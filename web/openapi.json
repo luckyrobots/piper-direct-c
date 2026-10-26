@@ -1,0 +1,580 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "PiPer Direct C position-control API",
+    "version": "1.0.0",
+    "description": "Loopback-only C/SocketCAN controller. No Python or robot SDK. Read /api/state for the per-process token, stable selected device_id and current connection generation. Every POST requires X-Piper-Token and application/json. Accepted actions are asynchronous: poll state and renew the matching owner/request_id lease every 200 ms. Lease expires at 800 ms. Commands never resume automatically after reconnect or restart. A single-joint command sends a six-angle MoveJ pose, holding other joints at their initial measured positions. This API does not bypass the onboard MCU or expose raw torque/MIT/calibration/firmware writes. State includes controller teach_state, fault masks, persisted last_fault and per-joint max_acceleration_rad_s2/acceleration_fresh/acceleration_age_s. New motion and enable require all six acceleration readings within 60 seconds, finite, greater than zero and at most 5 rad/s\u00b2. Queries are read-only and preserve unresolved recovery locks."
+  },
+  "servers": [
+    {
+      "url": "http://127.0.0.1:8765"
+    }
+  ],
+  "security": [
+    {
+      "localToken": []
+    }
+  ],
+  "paths": {
+    "/api/camera": {
+      "post": {
+        "summary": "Start or stop the configured local bench webcam",
+        "description": "Independent of robot motion. Simulation never opens a real webcam. No microphone or recording.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "enabled"
+                ],
+                "properties": {
+                  "enabled": {
+                    "type": "boolean"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Camera state; capture start is asynchronous"
+          },
+          "400": {
+            "description": "Invalid enabled flag"
+          },
+          "409": {
+            "description": "Camera unavailable or not configured"
+          }
+        }
+      }
+    },
+    "/api/camera/frame": {
+      "get": {
+        "summary": "Read the latest fresh bench-camera JPEG",
+        "responses": {
+          "200": {
+            "description": "JPEG received within the last 1.5 seconds",
+            "content": {
+              "image/jpeg": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "No fresh frame"
+          }
+        }
+      }
+    },
+    "/api/state": {
+      "get": {
+        "summary": "Discover adapters and read feedback, diagnostics, control status and token",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Unknown numeric measurements are null. fresh/age_s describe validity. tx_frames counts queued, not acknowledged, frames. motion exposes active, owner, request_id, speed_deg_s, tolerance_deg and elapsed_s. devices contain stable ID, generation, interface, firmware, hardware, status, recovery gate, six joints and gripper feedback.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/State"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/select": {
+      "post": {
+        "summary": "Select a discovered stable adapter; no motor command",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "device_id"
+                ],
+                "properties": {
+                  "device_id": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Selected"
+          },
+          "404": {
+            "description": "Adapter absent"
+          },
+          "409": {
+            "description": "Action active"
+          }
+        }
+      }
+    },
+    "/api/query": {
+      "post": {
+        "summary": "Request firmware, then six limits; ends within 3 seconds",
+        "description": "Queues one firmware read. Limit queries follow only after external robot data is received. Missing replies stay unknown.",
+        "requestBody": {
+          "$ref": "#/components/requestBodies/Identity"
+        },
+        "responses": {
+          "202": {
+            "description": "Read started"
+          },
+          "409": {
+            "description": "Unavailable, busy or stale selection"
+          }
+        }
+      }
+    },
+    "/api/reconnect": {
+      "post": {
+        "summary": "Reopen CAN sockets and refresh selected arm firmware/limits; no network configuration or motion",
+        "description": "Invalidates cached feedback, then starts one bounded information query on the selected adapter if its CAN socket is available. Motion and stop recovery remain explicit. Poll query_active for completion; 200 does not guarantee robot replies.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Sockets reopened; selected adapter information read started if available"
+          },
+          "409": {
+            "description": "Action active"
+          }
+        }
+      }
+    },
+    "/api/command": {
+      "post": {
+        "summary": "Control joints, a pose, motor power, gripper or recovery",
+        "description": "enable requires all six drivers disabled and supported=true. joint sets one absolute degree target; jog adds a signed increment to the current measured angle; zero sets one target to 0 degrees without calibration writes. pose takes six absolute angles; synchronized=true uses one shared interpolation fraction so joints follow the planned straight line in joint space. gripper sets opening from 0 to the freshly queried hardware maximum (70 or 100 mm), at 5 mm/s and effort_nm 0.02\u20130.5 N\u00b7m (default 0.1). If raw closed feedback is between \u22122 and 0 mm, allow_closed_offset=true permits an explicit opening to at least 5 mm with a bounded 1 mm entry target; no encoder calibration is changed. Configuration is checked throughout motion. disable/reset require physical support, known firmware and fresh status. reset powers motors off, sends once and verifies fresh disabled, stationary feedback. A pending reset cannot be resent. verify-reset requires reset_completed=true after an operator reset/power cycle. hold is accepted from the owner during an active joint/pose move or gripper ramp. For a gripper it ends the ramp while retaining the last sent target and effort; it does not certify contact or a secure grasp. New moves require a stationary arm and fresh limits. All asynchronous actions require heartbeats. Enable transmits only driver power commands, without a position target or mode change. align explicitly moves resting joints at most 3 degrees to 0.5 degrees inside their command ranges, at 1% MCU speed, retaining all other targets. Larger corrections are rejected. verify-disabled clears a recovery record without CAN transmission only when all drivers are healthy, stationary and disabled; pending resets still require verify-reset. A successful normal disable clears only its own in-flight record; earlier stops remain latched. cycle requires enabled motors and a starting pose within limits. It captures that measured pose, raises toward [start J1,82,-160,0,-7,start J6] degrees, pauses for two seconds after verified arrival, and returns to the captured pose. Cycle speed is fixed at up to 3 degrees/second with 0.2-degree feedback tolerance; it uses synchronized joint interpolation and a 180-second deadline. Stop, Hold, lease loss, faults or disconnection cancel the remaining cycle; return is never automatic after interruption. Motion remains supervised by the existing heartbeat. motion.sequence_stage is raising/upright/returning while active; motion.return_degrees contains the captured pose.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Command"
+              },
+              "examples": {
+                "joint": {
+                  "value": {
+                    "device_id": "usb:YOUR_ADAPTER_SERIAL",
+                    "generation": 1,
+                    "owner": "YOUR_UNIQUE_CLIENT_ID",
+                    "action": "joint",
+                    "joint": 1,
+                    "degrees": 12.5,
+                    "speed_deg_s": 3,
+                    "tolerance_deg": 0.2,
+                    "standalone": true,
+                    "clear": true
+                  }
+                },
+                "pose": {
+                  "value": {
+                    "device_id": "usb:YOUR_ADAPTER_SERIAL",
+                    "generation": 1,
+                    "owner": "YOUR_UNIQUE_CLIENT_ID",
+                    "action": "pose",
+                    "degrees": [
+                      0,
+                      45,
+                      -65,
+                      0,
+                      10,
+                      0
+                    ],
+                    "standalone": true,
+                    "clear": true
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Recovery verified"
+          },
+          "202": {
+            "description": "Accepted; retain request_id, renew heartbeat, then check measured completion",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Result"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input, missing operator acknowledgement or target outside limits"
+          },
+          "409": {
+            "description": "Feedback, mode, firmware, driver, lease, connection or recovery prerequisite failed"
+          },
+          "500": {
+            "description": "Persistent intent could not be saved; no action started"
+          }
+        }
+      }
+    },
+    "/api/heartbeat": {
+      "post": {
+        "summary": "Renew an active control lease",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "owner",
+                  "request_id"
+                ],
+                "properties": {
+                  "owner": {
+                    "type": "string"
+                  },
+                  "request_id": {
+                    "type": "integer",
+                    "minimum": 1
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Lease renewed"
+          },
+          "409": {
+            "description": "No matching active lease or already expired"
+          }
+        }
+      }
+    },
+    "/api/stop": {
+      "post": {
+        "summary": "Best-effort software stop on selected arm; persist recovery requirement",
+        "description": "Does not require motion health checks or matching owner. Fast stop can allow damped descent; it is not a power cut or guaranteed hold. Active gripper motion also gets a gripper disable request. Disconnected hardware cannot receive the stop. Inspect physical state before recovery.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Stop attempted; read message and physical state"
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "localToken": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "X-Piper-Token"
+      }
+    },
+    "requestBodies": {
+      "Identity": {
+        "required": true,
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Identity"
+            }
+          }
+        }
+      }
+    },
+    "schemas": {
+      "Identity": {
+        "type": "object",
+        "required": [
+          "device_id",
+          "generation"
+        ],
+        "properties": {
+          "device_id": {
+            "type": "string",
+            "description": "Stable USB adapter identity returned by state"
+          },
+          "generation": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "Changes when the CAN socket reconnects"
+          }
+        }
+      },
+      "Command": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/Identity"
+          },
+          {
+            "type": "object",
+            "required": [
+              "action",
+              "owner",
+              "standalone"
+            ],
+            "properties": {
+              "action": {
+                "type": "string",
+                "enum": [
+                  "enable",
+                  "disable",
+                  "joint",
+                  "jog",
+                  "zero",
+                  "pose",
+                  "gripper",
+                  "hold",
+                  "reset",
+                  "verify-reset",
+                  "align",
+                  "verify-disabled",
+                  "cycle"
+                ]
+              },
+              "owner": {
+                "type": "string",
+                "minLength": 16,
+                "maxLength": 80
+              },
+              "standalone": {
+                "type": "boolean",
+                "description": "Operator confirms no linked leader or competing controller"
+              },
+              "clear": {
+                "type": "boolean",
+                "description": "Operator confirms full path clear and attended; required for enable/moves"
+              },
+              "supported": {
+                "type": "boolean",
+                "description": "Operator confirms physical support; required for power/recovery"
+              },
+              "reset_completed": {
+                "type": "boolean",
+                "description": "Operator confirms manual reset/power-cycle completed"
+              },
+              "joint": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 6
+              },
+              "degrees": {
+                "oneOf": [
+                  {
+                    "type": "number",
+                    "minimum": -360,
+                    "maximum": 360
+                  },
+                  {
+                    "type": "array",
+                    "items": {
+                      "type": "number"
+                    },
+                    "minItems": 6,
+                    "maxItems": 6
+                  }
+                ],
+                "description": "Absolute degrees for joint/pose; delta for jog (\u00b15 max). Controller-reported joint limits always apply."
+              },
+              "speed_deg_s": {
+                "type": "number",
+                "minimum": 0.1,
+                "maximum": 15,
+                "default": 3
+              },
+              "tolerance_deg": {
+                "type": "number",
+                "minimum": 0.05,
+                "maximum": 1,
+                "default": 0.2
+              },
+              "width_mm": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 100
+              },
+              "effort_nm": {
+                "type": "number",
+                "minimum": 0.02,
+                "maximum": 0.5,
+                "default": 0.1
+              },
+              "allow_closed_offset": {
+                "type": "boolean",
+                "default": false
+              },
+              "synchronized": {
+                "type": "boolean",
+                "default": false
+              }
+            }
+          }
+        ]
+      },
+      "Result": {
+        "type": "object",
+        "properties": {
+          "ok": {
+            "type": "boolean"
+          },
+          "message": {
+            "type": "string"
+          },
+          "error": {
+            "type": "string"
+          },
+          "request_id": {
+            "type": "integer"
+          }
+        }
+      },
+      "State": {
+        "type": "object",
+        "required": [
+          "kind",
+          "simulated",
+          "token",
+          "selected",
+          "devices",
+          "motion"
+        ],
+        "properties": {
+          "kind": {
+            "const": "piper_direct_c"
+          },
+          "api_version": {
+            "type": "string"
+          },
+          "simulated": {
+            "type": "boolean"
+          },
+          "token": {
+            "type": "string"
+          },
+          "selected": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "phase": {
+            "type": "string"
+          },
+          "query_active": {
+            "type": "boolean"
+          },
+          "storage_failed": {
+            "type": "boolean"
+          },
+          "motion": {
+            "type": "object"
+          },
+          "devices": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "generation": {
+                  "type": "integer"
+                },
+                "fresh": {
+                  "type": "boolean"
+                },
+                "blocker": {
+                  "type": "string"
+                },
+                "joints": {
+                  "type": "array",
+                  "minItems": 6,
+                  "maxItems": 6,
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "index": {
+                        "type": "integer"
+                      },
+                      "actual_deg": {
+                        "type": [
+                          "number",
+                          "null"
+                        ]
+                      },
+                      "target_deg": {
+                        "type": [
+                          "number",
+                          "null"
+                        ]
+                      },
+                      "fresh": {
+                        "type": "boolean"
+                      },
+                      "enabled": {
+                        "type": [
+                          "boolean",
+                          "null"
+                        ]
+                      },
+                      "min_deg": {
+                        "type": [
+                          "number",
+                          "null"
+                        ]
+                      },
+                      "max_deg": {
+                        "type": [
+                          "number",
+                          "null"
+                        ]
+                      },
+                      "limits_fresh": {
+                        "type": "boolean"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

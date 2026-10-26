@@ -1,0 +1,29 @@
+#!/bin/bash
+# Hotplug link setup only. This helper never opens a CAN socket or sends a frame.
+set -euo pipefail
+export PATH=/usr/sbin:/usr/bin:/sbin:/bin
+
+if (( $# != 1 )) || [[ ! $1 =~ ^can[0-9]+$ ]]; then
+    echo 'Expected one physical canN interface.' >&2
+    exit 1
+fi
+iface=$1
+net=/sys/class/net/$iface
+usb=$(readlink -f "$net/device/..")
+[[ $(cat "$net/type") == 280 ]]
+[[ $(cat "$usb/idVendor") == 1d50 && $(cat "$usb/idProduct") == 606f ]]
+case $(cat "$usb/serial") in
+    004000485246570520323934|0021003A5443571020393433|001F00275631511920313857) ;;
+    *) echo 'Adapter is not assigned to this PiPer installation.' >&2; exit 1 ;;
+esac
+original_index=$(cat "$net/ifindex")
+flags=$(cat "$net/flags")
+if (( flags & 1 )); then
+    echo "$iface is already up; leaving its configuration unchanged."
+    exit 0
+fi
+
+/usr/sbin/ip link set dev "$iface" type can bitrate 1000000
+[[ $(cat "$net/ifindex") == "$original_index" ]]
+/usr/sbin/ip link set dev "$iface" up
+echo "$iface activated at 1 Mbit/s. No robot commands sent."

@@ -1,0 +1,66 @@
+CC ?= cc
+CPPFLAGS += -Isrc -Ivendor -DCJSON_NESTING_LIMIT=32
+LDLIBS += -lm
+CFLAGS ?= -O2 -g
+CFLAGS += -std=c17 -Wall -Wextra -Wpedantic -Werror
+
+.PHONY: all test test-vcan test-record clean
+all: build/piper-can build/piper-control build/piper-record build/piper-trace
+
+build:
+	mkdir -p build
+
+build/piper-can: src/main.c src/protocol.c src/protocol.h | build
+	$(CC) $(CPPFLAGS) $(CFLAGS) src/main.c src/protocol.c -o $@ $(LDLIBS)
+
+CORE = src/controller.c src/canbus.c src/protocol.c vendor/cJSON.c
+HEADERS = src/controller.h src/canbus.h src/protocol.h vendor/cJSON.h
+build/piper-trace: src/trace.c src/canbus.c src/protocol.c $(HEADERS) | build
+	$(CC) $(CPPFLAGS) $(CFLAGS) src/trace.c src/canbus.c src/protocol.c -o $@ $(LDLIBS)
+
+build/piper-record: src/record.c src/canbus.c src/protocol.c vendor/cJSON.c $(HEADERS) | build
+	$(CC) $(CPPFLAGS) $(CFLAGS) src/record.c src/canbus.c src/protocol.c vendor/cJSON.c -o $@ $(LDLIBS)
+
+build/piper-control: src/server.c src/camera.c src/camera.h $(CORE) $(HEADERS) | build
+	$(CC) $(CPPFLAGS) $(CFLAGS) src/server.c src/camera.c $(CORE) -o $@ $(LDLIBS)
+
+build/test-protocol: tests/test_protocol.c src/protocol.c src/protocol.h | build
+	$(CC) $(CPPFLAGS) $(CFLAGS) tests/test_protocol.c src/protocol.c -o $@ $(LDLIBS)
+
+build/test-control: tests/test_control.c $(CORE) $(HEADERS) | build
+	$(CC) $(CPPFLAGS) $(CFLAGS) tests/test_control.c $(CORE) -o $@ $(LDLIBS)
+
+build/test-camera: tests/test_camera.c src/camera.c src/camera.h src/canbus.c src/protocol.c vendor/cJSON.c $(HEADERS) | build
+	$(CC) $(CPPFLAGS) $(CFLAGS) tests/test_camera.c src/camera.c src/canbus.c src/protocol.c vendor/cJSON.c -o $@ $(LDLIBS)
+
+build/test-startup: tests/test_startup.c $(CORE) $(HEADERS) | build
+	$(CC) $(CPPFLAGS) $(CFLAGS) tests/test_startup.c $(CORE) -o $@ $(LDLIBS)
+
+build/test-cycle: tests/test_cycle.c $(CORE) $(HEADERS) | build
+	$(CC) $(CPPFLAGS) $(CFLAGS) tests/test_cycle.c $(CORE) -o $@ $(LDLIBS)
+
+build/test-gripper: tests/test_gripper.c $(CORE) $(HEADERS) | build
+	$(CC) $(CPPFLAGS) $(CFLAGS) tests/test_gripper.c $(CORE) -o $@ $(LDLIBS)
+
+test: all build/test-protocol build/test-control build/test-camera build/test-startup build/test-cycle build/test-gripper
+	./build/test-protocol
+	./build/test-control
+	./build/test-camera
+	./build/test-startup
+	./build/test-cycle
+	./build/test-gripper
+	./build/piper-can --help >/dev/null
+	! ./build/piper-can --query-firmware >/dev/null 2>&1
+	! ./build/piper-can --seconds nonsense >/dev/null 2>&1
+	! ./build/piper-can --interface lo --query-firmware --seconds 1 >/dev/null 2>&1
+	node --check web/app.js
+	node tests/test_api.mjs
+
+clean:
+	rm -f build/piper-can build/piper-control build/test-protocol build/test-control build/test-camera build/test-control-sanitized
+
+test-vcan: build/piper-can
+	bash tests/test_vcan.sh
+
+test-record: build/piper-record
+	python3 tests/test_record.py

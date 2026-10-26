@@ -1,0 +1,10 @@
+# Assignments follow adapter serials, never USB ports or canN numbering.
+# Only initialize newly added links. Never reset an existing live interface.
+ACTION!="add", GOTO="piper_can_end"
+SUBSYSTEM!="net", GOTO="piper_can_end"
+KERNEL!="can[0-9]*", GOTO="piper_can_end"
+ATTR{type}!="280", GOTO="piper_can_end"
+ATTRS{idVendor}=="1d50", ATTRS{idProduct}=="606f", ATTRS{serial}=="004000485246570520323934", TAG+="systemd", ENV{SYSTEMD_WANTS}+="piper-can-setup@%k.service"
+ATTRS{idVendor}=="1d50", ATTRS{idProduct}=="606f", ATTRS{serial}=="0021003A5443571020393433", TAG+="systemd", ENV{SYSTEMD_WANTS}+="piper-can-setup@%k.service"
+ATTRS{idVendor}=="1d50", ATTRS{idProduct}=="606f", ATTRS{serial}=="001F00275631511920313857", TAG+="systemd", ENV{SYSTEMD_WANTS}+="piper-can-setup@%k.service"
+LABEL="piper_can_end"
