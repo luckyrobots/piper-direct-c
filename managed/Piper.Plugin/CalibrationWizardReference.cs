@@ -9,9 +9,9 @@ namespace LuckyRobots.Piper.Plugin;
 
 /// <summary>A temporary scene pointer, never a physical or simulated motion target.</summary>
 public sealed record WizardReferenceHighlightScope(CalibrationIdentity Identity, long Epoch, CalibrationWizardStep Step,
-    double WidthMm, double DepthMm, double SurfaceMm, CalibrationPoint Point, string Label)
+    double WidthMm, double DepthMm, double SurfaceMm, CalibrationPoint Point, string Label, CalibrationPlacement RootPlacement)
 {
-    public static WizardReferenceHighlightScope Create(CalibrationIdentity identity, CalibrationWizardDraft draft)
+    public static WizardReferenceHighlightScope Create(CalibrationIdentity identity, CalibrationWizardDraft draft, CalibrationPlacement rootPlacement)
     {
         if (draft.Step is not (CalibrationWizardStep.DeskFrame or CalibrationWizardStep.DeskBack) ||
             !draft.Answers.ContainsKey("sceneconfirmed") || string.IsNullOrWhiteSpace(draft.ModelAssetId) || string.IsNullOrWhiteSpace(draft.ModelRevision) || identity.ProfileId != draft.ProfileId ||
@@ -20,20 +20,30 @@ public sealed record WizardReferenceHighlightScope(CalibrationIdentity Identity,
         double width = CalibrationWizardFlow.Number(draft, "width", 100, 10000);
         double depth = CalibrationWizardFlow.Number(draft, "depth", 100, 10000);
         double surface = CalibrationWizardFlow.SceneSurface(draft);
+        _ = CalibrationPlacement.Read(rootPlacement.Json());
+        if (Math.Abs(rootPlacement.Position.Y - surface / 1000) > .001)
+            throw new InvalidOperationException("The simulated robot base is no longer on the confirmed tabletop. Check its placement and start new questions.");
         bool left = draft.Step == CalibrationWizardStep.DeskFrame;
         return new(identity, draft.Epoch, draft.Step, width, depth, surface,
             left ? new(-width / 2000, surface / 1000 + .003, 0) : new(0, surface / 1000 + .003, -depth / 2000),
-            left ? "LEFT desk edge" : "BACK desk edge");
+            left ? "LEFT desk edge" : "BACK desk edge", rootPlacement);
     }
-    public bool Matches(CalibrationIdentity live, CalibrationWizardDraft draft, bool calibrationOpen, bool fresh)
+    public bool Matches(CalibrationIdentity live, CalibrationWizardDraft draft, CalibrationPlacement rootPlacement, bool calibrationOpen, bool fresh)
     {
         if (!calibrationOpen || !fresh) return false;
-        try { return this == Create(live, draft); }
+        try
+        {
+            var expected = Create(live, draft, rootPlacement);
+            return Identity == expected.Identity && Epoch == expected.Epoch && Step == expected.Step && WidthMm == expected.WidthMm && DepthMm == expected.DepthMm &&
+                SurfaceMm == expected.SurfaceMm && Point == expected.Point && Label == expected.Label && RootPlacement.Same(expected.RootPlacement);
+        }
         catch (InvalidOperationException) { return false; }
     }
-    public string DeskFingerprint() => DeskFingerprint(Identity, WidthMm, DepthMm, SurfaceMm);
-    public static string DeskFingerprint(CalibrationIdentity identity, double widthMm, double depthMm, double surfaceMm) =>
-        Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(JsonSerializer.Serialize(new { Identity = identity, WidthMm = widthMm, DepthMm = depthMm, SurfaceMm = surfaceMm }, PluginProtocol.Json))));
+    public string DeskFingerprint() => DeskFingerprint(Identity, WidthMm, DepthMm, SurfaceMm, RootPlacement);
+    public static string DeskFingerprint(CalibrationIdentity identity, double widthMm, double depthMm, double surfaceMm, CalibrationPlacement rootPlacement) =>
+        Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(JsonSerializer.Serialize(new { Identity = identity, WidthMm = widthMm, DepthMm = depthMm, SurfaceMm = surfaceMm, RootPlacement = rootPlacement.Json() }, PluginProtocol.Json))));
+    public static bool RefreshDue(WizardReferenceHighlightScope? marker, CalibrationWizardDraft question, TimeSpan sinceAttempt) =>
+        marker is null || marker.Epoch != question.Epoch || marker.Step != question.Step || sinceAttempt >= TimeSpan.FromSeconds(10);
     public static string FailureMessage(Exception error)
     {
         string message = error.Message;
@@ -44,17 +54,25 @@ public sealed record WizardReferenceHighlightScope(CalibrationIdentity Identity,
         if (error is OperationCanceledException) return "The editor did not answer in time. Use Show edge to retry. Confirmation remains unavailable.";
         return "Desk-edge pointer unavailable. Use Show edge to retry; confirmation remains unavailable. " + message;
     }
-    public JsonObject Request(bool visible) => new() { ["sceneId"] = Identity.SceneId, ["entityId"] = Identity.RobotId,
+    public JsonObject Request(bool visible, bool frame = false) => new() { ["sceneId"] = Identity.SceneId, ["entityId"] = Identity.RobotId,
         ["expectedModelAssetId"] = Identity.ModelAssetId, ["expectedModelRevision"] = Identity.ModelRevision,
+        ["expectedRootPlacement"] = RootPlacement.Json(), ["frame"] = frame,
         ["point"] = Point.Json(), ["label"] = Label, ["durationSeconds"] = 30, ["visible"] = visible };
-    public bool Acknowledged(JsonElement response)
+    public bool Acknowledged(JsonElement response, bool frameRequested = false)
     {
-        if (!response.TryGetProperty("highlighted", out var shown) || shown.ValueKind != JsonValueKind.True ||
+        if (response.ValueKind != JsonValueKind.Object || !response.TryGetProperty("highlighted", out var shown) || shown.ValueKind != JsonValueKind.True ||
             !response.TryGetProperty("label", out var label) || label.ValueKind != JsonValueKind.String || label.GetString() != Label ||
-            !response.TryGetProperty("point", out var point) || point.ValueKind != JsonValueKind.Array || point.GetArrayLength() != 3) return false;
+            !response.TryGetProperty("point", out var point) || point.ValueKind != JsonValueKind.Array || point.GetArrayLength() != 3 ||
+            !response.TryGetProperty("framed", out var framed) || framed.ValueKind != (frameRequested ? JsonValueKind.True : JsonValueKind.False) ||
+            !response.TryGetProperty("rootPlacement", out var root)) return false;
         var values = point.EnumerateArray().ToArray();
-        return values.All(v => v.ValueKind == JsonValueKind.Number && v.TryGetDouble(out double n) && double.IsFinite(n)) &&
-            Point.Distance(new(values[0].GetDouble(), values[1].GetDouble(), values[2].GetDouble())) <= 1e-9;
+        try
+        {
+            return values.All(v => v.ValueKind == JsonValueKind.Number && v.TryGetDouble(out double n) && double.IsFinite(n)) &&
+                Point.Distance(new(values[0].GetDouble(), values[1].GetDouble(), values[2].GetDouble())) <= 1e-9 &&
+                RootPlacement.Same(CalibrationPlacement.Read(JsonNode.Parse(root.GetRawText())));
+        }
+        catch (Exception error) when (error is InvalidOperationException or JsonException or ArgumentException) { return false; }
     }
 }
 
@@ -72,35 +90,53 @@ public sealed partial class PipersPlugin
         try
         {
             _ = Device(scope.Identity.DeviceId, scope.Identity.Generation);
-            return calibrationWizard is not null && scope.Matches(WizardReferenceIdentity(), Wizard, calibrationOpen, true);
+            return calibrationWizard is not null && scope.Matches(WizardReferenceIdentity(), Wizard, scope.RootPlacement, calibrationOpen, true);
         }
         catch (InvalidOperationException) { return false; }
     }
     private bool WizardReferenceShown() => wizardReferenceHighlightScope is { } scope && wizardReferenceAcknowledgedAt != 0 &&
         Stopwatch.GetElapsedTime(wizardReferenceAcknowledgedAt).TotalSeconds < 20 && WizardReferenceCurrent(scope);
 
-    private async Task RequestWizardReference(WizardReferenceHighlightScope scope, bool visible, CancellationToken cancellation)
+    private async Task RequestWizardReference(WizardReferenceHighlightScope scope, bool visible, CancellationToken cancellation, bool frame = false)
     {
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellation);
         deadline.CancelAfter(TimeSpan.FromMilliseconds(750));
-        var response = await engine.RequestAsync("robot.highlightReference", scope.Request(visible), deadline.Token);
-        if (visible && !scope.Acknowledged(response)) throw new InvalidOperationException("The editor did not confirm the requested desk-edge pointer.");
+        var response = await engine.RequestAsync("robot.highlightReference", scope.Request(visible, frame), deadline.Token);
+        if (visible && !scope.Acknowledged(response, frame)) throw new InvalidOperationException("The editor did not confirm the requested desk-edge pointer, framing, and robot placement. Update Lucky Engine if these marker features are unavailable.");
     }
 
-    private async Task ShowWizardReferenceWithinGate(CancellationToken cancellation)
+    private async Task ShowWizardReferenceWithinGate(CancellationToken cancellation, bool frame)
     {
         wizardReferenceAcknowledgedAt = 0;
-        var scope = WizardReferenceHighlightScope.Create(WizardReferenceIdentity(), Wizard);
+        var identity = WizardReferenceIdentity();
+        long epoch = Wizard.Epoch, start = Stopwatch.GetTimestamp();
+        _ = Device(identity.DeviceId, identity.Generation);
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellation);
+        deadline.CancelAfter(TimeSpan.FromMilliseconds(750));
+        var currentRoot = await ReadWizardMetricRoot(deadline.Token);
+        if (!calibrationOpen || epoch != Wizard.Epoch || identity != WizardReferenceIdentity() || Stopwatch.GetElapsedTime(start).TotalSeconds > .5)
+            throw new InvalidOperationException("The robot or question changed, or the simulation answered too slowly. Use Show edge again.");
+        _ = Device(identity.DeviceId, identity.Generation);
+        CalibrationPlacement pinnedRoot = currentRoot;
+        if (Wizard.Answers.TryGetValue("edgeroot", out string? savedRoot))
+            pinnedRoot = CalibrationPlacement.Read(JsonNode.Parse(savedRoot));
+        else if (wizardReferenceHighlightScope is { } previous && previous.Epoch == epoch && previous.Step == Wizard.Step)
+            pinnedRoot = previous.RootPlacement;
+        else if (Wizard.Step == CalibrationWizardStep.DeskBack)
+            throw new InvalidOperationException("Go back and confirm the LEFT edge first. Both edges must use the same simulated robot placement.");
+        if (!pinnedRoot.Same(currentRoot))
+            throw new InvalidOperationException("The simulated robot was moved after these desk questions began. Start new questions and compare both edges again; the pointer will not follow a changed placement silently.");
+        var scope = WizardReferenceHighlightScope.Create(identity, Wizard, pinnedRoot);
         if (!WizardReferenceCurrent(scope)) throw new InvalidOperationException("Wait for the linked robot to reconnect before showing the desk edge.");
         wizardHighlightScope = null; // The native process owns one visual marker.
         wizardReferenceHighlightScope = scope; wizardHighlightAttempt = Stopwatch.GetTimestamp();
-        await RequestWizardReference(scope, true, cancellation);
+        await RequestWizardReference(scope, true, cancellation, frame);
         if (!WizardReferenceCurrent(scope)) throw new InvalidOperationException("The robot or question changed while the pointer was being shown. Show it again.");
         wizardReferenceAcknowledgedAt = Stopwatch.GetTimestamp();
         wizardMessage = "The simulation pointer marks the " + (scope.Step == CalibrationWizardStep.DeskFrame ? "LEFT" : "BACK") + " desk edge. Compare it with the edge of your real desk before confirming.";
     }
 
-    private async Task ShowWizardReference(CancellationToken cancellation)
+    private async Task ShowWizardReference(CancellationToken cancellation, bool frame = true)
     {
         bool entered = false;
         try
@@ -108,7 +144,7 @@ public sealed partial class PipersPlugin
             wizardReferenceRetryRequired = false;
             entered = await wizardHighlightGate.WaitAsync(TimeSpan.FromMilliseconds(800), cancellation);
             if (!entered) throw new InvalidOperationException("The pointer is busy. Try Show edge again.");
-            await ShowWizardReferenceWithinGate(cancellation);
+            await ShowWizardReferenceWithinGate(cancellation, frame);
         }
         catch (Exception error)
         {
@@ -125,9 +161,10 @@ public sealed partial class PipersPlugin
         if (wizardReferenceRetryRequired) return; // Failed/unsupported markers require the visible Retry action.
         bool current = wizardReferenceHighlightScope is { } scope && WizardReferenceCurrent(scope);
         if (!current) wizardReferenceAcknowledgedAt = 0;
-        if (Stopwatch.GetElapsedTime(wizardHighlightAttempt).TotalSeconds < 10) return;
+        bool firstQuestionMarker = wizardReferenceHighlightScope is not { } existing || existing.Epoch != Wizard.Epoch || existing.Step != Wizard.Step;
+        if (!WizardReferenceHighlightScope.RefreshDue(wizardReferenceHighlightScope, Wizard, Stopwatch.GetElapsedTime(wizardHighlightAttempt))) return;
         wizardHighlightAttempt = Stopwatch.GetTimestamp();
-        try { await ShowWizardReferenceWithinGate(cancellation); }
+        try { await ShowWizardReferenceWithinGate(cancellation, firstQuestionMarker); }
         catch (Exception error) { wizardReferenceAcknowledgedAt = 0; wizardReferenceRetryRequired = true; wizardMessage = WizardReferenceHighlightScope.FailureMessage(error); }
     }
 
@@ -136,7 +173,11 @@ public sealed partial class PipersPlugin
         if (!WizardReferenceShown() || wizardReferenceHighlightScope is not { } scope)
             throw new InvalidOperationException(wizardReferenceRetryRequired && wizardMessage.Length > 0 ? wizardMessage :
                 "First show the pointer in the simulation, then compare it with the matching real desk edge.");
-        if (Wizard.Step == CalibrationWizardStep.DeskFrame) Wizard.Answers["leftedgeconfirmed"] = scope.DeskFingerprint();
+        if (Wizard.Step == CalibrationWizardStep.DeskFrame)
+        {
+            Wizard.Answers["edgeroot"] = scope.RootPlacement.Json().ToJsonString();
+            Wizard.Answers["leftedgeconfirmed"] = scope.DeskFingerprint();
+        }
         else
         {
             if (Wizard.Answers.GetValueOrDefault("leftedgeconfirmed") != scope.DeskFingerprint())

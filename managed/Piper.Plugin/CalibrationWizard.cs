@@ -300,7 +300,7 @@ public sealed partial class PipersPlugin
                 ModelAssetId = key == "tool" ? "" : Wizard.ModelAssetId, ModelRevision = key == "tool" ? "" : Wizard.ModelRevision };
             if (key == "tool") { wizardModelPoint = "Point name changed. Read/inspect the named model point again; correspondence is not verified."; Wizard.Answers.Remove("observedrooty"); Wizard.Answers.Remove("sceneconfirmed"); }
             if (key == "sceney") Wizard.Answers.Remove("sceneconfirmed");
-            if (key is "sceney" or "width" or "depth" or "tool") { Wizard.Answers.Remove("leftedgeconfirmed"); Wizard.Answers.Remove("frame"); wizardReferenceAcknowledgedAt = 0; }
+            if (key is "sceney" or "width" or "depth" or "tool") { Wizard.Answers.Remove("leftedgeconfirmed"); Wizard.Answers.Remove("frame"); Wizard.Answers.Remove("edgeroot"); wizardReferenceAcknowledgedAt = 0; }
             if (key == "floory") Wizard.Answers.Remove("floorconfirmed");
             await SaveWizard(cancellation); return;
         }
@@ -326,6 +326,7 @@ public sealed partial class PipersPlugin
             var root = await ReadWizardMetricRoot(cancellation);
             Wizard.Answers["observedrooty"] = Wizard.Answers["sceney"] = CalibrationNumber(root.Position.Y * 1000);
             Wizard.Answers["baseontabletop"] = "operator states the metric base rests on the scene tabletop";
+            Wizard.Answers.Remove("leftedgeconfirmed"); Wizard.Answers.Remove("frame"); Wizard.Answers.Remove("edgeroot"); wizardReferenceAcknowledgedAt = 0;
         }
         else if (action == "floor.zero" && Wizard.Step == CalibrationWizardStep.SceneFloorOrigin)
             Wizard.Answers["floory"] = "0";
@@ -333,7 +334,7 @@ public sealed partial class PipersPlugin
         {
             // Re-acknowledge the exact pointer at confirmation time. The host
             // rejects a changed model/subscription even before first capture.
-            if (WizardReferenceStep) await ShowWizardReference(cancellation);
+            if (WizardReferenceStep) await ShowWizardReference(cancellation, frame: false);
             ValidateWizardQuestion(); calibrationWizard = CalibrationWizardFlow.Advance(Wizard);
         }
         else if (action == "cross" && Wizard.Step == CalibrationWizardStep.PointIntro && WizardValidation && WizardCross() is { } cross)
@@ -444,8 +445,21 @@ public sealed partial class PipersPlugin
             !Wizard.Answers.ContainsKey("sceneconfirmed"))
             throw new InvalidOperationException("Identify the fixed physical/model point and scene desk frame before capturing.");
         var tabletop = CalibrationWizardFlow.TabletopInputs(Wizard);
+        if (!Wizard.Answers.TryGetValue("edgeroot", out string? savedEdgeRoot))
+            throw new InvalidOperationException("Confirm the LEFT and BACK pointers before capturing. Start new questions if this saved draft used the older desk setup.");
+        var edgeRoot = CalibrationPlacement.Read(JsonNode.Parse(savedEdgeRoot));
+        long referenceReadStart = Stopwatch.GetTimestamp(), questionEpoch = Wizard.Epoch;
+        var referenceIdentity = WizardReferenceIdentity();
+        using (var referenceDeadline = CancellationTokenSource.CreateLinkedTokenSource(cancellation))
+        {
+            referenceDeadline.CancelAfter(TimeSpan.FromMilliseconds(750));
+            var currentRoot = await ReadWizardMetricRoot(referenceDeadline.Token);
+            _ = Device(referenceIdentity.DeviceId, referenceIdentity.Generation);
+            if (!calibrationOpen || questionEpoch != Wizard.Epoch || referenceIdentity != WizardReferenceIdentity() || Stopwatch.GetElapsedTime(referenceReadStart).TotalSeconds > .5 || !edgeRoot.Same(currentRoot))
+                throw new InvalidOperationException("The simulated robot placement or connection changed after the desk edges were confirmed. Start new questions; the saved report is retained.");
+        }
         string deskProof = WizardReferenceHighlightScope.DeskFingerprint(WizardReferenceIdentity(), CalibrationWizardFlow.Number(Wizard, "width", 100, 10000),
-            CalibrationWizardFlow.Number(Wizard, "depth", 100, 10000), CalibrationWizardFlow.SceneSurface(Wizard));
+            CalibrationWizardFlow.Number(Wizard, "depth", 100, 10000), CalibrationWizardFlow.SceneSurface(Wizard), edgeRoot);
         if (Wizard.Answers.GetValueOrDefault("leftedgeconfirmed") != deskProof || Wizard.Answers.GetValueOrDefault("frame") != deskProof)
             throw new InvalidOperationException("The LEFT/BACK pointers have not been confirmed for this robot and these desk measurements. Start new questions and compare both desk edges before capturing more points; the saved report is retained.");
         if (Math.Abs(CalibrationWizardFlow.SceneSurface(Wizard) - calibrationDesk.SurfaceY * 1000) > .001)

@@ -102,7 +102,7 @@ public static class CalibrationWizardFlow
             (CalibrationWizardStep.Prepare or CalibrationWizardStep.ContactPoint or CalibrationWizardStep.ModelPoint))
         {
             var answers = new Dictionary<string, string>(draft.Answers, StringComparer.Ordinal);
-            answers.Remove("frame"); answers.Remove("leftedgeconfirmed");
+            answers.Remove("frame"); answers.Remove("leftedgeconfirmed"); answers.Remove("edgeroot");
             return draft with { Schema = 2, Answers = answers, Step = CalibrationWizardStep.SceneSurfaceY, History = [], Epoch = draft.Epoch + 1 };
         }
         var step = draft.Step switch { CalibrationWizardStep.SceneFloorOrigin => CalibrationWizardStep.DeskWidth,

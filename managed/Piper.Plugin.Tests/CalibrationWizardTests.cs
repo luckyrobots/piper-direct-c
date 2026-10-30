@@ -119,25 +119,31 @@ public static class CalibrationWizardTests
         check(marker.Request(true)["durationSeconds"]!.GetValue<int>() == 30, "Temporary marker lost its bounded native expiry");
         var edgeDraft = tabletopDraft with { Step = CalibrationWizardStep.DeskFrame, ModelAssetId = live.ModelAssetId, ModelRevision = live.ModelRevision,
             Answers = new(tabletopDraft.Answers) { ["sceneconfirmed"] = "operator confirmed simulated tabletop" } };
-        var leftEdge = WizardReferenceHighlightScope.Create(live, edgeDraft);
+        var edgeRoot = CalibrationPlacement.At(new(.1, .8, -.2), .2);
+        var leftEdge = WizardReferenceHighlightScope.Create(live, edgeDraft, edgeRoot);
         check(leftEdge.Point.Distance(new(-.7, .803, 0)) < 1e-12 && leftEdge.Label == "LEFT desk edge", "LEFT pointer did not mark the measured desk's short-edge midpoint just above its confirmed surface");
         var backDraft = edgeDraft with { Step = CalibrationWizardStep.DeskBack, Epoch = edgeDraft.Epoch + 1 };
-        var backEdge = WizardReferenceHighlightScope.Create(live, backDraft);
+        var backEdge = WizardReferenceHighlightScope.Create(live, backDraft, edgeRoot);
         check(backEdge.Point.Distance(new(0, .803, -.35)) < 1e-12 && backEdge.Label == "BACK desk edge", "BACK pointer did not mark the measured far long edge");
+        check(WizardReferenceHighlightScope.RefreshDue(leftEdge, backDraft, TimeSpan.Zero), "The BACK question inherited the previous LEFT pointer's ten-second delay");
+        check(WizardReferenceHighlightScope.RefreshDue(null, edgeDraft, TimeSpan.Zero), "A first/resumed LEFT pointer waited for a recent tool-marker renewal");
+        check(WizardReferenceHighlightScope.RefreshDue(leftEdge, edgeDraft with { Epoch = edgeDraft.Epoch + 1 }, TimeSpan.Zero), "Returning to a desk-edge question did not show its pointer immediately");
+        check(!WizardReferenceHighlightScope.RefreshDue(leftEdge, edgeDraft, TimeSpan.FromSeconds(9.9)) && WizardReferenceHighlightScope.RefreshDue(leftEdge, edgeDraft, TimeSpan.FromSeconds(10)),
+            "Same-question renewals lost the ten-second limit or repeatedly stole viewport navigation");
         check(leftEdge.DeskFingerprint() == backEdge.DeskFingerprint(), "Sequential LEFT/BACK confirmations did not refer to one fixed robot/desk reference");
-        check(leftEdge.Matches(live, edgeDraft, true, true) && !leftEdge.Matches(live, backDraft, true, true), "A LEFT pointer acknowledgement authorized the BACK question");
-        check(!leftEdge.Matches(live, edgeDraft with { Epoch = edgeDraft.Epoch + 1 }, true, true), "A stale pointer survived returning to an earlier question");
+        check(leftEdge.Matches(live, edgeDraft, edgeRoot, true, true) && !leftEdge.Matches(live, backDraft, edgeRoot, true, true), "A LEFT pointer acknowledgement authorized the BACK question");
+        check(!leftEdge.Matches(live, edgeDraft with { Epoch = edgeDraft.Epoch + 1 }, edgeRoot, true, true), "A stale pointer survived returning to an earlier question");
         foreach (var changed in new[] { live with { ProfileId = "robot-b" }, live with { DeviceId = "can-b" }, live with { Generation = 4 }, live with { BackendSessionFingerprint = "backend-b" }, live with { SceneId = "scene-b" }, live with { RobotId = "root-b" }, live with { ModelRevision = "revision-b" } })
-            check(!leftEdge.Matches(changed, edgeDraft, true, true), "A desk pointer acknowledgement crossed its robot/backend/model identity");
+            check(!leftEdge.Matches(changed, edgeDraft, edgeRoot, true, true), "A desk pointer acknowledgement crossed its robot/backend/model identity");
         foreach (string changedKey in new[] { "width", "depth", "sceney" })
-            check(!leftEdge.Matches(live, edgeDraft with { Answers = new(edgeDraft.Answers) { [changedKey] = changedKey == "sceney" ? "900" : "1000" } }, true, true), "A desk pointer survived changed measurements: " + changedKey);
-        check(!leftEdge.Matches(live, edgeDraft, false, true) && !leftEdge.Matches(live, edgeDraft, true, false), "A pointer remained confirmable after leaving the page or losing fresh feedback");
-        Reject(() => WizardReferenceHighlightScope.Create(live, edgeDraft with { Answers = new(edgeDraft.Answers.Where(p => p.Key != "width")) }), "Pointer guessed an unmeasured desk width");
-        Reject(() => WizardReferenceHighlightScope.Create(live, edgeDraft with { Answers = new(edgeDraft.Answers.Where(p => p.Key != "sceneconfirmed")) }), "Pointer assumed an unconfirmed simulated tabletop");
-        var edgeReply = JsonSerializer.SerializeToElement(new { highlighted = true, label = leftEdge.Label, point = new[] { -.7, .803, 0 } });
+            check(!leftEdge.Matches(live, edgeDraft with { Answers = new(edgeDraft.Answers) { [changedKey] = changedKey == "sceney" ? "900" : "1000" } }, edgeRoot, true, true), "A desk pointer survived changed measurements: " + changedKey);
+        check(!leftEdge.Matches(live, edgeDraft, edgeRoot, false, true) && !leftEdge.Matches(live, edgeDraft, edgeRoot, true, false), "A pointer remained confirmable after leaving the page or losing fresh feedback");
+        Reject(() => WizardReferenceHighlightScope.Create(live, edgeDraft with { Answers = new(edgeDraft.Answers.Where(p => p.Key != "width")) }, edgeRoot), "Pointer guessed an unmeasured desk width");
+        Reject(() => WizardReferenceHighlightScope.Create(live, edgeDraft with { Answers = new(edgeDraft.Answers.Where(p => p.Key != "sceneconfirmed")) }, edgeRoot), "Pointer assumed an unconfirmed simulated tabletop");
+        var edgeReply = JsonSerializer.SerializeToElement(new { highlighted = true, label = leftEdge.Label, point = new[] { -.7, .803, 0 }, rootPlacement = edgeRoot.Json(), framed = false });
         check(leftEdge.Acknowledged(edgeReply), "Exact native desk-pointer echo was rejected");
         check(!backEdge.Acknowledged(edgeReply), "A returned LEFT pointer was accepted for the BACK question");
-        check(!leftEdge.Acknowledged(JsonSerializer.SerializeToElement(new { highlighted = true, label = leftEdge.Label, point = new[] { -.6, .803, 0 } })), "A wrong pointer position was accepted as shown");
+        check(!leftEdge.Acknowledged(JsonSerializer.SerializeToElement(new { highlighted = true, label = leftEdge.Label, point = new[] { -.6, .803, 0 }, rootPlacement = edgeRoot.Json(), framed = false })), "A wrong pointer position was accepted as shown");
         check(!leftEdge.Acknowledged(JsonSerializer.SerializeToElement(new { highlighted = true })) && !leftEdge.Acknowledged(JsonSerializer.SerializeToElement(new { highlighted = false })), "An absent/incomplete marker acknowledgement enabled edge confirmation");
         var edgeRequest = leftEdge.Request(true);
         check(edgeRequest["point"]!.AsArray().Count == 3 && edgeRequest["siteName"] is null && edgeRequest["durationSeconds"]!.GetValue<int>() == 30 &&
@@ -149,9 +155,28 @@ public static class CalibrationWizardTests
             "A real permission problem was mislabeled as an old engine");
         check(WizardReferenceHighlightScope.FailureMessage(new OperationCanceledException()).Contains("Show edge to retry", StringComparison.Ordinal),
             "A marker timeout did not explain the next action or kept confirming without a pointer");
-        check(WizardReferenceHighlightScope.DeskFingerprint(live, 1400, 700, 800) == leftEdge.DeskFingerprint() &&
-            WizardReferenceHighlightScope.DeskFingerprint(live with { ModelRevision = "changed" }, 1400, 700, 800) != leftEdge.DeskFingerprint(),
+        check(WizardReferenceHighlightScope.DeskFingerprint(live, 1400, 700, 800, edgeRoot) == leftEdge.DeskFingerprint() &&
+            WizardReferenceHighlightScope.DeskFingerprint(live with { ModelRevision = "changed" }, 1400, 700, 800, edgeRoot) != leftEdge.DeskFingerprint(),
             "Capture could reuse an old LEFT/BACK confirmation after the robot model revision changed");
+        foreach (var changedRoot in new[] { CalibrationPlacement.At(new(.2, .8, -.2), .2), CalibrationPlacement.At(new(.1, .8, -.2), .3) })
+        {
+            check(!leftEdge.Matches(live, edgeDraft, changedRoot, true, true), "A reference pointer silently repinned a moved/rotated simulated robot");
+            check(!leftEdge.Acknowledged(JsonSerializer.SerializeToElement(new { highlighted = true, label = leftEdge.Label, point = new[] { -.7, .803, 0 }, rootPlacement = changedRoot.Json(), framed = false })),
+                "A pointer acknowledgement for a changed root placement was accepted");
+            check(WizardReferenceHighlightScope.DeskFingerprint(live, 1400, 700, 800, changedRoot) != leftEdge.DeskFingerprint(), "LEFT/BACK proof was not bound to the simulated robot placement");
+        }
+        check(leftEdge.Matches(live, edgeDraft, new(edgeRoot.Position, edgeRoot.Rotation.Select(x => -x).ToArray()), true, true), "Sign-equivalent quaternion changed a pinned pointer's orientation");
+        check(leftEdge.Request(true, frame: true)["frame"]!.GetValue<bool>() && !leftEdge.Request(true)["frame"]!.GetValue<bool>() &&
+            CalibrationPlacement.Read(leftEdge.Request(true)["expectedRootPlacement"]).Same(edgeRoot), "First/manual framing or non-framing renewals lost their exact expected root pose");
+        check(leftEdge.Acknowledged(JsonSerializer.SerializeToElement(new { highlighted = true, label = leftEdge.Label, point = new[] { -.7, .803, 0 }, rootPlacement = edgeRoot.Json(), framed = true }), true),
+            "A successfully framed pointer was rejected");
+        check(!leftEdge.Acknowledged(edgeReply, frameRequested: true), "Manual Show accepted an unframed marker while the reference remained out of view");
+        check(!leftEdge.Acknowledged(JsonSerializer.SerializeToElement(new { highlighted = true, label = leftEdge.Label, point = new[] { -.7, .803, 0 }, rootPlacement = edgeRoot.Json(), framed = true })),
+            "A renewal unexpectedly framed the viewport instead of preserving user navigation");
+        check(!leftEdge.Acknowledged(JsonSerializer.SerializeToElement(new { highlighted = true, label = leftEdge.Label, point = new[] { -.7, .803, 0 }, framed = false })),
+            "A pointer without an echoed root placement enabled confirmation");
+        check(WizardReferenceHighlightScope.FailureMessage(new InvalidOperationException("Viewport overlays are hidden. Enable viewport overlays, then retry.")).Contains("Enable viewport overlays", StringComparison.Ordinal),
+            "Hidden-overlay guidance was lost behind a generic marker failure");
         const System.Reflection.BindingFlags hidden = System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic;
         var copyPlugin = new PipersPlugin();
         foreach (CalibrationWizardStep step in Enum.GetValues<CalibrationWizardStep>())
