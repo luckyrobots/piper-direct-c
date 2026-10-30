@@ -1,0 +1,71 @@
+name: Validate controller and plugin
+
+on: [push, pull_request]
+
+permissions:
+  contents: read
+
+jobs:
+  native-linux:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: make test
+
+  managed:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-24.04]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '9.0.x'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Restore against the public plugin SDK
+        shell: pwsh
+        run: |
+          $sdk = Join-Path $env:RUNNER_TEMP 'public-plugin-sdk'
+          New-Item -ItemType Directory -Path $sdk -Force | Out-Null
+          $package = Join-Path $sdk 'LuckyEngine.PluginSdk.0.1.0.nupkg'
+          Invoke-WebRequest -Uri 'https://github.com/luckyrobots/luckyengine-plugins/releases/download/sdk-v0.1.0/LuckyEngine.PluginSdk.0.1.0.nupkg' -OutFile $package
+          if ((Get-FileHash -LiteralPath $package -Algorithm SHA256).Hash -ne '106A9B3877AB8079541D7BFB9D49394B06965977CA35A002C339BBF37430DD0F') { throw 'Unexpected public SDK package digest' }
+          foreach ($project in @('Piper.Plugin.Tests','Piper.Pika.Tests')) {
+            dotnet restore "managed/$project" --source $sdk --source https://api.nuget.org/v3/index.json
+            if ($LASTEXITCODE) { throw "Restore failed: $project" }
+          }
+      - name: Managed protocol and plugin fixtures
+        shell: pwsh
+        run: |
+          dotnet run --project managed/Piper.Pika.Tests -c Release --no-restore
+          if ($LASTEXITCODE) { throw 'Pika fixtures failed' }
+          dotnet run --project managed/Piper.Plugin.Tests -c Release --no-restore
+          if ($LASTEXITCODE) { throw 'Plugin fixtures failed' }
+      - name: Windows offline camera fixtures
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          dotnet run --project managed/Piper.Camera.Tests -c Release
+          if ($LASTEXITCODE) { throw 'Camera fixtures failed' }
+          ./tools/Prepare-CameraRuntime.ps1 -Destination build/camera-check
+          dotnet publish managed/Piper.Camera -c Release -r win-x64 --self-contained true -o build/camera-check
+          if ($LASTEXITCODE) { throw 'Camera runtime publish failed' }
+          ./build/camera-check/LuckyRobots.Piper.Camera.exe check
+          if ($LASTEXITCODE) { throw 'Bundled camera runtime check failed' }
+          ./tests/test_windows_supervisor.ps1
+      - name: Build Linux native ABI
+        if: runner.os == 'Linux'
+        run: bash tools/build-native-linux.sh
+      - name: Linux managed host simulation
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          dotnet build managed/Piper.Host -c Release -r linux-x64
+          PIPER_TEST_EXE="$PWD/managed/Piper.Host/bin/Release/net9.0/linux-x64/Piper.Host" node tests/test_api.mjs

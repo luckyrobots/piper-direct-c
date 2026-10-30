@@ -40,7 +40,7 @@ int main(void)
     assert(!controller_blocker(&c,d,now));
     struct piper_feedback healthy=d->feedback;
     d->feedback.acceleration[5].seen=false; reject(&c,d,j); d->feedback=healthy;
-    d->feedback.acceleration[5].at=now-61; reject(&c,d,j); d->feedback=healthy;
+    d->configuration_since=now-.1; d->feedback.acceleration[5].at=now-.2; reject(&c,d,j); d->feedback=healthy; d->configuration_since=0;
     d->feedback.acceleration[5].at=now+1; reject(&c,d,j); d->feedback=healthy;
     d->feedback.acceleration[5].max=0; reject(&c,d,j); d->feedback=healthy;
     d->feedback.acceleration[5].max=5.001; reject(&c,d,j); d->feedback=healthy;
@@ -61,7 +61,7 @@ int main(void)
     d->feedback.arm[1].status_seen=true; d->feedback.arm[1].status_at=now; reject(&c,d,j); d->feedback=healthy;
     d->feedback.arm[0].control=2; reject(&c,d,j); d->feedback=healthy;
     d->feedback.arm[0].motion_mode=4; reject(&c,d,j); d->feedback=healthy;
-    d->feedback.limit[0].at=now-61; reject(&c,d,j); d->feedback=healthy;
+    d->configuration_since=now-.1; d->feedback.limit[0].at=now-.2; reject(&c,d,j); d->feedback=healthy; d->configuration_since=0;
     strcpy(d->feedback.version,"S-V9.0-0");
     assert(strstr(controller_blocker(&c,d,now),"not supported"));
     reject(&c,d,j); d->feedback=healthy;
@@ -98,6 +98,18 @@ int main(void)
     snapshot=controller_state(&c,"test-token");
     first=cJSON_GetArrayItem(cJSON_GetObjectItem(snapshot,"devices"),0);
     assert(cJSON_IsTrue(cJSON_GetObjectItem(first,"recovery_required"))); cJSON_Delete(snapshot);
+    /* A lost information reply is retried without motor commands, and the
+       existing query deadline still bounds all retries. */
+    c.query_joint=12; c.query_next=0; d->feedback.limit[0].seen=false;
+    tx=d->tx; controller_tick(&c,piper_now());
+    assert(d->tx==tx+1&&d->feedback.limit[0].seen&&c.bus.sim_enabled==0);
+    now=piper_now(); c.query_start=now; c.query_joint=12; c.query_next=0;
+    for (unsigned i=0;i<6;i++) { d->feedback.limit[i].seen=true; d->feedback.limit[i].at=now; d->feedback.acceleration[i].seen=true; d->feedback.acceleration[i].at=now; }
+    d->feedback.version[0]=0; d->feedback.gripper_config_at=now;
+    tx=d->tx; controller_tick(&c,piper_now());
+    assert(d->tx==tx+1&&*d->feedback.version&&c.bus.sim_enabled==0); /* skipped replies do not contaminate firmware request bytes */
+    c.query_start=piper_now()-6; tx=d->tx;
+    controller_tick(&c,piper_now()); assert(!c.query&&d->tx==tx);
     /* Missing selected arm survives restart even when another arm is present. */
     struct can_device *missing=&c.bus.devices[1];
     strcpy(missing->id,"simulation:missing"); strcpy(missing->label,"Absent arm");

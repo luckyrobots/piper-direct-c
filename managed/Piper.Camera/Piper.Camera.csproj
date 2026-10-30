@@ -1,0 +1,19 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType><TargetFramework>net9.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings><Nullable>enable</Nullable>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors><AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <AssemblyName>LuckyRobots.Piper.Camera</AssemblyName>
+    <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="OpenCvSharp5" Version="5.0.0.20261018" />
+    <PackageReference Include="OpenCvSharp5.runtime.win" Version="5.0.0.20261018" Condition="'$(RuntimeIdentifier)' != 'linux-x64'" />
+    <PackageReference Include="OpenCvSharp5.official.runtime.linux-x64.headless" Version="5.0.0.20261018" Condition="'$(RuntimeIdentifier)' == 'linux-x64'" />
+    <ProjectReference Include="../Piper.RealSense/Piper.RealSense.csproj" />
+  </ItemGroup>
+  <!-- DSHOW/V4L2 and our JPEG encoder do not use the optional FFmpeg plugin. -->
+  <Target Name="ExcludeUnusedFfmpegPlugin" AfterTargets="ComputeFilesToPublish">
+    <ItemGroup><ResolvedFileToPublish Remove="@(ResolvedFileToPublish)" Condition="$([System.String]::Copy('%(Filename)').StartsWith('opencv_videoio_ffmpeg'))" /></ItemGroup>
+  </Target>
+</Project>

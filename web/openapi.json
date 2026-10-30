@@ -3,7 +3,7 @@
   "info": {
     "title": "PiPer Direct C position-control API",
     "version": "1.0.0",
-    "description": "Loopback-only C/SocketCAN controller. No Python or robot SDK. Read /api/state for the per-process token, stable selected device_id and current connection generation. Every POST requires X-Piper-Token and application/json. Accepted actions are asynchronous: poll state and renew the matching owner/request_id lease every 200 ms. Lease expires at 800 ms. Commands never resume automatically after reconnect or restart. A single-joint command sends a six-angle MoveJ pose, holding other joints at their initial measured positions. This API does not bypass the onboard MCU or expose raw torque/MIT/calibration/firmware writes. State includes controller teach_state, fault masks, persisted last_fault and per-joint max_acceleration_rad_s2/acceleration_fresh/acceleration_age_s. New motion and enable require all six acceleration readings within 60 seconds, finite, greater than zero and at most 5 rad/s\u00b2. Queries are read-only and preserve unresolved recovery locks."
+    "description": "Loopback-only C/SocketCAN controller. No Python or robot SDK. Read /api/state for the per-process token, stable selected device_id and current connection generation. Every POST requires X-Piper-Token and application/json. Accepted actions are asynchronous: poll state and renew the matching owner/request_id lease every 200 ms. Lease expires at 800 ms. Commands never resume automatically after reconnect or restart. A single-joint command sends a six-angle MoveJ pose, holding other joints at their initial measured positions. This API does not bypass the onboard MCU or expose raw torque/MIT/calibration/firmware writes. State includes controller teach_state, fault masks, persisted last_fault and per-joint max_acceleration_rad_s2/acceleration_fresh/acceleration_age_s. New motion and enable require valid angle, speed and acceleration limits read on this connection. Static configuration remains valid while the connection is uninterrupted; there is no periodic refresh or 60-second expiry. USB/CAN reconnection, a robot status-stream gap or an explicit information query invalidates the cache. Live position, motor and fault feedback still use the normal short freshness checks. Acceleration limits must be finite, greater than zero and at most 5 rad/s\u00b2. Queries are read-only and preserve unresolved recovery locks. The limits_fresh, acceleration_fresh and gripper configuration_fresh fields mean valid for this connection; their age fields report elapsed time without imposing an expiry. Missing optional standard CAN gripper settings do not block the arm or Pika."
   },
   "servers": [
     {
@@ -441,6 +441,12 @@
               "synchronized": {
                 "type": "boolean",
                 "default": false
+              },
+              "speed_percent": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 100,
+                "description": "Percentage of the slowest fresh reported joint speed limit. Mutually exclusive with legacy speed_deg_s. Zero blocks new joint moves; it does not stop an active move. Alignment and scripted cycle retain explicit rates."
               }
             }
           }

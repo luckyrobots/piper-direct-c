@@ -1,0 +1,9 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup><TargetFramework>net9.0</TargetFramework><ImplicitUsings>enable</ImplicitUsings><Nullable>enable</Nullable><TreatWarningsAsErrors>true</TreatWarningsAsErrors></PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Google.Protobuf" Version="3.33.0" />
+    <PackageReference Include="Grpc.Core.Api" Version="2.76.0" />
+    <PackageReference Include="Grpc.Tools" Version="2.76.0" PrivateAssets="All" />
+    <Protobuf Include="piper.proto" GrpcServices="Both" />
+  </ItemGroup>
+</Project>

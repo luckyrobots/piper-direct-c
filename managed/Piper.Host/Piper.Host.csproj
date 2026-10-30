@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+  <PropertyGroup><TargetFramework>net9.0</TargetFramework><ImplicitUsings>enable</ImplicitUsings><Nullable>enable</Nullable><TreatWarningsAsErrors>true</TreatWarningsAsErrors></PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Grpc.AspNetCore" Version="2.76.0" />
+    <ProjectReference Include="../Piper.Contracts/Piper.Contracts.csproj" />
+    <ProjectReference Include="../Piper.Core/Piper.Core.csproj" />
+    <ProjectReference Include="../Piper.Pika/Piper.Pika.csproj" />
+    <Content Include="../../web/*" Link="web/%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="../../vendor/candle/**/*" Condition="'$(RuntimeIdentifier)' != 'linux-x64'" Link="transport-source/%(RecursiveDir)%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="../THIRD-PARTY-NOTICES.txt" Link="THIRD-PARTY-NOTICES.txt" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="../../build/windows-x64/*.dll" Condition="'$(RuntimeIdentifier)' != 'linux-x64'" Link="%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="../../build/linux-x64/*.so" Condition="'$(RuntimeIdentifier)' == 'linux-x64'" Link="%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+  </ItemGroup>
+</Project>
