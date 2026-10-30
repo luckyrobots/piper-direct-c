@@ -10,6 +10,7 @@ public sealed partial class PipersPlugin
     private CalibrationWizardDraft? calibrationWizard;
     private string[] wizardDiscoveredSites = [];
     private string wizardProfile = "", wizardMessage = "", wizardModelPoint = "Not inspected. Software has not verified the physical/model point correspondence.";
+    private string wizardModelPointDetails = "Model coordinates and site identity are not a verified physical TCP calibration.";
     private CalibrationWizardDraft Wizard => calibrationWizard ?? throw new InvalidOperationException("Open the calibration wizard first.");
     private string WizardId(string action) => "wizard." + Wizard.Epoch + "." + action;
     private int WizardTrainingCount => calibrationSamples.Count(s => !s.HeldOut);
@@ -29,7 +30,7 @@ public sealed partial class PipersPlugin
                 JsonSerializer.Deserialize<CalibrationWizardDraft>(File.ReadAllText(WizardDraftPath), PluginProtocol.Json) is { } saved)
             {
                 CalibrationWizardFlow.ValidateDraft(saved, ActiveProfile.Id);
-                calibrationWizard = saved with { Epoch = saved.Epoch + 1 };
+                calibrationWizard = CalibrationWizardFlow.TabletopDefault(saved);
                 // Restore partial observations only from the draft's named report.
                 // Every later capture/write still rechecks the live pinned scope.
                 string reportPath = Path.Combine(RobotCalibrationDirectory, saved.ReportFile);
@@ -79,7 +80,7 @@ public sealed partial class PipersPlugin
         string? input = CalibrationWizardFlow.Input(step);
         if (step == CalibrationWizardStep.Prepare)
             children.Add(link is null ? Widget.Button("link", "Link robot · measured pose only") with { Appearance = "primary" } : Widget.Label("wizard.linked", "Selected real robot and scene are linked; Continue is read-only."));
-        if (input is not null) children.Add(new Widget("input", WizardId("answer")) { Text = Wizard.Answers.GetValueOrDefault(input, ""), Hint = input == "tool" ? "Exact case-sensitive model site name" : "Measured millimetres; decimal point. Blank means unknown." });
+        if (input is not null && step != CalibrationWizardStep.SceneSurfaceY) children.Add(new Widget("input", WizardId("answer")) { Text = Wizard.Answers.GetValueOrDefault(input, ""), Hint = input == "tool" ? "Exact case-sensitive model site name" : "Measured millimetres; decimal point. Blank means unknown." });
         if (step == CalibrationWizardStep.ContactPoint)
         {
             children.Add(Widget.Label("wizard.contact.diagram", "left jaw tip o-----+-----o right jaw tip\n                  measured midpoint") with { Height = 42, Appearance = "numeric" });
@@ -87,15 +88,15 @@ public sealed partial class PipersPlugin
         }
         if (step == CalibrationWizardStep.ModelPoint)
         {
-            children.Add(WizardButton("model.show", "Read coordinates + show temporary model marker"));
+            children.Add(WizardButton("model.show", "Show selected point") with { Hint = "Reads the exact selected model site and shows its temporary marker. This does not move hardware or verify physical correspondence." });
             if (wizardDiscoveredSites.Count(name => name == "calibration_jaw_tips") == 1)
-                children.Add(WizardButton("model.jawtips", "Use model jaw-tip reference · inspect and confirm"));
-            children.Add(Widget.Label("wizard.model.point", wizardModelPoint) with { Height = 58 });
+                children.Add(WizardButton("model.jawtips", "Show midpoint between jaw tips") with { Hint = "Uses the discovered model's calibration_jaw_tips site. Compare the temporary marker with the physical midpoint; software does not verify correspondence." });
+            children.Add(Widget.Label("wizard.model.point", wizardModelPoint) with { Height = 50, Hint = wizardModelPointDetails });
         }
         if (step == CalibrationWizardStep.TabletopHeight)
             children.Add(Widget.Label("wizard.height.scene", $"Confirmed scene surface Y: {calibrationDesk.SurfaceY * 1000:F0} mm. Scene floor reference: {Wizard.Answers.GetValueOrDefault("floory", "unknown")} mm. Physical ruler height remains separate; no scene object moves.") with { Height = 42 });
         if (step == CalibrationWizardStep.SceneSurfaceY)
-            children.Add(WizardButton("scene.root", "Base sits on scene tabletop: use current metric root Y"));
+            children.Add(WizardButton("scene.root", "Use this tabletop reference") with { Hint = "Confirm the simulated base is on the simulated tabletop. This reads its validated metric world-Y reference; it does not move any scene object or use a physical floor measurement." });
         if (step == CalibrationWizardStep.SceneFloorOrigin)
             children.Add(WizardButton("floor.zero", "My scene floor and physical floor origin both use Y=0"));
         if (step == CalibrationWizardStep.Method)
@@ -143,11 +144,11 @@ public sealed partial class PipersPlugin
         CalibrationWizardStep.ContactPoint => "Which physical point will you measure at every location? Use the midpoint between BOTH jaw tips, not one tilted fingertip or the camera lens. Software has not verified its matching model site.",
         CalibrationWizardStep.ModelPoint => "What exact named model point represents the physical midpoint? Read its coordinates and inspect the temporary scene marker, then report correspondence. A grasp centre may be behind the jaw tips; a name or marker alone does not verify the physical TCP.",
         CalibrationWizardStep.DeskFrame => "Confirm the scene desk frame: centre X=0/Z=0, width along X, back edge at −Z. This wizard does not infer a desk transform from a camera. Fix a different/rotated scene desk before continuing.",
-        CalibrationWizardStep.SceneSurfaceY => "What is the SCENE tabletop's world Y, in millimetres? Enter it explicitly. Only if the metric robot base actually rests on that scene tabletop may you use its current root Y below. This reference does not move the scene or come from a ruler.",
-        CalibrationWizardStep.SceneFloorOrigin => "What scene-world Y corresponds to your physical floor reference, in millimetres? Explicitly choose zero if origins match, or enter the known world-floor offset. Ruler height will be compared to scene tabletop Y minus this reference.",
+        CalibrationWizardStep.SceneSurfaceY => "Check that the simulated base is on the simulated tabletop, then use that reference. The validated model root supplies the technical world-Y value; this reads a scene reference without moving anything. Physical floor/table height is irrelevant to tabletop-relative contact measurements.",
+        CalibrationWizardStep.SceneFloorOrigin => "Optional legacy office-height audit only: enter a known scene-world floor reference if you want to preserve it. This value is not required or used for tabletop capture, fitting or Apply.",
         CalibrationWizardStep.DeskWidth => "What is the full tabletop width, from left edge to right edge, in millimetres? Enter your measured value.",
         CalibrationWizardStep.DeskDepth => "What is the full tabletop depth, from back edge to front edge, in millimetres? Enter your measured value.",
-        CalibrationWizardStep.TabletopHeight => "How high is the physical tabletop above the floor, in millimetres? UNKNOWN until you measure it. The value must agree with the established scene surface; a mismatch needs separate scene setup.",
+        CalibrationWizardStep.TabletopHeight => "Optional legacy office-height audit only: physical tabletop height remains unknown unless measured and entered. It is visual-office metadata, not a tabletop-calibration requirement or capture gate.",
         CalibrationWizardStep.Precision => "How precisely can you measure these points, in millimetres (1–10)? Enter an honest uncertainty; this controls the fit's rejection thresholds, not a promise of physical accuracy.",
         CalibrationWizardStep.Method => "How will you locate each point: measure its distance from the desk edges, or use numbered intersections on a grid mat? No object is required.",
         CalibrationWizardStep.GridSquare => "What is the grid square size in millimetres? Verify with a ruler. Secure the mat flat and parallel to the desk edges; rotated grids are not supported.",
@@ -169,9 +170,9 @@ public sealed partial class PipersPlugin
     {
         CalibrationWizardStep.Prepare => "Link the selected real robot and scene model.",
         CalibrationWizardStep.ContactPoint => "Which physical point will you measure?",
-        CalibrationWizardStep.ModelPoint => "Which model site matches that physical point?",
+        CalibrationWizardStep.ModelPoint => "Check the point between the simulated jaw tips.",
         CalibrationWizardStep.DeskFrame => "Confirm the scene desk's left/back coordinate frame.",
-        CalibrationWizardStep.SceneSurfaceY => "What is the scene tabletop's world Y in millimetres?",
+        CalibrationWizardStep.SceneSurfaceY => "Is the simulated robot base resting on the tabletop?",
         CalibrationWizardStep.SceneFloorOrigin => "What scene-world Y represents the physical floor?",
         CalibrationWizardStep.DeskWidth => "What is the measured tabletop width in millimetres?",
         CalibrationWizardStep.DeskDepth => "What is the measured tabletop depth in millimetres?",
@@ -195,7 +196,7 @@ public sealed partial class PipersPlugin
     };
     private string WizardNextLabel() => Wizard.Step switch
     {
-        CalibrationWizardStep.ModelPoint => "I compared the physical/model points",
+        CalibrationWizardStep.ModelPoint => "Marker matches jaw tips",
         CalibrationWizardStep.DeskFrame => "This scene desk uses that frame",
         CalibrationWizardStep.SceneSurfaceY => "I confirm this scene tabletop reference",
         CalibrationWizardStep.HandGuide => "I am holding the measured point",
@@ -227,7 +228,8 @@ public sealed partial class PipersPlugin
             var evidence = new { report = Path.GetFileName(calibrationPath), Wizard.ProfileId, Wizard.Answers,
                 physicalPoint = Wizard.Answers.GetValueOrDefault("physicalpoint"), operatorSaysTcpMatches = Wizard.OperatorSaysTcpMatches,
                 modelCorrespondenceIndependentlyVerified = false, Wizard.ModelAssetId, Wizard.ModelRevision,
-                sceneSurfaceYMetres = calibrationDesk.SurfaceY, cameraEvidence = "JPEG preview only; no metric depth was queried", timestampUtc = DateTimeOffset.UtcNow };
+                sceneSurfaceYMetres = calibrationDesk.SurfaceY, optionalOfficeAudit = CalibrationWizardFlow.OptionalOfficeAudit(Wizard),
+                cameraEvidence = "JPEG preview only; no metric depth was queried", timestampUtc = DateTimeOffset.UtcNow };
             await File.WriteAllTextAsync(calibrationPath.Replace("-calibration.json", "-wizard-evidence.json"), JsonSerializer.Serialize(evidence, PluginProtocol.Json), cancellation);
         }
     }
@@ -331,15 +333,15 @@ public sealed partial class PipersPlugin
                 calibrationDesk = calibrationDesk with { SurfaceY = sceneY / 1000 };
                 Wizard.Answers["sceneconfirmed"] = "operator explicitly confirmed scene surface reference; no scene transform changed"; break;
             case CalibrationWizardStep.SceneFloorOrigin:
-                _ = CalibrationWizardFlow.Number(Wizard, "floory", -10000, 10000);
-                Wizard.Answers["floorconfirmed"] = "operator supplied scene-world Y for physical floor reference"; break;
+                if (Wizard.Answers.TryGetValue("floory", out var optionalFloor) && !string.IsNullOrWhiteSpace(optionalFloor))
+                { _ = CalibrationWizardFlow.Number(Wizard, "floory", -10000, 10000); Wizard.Answers["floorconfirmed"] = "operator supplied optional office floor reference; not used for tabletop fit"; } break;
             case CalibrationWizardStep.DeskWidth: _ = CalibrationWizardFlow.Number(Wizard, "width", 100, 10000); break;
             case CalibrationWizardStep.DeskDepth: _ = CalibrationWizardFlow.Number(Wizard, "depth", 100, 10000); break;
             case CalibrationWizardStep.TabletopHeight:
-                CalibrationWizardFlow.ValidateTabletopHeight(Wizard, 10); break;
+                if (Wizard.Answers.TryGetValue("tableheight", out var optionalHeight) && !string.IsNullOrWhiteSpace(optionalHeight))
+                    _ = CalibrationWizardFlow.Number(Wizard, "tableheight", 1, 3000); break;
             case CalibrationWizardStep.Precision:
-                double precision = CalibrationWizardFlow.Number(Wizard, "precision", 1, 10);
-                CalibrationWizardFlow.ValidateTabletopHeight(Wizard, precision); break;
+                _ = CalibrationWizardFlow.Number(Wizard, "precision", 1, 10); break;
             case CalibrationWizardStep.GridSquare: _ = CalibrationWizardFlow.Number(Wizard, "square", 5, 500); break;
             case CalibrationWizardStep.GridOriginLeft: _ = CalibrationWizardFlow.Number(Wizard, "originleft", 0, CalibrationWizardFlow.Number(Wizard, "width", 100, 10000)); break;
             case CalibrationWizardStep.GridOriginBack: _ = CalibrationWizardFlow.Number(Wizard, "originback", 0, CalibrationWizardFlow.Number(Wizard, "depth", 100, 10000)); break;
@@ -367,7 +369,9 @@ public sealed partial class PipersPlugin
             throw new InvalidOperationException("The current model does not expose one exact named metric site. Select/fix the correct model point before continuing.");
         calibrationWizard = Wizard with { ModelAssetId = asset, ModelRevision = revision, OperatorSaysTcpMatches = false };
         Wizard.Answers["observedrooty"] = CalibrationNumber(CalibrationPlacement.Read(pose["rootPlacement"]).Position.Y * 1000);
-        wizardModelPoint = $"Model site '{name}': {sites[0]!["position"]!.ToJsonString()} m. The marker identifies only the model point; physical correspondence remains unverified.";
+        var coordinates = sites[0]!["position"]!.AsArray().Select(v => v!.GetValue<double>() * 1000).ToArray();
+        wizardModelPoint = $"Model marker: ({coordinates[0]:F1}, {coordinates[1]:F1}, {coordinates[2]:F1}) mm. Physical match is unverified.";
+        wizardModelPointDetails = $"Site '{name}' world coordinates {sites[0]!["position"]!.ToJsonString()} m; compiled model {asset}, revision {revision}. The marker identifies a model point only. Continue records the operator's comparison, not independent physical calibration.";
         await ShowWizardHighlight(cancellation);
     }
 
@@ -385,27 +389,17 @@ public sealed partial class PipersPlugin
     private async Task CaptureWizardPoint(CancellationToken cancellation)
     {
         if (!Wizard.OperatorSaysTcpMatches || !Wizard.Answers.ContainsKey("physicalpoint") || !Wizard.Answers.ContainsKey("frame") ||
-            !Wizard.Answers.ContainsKey("sceneconfirmed") || !Wizard.Answers.ContainsKey("floorconfirmed"))
+            !Wizard.Answers.ContainsKey("sceneconfirmed"))
             throw new InvalidOperationException("Identify the fixed physical/model point and scene desk frame before capturing.");
-        double width = CalibrationWizardFlow.Number(Wizard, "width", 100, 10000), depth = CalibrationWizardFlow.Number(Wizard, "depth", 100, 10000);
-        double precision = CalibrationWizardFlow.Number(Wizard, "precision", 1, 10);
-        CalibrationWizardFlow.ValidateTabletopHeight(Wizard, precision);
+        var tabletop = CalibrationWizardFlow.TabletopInputs(Wizard);
         if (Math.Abs(CalibrationWizardFlow.SceneSurface(Wizard) - calibrationDesk.SurfaceY * 1000) > .001)
             throw new InvalidOperationException("The saved scene reference changed. Start new questions before mixing measurements from different scene surfaces.");
-        _ = CalibrationWizardFlow.Number(Wizard, "height", 0, 1000);
-        bool grid = Wizard.Answers.GetValueOrDefault("method") == "grid intersections";
-        if (grid)
-        {
-            _ = CalibrationWizardFlow.Number(Wizard, "square", 5, 500);
-            _ = CalibrationWizardFlow.Number(Wizard, "originleft", 0, width); _ = CalibrationWizardFlow.Number(Wizard, "originback", 0, depth);
-            _ = CalibrationWizardFlow.Number(Wizard, "column", 0, 200, true); _ = CalibrationWizardFlow.Number(Wizard, "row", 0, 200, true);
-        }
-        else { _ = CalibrationWizardFlow.Number(Wizard, "left", 0, width); _ = CalibrationWizardFlow.Number(Wizard, "back", 0, depth); }
         foreach (string key in new[] { "tool", "width", "depth", "precision", "left", "back", "height", "square", "originleft", "originback", "column", "row" })
             calibrationInputs[key] = Wizard.Answers.GetValueOrDefault(key, key == "tool" ? "grasp_site" : "0");
         calibrationInputs["surface"] = CalibrationNumber(calibrationDesk.SurfaceY * 1000);
         calibrationMode = Wizard.Answers.GetValueOrDefault("method", "edge measurements");
         ReadCalibrationInputs(calibrationIdentity is null);
+        if (calibrationDesk != tabletop.Desk) throw new InvalidOperationException("The captured session's fixed tabletop settings changed. Start new questions before mixing references.");
         _ = calibrationMeasurement.World(calibrationDesk);
         if (!WizardValidation && WizardCross() is { } cross && calibrationMeasurement.World(calibrationDesk).PlanarDistance(calibrationDesk.World(cross.LeftMm, cross.BackMm, 0)) < .05)
             throw new InvalidOperationException("Keep the saved profile cross and its nearby5cm for independent validation. Choose a different training location.");

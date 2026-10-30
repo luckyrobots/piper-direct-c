@@ -129,7 +129,8 @@ public sealed partial class PipersPlugin
     private void AddWorkspacePatches(Dictionary<string, JsonObject> patches, JsonObject? device)
     {
         patches["workspace.connection"] = new() { ["text"] = CompactConnectionStatus(device), ["hint"] = message };
-        string fullStatus = device?["range_recovery"]?["required"]?.GetValue<bool>() == true ? device["range_recovery"]!["reason"]?.GetValue<string>() ?? message : message;
+        string fullStatus = calibrationOpen ? "Calibration reads the measured pose. Use the physical teach button only when the guide asks."
+            : device?["range_recovery"]?["required"]?.GetValue<bool>() == true ? device["range_recovery"]!["reason"]?.GetValue<string>() ?? message : message;
         patches["status"] = new() { ["text"] = device is null ? "Waiting for fresh controller feedback" : device["recovery_required"]?.GetValue<bool>() == true ? "Stopped · review recovery above" : fullStatus.Length > 110 ? fullStatus[..107] + "…" : fullStatus, ["hint"] = fullStatus };
         patches["workspace.incident"] = new() { ["visible"] = device?["recovery_required"]?.GetValue<bool>() == true || device?["reset_pending"]?.GetValue<bool>() == true };
         patches["enable"] = new() { ["enabled"] = workspacePage == "controls" && device is not null && !switchingProfile && !TeachingState.Inspect(device).BlocksTargets };

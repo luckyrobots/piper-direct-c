@@ -12,6 +12,9 @@ public enum CalibrationWizardStep
 public sealed record CalibrationWizardDraft(int Schema, string ProfileId, CalibrationWizardStep Step, long Epoch,
     Dictionary<string, string> Answers, CalibrationWizardStep[] History, string ReportFile = "", string HelpCamera = "bench",
     string ModelAssetId = "", string ModelRevision = "", bool OperatorSaysTcpMatches = false);
+public sealed record CalibrationTabletopInputs(CalibrationDesk Desk, CalibrationMeasurement Measurement);
+public sealed record CalibrationOptionalOfficeAudit(double? SceneFloorYMillimetres, double? MeasuredTabletopHeightMillimetres,
+    string Meaning = "Optional visual-office audit only; not required or used for tabletop capture/fit.");
 
 /// <summary>Question order and input validation only: no engine, camera or robot command path.</summary>
 public static class CalibrationWizardFlow
@@ -57,10 +60,10 @@ public static class CalibrationWizardFlow
             CalibrationWizardStep.ContactPoint => CalibrationWizardStep.ModelPoint,
             CalibrationWizardStep.ModelPoint => CalibrationWizardStep.DeskFrame,
             CalibrationWizardStep.DeskFrame => CalibrationWizardStep.SceneSurfaceY,
-            CalibrationWizardStep.SceneSurfaceY => CalibrationWizardStep.SceneFloorOrigin,
+            CalibrationWizardStep.SceneSurfaceY => CalibrationWizardStep.DeskWidth,
             CalibrationWizardStep.SceneFloorOrigin => CalibrationWizardStep.DeskWidth,
             CalibrationWizardStep.DeskWidth => CalibrationWizardStep.DeskDepth,
-            CalibrationWizardStep.DeskDepth => CalibrationWizardStep.TabletopHeight,
+            CalibrationWizardStep.DeskDepth => CalibrationWizardStep.Precision,
             CalibrationWizardStep.TabletopHeight => CalibrationWizardStep.Precision,
             CalibrationWizardStep.Precision => CalibrationWizardStep.Method,
             CalibrationWizardStep.Method => grid ? CalibrationWizardStep.GridSquare : CalibrationWizardStep.PointIntro,
@@ -89,6 +92,34 @@ public static class CalibrationWizardFlow
             History = [], Epoch = draft.Epoch + 1 };
     }
     public static bool Accepts(CalibrationWizardDraft draft, string profileId, long epoch) => draft.ProfileId == profileId && draft.Epoch == epoch;
+    public static CalibrationWizardDraft TabletopDefault(CalibrationWizardDraft draft)
+    {
+        var step = draft.Step switch { CalibrationWizardStep.SceneFloorOrigin => CalibrationWizardStep.DeskWidth,
+            CalibrationWizardStep.TabletopHeight => CalibrationWizardStep.Precision, _ => draft.Step };
+        var history = draft.History.Where(s => s is not (CalibrationWizardStep.SceneFloorOrigin or CalibrationWizardStep.TabletopHeight)).ToArray();
+        return draft with { Step = step, History = history, Epoch = draft.Epoch + 1 };
+    }
+    public static CalibrationOptionalOfficeAudit OptionalOfficeAudit(CalibrationWizardDraft draft)
+    {
+        double? Value(string key, double min, double max) => draft.Answers.TryGetValue(key, out var text) && !string.IsNullOrWhiteSpace(text) &&
+            double.TryParse(text, NumberStyles.Float, CultureInfo.InvariantCulture, out double value) && double.IsFinite(value) && value >= min && value <= max ? value : null;
+        return new(Value("floory", -10000, 10000), Value("tableheight", 1, 3000));
+    }
+    public static CalibrationTabletopInputs TabletopInputs(CalibrationWizardDraft draft)
+    {
+        double width = Number(draft, "width", 100, 10000), depth = Number(draft, "depth", 100, 10000);
+        var desk = new CalibrationDesk(width / 1000, depth / 1000, SceneSurface(draft) / 1000, Number(draft, "precision", 1, 10), draft.Answers.GetValueOrDefault("tool", "").Trim());
+        desk.Validate();
+        double height = Number(draft, "height", 0, 1000);
+        CalibrationMeasurement measurement;
+        if (draft.Answers.GetValueOrDefault("method") == "grid intersections")
+            measurement = new("grid intersections", HeightMm: height, SquareMm: Number(draft, "square", 5, 500),
+                OriginLeftMm: Number(draft, "originleft", 0, width), OriginBackMm: Number(draft, "originback", 0, depth),
+                Column: (int)Number(draft, "column", 0, 200, true), Row: (int)Number(draft, "row", 0, 200, true));
+        else measurement = new("edge measurements", Number(draft, "left", 0, width), Number(draft, "back", 0, depth), height);
+        _ = measurement.World(desk);
+        return new(desk, measurement);
+    }
     public static bool AlreadyRecorded(CalibrationWizardDraft draft, CalibrationSample sample)
     {
         if (draft.Step != CalibrationWizardStep.Capture || sample.HeldOut != (draft.Answers.GetValueOrDefault("role") == "validation") ||

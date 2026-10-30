@@ -24,8 +24,8 @@ public static class CalibrationWizardTests
         check(next.Step == CalibrationWizardStep.ModelPoint && !next.OperatorSaysTcpMatches, "Selecting a physical midpoint claimed model correspondence");
         var back = CalibrationWizardFlow.Back(next);
         check(back.Step == CalibrationWizardStep.ContactPoint && back.Epoch > next.Epoch, "Previous question did not invalidate delayed inputs");
-        var expected = new[] { CalibrationWizardStep.DeskFrame, CalibrationWizardStep.SceneSurfaceY, CalibrationWizardStep.SceneFloorOrigin, CalibrationWizardStep.DeskWidth, CalibrationWizardStep.DeskDepth,
-            CalibrationWizardStep.TabletopHeight, CalibrationWizardStep.Precision, CalibrationWizardStep.Method, CalibrationWizardStep.PointIntro,
+        var expected = new[] { CalibrationWizardStep.DeskFrame, CalibrationWizardStep.SceneSurfaceY, CalibrationWizardStep.DeskWidth, CalibrationWizardStep.DeskDepth,
+            CalibrationWizardStep.Precision, CalibrationWizardStep.Method, CalibrationWizardStep.PointIntro,
             CalibrationWizardStep.PointLeft, CalibrationWizardStep.PointBack, CalibrationWizardStep.PointHeight, CalibrationWizardStep.HandGuide, CalibrationWizardStep.Capture };
         foreach (var step in expected) { next = CalibrationWizardFlow.Advance(next); check(next.Step == step, "Manual wizard question order is wrong at " + step); }
         Reject(() => CalibrationWizardFlow.Advance(next), "Continue implicitly captured a point or applied a fit");
@@ -64,6 +64,28 @@ public static class CalibrationWizardTests
         Reject(() => CalibrationWizardFlow.ValidateTabletopHeight(genericDesk with { Answers = new(genericDesk.Answers) { ["tableheight"] = "750" } }, 10), "Physical/scene height mismatch was silently fitted away");
         Reject(() => CalibrationWizardFlow.SceneSurface(draft), "An unknown scene surface silently defaulted to750mm");
         Reject(() => CalibrationWizardFlow.RelativeTabletopHeight(genericDesk with { Answers = new(draft.Answers) { ["sceney"] = "800" } }), "Unknown world-floor origin silently defaulted tozero");
+        var tabletopDraft = draft with { Answers = new(draft.Answers) { ["width"] = "1400", ["depth"] = "700", ["sceney"] = "800", ["precision"] = "10", ["left"] = "400", ["back"] = "300", ["height"] = "0" } };
+        var tabletop = CalibrationWizardFlow.TabletopInputs(tabletopDraft);
+        check(tabletop.Measurement.World(tabletop.Desk).Distance(new(-.3, .8, -.05)) < 1e-12, "Tabletop capture required a physical floor/table-height measurement or used a wrong height frame");
+        check(CalibrationWizardFlow.OptionalOfficeAudit(tabletopDraft) is { SceneFloorYMillimetres: null, MeasuredTabletopHeightMillimetres: null }, "Unknown physical office heights were fabricated as measured defaults");
+        var inconsistentOffice = tabletopDraft with { Answers = new(tabletopDraft.Answers) { ["floory"] = "1000", ["tableheight"] = "740" } };
+        check(CalibrationWizardFlow.TabletopInputs(inconsistentOffice) == tabletop, "An unrelated optional office-height audit blocked tabletop capture");
+        check(CalibrationWizardFlow.OptionalOfficeAudit(inconsistentOffice) is { SceneFloorYMillimetres: 1000, MeasuredTabletopHeightMillimetres: 740 }, "Explicit legacy office-height input was discarded");
+        var resumedLegacy = CalibrationWizardFlow.TabletopDefault(tabletopDraft with { Step = CalibrationWizardStep.SceneFloorOrigin,
+            History = [CalibrationWizardStep.SceneSurfaceY, CalibrationWizardStep.SceneFloorOrigin] });
+        check(resumedLegacy.Step == CalibrationWizardStep.DeskWidth && !resumedLegacy.History.Contains(CalibrationWizardStep.SceneFloorOrigin), "An old draft still forced irrelevant floor questions on resume/back");
+        var relativeSamples = new[] { (300d, 200d), (600d, 200d), (600d, 500d), (300d, 500d), (450d, 350d) }.Select((p, i) =>
+        {
+            var pointDraft = tabletopDraft with { Answers = new(tabletopDraft.Answers) { ["left"] = p.Item1.ToString(System.Globalization.CultureInfo.InvariantCulture), ["back"] = p.Item2.ToString(System.Globalization.CultureInfo.InvariantCulture) } };
+            var pointInput = CalibrationWizardFlow.TabletopInputs(pointDraft);
+            var physical = pointInput.Measurement.World(pointInput.Desk);
+            return new CalibrationSample("tabletop" + i, physical, new(physical.X + .1, physical.Y, physical.Z + .05), [0, 0, 0, 0, 0, 0], i, i == 4, pointInput.Measurement, "synthetic-fk");
+        }).ToArray();
+        var relativeFit = CalibrationSolver.Fit(tabletop.Desk, CalibrationPlacement.At(new(.1, .8, .05), 0), relativeSamples);
+        check(relativeFit.CanApply && relativeFit.ProposedPlacement.Position.Distance(new(0, .8, 0)) < 1e-12, "A tabletop-only dataset could not fit/validate without floor measurements");
+        var wrongTip = relativeSamples.Select(s => s with { SceneWorld = new(s.SceneWorld.X, s.SceneWorld.Y + .03, s.SceneWorld.Z) }).ToArray();
+        var wrongTipFit = CalibrationSolver.Fit(tabletop.Desk, CalibrationPlacement.At(new(.1, .8, .05), 0), wrongTip);
+        check(!wrongTipFit.CanApply && wrongTipFit.VerticalRmsMm > 20 && wrongTipFit.ProposedPlacement.Position.Y == .8, "Removing the floor gate hid a wrong TCP vertical residual or floated the base");
         var stored = JsonSerializer.Deserialize<CalibrationWizardDraft>(JsonSerializer.Serialize(measured))!;
         CalibrationWizardFlow.ValidateDraft(stored, "robot-a");
         check(stored.Answers["tableheight"] == "755.5" && !stored.OperatorSaysTcpMatches, "Draft persistence invented defaults or promoted model verification");
