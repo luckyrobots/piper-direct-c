@@ -8,7 +8,8 @@ namespace LuckyRobots.Piper.Plugin;
 
 public sealed record RobotProfile(string Id, string Name, string CanDeviceId = "", double Speed = 10, double Step = 1, double Tolerance = .5,
     string RobotId = "", CameraPreferences? Gripper = null, CameraPreferences? Depth = null, string DepthSerial = "",
-    Dictionary<string, SimulationCameraPreferences>? SimulationCameras = null, string PikaDevice = "", string WslDistribution = "Ubuntu", int CameraSlot = -1);
+    Dictionary<string, SimulationCameraPreferences>? SimulationCameras = null, string PikaDevice = "", string WslDistribution = "Ubuntu", int CameraSlot = -1,
+    AlignmentReference? Alignment = null);
 
 /// <summary>Persistent identity and settings projection, independent of the editor and hardware.</summary>
 public static class RobotProfileRouting
@@ -295,18 +296,23 @@ public sealed partial class PipersPlugin
                 await Task.Delay(25, cancellation);
             }
         }
-        if (pikaOwned)
+        if (pikaOwned || pikaMonitoring || state?["pika"]?["owner"]?.GetValue<string>() == owner)
             await ReleaseOwnPika(cancellation);
         if (link is not null) await engine.RequestAsync("robot.unsubscribe", cancellation: cancellation);
         teleoperating = false; followInput.End(); followRequest = lease = lastCommand = 0;
-        approved = pikaOwned = linkCommandsEnabled = recoveryInProgress = false; link = null; linkErrorDegrees = null;
+        approved = pikaOwned = pikaMonitoring = linkCommandsEnabled = recoveryInProgress = false; link = null; linkErrorDegrees = null;
     }
 
     private async Task ReleaseOwnPika(CancellationToken cancellation)
     {
-        if (pikaOwned || state?["pika"]?["owner"]?.GetValue<string>() == owner)
+        if (state?["pika"]?["owner"]?.GetValue<string>() != owner)
         {
-            if (!PikaMatchesProfile()) throw new InvalidOperationException("Pika assignment changed outside this robot profile. Reconnect its original assignment before switching.");
+            pikaOwned = pikaMonitoring = false;
+            return; // Never disable or disconnect a foreign client's agent.
+        }
+        if (!PikaMatchesProfile()) throw new InvalidOperationException("Pika assignment changed outside this robot profile. Reconnect its original assignment before switching.");
+        if (pikaOwned || state?["pika"]?["power_requested"]?.GetValue<bool>() == true)
+        {
             await Call("/api/pika/disable", new JsonObject { ["owner"] = owner }, cancellation);
             long started = Stopwatch.GetTimestamp();
             while (state?["pika"]?["fresh"]?.GetValue<bool>() != true || state["pika"]?["enabled"]?.GetValue<bool>() != false)
@@ -314,14 +320,18 @@ public sealed partial class PipersPlugin
                 if (Stopwatch.GetElapsedTime(started).TotalSeconds > 3) throw new InvalidOperationException("Pika disable is not verified. Keep this robot selected and restore its gripper connection before switching.");
                 await Task.Delay(25, cancellation);
             }
-            await Call("/api/pika/disconnect", new JsonObject { ["owner"] = owner }, cancellation);
-            pikaOwned = false;
         }
+        // A read-only monitor never armed its agent. EOF/disconnect therefore
+        // releases serial ownership without turning off externally enabled Pika.
+        await Call("/api/pika/disconnect", new JsonObject { ["owner"] = owner }, cancellation);
+        pikaOwned = pikaMonitoring = false;
+        pikaMonitorStatus = "Pika telemetry starts read-only when the scene is linked.";
     }
 
     private async Task SwitchProfile(RobotProfile profile, bool append, CancellationToken cancellation)
     {
         if (calibrationWorker is { IsCompleted: false }) throw new InvalidOperationException("Finish camera setup/calibration before switching robots.");
+        await FinishAlignment("Robot profile changed", cancellation);
         switchingProfile = true;
         try
         {
@@ -330,6 +340,7 @@ public sealed partial class PipersPlugin
             foreach (string id in new[] { "gripper", "depth" }) if (cameras.Remove(id, out var camera)) await camera.DisposeAsync();
             var profiles = append ? preferences.Robots!.Append(profile).ToArray() : preferences.Robots!.Select(p => p.Id == profile.Id ? profile : p).ToArray();
             preferences = RobotProfileRouting.Activate(preferences with { Robots = profiles }, profile.Id);
+            LoadAlignmentSummary();
             cameraCalibration.Clear(); cameraDimensions.TryRemove("gripper", out _); cameraDimensions.TryRemove("depth", out _);
             cameraStatus["gripper"] = cameraStatus["depth"] = "Connecting…";
             calibrationSession = null; calibrationLastSequence = 0; calibrationStatus = "No lens calibration. Camera mount remains unverified.";

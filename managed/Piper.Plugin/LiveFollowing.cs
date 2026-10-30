@@ -17,6 +17,8 @@ public sealed partial class PipersPlugin
         if (!approved || !linkCommandsEnabled)
             throw new InvalidOperationException("Enable robot before starting Teleoperate.");
         var device = Device();
+        if (TeachingState.Inspect(device).BlocksTargets)
+            throw new InvalidOperationException("Hand guiding or onboard playback owns the arm. Finish the teaching return flow before starting Teleoperate.");
         if (device["recovery_required"]?.GetValue<bool>() == true ||
             !device["joints"]!.AsArray().All(j => j?["enabled"]?.GetValue<bool>() == true))
             throw new InvalidOperationException("All six motors must be enabled and recovery clear.");

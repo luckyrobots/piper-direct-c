@@ -211,12 +211,13 @@ static void simulation(struct can_bus *b,double now)
     struct can_frame frames[3]; double angles[6]; bool reached=true;
     for (unsigned i=0;i<6;++i) {
         double current=f->arm[0].deg[i],error=b->sim_target[i]-current;
-        angles[i]=current+((b->sim_enabled&(1u<<i))?copysign(fmin(fabs(error),8*dt),error):0);
+        bool teaching=f->arm[0].control==2||f->arm[0].teach==1||f->arm[0].teach==3||f->arm[0].teach==4||f->arm[0].teach==5||f->arm[0].teach==7;
+        angles[i]=current+((b->sim_enabled&(1u<<i))&&f->arm[0].control==1&&!teaching?copysign(fmin(fabs(error),8*dt),error):0);
         if (fabs(b->sim_target[i]-angles[i])>.02) reached=false;
     }
     piper_targets(angles,frames);
     for (unsigned i=0;i<3;++i) { frames[i].can_id=0x2a5+i; can_bus_ingest(d,&frames[i],false,now); }
-    struct can_frame status={.can_id=0x2a1,.len=8,.data={f->arm[0].control,f->arm[0].arm_status,1,0,reached?0:1}};
+    struct can_frame status={.can_id=0x2a1,.len=8,.data={f->arm[0].control,f->arm[0].arm_status,1,f->arm[0].teach,reached?0:1}};
     can_bus_ingest(d,&status,false,now);
     for (unsigned i=0;i<6;++i) {
         struct can_frame motor={.can_id=0x261+i,.len=8,.data={0,240,0,28,27,(b->sim_enabled&(1u<<i))?0x40:0}};
@@ -266,7 +267,13 @@ bool can_bus_send(struct can_bus *b,struct can_device *d,unsigned generation,con
         bool allowed=f->can_id>=0x155&&f->can_id<=0x157;
         unsigned tail=0;
         if (f->can_id==0x150) { allowed=f->data[0]==1||f->data[0]==2; tail=1; }
-        if (f->can_id==0x151) { allowed=f->data[0]==1&&f->data[1]==1&&f->data[2]>=1&&f->data[2]<=100; tail=3; }
+        if (f->can_id==0x151) {
+            /* Only the documented standby packet is added for zero-pose teach
+               handoff. ctrl_mode=2, MIT and arbitrary mode writes stay blocked. */
+            allowed=(f->data[0]==1&&f->data[1]==1&&f->data[2]>=1&&f->data[2]<=100)||
+                (f->data[0]==0&&f->data[1]==1&&f->data[2]==1);
+            tail=3;
+        }
         if (f->can_id==0x471) { allowed=f->data[0]>=1&&f->data[0]<=6&&(f->data[1]==1||f->data[1]==2); tail=2; }
         if (f->can_id==0x472) { allowed=f->data[0]>=1&&f->data[0]<=6&&(f->data[1]==1||f->data[1]==2); tail=2; }
         if (f->can_id==0x4af) { allowed=f->data[0]==1; tail=1; }

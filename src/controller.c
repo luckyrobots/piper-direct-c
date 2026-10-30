@@ -121,7 +121,40 @@ static void message(struct controller *c,const char *phase,const char *format,..
     va_list args; va_start(args,format); vsnprintf(c->message,sizeof c->message,format,args); va_end(args);
     fprintf(stderr,"%s: %s\n",phase,c->message);
 }
-enum health_check { CHECK_CONTROL, CHECK_POWER, CHECK_RESET };
+/* These are feedback states, not permission to send ctrl_mode=2 (which is not
+   a supported command in the current vendor SDK). The physical teach button
+   retains priority. Read-only scene tracking works in every fresh state. */
+static const char *teaching_phase(const struct piper_sample *s)
+{
+    if (!s->status_seen) return "unknown";
+    if (s->teach==1) return "hand-guiding";
+    if (s->teach==3||s->teach==5||s->teach==7) return "playback";
+    if (s->teach==4) return "playback-paused";
+    if (s->teach>7) return "unknown";
+    return s->control==2?"ended":"off";
+}
+static bool teaching_active(const struct piper_sample *s)
+{
+    return s->status_seen&&(s->teach==1||s->teach==3||s->teach==4||s->teach==5||s->teach==7);
+}
+static bool teaching_status(const struct piper_sample *s)
+{
+    return (s->teach==1&&s->arm_status==11)||((s->teach==3||s->teach==5||s->teach==7)&&s->arm_status==12)||
+        (s->teach==4&&s->arm_status==13);
+}
+static bool teaching_benign(const struct can_device *d,double now)
+{
+    const struct piper_sample *s=&d->feedback.arm[0];
+    if (!d->present||!d->up||(!d->simulated&&d->fd<0)||!d->stable||!d->link_verified||d->bitrate!=1000000||
+        d->bus_state>=CAN_STATE_BUS_OFF||(d->control_flags&(CAN_CTRLMODE_LOOPBACK|CAN_CTRLMODE_LISTENONLY|CAN_CTRLMODE_FD))||
+        !piper_fresh(s,now)||s->error||!teaching_active(s)) return false;
+    if (s->arm_status&&!teaching_status(s)) return false;
+    if (d->feedback.foreign_seen&&now-d->feedback.foreign_at<2) return false;
+    for (unsigned i=1;i<3;++i) if (d->feedback.arm[i].status_seen&&piper_recent(d->feedback.arm[i].status_at,now)) return false;
+    for (unsigned i=0;i<6;++i) if (!d->feedback.motor[i].seen||!piper_recent(d->feedback.motor[i].at,now)||d->feedback.motor[i].fault) return false;
+    return true;
+}
+enum health_check { CHECK_CONTROL, CHECK_POWER, CHECK_RESET, CHECK_TEACH_RETURN };
 static const char *health(struct can_device *d,double now,enum health_check check)
 {
     if (!d) return "Select an arm.";
@@ -137,16 +170,15 @@ static const char *health(struct can_device *d,double now,enum health_check chec
     /* During a requested reset, observe transient MCU status without sending
        another stop into the reset sequence. All transport/driver checks remain
        active, and completion below still requires zero error and normal status. */
-    if (check!=CHECK_RESET&&(s->error||(check==CHECK_CONTROL&&s->arm_status)||s->arm_status>1)) {
+    if (check!=CHECK_RESET&&(s->error||(!teaching_status(s)&&(((check==CHECK_CONTROL||check==CHECK_TEACH_RETURN)&&s->arm_status)||s->arm_status>1)))) {
         if (s->arm_status==5||(s->error&0x3f)) return "Robot reports a joint-drive communication fault. Motion stopped; inspect the saved fault before recovery.";
         return "The arm reports a fault or stop. Inspect status and recover before control.";
     }
-    if (check==CHECK_CONTROL&&(s->control>1||(s->teach!=0&&s->teach!=2)||(s->motion_mode!=1&&!(s->control==0&&s->motion_mode==0)))) return "Arm must be in standby/CAN MoveJ mode with teaching inactive; use supported reset recovery if needed.";
     for (unsigned i=0;i<6;++i) {
         if (!isfinite(s->deg[i])||fabs(s->deg[i])>360) return "Joint feedback is outside the supported physical range.";
         if (!f->motor[i].seen||!piper_recent(f->motor[i].at,now)) return "Waiting for fresh feedback from all six motor drivers.";
         if (f->motor[i].fault) return "A motor driver reports a fault.";
-        if (check==CHECK_CONTROL && !d->simulated) {
+        if ((check==CHECK_CONTROL||check==CHECK_TEACH_RETURN) && !d->simulated) {
             struct piper_motor *m=&f->motor[i];
             if (!m->high_seen || !piper_recent(m->high_at,now)) return "Waiting for fresh motor encoder feedback.";
             double encoder_deg=m->position_raw*180.0/(1000.0*3.141592653589793);
@@ -155,6 +187,9 @@ static const char *health(struct can_device *d,double now,enum health_check chec
     }
     if (!*f->hardware||!*f->version) return "Firmware has not been read on this connection. Click Read firmware & limits.";
     if (!piper_supported(f)) return "The reported hardware/firmware is not supported for motion. See the detected versions in Arm connection.";
+    if (check==CHECK_CONTROL&&teaching_active(s)) return "Onboard teaching is active. Move the arm by hand while the scene follows; dashboard motion is paused.";
+    if (check==CHECK_CONTROL&&s->control==2) return "Teaching ended with the controller still in teach mode. Return to physical zero, turn the teach light off, then use Return to CAN control.";
+    if (check==CHECK_CONTROL&&(s->control>1||(s->teach!=0&&s->teach!=2&&s->teach!=6)||(s->motion_mode!=1&&!(s->control==0&&s->motion_mode==0)))) return "Arm must be in standby/CAN MoveJ mode with teaching inactive.";
     return NULL;
 }
 /* These are static configuration replies, not streaming telemetry. They
@@ -228,6 +263,54 @@ static bool enabled(struct can_device *d,bool wanted,double after)
         if (!m->seen||m->enabled!=wanted||m->at<=after) return false;
     }
     return true;
+}
+static bool teaching_zero(const struct can_device *d)
+{
+    for (unsigned i=0;i<6;++i) if (!isfinite(d->feedback.arm[0].deg[i])||fabs(d->feedback.arm[0].deg[i])>1) return false;
+    return true;
+}
+static const char *teaching_return_guard(struct controller *c,struct can_device *d,double now)
+{
+    if (c->storage_failed) return "Control-state storage failed; repair storage before teaching handoff.";
+    const char *why=health(d,now,CHECK_TEACH_RETURN); if (why) return why;
+    struct piper_sample *s=&d->feedback.arm[0];
+    if (s->teach!=0&&s->teach!=2&&s->teach!=6) return "Turn off the physical teach button and finish onboard teaching/playback before returning to CAN.";
+    if (s->control>2||s->motion_mode>1) return "Only a completed onboard teaching state can return to CAN through this action.";
+    if (blocked(c,d->id)||reset_pending(c,d->id)) return "A recorded stop/reset still requires its separate recovery flow before teaching handoff.";
+    if (!arm_configuration_received(d,now)) return "Read current firmware and joint limits before returning to CAN.";
+    for (unsigned i=0;i<6;++i) {
+        const struct piper_limit *l=&d->feedback.limit[i]; const struct piper_acceleration *a=&d->feedback.acceleration[i];
+        if (!isfinite(l->min)||!isfinite(l->max)||l->min>=l->max||l->min < -360||l->max>360||!isfinite(l->speed)||l->speed<=0||l->speed>3||
+            !isfinite(a->max)||a->max<=0||a->max>5) return "Robot configuration is invalid; inspect it before teaching handoff.";
+    }
+    if (!teaching_zero(d)) return "Return every physical joint to its zero pose before switching from teaching to CAN (application guard: within 1 degree).";
+    if (range_distance(d)>0) return "A joint is outside its reported command range; reposition it by hand before returning to CAN.";
+    if (!enabled(d,true,0)&&!enabled(d,false,0)) return "Wait for a consistent measured motor power state before teaching handoff.";
+    /* Establish stillness before the first packet. During the bounded mode
+       exchange, fresh zero/range feedback and the 0.5-degree initial-pose guard
+       permit minor supported settling without restarting this timer. */
+    if (c->op!=OP_TEACH_RETURN&&(!d->stationary_since||now-d->stationary_since<.4)) return "Keep the zero pose stationary for 0.4 seconds before teaching handoff.";
+    return NULL;
+}
+/* A hardware button may preempt a leased move. Do not fight that button with a
+   STOP/reset or preserve an old target for later replay. Only this operation's
+   ordinary interrupted-action intent can be cleared; real incidents stay. */
+static bool relinquish_to_teaching(struct controller *c,struct can_device *d,double now)
+{
+    if (c->op==OP_IDLE||c->op==OP_TEACH_RETURN||!d||d->generation!=c->generation||!teaching_benign(d,now)) return false;
+    cJSON *r=record(c,d->id);
+    bool own_intent=!strcmp(text_field(r,"reason"),"Control action interrupted before verified completion")&&
+        !yes(r,"stop_event_active")&&!reset_pending(c,d->id);
+    c->op=OP_IDLE; c->cycle_stage=0; c->owner[0]=0; c->following=c->follow_committed=false;
+    c->teach_return_stage=0;
+    if (own_intent&&!clear_latch(c,d->id)) message(c,"blocked","Teaching took over, but state storage failed; previous target discarded.");
+    else message(c,"teaching","Onboard teaching took control. The previous movement and lease were discarded; measured scene tracking continues.");
+    return true;
+}
+static void abandon_teaching_return(struct controller *c,const char *reason)
+{
+    c->op=OP_IDLE; c->owner[0]=0; c->teach_return_stage=0; c->following=c->follow_committed=false;
+    message(c,"teaching","Return to CAN cancelled: %s No reset, power or position command was sent.",reason);
 }
 static bool send_pose(struct controller *c,struct can_device *d,const double target[6])
 {
@@ -359,6 +442,8 @@ bool controller_init(struct controller *c,bool simulation,const char *directory,
 }
 void controller_close(struct controller *c)
 {
+    relinquish_to_teaching(c,can_bus_find(&c->bus,c->selected),piper_now());
+    if (c->op==OP_TEACH_RETURN) abandon_teaching_return(c,"Controller closing.");
     if (c->op!=OP_IDLE) controller_stop(c,"Controller shutting down.");
     can_bus_close(&c->bus); cJSON_Delete(c->saved); cJSON_Delete(c->profiles); cJSON_Delete(c->legacy_stops);
 }
@@ -379,6 +464,7 @@ static void begin(struct controller *c,struct can_device *d,const char *owner,en
     c->op=op; c->generation=d->generation; c->started=c->heartbeat=c->last_tick=c->progress_at=now;
     c->sent_at=c->settled_at=c->final_sent_at=0; c->best_error=1e9; c->enable_count=0; ++c->request_id;
     c->cycle_stage=0;
+    c->teach_return_stage=0;
     c->synchronized_pose=false;
     c->following=c->follow_committed=false; c->follow_updated=0; c->follow_sequence=0;
     snprintf(c->owner,sizeof c->owner,"%s",owner);
@@ -432,6 +518,14 @@ cJSON *controller_action(struct controller *c,const char *route,const cJSON *bod
     double now=piper_now(); struct can_device *d=can_bus_find(&c->bus,c->selected);
     if (!strcmp(route,"/api/stop")) {
         if (*text_field(body,"device_id")&&(!d||strcmp(text_field(body,"device_id"),d->id))) return reply(status,409,"Stop belongs to a different selected adapter.");
+        if (field(body,"generation")) {
+            double generation;
+            if (!d||!numeric(body,"generation",1,UINT32_MAX,&generation)||generation!=d->generation)
+                return reply(status,409,"Stop belongs to a different CAN connection generation.");
+        }
+    }
+    relinquish_to_teaching(c,d,now);
+    if (!strcmp(route,"/api/stop")) {
         if (field(body,"request_id")) {
             double request;
             if (c->op==OP_IDLE||strcmp(c->owner,text_field(body,"owner"))||!numeric(body,"request_id",1,UINT32_MAX,&request)||request!=c->request_id)
@@ -441,7 +535,11 @@ cJSON *controller_action(struct controller *c,const char *route,const cJSON *bod
     }
     if (!strcmp(route,"/api/heartbeat")) {
         double request;
-        if (c->op!=OP_IDLE&&now-c->heartbeat>=.8) { controller_stop(c,"Control heartbeat expired."); return reply(status,409,"Control lease expired; recovery required."); }
+        if (c->op!=OP_IDLE&&now-c->heartbeat>=.8) {
+            if (c->op==OP_TEACH_RETURN) abandon_teaching_return(c,"Control lease expired.");
+            else controller_stop(c,"Control heartbeat expired.");
+            return reply(status,409,c->message);
+        }
         if (c->op==OP_IDLE||strcmp(c->owner,text_field(body,"owner"))||!numeric(body,"request_id",1,UINT32_MAX,&request)||request!=c->request_id)
             return reply(status,409,"No matching active control lease.");
         c->heartbeat=now; return reply(status,200,"Control lease renewed.");
@@ -545,6 +643,24 @@ cJSON *controller_action(struct controller *c,const char *route,const cJSON *bod
     if (strlen(owner)<16||strlen(owner)>80) return reply(status,400,"owner must be a 16–80 character client identifier.");
     if (!yes(body,"standalone")) return reply(status,400,"Confirm that this arm has no linked leader or competing controller.");
     if (c->storage_failed) return reply(status,409,"Persistent control-state storage failed; repair storage and restart.");
+    if (!strcmp(action,"teach-return")) {
+        if (!yes(body,"button_off")||!yes(body,"zero_pose_confirmed")||!yes(body,"clear")||!yes(body,"supported"))
+            return reply(status,400,"Confirm physical zero pose, teach-button light off, a clear workspace and support for the arm during the standby/CAN transition.");
+        const struct piper_sample *s=&d->feedback.arm[0];
+        if (s->control<=1&&!teaching_active(s)) {
+            const char *why=health(d,now,CHECK_CONTROL); if (why) return reply(status,409,why);
+            return reply(status,200,"The arm already reports standby/CAN control. No handoff command was sent.");
+        }
+        if (s->control!=2) return reply(status,409,"This action only returns a completed onboard teaching state to CAN control.");
+        const char *why=teaching_return_guard(c,d,now); if (why) return reply(status,409,why);
+        begin(c,d,owner,OP_TEACH_RETURN,now); c->teach_return_stage=1; c->sent_at=now;
+        struct can_frame frame=piper_mode(1); frame.data[0]=0; /* Documented standby, then CAN; never ctrl_mode=2. */
+        if (!can_bus_send(&c->bus,d,c->generation,&frame,1)) {
+            abandon_teaching_return(c,"Standby request could not be transmitted."); return reply(status,409,c->message);
+        }
+        message(c,"teaching-return","Standby requested at verified zero. Waiting for fresh acknowledgement before requesting CAN; keep the arm supported.");
+        cJSON *result=reply(status,202,c->message); num(result,"request_id",c->request_id); return result;
+    }
     if (!strcmp(action,"verify-current")) {
         if (!yes(body,"clear") || !yes(body,"supported")) return reply(status,400,"Confirm that it is safe to use the current robot state.");
         const char *why=health(d,now,CHECK_CONTROL); if (why) return reply(status,409,why);
@@ -668,6 +784,7 @@ void controller_tick(struct controller *c,double now)
 {
     can_bus_receive(&c->bus,now);
     struct can_device *d=can_bus_find(&c->bus,c->selected);
+    relinquish_to_teaching(c,d,now);
     /* Recover transport and refresh information without a browser. Never
        replay control commands, clear recovery, or change motor power here. */
     if (!c->bus.simulated && c->op==OP_IDLE && !c->query) {
@@ -729,6 +846,40 @@ void controller_tick(struct controller *c,double now)
         }
     }
     if (c->op==OP_IDLE) return;
+    if (c->op==OP_TEACH_RETURN) {
+        if (!d||d->generation!=c->generation||!d->present) { abandon_teaching_return(c,"Adapter connection changed."); return; }
+        struct piper_sample *s=&d->feedback.arm[0];
+        /* A hand-guided reentry relinquishes control. Unexpected motion after
+           the controller accepts standby/CAN is different: request STOP rather
+           than abandon a possibly moving controller with no position target. */
+        if (piper_fresh(s,now)&&s->control<=1&&!teaching_active(s)) {
+            for (unsigned i=0;i<6;++i) if (fabs(s->deg[i]-c->initial[i])>.5) {
+                c->obstruction_joint=i+1;
+                controller_stop(c,"Unexpected measured joint movement during teaching-to-CAN handoff; no position target was requested."); return;
+            }
+        }
+        if (now-c->heartbeat>=.8) { abandon_teaching_return(c,"Control lease expired."); return; }
+        const char *why=teaching_return_guard(c,d,now);
+        if (why) { abandon_teaching_return(c,why); return; }
+        for (unsigned i=0;i<6;++i) if (fabs(d->feedback.arm[0].deg[i]-c->initial[i])>.5) {
+            abandon_teaching_return(c,"Measured pose changed during the mode transition."); return;
+        }
+        if (now-c->sent_at>1.5) { abandon_teaching_return(c,"Mode acknowledgement timed out; no automatic retry or reset will run."); return; }
+        if ((c->teach_return_stage==1&&s->control!=2&&s->control!=0)||(c->teach_return_stage==2&&s->control!=0&&s->control!=1)) {
+            abandon_teaching_return(c,"Controller mode changed outside the requested standby/CAN sequence."); return;
+        }
+        if (s->status_at<=c->sent_at) return;
+        if (c->teach_return_stage==1&&s->control==0) {
+            struct can_frame frame=piper_mode(1); c->sent_at=now;
+            if (!can_bus_send(&c->bus,d,c->generation,&frame,1)) { abandon_teaching_return(c,"CAN request could not be transmitted."); return; }
+            c->teach_return_stage=2;
+            message(c,"teaching-return","Standby acknowledged. CAN requested; waiting for fresh controller feedback. Keep the arm supported.");
+        } else if (c->teach_return_stage==2&&s->control==1&&s->motion_mode==1) {
+            c->teach_return_stage=0;
+            finish(c,d,"CAN control acknowledged at zero. No reset, motor-power, homing or position command was sent; old targets were discarded.",false);
+        }
+        return;
+    }
     if (!d||d->generation!=c->generation||!d->present) { controller_stop(c,"Adapter connection changed."); return; }
     if (c->following&&now-c->follow_updated>=.25) {
         follow_hold(c,d,now,"Following input expired after 250 ms. Holding measured pose; no target replay."); return;
@@ -883,6 +1034,7 @@ cJSON *controller_state(struct controller *c,const char *token)
     flag(motion,"following",c->op!=OP_IDLE&&c->following);
     flag(motion,"finishing_target",c->op==OP_MOVE&&c->follow_committed);
     num(motion,"follow_sequence",c->follow_sequence);
+    num(motion,"teaching_return_stage",c->op==OP_TEACH_RETURN?c->teach_return_stage:0);
     num(motion,"elapsed_s",c->op!=OP_IDLE?now-c->started:0); put(root,"motion",motion);
     str(motion,"sequence_stage",c->op==OP_CYCLE?(c->cycle_stage==1?"raising":c->cycle_stage==2?"upright":"returning"):"");
     cJSON *return_pose=cJSON_CreateArray();
@@ -915,6 +1067,20 @@ cJSON *controller_state(struct controller *c,const char *token)
         num(status,"joint_communication_fault_mask",s->status_seen?s->error&0x3f:NAN);
         num(status,"joint_angle_limit_fault_mask",s->status_seen?(s->error>>8)&0x3f:NAN);
         num(status,"stationary_s",d->stationary_since?now-d->stationary_since:0);
+        cJSON *teaching=cJSON_CreateObject();
+        const char *teach_phase=fresh?teaching_phase(s):"unknown";
+        bool active_teaching=fresh&&teaching_active(s), return_required=fresh&&(s->control==2||active_teaching);
+        const char *return_reason=teaching_return_guard(c,d,now);
+        str(teaching,"phase",teach_phase); flag(teaching,"active",active_teaching);
+        flag(teaching,"return_required",return_required);
+        flag(teaching,"can_return",c->op==OP_IDLE&&fresh&&s->control==2&&!return_reason);
+        flag(teaching,"zero_within_tolerance",fresh&&teaching_zero(d)); num(teaching,"zero_tolerance_deg",1);
+        str(teaching,"return_action","teach-return"); str(teaching,"return_reason",return_reason?return_reason:"");
+        flag(teaching,"handoff_in_progress",c->op==OP_TEACH_RETURN&&!strcmp(d->id,c->selected));
+        str(teaching,"label",!fresh?"Waiting for fresh teaching feedback":!strcmp(teach_phase,"hand-guiding")?"Hand-guiding / onboard teaching record":
+            !strcmp(teach_phase,"playback")?"Onboard teaching playback":!strcmp(teach_phase,"playback-paused")?"Onboard teaching playback paused":
+            !strcmp(teach_phase,"ended")?"Teaching ended; return to CAN required":!strcmp(teach_phase,"off")?"CAN / standby control":"Unknown teaching state; controls withheld");
+        put(j,"teaching",teaching);
         cJSON *joints=cJSON_CreateArray();
         for (unsigned i=0;i<6;++i) {
             cJSON *joint=cJSON_CreateObject(); struct piper_motor *m=&f->motor[i]; struct piper_limit *l=&f->limit[i];

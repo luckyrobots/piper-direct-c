@@ -22,6 +22,7 @@ public sealed class PikaProcessService : IAsyncDisposable
     // Closing a failed process does not prove that its motor was disabled. Keep
     // this identity until fresh disabled feedback is observed on the same port.
     private string? unresolvedOwner;
+    private bool sessionPowerRequested;
     private JsonObject? state;
     private bool connected;
     private string error = "Not connected";
@@ -39,6 +40,8 @@ public sealed class PikaProcessService : IAsyncDisposable
             snapshot["device"] = device;
             snapshot["distribution"] = distribution;
             snapshot["owner"] = owner;
+            snapshot["power_requested"] = sessionPowerRequested;
+            snapshot["power_uncertain"] = unresolvedOwner is not null;
             snapshot["configuration_blocked"] = process is not null || owner is not null || unresolvedOwner is not null;
             snapshot["transport"] = Configured ? distribution is null ? "linux-serial" : "wsl-linux-serial" : OperatingSystem.IsWindows() ? "disabled" : "browser";
             snapshot["connected"] = connected;
@@ -55,6 +58,10 @@ public sealed class PikaProcessService : IAsyncDisposable
         await operations.WaitAsync(cancellation);
         try
         {
+            // A dead observer owns no motor state. Release that stale serial
+            // reservation, but retain every failed power/position attempt.
+            if (process is { HasExited: true } && !sessionPowerRequested && unresolvedOwner is null)
+                await CloseAsync();
             if (action == "configure")
             {
                 // A dead process may have left enabled hardware behind. Never
@@ -86,24 +93,26 @@ public sealed class PikaProcessService : IAsyncDisposable
                     await CloseAsync();
                 }
                 owner = requestedOwner;
-                var info = new ProcessStartInfo { RedirectStandardInput = true, RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false, CreateNoWindow = true };
-                if (distribution is not null)
-                {
-                    info.FileName = "wsl.exe";
-                    info.ArgumentList.Add("--distribution"); info.ArgumentList.Add(distribution);
-                    string linuxAgent = agentPath.StartsWith('/') ? agentPath : await ResolveWslPath(agentPath, cancellation);
-                    info.ArgumentList.Add("--exec"); info.ArgumentList.Add(linuxAgent);
-                }
-                else
-                {
-                    if (!OperatingSystem.IsLinux()) throw new InvalidOperationException("Native Windows WCH serial is disabled; configure the WSL transport");
-                    if (File.Exists(agentPath)) File.SetUnixFileMode(agentPath, File.GetUnixFileMode(agentPath) | UnixFileMode.UserExecute);
-                    info.FileName = agentPath;
-                }
-                info.ArgumentList.Add("--device"); info.ArgumentList.Add(device);
-                ready = new(TaskCreationOptions.RunContinuationsAsynchronously);
                 try
                 {
+                    // Setup failures, including WSL path resolution before process
+                    // launch, must release a read-only reservation as well.
+                    var info = new ProcessStartInfo { RedirectStandardInput = true, RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false, CreateNoWindow = true };
+                    if (distribution is not null)
+                    {
+                        info.FileName = "wsl.exe";
+                        info.ArgumentList.Add("--distribution"); info.ArgumentList.Add(distribution);
+                        string linuxAgent = agentPath.StartsWith('/') ? agentPath : await ResolveWslPath(agentPath, cancellation);
+                        info.ArgumentList.Add("--exec"); info.ArgumentList.Add(linuxAgent);
+                    }
+                    else
+                    {
+                        if (!OperatingSystem.IsLinux()) throw new InvalidOperationException("Native Windows WCH serial is disabled; configure the WSL transport");
+                        if (File.Exists(agentPath)) File.SetUnixFileMode(agentPath, File.GetUnixFileMode(agentPath) | UnixFileMode.UserExecute);
+                        info.FileName = agentPath;
+                    }
+                    info.ArgumentList.Add("--device"); info.ArgumentList.Add(device);
+                    ready = new(TaskCreationOptions.RunContinuationsAsynchronously);
                     process = Process.Start(info) ?? throw new IOException("Could not start the Pika serial agent");
                     _ = PumpAsync(process, ready);
                     await ready.Task.WaitAsync(TimeSpan.FromSeconds(15), cancellation);
@@ -115,7 +124,7 @@ public sealed class PikaProcessService : IAsyncDisposable
             if (action is not ("heartbeat" or "enable" or "disable" or "position" or "disconnect")) throw new ArgumentException("Unsupported Pika action");
             if (action == "disconnect" && process.HasExited)
             {
-                if (unresolvedOwner is not null || !KnownDisabled())
+                if (unresolvedOwner is not null || sessionPowerRequested && !KnownDisabled())
                     throw new InvalidOperationException("The Pika agent exited without verified disabled feedback. Reconnect the same device, disable it and verify feedback before changing its assignment.");
                 await CloseAsync(); return new JsonObject { ["ok"] = true, ["message"] = "Disconnected" };
             }
@@ -128,7 +137,8 @@ public sealed class PikaProcessService : IAsyncDisposable
             bool disconnected = false;
             try
             {
-                if (action is "enable" or "position") lock (stateGate) unresolvedOwner = requestedOwner;
+                if (action is "enable" or "position" or "disable")
+                    lock (stateGate) { sessionPowerRequested = true; unresolvedOwner = requestedOwner; }
                 await process.StandardInput.WriteLineAsync(command.ToJsonString().AsMemory(), cancellation);
                 await process.StandardInput.FlushAsync(cancellation);
                 var response = await completion.Task.WaitAsync(TimeSpan.FromSeconds(3), cancellation);
@@ -235,14 +245,19 @@ public sealed class PikaProcessService : IAsyncDisposable
                 switch (data.GetProperty("type").GetString())
                 {
                     case "ready":
-                        lock (stateGate) { connected = true; error = ""; unresolvedOwner = owner; }
+                        lock (stateGate) { connected = true; error = ""; }
                         sessionReady.TrySetResult(); break;
                     case "state":
                         lock (stateGate)
                         {
                             state = JsonNode.Parse(line)!.AsObject(); stateAt = Stopwatch.GetTimestamp();
                             if (state["fresh"]?.GetValue<bool>() == true)
-                                unresolvedOwner = state["enabled"]?.GetValue<bool>() == false ? null : owner;
+                            {
+                                if (state["enabled"]?.GetValue<bool>() == false) unresolvedOwner = null;
+                                else if (sessionPowerRequested) unresolvedOwner = owner;
+                                // Observing externally enabled hardware is not an
+                                // enable request and creates no power ownership.
+                            }
                         }
                         break;
                     case "ack":
@@ -275,6 +290,11 @@ public sealed class PikaProcessService : IAsyncDisposable
 
     private async Task CloseAsync()
     {
+        lock (stateGate)
+        {
+            if (KnownDisabled()) unresolvedOwner = null;
+            else if (sessionPowerRequested) unresolvedOwner ??= owner;
+        }
         if (process is { } agent)
         {
             process = null;
@@ -284,7 +304,7 @@ public sealed class PikaProcessService : IAsyncDisposable
             agent.Dispose();
         }
         owner = null;
-        lock (stateGate) { connected = false; state = null; stateAt = 0; error = "Disconnected"; }
+        lock (stateGate) { sessionPowerRequested = false; connected = false; state = null; stateAt = 0; error = "Disconnected"; }
     }
     public async ValueTask DisposeAsync()
     {

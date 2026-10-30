@@ -209,6 +209,86 @@ Check(gate.Active is null, "Commit did not close the input gesture");
 Reject(() => gate.Accept(Gesture("update", 3, 3), 1000), "Update replayed after commit");
 Reject(() => gate.Accept(Gesture("commit", 3, 4), 1000), "Commit replayed twice");
 
+var manualDevice = (JsonObject)device.DeepClone();
+manualDevice["status"] = new JsonObject { ["control"] = 2, ["teach_state"] = 1, ["arm_status"] = 0, ["error"] = 0, ["stationary_s"] = 1.0 };
+foreach (var joint in manualDevice["joints"]!.AsArray()) { joint!["fresh"] = true; joint["fault"] = 0; joint["enabled"] = true; }
+Check(TeachingState.Inspect(manualDevice) is { HandGuiding: true, Active: true, BlocksTargets: true }, "Physical hand-guiding mode was not recognized");
+Check(!PipersPlugin.TeachingCanResume(manualDevice), "Hand-guiding feedback rearmed motion controls");
+manualDevice["status"]!["teach_state"] = 3;
+Check(TeachingState.Inspect(manualDevice) is { Phase: "playback", BlocksTargets: true }, "Onboard playback was not separated from CAN control");
+manualDevice["status"]!["teach_state"] = 4;
+Check(TeachingState.Inspect(manualDevice).Phase == "playback-paused", "Paused onboard playback was treated as stopped teaching");
+manualDevice["status"]!["teach_state"] = 2;
+Check(TeachingState.Inspect(manualDevice) is { Phase: "ended", ReturnRequired: true, CanReturn: false }, "Ended recording with sticky teach control was treated as a fault or normal CAN");
+manualDevice["teaching"] = new JsonObject { ["phase"] = "ended", ["return_required"] = true, ["can_return"] = true };
+Check(TeachingState.Inspect(manualDevice).CanReturn, "Native validated teaching return was not offered");
+manualDevice.Remove("teaching"); manualDevice["status"]!["control"] = 1;
+Check(PipersPlugin.TeachingCanResume(manualDevice), "Healthy CAN feedback could not restore previous UI approval without an enable packet");
+manualDevice["status"]!["control"] = 0;
+Check(!PipersPlugin.TeachingCanResume(manualDevice), "Intermediate standby acknowledgement prematurely restored CAN controls");
+manualDevice["status"]!["control"] = 1;
+manualDevice["joints"]![0]!["enabled"] = false;
+Check(!PipersPlugin.TeachingCanResume(manualDevice), "Teaching exit silently treated an unpowered arm as enabled");
+manualDevice["joints"]![0]!["enabled"] = true; manualDevice["recovery_required"] = true;
+Check(!PipersPlugin.TeachingCanResume(manualDevice), "Real controller recovery was bypassed by teaching exit");
+manualDevice["recovery_required"] = false; manualDevice["fresh"] = false;
+Check(!PipersPlugin.TeachingCanResume(manualDevice), "Stale teaching exit rearmed controls");
+manualDevice["fresh"] = true;
+var reference = new AlignmentReference("Desk cross", .205, .75, 0, 80, "grasp_site");
+AlignmentCheck.ValidateReference(reference);
+Reject(() => AlignmentCheck.ValidateReference(reference with { ObjectHeightMm = double.NaN }), "Invalid reference height entered a calibration report");
+var checkSession = new AlignmentCheck("profile-a", "test-device", 1, "scene-1", "robot-1", reference, "S-V1.9-0");
+var checkedPose = new JsonObject { ["pose"] = new JsonObject { ["sceneId"] = "scene-1", ["entityId"] = "robot-1", ["joints"] = new JsonArray(Enumerable.Range(1, 6).Select(i => (JsonNode)new JsonObject { ["name"] = "joint" + i, ["position"] = Math.PI / 2 }).ToArray()) } };
+var observation = checkSession.Read(1000, "profile-a", manualDevice, link, checkedPose, 999);
+checkSession.Sample(observation); checkSession.Sample(observation with { HostUnixMilliseconds = 1050 });
+Check(checkSession.Samples == 1, "Alignment trace exceeded its 10 Hz bound");
+checkSession.Observe(observation, true, null);
+Reject(() => checkSession.Observe(observation, true, null), "Repeated identical approach counted as independent spatial evidence");
+Reject(() => checkSession.Read(1600, "profile-a", manualDevice, link, checkedPose, 999), "Stale scene acknowledgement accepted as current alignment");
+Reject(() => checkSession.Read(1000, "profile-b", manualDevice, link, checkedPose, 999), "Another robot's alignment observation was accepted");
+var oldSceneAcknowledgement = (JsonObject)checkedPose.DeepClone(); oldSceneAcknowledgement["pose"]!["sceneId"] = "old-scene";
+Reject(() => checkSession.Read(1000, "profile-a", manualDevice, link, oldSceneAcknowledgement, 999), "A previous scene's cached pose entered an alignment report");
+var mappedGripperModel = (JsonArray)joints.DeepClone();
+mappedGripperModel.Add(new JsonObject { ["name"] = "joint7", ["unit"] = "m", ["limited"] = true, ["min"] = -.05, ["max"] = 0.0 });
+mappedGripperModel.Add(new JsonObject { ["name"] = "joint8", ["unit"] = "m", ["limited"] = true, ["min"] = 0.0, ["max"] = .05 });
+var alignmentWithGripper = new RobotLink("scene-1", "robot-1", mappedGripperModel, manualDevice);
+var gripperRequest = alignmentWithGripper.Feedback(manualDevice, new JsonObject { ["fresh"] = true,
+    ["telemetry"] = new JsonObject { ["motor"] = new JsonObject { ["Position"] = LuckyRobots.Piper.Pika.PikaProtocol.Angle(30) } } }, true);
+var gripperAcknowledgement = (JsonObject)checkedPose.DeepClone();
+gripperAcknowledgement["pose"]!["joints"]!.AsArray().Add(new JsonObject { ["name"] = "joint7", ["position"] = gripperRequest["joints"]!["joint7"]!.GetValue<double>() });
+gripperAcknowledgement["pose"]!["joints"]!.AsArray().Add(new JsonObject { ["name"] = "joint8", ["position"] = gripperRequest["joints"]!["joint8"]!.GetValue<double>() });
+alignmentWithGripper.FeedbackError(gripperRequest, gripperAcknowledgement);
+string gripperStatusBeforeObservation = alignmentWithGripper.GripperStatus;
+double? gripperErrorBeforeObservation = alignmentWithGripper.GripperErrorMm;
+checkSession.Read(1000, "profile-a", manualDevice, alignmentWithGripper, gripperAcknowledgement, 999);
+Check(alignmentWithGripper.GripperStatus == gripperStatusBeforeObservation && alignmentWithGripper.GripperErrorMm == gripperErrorBeforeObservation && gripperErrorBeforeObservation == 0,
+    "Reading an alignment observation reset or unlinked independently verified Pika feedback");
+var alignmentReport = checkSession.Finish("Test complete");
+Check(Math.Abs(alignmentReport.Observations.Single().ReferenceTopMetres[1] - .83) < 1e-12, "Known object height was measured from the rendered cross rather than physical desk surface");
+Check(!alignmentReport.MetricCalibrationValid && !alignmentReport.ExposureSynchronized && alignmentReport.JointUnit == "degrees" && alignmentReport.Firmware == "S-V1.9-0",
+    "Copied joint angles or operator confirmation were incorrectly promoted to metric/timing calibration");
+Reject(() => checkSession.Observe(observation, true, null), "Finished alignment report accepted new observations");
+GripperLinkTests.Run(Check);
+var monitorPika = new JsonObject { ["configured"] = true };
+Check(PikaMonitorPolicy.MayConnect(monitorPika, true, "this-reader"), "Unowned configured Pika could not be monitored without enabling it");
+Check(!PikaMonitorPolicy.MayConnect(monitorPika, false, "this-reader"), "Read-only monitoring used another robot's serial assignment");
+monitorPika["owner"] = "another-reader";
+Check(!PikaMonitorPolicy.MayConnect(monitorPika, true, "this-reader"), "Read-only scene linking would take over a foreign Pika session");
+monitorPika["owner"] = "this-reader";
+Check(PikaMonitorPolicy.MayConnect(monitorPika, true, "this-reader"), "The same reader could not retain its existing monitor");
+monitorPika["configured"] = false;
+Check(!PikaMonitorPolicy.MayConnect(monitorPika, true, "this-reader"), "Scene linking tried to configure or open an unassigned gripper");
+
+await TeachingResetTests.Run(Check);
+var resetGapDevice = new JsonObject { ["id"] = "reset-arm", ["generation"] = 7L, ["present"] = true, ["up"] = true, ["fresh"] = false };
+var resetGapSnapshot = new JsonObject { ["selected"] = "reset-arm", ["devices"] = new JsonArray(resetGapDevice) };
+Check(TeachingResetAssisted.ExpectedFeedbackGap(true, resetGapSnapshot, "reset-arm", 7), "Expected MCU reset gap discarded an unchanged connected scene binding");
+Check(!TeachingResetAssisted.ExpectedFeedbackGap(false, resetGapSnapshot, "reset-arm", 7), "Ordinary stale feedback silently preserved a live scene link");
+resetGapDevice["generation"] = 8L;
+Check(!TeachingResetAssisted.ExpectedFeedbackGap(true, resetGapSnapshot, "reset-arm", 7), "A reconnected adapter silently inherited the previous reset binding");
+resetGapDevice["generation"] = 7L; resetGapDevice["present"] = false;
+Check(!TeachingResetAssisted.ExpectedFeedbackGap(true, resetGapSnapshot, "reset-arm", 7), "Physical USB loss was hidden as an expected MCU reset gap");
+
 if (args.Length == 1)
 {
     // This optional integration suite is restricted to the separate simulated server.

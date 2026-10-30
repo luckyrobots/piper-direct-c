@@ -15,6 +15,9 @@ over loopback gRPC (8766), alongside the existing web dashboard (8765).
 - Pika opening in millimetres; Enable robot enables Pika through the same server.
 - Bench/Lumina, Pika gripper and D405 preview tiles with preserved aspect ratio.
 - Camera, speed, jog and tolerance settings retained between editor sessions.
+- Hand-guided teaching detection, a verified standby/CAN return at physical zero,
+  and a per-robot manual desk-alignment observation workflow. See
+  [teaching and alignment](teaching-alignment.md).
 - Explicit recovery controls for controller stops; existing backend obstruction
   detection and motion leases remain authoritative.
 
@@ -84,6 +87,23 @@ measurements, even if a scene preview has changed. For precise J6 tests, select
 `link6`, put the pointer over the viewport, then use `R`, `Z`, `Z`, an angle in
 degrees and Enter (local-Z rotation). Escape cancels before sending a command.
 Translation of the whole robot is scene placement, not physical arm control.
+
+The scene also follows the assigned Pika's fresh measured opening. The model
+must expose opposite, equal-travel `joint7`/`joint8` slide joints in metres; the
+two fingers receive half the opening in opposite directions. The current Pika
+model spans 100 mm, covering the controller's 0–90 mm opening commands. Stale or
+different-device feedback leaves the last simulated opening unchanged with a
+status message. Openings outside the model range are reported rather than
+clamped; only closed-position encoder noise between −0.1 and 0 mm maps to zero.
+This is measured physical-to-scene feedback, not a calibration of fingertip
+geometry or a command to replay gripper motion.
+
+Linking may open a matching unowned Pika connection for read-only feedback even
+while the arm is hand guided. This monitor sends no enable, disable or position
+request and does not take over another client's live gripper session. The normal
+Enable action grants this plugin's gripper control permission. Monitor-only
+cleanup preserves externally enabled motor power; failed explicit power attempts
+retain their separate ownership/uncertainty checks.
 
 Recovery shows the recorded reason, joint and tracking gap and selects the next
 step from live telemetry. A stopped controller offers **Clear & support arm —

@@ -1,9 +1,11 @@
 # Workspace scanning and calibration roadmap
 
-This is planned functionality, not a claim that the current cameras or scene are
-calibrated. The plugin currently supports factory D405 intrinsics and a bundled
-fisheye lens-calibration workflow. Camera mounts, desk registration, inter-robot
-transforms and exposure synchronization still require validation.
+Metric scanning and fitting below are planned functionality, not a claim that the
+current cameras or scene are calibrated. The plugin includes factory D405
+intrinsics, a bundled fisheye lens-calibration workflow and a
+[manual desk-alignment observation check](teaching-alignment.md). Camera mounts,
+desk registration, inter-robot transforms and exposure synchronization still
+require independent validation.
 
 ## Sources
 

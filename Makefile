@@ -57,7 +57,15 @@ build/test-obstruction-controller: tests/test_obstruction_controller.c $(CORE) $
 build/test-follow: tests/test_follow.c $(CORE) $(HEADERS) | build
 	$(CC) $(CPPFLAGS) $(CFLAGS) tests/test_follow.c $(CORE) -o $@ $(LDLIBS)
 
-test: all build/test-protocol build/test-control build/test-camera build/test-startup build/test-cycle build/test-gripper build/test-obstruction build/test-obstruction-controller build/test-range-drift build/test-configuration-cache build/test-follow
+build/test-teaching: tests/test_teaching.c $(CORE) $(HEADERS) | build
+	$(CC) $(CPPFLAGS) $(CFLAGS) tests/test_teaching.c $(CORE) -o $@ $(LDLIBS)
+
+build/test-stop-generation: tests/test_stop_generation.c $(CORE) $(HEADERS) | build
+	$(CC) $(CPPFLAGS) $(CFLAGS) tests/test_stop_generation.c $(CORE) -o $@ $(LDLIBS)
+
+test: all build/test-protocol build/test-control build/test-camera build/test-startup build/test-cycle build/test-gripper build/test-obstruction build/test-obstruction-controller build/test-range-drift build/test-configuration-cache build/test-follow build/test-teaching build/test-stop-generation
+	./build/test-stop-generation
+	./build/test-teaching
 	./build/test-follow
 	./build/test-configuration-cache
 	./build/test-range-drift

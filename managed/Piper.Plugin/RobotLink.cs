@@ -10,12 +10,16 @@ public sealed class RobotLink
     public string[] JointNames { get; }
     public long Generation { get; }
     public string DeviceId { get; }
+    private readonly GripperLink gripper;
+    public string GripperStatus => gripper.Status;
+    public double? GripperErrorMm => gripper.ErrorMm;
 
     public RobotLink(string sceneId, string entityId, JsonArray modelJoints, JsonObject device)
     {
         SceneId = sceneId; EntityId = entityId;
         DeviceId = device["id"]!.GetValue<string>();
         Generation = device["generation"]!.GetValue<long>();
+        gripper = new GripperLink(modelJoints);
         JointNames = Enumerable.Range(1, 6).Select(i => "joint" + i).ToArray();
         foreach (string name in JointNames)
         {
@@ -25,7 +29,7 @@ public sealed class RobotLink
         }
     }
 
-    public JsonObject Feedback(JsonObject device)
+    public JsonObject Feedback(JsonObject device, JsonObject? pika = null, bool pikaMatchesProfile = false)
     {
         ValidateDevice(device, false);
         var measured = device["joints"]!.AsArray();
@@ -37,6 +41,7 @@ public sealed class RobotLink
             if (!double.IsFinite(degrees)) throw new InvalidOperationException("Joint feedback is unavailable.");
             values[JointNames[i]] = degrees * Math.PI / 180;
         }
+        gripper.AddFeedback(values, pika, pikaMatchesProfile);
         return new JsonObject { ["sceneId"] = SceneId, ["entityId"] = EntityId, ["joints"] = values };
     }
 
@@ -81,6 +86,7 @@ public sealed class RobotLink
             if (!double.IsFinite(error) || error > 0.01) throw new InvalidOperationException($"Scene joint {name} did not accept measured feedback.");
             maximum = Math.Max(maximum, error);
         }
+        gripper.Verify(requested["joints"]!.AsObject(), pose);
         return maximum;
     }
 
@@ -90,5 +96,7 @@ public sealed class RobotLink
             throw new InvalidOperationException("Robot connection changed or feedback is stale. Link again after reconnecting.");
         if (forMotion && device["recovery_required"]?.GetValue<bool>() == true)
             throw new InvalidOperationException("Robot needs recovery. Measured scene tracking continues; motion is blocked.");
+        if (forMotion && TeachingState.Inspect(device).BlocksTargets)
+            throw new InvalidOperationException("Onboard teaching owns the arm. Measured scene tracking continues; scene targets are blocked.");
     }
 }

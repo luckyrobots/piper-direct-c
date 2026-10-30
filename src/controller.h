@@ -4,7 +4,7 @@
 #include "cJSON.h"
 #include "obstruction.h"
 
-enum operation { OP_IDLE, OP_ENABLE, OP_MOVE, OP_ALIGN, OP_CYCLE, OP_GRIPPER, OP_DISABLE, OP_RESET };
+enum operation { OP_IDLE, OP_ENABLE, OP_MOVE, OP_ALIGN, OP_CYCLE, OP_GRIPPER, OP_DISABLE, OP_RESET, OP_TEACH_RETURN };
 struct controller {
     struct can_bus bus;
     char selected[160], message[256], phase[32], error[256];
@@ -23,6 +23,7 @@ struct controller {
     double follow_updated;
     unsigned follow_sequence;
     unsigned cycle_stage;
+    unsigned teach_return_stage;
     double leg_start[6], leg_span, leg_fraction, pause_until;
     bool query, disable_keeps_recovery;
     unsigned query_joint, query_generation;

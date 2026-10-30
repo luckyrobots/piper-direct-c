@@ -278,13 +278,17 @@
     "/api/stop": {
       "post": {
         "summary": "Best-effort software stop on selected arm; persist recovery requirement",
-        "description": "Does not require motion health checks or matching owner. Fast stop can allow damped descent; it is not a power cut or guaranteed hold. Active gripper motion also gets a gripper disable request. Disconnected hardware cannot receive the stop. Inspect physical state before recovery.",
+        "description": "Does not require motion health checks or matching owner. An optional generation must match the selected adapter connection; malformed or stale generations are rejected before sending STOP. Manual callers may omit generation. Fast stop can allow damped descent; it is not a power cut or guaranteed hold. Active gripper motion also gets a gripper disable request. Disconnected hardware cannot receive the stop. Inspect physical state before recovery.",
         "requestBody": {
           "required": true,
           "content": {
             "application/json": {
               "schema": {
-                "type": "object"
+                "type": "object",
+                "properties": {
+                  "device_id": { "type": "string" },
+                  "generation": { "type": "integer", "minimum": 1, "maximum": 4294967295 }
+                }
               }
             }
           }
@@ -292,6 +296,9 @@
         "responses": {
           "200": {
             "description": "Stop attempted; read message and physical state"
+          },
+          "409": {
+            "description": "Adapter identity, optional generation or automatic-stop action no longer matches"
           }
         }
       }
@@ -351,6 +358,7 @@
             "properties": {
               "action": {
                 "type": "string",
+                "description": "teach-return is an explicit zero-only handoff after physical teaching ends: confirm button_off, zero_pose_confirmed, supported and clear. Fresh healthy joint/encoder/configuration feedback, a stationary pose, every reported joint within 1 degree of zero and within its limits are required. One standby mode packet is acknowledged before one CAN MoveJ packet; each stage has a 1.5-second deadline and requires a new status frame. No reset, motor-power, homing, position or replay command is sent. Mode/lease/connection changes cancel the handoff; unexpected measured movement after standby/CAN requests a protective STOP. device.teaching exposes phase, active, return_required, can_return, return_reason and zero_tolerance_deg. The 1-degree threshold is an application guard, not a manufacturer calibration tolerance.",
                 "enum": [
                   "enable",
                   "disable",
@@ -364,7 +372,8 @@
                   "verify-reset",
                   "align",
                   "verify-disabled",
-                  "cycle"
+                  "cycle",
+                  "teach-return"
                 ]
               },
               "owner": {
@@ -387,6 +396,14 @@
               "reset_completed": {
                 "type": "boolean",
                 "description": "Operator confirms manual reset/power-cycle completed"
+              },
+              "button_off": {
+                "type": "boolean",
+                "description": "Required true for teach-return: operator confirms the physical teaching button light is off"
+              },
+              "zero_pose_confirmed": {
+                "type": "boolean",
+                "description": "Required true for teach-return: operator confirms the physical arm is at its manufacturer's zero pose"
               },
               "joint": {
                 "type": "integer",

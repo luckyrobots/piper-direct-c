@@ -35,6 +35,7 @@ Copy-Item -LiteralPath (Join-Path $taskRepo 'web') -Destination $taskPackage -Re
 New-Item -ItemType Directory -Path (Join-Path $taskPackage 'docs') -Force | Out-Null
 Copy-Item -LiteralPath (Join-Path $taskRepo 'docs/lucky-engine-plugin.md') -Destination (Join-Path $taskPackage 'docs') -Force
 Copy-Item -LiteralPath (Join-Path $taskRepo 'docs/workspace-calibration-roadmap.md') -Destination (Join-Path $taskPackage 'docs') -Force
+Copy-Item -LiteralPath (Join-Path $taskRepo 'docs/teaching-alignment.md') -Destination (Join-Path $taskPackage 'docs') -Force
 Copy-Item -LiteralPath (Join-Path $taskRepo 'managed/THIRD-PARTY-NOTICES.txt') -Destination $taskPackage -Force
 Copy-Item -LiteralPath (Join-Path $taskRepo 'vendor/candle') -Destination (Join-Path $taskPackage 'transport-source') -Recurse -Force
 # Include reproducible plugin/controller sources, never local state, captures, credentials or engine code.
@@ -63,6 +64,7 @@ Copy-Item -LiteralPath (Join-Path $taskRepo 'README.md') -Destination $taskSourc
 Copy-Item -LiteralPath (Join-Path $taskRepo 'managed/README.md') -Destination (Join-Path $taskSource 'managed') -Force
 Copy-Item -LiteralPath (Join-Path $taskRepo 'docs/lucky-engine-plugin.md') -Destination (Join-Path $taskSource 'docs') -Force
 Copy-Item -LiteralPath (Join-Path $taskRepo 'docs/workspace-calibration-roadmap.md') -Destination (Join-Path $taskSource 'docs') -Force
+Copy-Item -LiteralPath (Join-Path $taskRepo 'docs/teaching-alignment.md') -Destination (Join-Path $taskSource 'docs') -Force
 Copy-Item -LiteralPath (Join-Path $taskRepo 'managed/THIRD-PARTY-NOTICES.txt') -Destination (Join-Path $taskSource 'managed') -Force
 $taskArchive=Join-Path $taskRepo ('build/Pipers-0.1.0-preview.1-'+$Runtime+'.zip')
 Add-Type -AssemblyName System.IO.Compression

@@ -1,21 +1,25 @@
 using System.Text.Json;
 using LuckyRobots.Piper.Pika;
 
-if (args is ["--device", "/dev/pika-fixture"])
+if (args.Length == 2 && args[0] == "--device" && args[1] is "/dev/pika-fixture" or "/dev/pika-monitor-fixture" or "/dev/pika-monitor-die-fixture")
 {
+    bool monitoringFixture = args[1] != "/dev/pika-fixture";
     Console.WriteLine("{\"type\":\"ready\",\"connected\":true}"); Console.Out.Flush();
-    bool enabled = false;
+    bool enabled = monitoringFixture;
     while (Console.ReadLine() is { } line)
     {
         using var data = JsonDocument.Parse(line); var root = data.RootElement;
         string action = root.GetProperty("action").GetString()!;
+        if (monitoringFixture && action is not ("heartbeat" or "disconnect"))
+            throw new Exception("A read-only monitor sent a motor power/position command.");
         bool ok = action != "enable" || root.GetProperty("clear").GetBoolean();
         if (ok && action == "enable") enabled = true;
-        if (action is "disable" or "disconnect") enabled = false;
+        if (!monitoringFixture && action is "disable" or "disconnect") enabled = false;
         Console.WriteLine(JsonSerializer.Serialize(new { type = "state", connected = true, fresh = true, enabled,
             telemetry = new { motor = new { Position = .5756, Speed = 0 }, motorstatus = new { Status = enabled ? "0x40" : "0x00" } } }));
         Console.WriteLine(JsonSerializer.Serialize(new { type = "ack", id = root.GetProperty("id").GetString(), ok, message = ok ? "fixture accepted" : "finger-clear required" }));
         Console.Out.Flush();
+        if (action == "heartbeat" && args[1] == "/dev/pika-monitor-die-fixture") Environment.Exit(0);
         if (action == "position" && root.GetProperty("value").GetDouble() == .75) Environment.Exit(0); // Simulated enabled agent failure.
         if (action == "disconnect") break;
     }
@@ -53,6 +57,37 @@ await using (var disconnected = new PikaProcessService("/dev/pika-old", "unused"
 }
 if (OperatingSystem.IsLinux())
 {
+    await using (var monitor = new PikaProcessService("/dev/pika-monitor-fixture", Environment.ProcessPath!))
+    {
+        await monitor.ExecuteAsync("connect", Input(owner), default);
+        await monitor.ExecuteAsync("heartbeat", Input(owner), default);
+        Check(monitor.Snapshot()["enabled"]!.GetValue<bool>() && !monitor.Snapshot()["power_requested"]!.GetValue<bool>() && !monitor.Snapshot()["power_uncertain"]!.GetValue<bool>(),
+            "Reading externally enabled hardware invented power ownership");
+        await Reject(() => monitor.ExecuteAsync("connect", Input(other), default), "A monitor stole another reader's live owner");
+        await monitor.ExecuteAsync("disconnect", Input(owner), default);
+        Check(monitor.Snapshot()["owner"] is null && !monitor.Snapshot()["configuration_blocked"]!.GetValue<bool>(), "Read-only disconnect stranded an owner or demanded a motor disable");
+        await monitor.ExecuteAsync("configure", Configure(other, "/dev/pika-monitor-fixture"), default);
+        await monitor.ExecuteAsync("connect", Input(other), default);
+        await monitor.ExecuteAsync("heartbeat", Input(other), default);
+        Check(monitor.Snapshot()["enabled"]!.GetValue<bool>(), "Read-only disconnect changed external motor power");
+        await monitor.ExecuteAsync("disconnect", Input(other), default);
+    }
+    await using (var failedMonitor = new PikaProcessService("/dev/pika-fixture", "/nonexistent-pika-agent-" + Guid.NewGuid()))
+    {
+        bool failed = false;
+        try { await failedMonitor.ExecuteAsync("connect", Input(owner), default); } catch (System.ComponentModel.Win32Exception) { failed = true; }
+        Check(failed && failedMonitor.Snapshot()["owner"] is null && !failedMonitor.Snapshot()["configuration_blocked"]!.GetValue<bool>(), "Failed monitor setup stranded serial ownership before process start");
+    }
+    await using (var exitedMonitor = new PikaProcessService("/dev/pika-monitor-die-fixture", Environment.ProcessPath!))
+    {
+        await exitedMonitor.ExecuteAsync("connect", Input(owner), default);
+        await exitedMonitor.ExecuteAsync("heartbeat", Input(owner), default);
+        for (int i = 0; i < 100 && exitedMonitor.Snapshot()["connected"]!.GetValue<bool>(); i++) await Task.Delay(10);
+        Check(!exitedMonitor.Snapshot()["connected"]!.GetValue<bool>(), "Dead read-only fixture did not exit");
+        await exitedMonitor.ExecuteAsync("connect", Input(other), default);
+        Check(exitedMonitor.Snapshot()["owner"]!.GetValue<string>() == other, "Dead read-only observer stranded the next reader's ownership");
+        await exitedMonitor.ExecuteAsync("disconnect", Input(other), default);
+    }
     await using var service = new PikaProcessService("/dev/pika-fixture", Environment.ProcessPath!);
     await service.ExecuteAsync("connect", Input(owner), default);
     await Reject(() => service.ExecuteAsync("configure", Configure(other, "/dev/pika-other"), default), "foreign owner reconfigured a live serial agent");
@@ -88,5 +123,6 @@ else
 {
     await using var service = new PikaProcessService("/dev/pika-fixture", "unused");
     await Reject(() => service.ExecuteAsync("connect", Input(owner), default), "native Windows WCH path must be unavailable");
+    Check(service.Snapshot()["owner"] is null && !service.Snapshot()["configuration_blocked"]!.GetValue<bool>(), "Rejected native Windows transport setup stranded an owner");
 }
 Console.WriteLine("Pika C# tests passed: wire packets, linkage, fragmented telemetry, invalid feedback, ownership and explicit reconnect; native Windows COM is unavailable.");
