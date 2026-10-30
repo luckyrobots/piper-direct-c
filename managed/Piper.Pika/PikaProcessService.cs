@@ -23,6 +23,8 @@ public sealed class PikaProcessService : IAsyncDisposable
     // this identity until fresh disabled feedback is observed on the same port.
     private string? unresolvedOwner;
     private bool sessionPowerRequested;
+    private string motorRequestId = "";
+    private bool motorRequestAcknowledged, processConfirmedExited;
     private JsonObject? state;
     private bool connected;
     private string error = "Not connected";
@@ -34,7 +36,7 @@ public sealed class PikaProcessService : IAsyncDisposable
     {
         lock (stateGate)
         {
-            double age = stateAt == 0 ? double.PositiveInfinity : Stopwatch.GetElapsedTime(stateAt).TotalSeconds;
+            double age = EvidenceAgeSeconds();
             var snapshot = state?.DeepClone().AsObject() ?? new JsonObject();
             snapshot["configured"] = Configured;
             snapshot["device"] = device;
@@ -45,6 +47,9 @@ public sealed class PikaProcessService : IAsyncDisposable
             snapshot["configuration_blocked"] = process is not null || owner is not null || unresolvedOwner is not null;
             snapshot["transport"] = Configured ? distribution is null ? "linux-serial" : "wsl-linux-serial" : OperatingSystem.IsWindows() ? "disabled" : "browser";
             snapshot["connected"] = connected;
+            // The agent's age is relative to its last emission. Do not leave
+            // that cached value looking current after its process has exited.
+            snapshot["age_s"] = double.IsFinite(age) ? age : null;
             snapshot["fresh"] = connected && age < 2 && snapshot["fresh"]?.GetValue<bool>() == true;
             snapshot["message"] = connected ? snapshot["message"]?.GetValue<string>() ?? "Waiting for telemetry" : error;
             return snapshot;
@@ -113,6 +118,7 @@ public sealed class PikaProcessService : IAsyncDisposable
                     }
                     info.ArgumentList.Add("--device"); info.ArgumentList.Add(device);
                     ready = new(TaskCreationOptions.RunContinuationsAsynchronously);
+                    lock (stateGate) processConfirmedExited = false;
                     process = Process.Start(info) ?? throw new IOException("Could not start the Pika serial agent");
                     _ = PumpAsync(process, ready);
                     await ready.Task.WaitAsync(TimeSpan.FromSeconds(15), cancellation);
@@ -138,12 +144,20 @@ public sealed class PikaProcessService : IAsyncDisposable
             try
             {
                 if (action is "enable" or "position" or "disable")
-                    lock (stateGate) { sessionPowerRequested = true; unresolvedOwner = requestedOwner; }
+                    lock (stateGate) { sessionPowerRequested = true; unresolvedOwner = requestedOwner; motorRequestId = id; motorRequestAcknowledged = false; }
                 await process.StandardInput.WriteLineAsync(command.ToJsonString().AsMemory(), cancellation);
                 await process.StandardInput.FlushAsync(cancellation);
                 var response = await completion.Task.WaitAsync(TimeSpan.FromSeconds(3), cancellation);
                 bool ok = response.GetProperty("ok").GetBoolean();
                 if (!ok) throw new InvalidOperationException(response.GetProperty("message").GetString());
+                cancellation.ThrowIfCancellationRequested();
+                if (action is "enable" or "position" or "disable")
+                    lock (stateGate)
+                    {
+                        motorRequestAcknowledged = motorRequestId == id;
+                        if (KnownDisabled()) unresolvedOwner = null;
+                        RetireVerifiedEndedPower();
+                    }
                 disconnected = action == "disconnect";
                 return new JsonObject { ["ok"] = true, ["message"] = response.GetProperty("message").GetString() };
             }
@@ -154,9 +168,30 @@ public sealed class PikaProcessService : IAsyncDisposable
 
     private bool KnownDisabled()
     {
-        lock (stateGate) return stateAt != 0 && Stopwatch.GetElapsedTime(stateAt).TotalSeconds < 2 &&
-            state?["fresh"]?.GetValue<bool>() == true && state["enabled"]?.GetValue<bool>() == false;
+        lock (stateGate) return EvidenceAgeSeconds() < 2 &&
+            state?["fresh"]?.GetValue<bool>() == true && state["enabled"]?.GetValue<bool>() == false &&
+            (!sessionPowerRequested || HasPostRequestEvidence());
     }
+
+    // Receipt order is insufficient: an old disabled packet may have been
+    // buffered before enable. Match the acknowledged mutation and compare
+    // hardware-feedback/request times from the same agent monotonic clock.
+    private bool HasPostRequestEvidence() => motorRequestAcknowledged && motorRequestId.Length > 0 &&
+        state?["last_motor_request"]?.GetValue<string>() == motorRequestId &&
+        state["request_time_s"] is JsonValue request && request.TryGetValue<double>(out double requestTime) && double.IsFinite(requestTime) && requestTime >= 0 &&
+        state["feedback_time_s"] is JsonValue feedback && feedback.TryGetValue<double>(out double feedbackTime) && double.IsFinite(feedbackTime) && feedbackTime > requestTime;
+
+    private void RetireVerifiedEndedPower()
+    {
+        if (processConfirmedExited && KnownDisabled() && state?["armed"]?.GetValue<bool>() == false && state["pending"]?.GetValue<bool>() == false)
+        { sessionPowerRequested = false; unresolvedOwner = null; }
+    }
+
+    // Call only under stateGate. Missing/invalid source age is not fresh
+    // evidence, even if a buffered state line was received very recently.
+    private double EvidenceAgeSeconds() => stateAt != 0 && state?["age_s"] is JsonValue source &&
+        source.TryGetValue<double>(out double seconds) && double.IsFinite(seconds) && seconds >= 0
+        ? seconds + Stopwatch.GetElapsedTime(stateAt).TotalSeconds : double.PositiveInfinity;
 
     public static void ValidateConfiguration(string device, string? distribution)
     {
@@ -253,7 +288,7 @@ public sealed class PikaProcessService : IAsyncDisposable
                             state = JsonNode.Parse(line)!.AsObject(); stateAt = Stopwatch.GetTimestamp();
                             if (state["fresh"]?.GetValue<bool>() == true)
                             {
-                                if (state["enabled"]?.GetValue<bool>() == false) unresolvedOwner = null;
+                                if (KnownDisabled()) unresolvedOwner = null;
                                 else if (sessionPowerRequested) unresolvedOwner = owner;
                                 // Observing externally enabled hardware is not an
                                 // enable request and creates no power ownership.
@@ -269,10 +304,19 @@ public sealed class PikaProcessService : IAsyncDisposable
                 }
             }
             string details = await stderr;
+            await agent.WaitForExitAsync();
             lock (stateGate)
             {
                 if (!ReferenceEquals(process, agent)) return;
                 connected = false;
+                processConfirmedExited = true;
+                // The old client's heartbeat can expire during an editor
+                // reload. Its agent disables first and then exits. A verified
+                // disabled, idle final sample releases only that obsolete
+                // power-request bookkeeping, so a new read-only monitor can
+                // reopen the unchanged serial assignment. Never infer a
+                // disable from EOF alone or from enabled/stale/pending data.
+                RetireVerifiedEndedPower();
                 if (!string.IsNullOrWhiteSpace(details)) error = details.Length > 2048 ? details[..2048] : details;
                 if (string.IsNullOrEmpty(error)) error = "Pika agent disconnected; reconnect explicitly";
             }
@@ -304,7 +348,8 @@ public sealed class PikaProcessService : IAsyncDisposable
             agent.Dispose();
         }
         owner = null;
-        lock (stateGate) { sessionPowerRequested = false; connected = false; state = null; stateAt = 0; error = "Disconnected"; }
+        lock (stateGate) { sessionPowerRequested = false; motorRequestId = ""; motorRequestAcknowledged = processConfirmedExited = false;
+            connected = false; state = null; stateAt = 0; error = "Disconnected"; }
     }
     public async ValueTask DisposeAsync()
     {

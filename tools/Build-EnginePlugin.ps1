@@ -55,7 +55,7 @@ foreach($taskDirectory in @('src','web','vendor/candle')) {
     Get-ChildItem -LiteralPath (Join-Path $taskRepo $taskDirectory) -File | Copy-Item -Destination $taskDestination -Force
 }
 foreach($taskFile in @('cJSON.c','cJSON.h')){Copy-Item -LiteralPath (Join-Path $taskRepo ('vendor/'+$taskFile)) -Destination (Join-Path $taskSource 'vendor') -Force}
-foreach($taskProject in @('Piper.Contracts','Piper.Core','Piper.Host','Piper.Pika','Piper.Pika.Agent','Piper.Plugin','Piper.Plugin.Tests','Piper.Camera','Piper.Camera.Tests','Piper.RealSense')) {
+foreach($taskProject in @('Piper.Contracts','Piper.Core','Piper.Host','Piper.Pika','Piper.Pika.Agent','Piper.Pika.Tests','Piper.Plugin','Piper.Plugin.Tests','Piper.Camera','Piper.Camera.Tests','Piper.RealSense')) {
     foreach($taskFile in Get-ChildItem -LiteralPath (Join-Path $taskRepo ('managed/'+$taskProject)) -File -Recurse | Where-Object {$_.FullName -notmatch '[\\/](bin|obj)[\\/]' -and $_.Extension -in @('.cs','.csproj','.proto','.svg','.json')}) {
         $taskRelative=$taskFile.FullName.Substring($taskRepo.Length+1)
         $taskDestination=Join-Path $taskSource $taskRelative

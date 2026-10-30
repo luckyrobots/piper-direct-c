@@ -6,7 +6,7 @@ namespace LuckyRobots.Piper.Plugin;
 /// <summary>Measured opening for the Piper/Pika paired slide-joint model, in metres.</summary>
 public sealed class GripperLink
 {
-    public const double ClosedNoiseToleranceMm = .1;
+    public const double ClosedNoiseToleranceMm = .25;
     private static readonly double MinimumFeedbackAngle = -PikaProtocol.Angle(PikaProtocol.ArrivalToleranceMm);
     private readonly int firstSign;
     private readonly double maximumMm;
@@ -37,18 +37,12 @@ public sealed class GripperLink
             Status = "Scene gripper unchanged: no Pika matching this robot profile.";
             return;
         }
-        if (pika?["fresh"] is not JsonValue fresh || !fresh.TryGetValue<bool>(out bool current) || !current ||
-            pika["telemetry"]?["motor"]?["Position"] is not JsonValue motor || !motor.TryGetValue<double>(out double angle) ||
-            !double.IsFinite(angle) || (!PikaProtocol.ValidAngle(angle) && (angle >= 0 || angle < MinimumFeedbackAngle)))
+        if (!TryMeasuredOpening(pika, out double width))
         {
-            Status = "Scene gripper unchanged: waiting for fresh Pika motor position.";
+            Status = "Scene gripper unchanged: waiting for fresh valid Pika motor position.";
             return;
         }
-        double width = PikaProtocol.Width(angle);
-        // Closed encoder noise is not a negative opening. Only this bounded
-        // near-zero feedback allowance is saturated; model mismatch is rejected.
-        if (width >= -ClosedNoiseToleranceMm && width < 0) width = 0;
-        if (!double.IsFinite(width) || width < 0 || width > maximumMm)
+        if (width > maximumMm)
         {
             Status = $"Scene gripper unchanged: measured opening {width:F1} mm is outside the model's 0–{maximumMm:F1} mm range. Check the tool model/calibration.";
             return;
@@ -60,6 +54,22 @@ public sealed class GripperLink
         joints["joint7"] = firstSign * closingTravelMetres;
         joints["joint8"] = -firstSign * closingTravelMetres;
         Status = $"Scene gripper linked · measured {width:F1} mm / model {maximumMm:F1} mm";
+    }
+
+    // Measured encoder noise around the closed stop is not negative jaw
+    // separation. This changes feedback presentation only, never motor targets.
+    public static bool TryMeasuredOpening(JsonObject? pika, out double width)
+    {
+        width = double.NaN;
+        if (pika?["fresh"] is not JsonValue fresh || !fresh.TryGetValue<bool>(out bool current) || !current ||
+            pika["telemetry"]?["motor"]?["Position"] is not JsonValue motor || !motor.TryGetValue<double>(out double angle) ||
+            !double.IsFinite(angle) || (!PikaProtocol.ValidAngle(angle) && (angle >= 0 || angle < MinimumFeedbackAngle)))
+            return false;
+        width = PikaProtocol.Width(angle);
+        // Closed encoder noise is not a negative opening. Only this bounded
+        // near-zero feedback allowance is saturated; model mismatch is rejected.
+        if (width >= -ClosedNoiseToleranceMm && width < 0) width = 0;
+        return double.IsFinite(width) && width >= 0;
     }
 
     public void Verify(JsonObject requested, JsonArray pose)

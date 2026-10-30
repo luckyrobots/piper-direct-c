@@ -60,14 +60,18 @@ internal static class GripperLinkTests
         check(new RobotLink("scene-a", "robot-a", Model(), device).Feedback(device, invalidMotor, true)["joints"]!.AsObject().Count == 6,
             "Invalid Pika encoder angle moved the simulated fingers");
         var noisyClosed = Pika(0);
-        foreach (double noise in new[] { .007, .02, .09 })
+        foreach (double noise in new[] { .007, .02, .09, .1236, .20, .249 })
         {
             noisyClosed["telemetry"]!["motor"]!["Position"] = -PikaProtocol.Angle(noise);
             var request = new RobotLink("scene-a", "robot-a", Model(), device).Feedback(device, noisyClosed, true);
             check(request["joints"]?["joint7"]?.GetValue<double>() == -.05 && request["joints"]?["joint8"]?.GetValue<double>() == .05,
                 "Small negative closed-position feedback left the simulated gripper open");
         }
-        noisyClosed["telemetry"]!["motor"]!["Position"] = -PikaProtocol.Angle(.2);
+        noisyClosed["telemetry"]!["motor"]!["Position"] = -.0016;
+        check(GripperLink.TryMeasuredOpening(noisyClosed, out double closed) && closed == 0,
+            "Observed negative closed-stop encoder reading did not yield a zero opening for both scene and UI");
+        check(!GripperLink.TryMeasuredOpening(Pika(45, false), out _), "Stale Pika opening was presented as a live measurement");
+        noisyClosed["telemetry"]!["motor"]!["Position"] = -PikaProtocol.Angle(.3);
         check(new RobotLink("scene-a", "robot-a", Model(), device).Feedback(device, noisyClosed, true)["joints"]!.AsObject().Count == 6,
             "Negative Pika opening beyond the closed-noise allowance was silently clamped");
 

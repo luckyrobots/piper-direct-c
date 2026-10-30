@@ -6,7 +6,8 @@ public enum CalibrationWizardStep
 {
     Prepare, ContactPoint, ModelPoint, DeskFrame, SceneSurfaceY, SceneFloorOrigin, DeskWidth, DeskDepth, TabletopHeight, Precision, Method,
     GridSquare, GridOriginLeft, GridOriginBack, PointIntro, PointLeft, PointBack, PointHeight, GridColumn, GridRow,
-    HandGuide, Capture, Review, Complete, InspectSaved
+    HandGuide, Capture, Review, Complete, InspectSaved,
+    DeskBack // Append only: saved drafts store the existing numeric step values.
 }
 
 public sealed record CalibrationWizardDraft(int Schema, string ProfileId, CalibrationWizardStep Step, long Epoch,
@@ -19,7 +20,7 @@ public sealed record CalibrationOptionalOfficeAudit(double? SceneFloorYMillimetr
 /// <summary>Question order and input validation only: no engine, camera or robot command path.</summary>
 public static class CalibrationWizardFlow
 {
-    public static CalibrationWizardDraft New(string profileId, long epoch = 1) => new(1, profileId, CalibrationWizardStep.Prepare, epoch,
+    public static CalibrationWizardDraft New(string profileId, long epoch = 1) => new(2, profileId, CalibrationWizardStep.Prepare, epoch,
         new(StringComparer.Ordinal) { ["tool"] = "grasp_site", ["role"] = "training", ["method"] = "edge measurements" }, []);
     public static string? Input(CalibrationWizardStep step) => step switch
     {
@@ -58,12 +59,13 @@ public static class CalibrationWizardFlow
         {
             CalibrationWizardStep.Prepare => CalibrationWizardStep.ContactPoint,
             CalibrationWizardStep.ContactPoint => CalibrationWizardStep.ModelPoint,
-            CalibrationWizardStep.ModelPoint => CalibrationWizardStep.DeskFrame,
-            CalibrationWizardStep.DeskFrame => CalibrationWizardStep.SceneSurfaceY,
+            CalibrationWizardStep.ModelPoint => CalibrationWizardStep.SceneSurfaceY,
+            CalibrationWizardStep.DeskFrame => CalibrationWizardStep.DeskBack,
+            CalibrationWizardStep.DeskBack => CalibrationWizardStep.Precision,
             CalibrationWizardStep.SceneSurfaceY => CalibrationWizardStep.DeskWidth,
             CalibrationWizardStep.SceneFloorOrigin => CalibrationWizardStep.DeskWidth,
             CalibrationWizardStep.DeskWidth => CalibrationWizardStep.DeskDepth,
-            CalibrationWizardStep.DeskDepth => CalibrationWizardStep.Precision,
+            CalibrationWizardStep.DeskDepth => CalibrationWizardStep.DeskFrame,
             CalibrationWizardStep.TabletopHeight => CalibrationWizardStep.Precision,
             CalibrationWizardStep.Precision => CalibrationWizardStep.Method,
             CalibrationWizardStep.Method => grid ? CalibrationWizardStep.GridSquare : CalibrationWizardStep.PointIntro,
@@ -94,10 +96,19 @@ public static class CalibrationWizardFlow
     public static bool Accepts(CalibrationWizardDraft draft, string profileId, long epoch) => draft.ProfileId == profileId && draft.Epoch == epoch;
     public static CalibrationWizardDraft TabletopDefault(CalibrationWizardDraft draft)
     {
+        // Uncaptured older drafts used one abstract desk-frame confirmation before
+        // dimensions. Ask the new pointer questions; never manufacture an ack.
+        if (draft.Schema == 1 && draft.ReportFile.Length == 0 && draft.Step is not
+            (CalibrationWizardStep.Prepare or CalibrationWizardStep.ContactPoint or CalibrationWizardStep.ModelPoint))
+        {
+            var answers = new Dictionary<string, string>(draft.Answers, StringComparer.Ordinal);
+            answers.Remove("frame"); answers.Remove("leftedgeconfirmed");
+            return draft with { Schema = 2, Answers = answers, Step = CalibrationWizardStep.SceneSurfaceY, History = [], Epoch = draft.Epoch + 1 };
+        }
         var step = draft.Step switch { CalibrationWizardStep.SceneFloorOrigin => CalibrationWizardStep.DeskWidth,
             CalibrationWizardStep.TabletopHeight => CalibrationWizardStep.Precision, _ => draft.Step };
         var history = draft.History.Where(s => s is not (CalibrationWizardStep.SceneFloorOrigin or CalibrationWizardStep.TabletopHeight)).ToArray();
-        return draft with { Step = step, History = history, Epoch = draft.Epoch + 1 };
+        return draft with { Schema = 2, Step = step, History = history, Epoch = draft.Epoch + 1 };
     }
     public static CalibrationOptionalOfficeAudit OptionalOfficeAudit(CalibrationWizardDraft draft)
     {
@@ -136,7 +147,7 @@ public static class CalibrationWizardFlow
     }
     public static void ValidateDraft(CalibrationWizardDraft draft, string profileId)
     {
-        if (draft.Schema != 1 || draft.ProfileId != profileId || !Enum.IsDefined(draft.Step) || draft.Epoch < 1 || draft.Epoch >= long.MaxValue - 100 || draft.Answers is null ||
+        if (draft.Schema is not (1 or 2) || draft.ProfileId != profileId || !Enum.IsDefined(draft.Step) || draft.Epoch < 1 || draft.Epoch >= long.MaxValue - 100 || draft.Answers is null ||
             draft.Answers.Count > 32 || draft.Answers.Any(p => p.Key.Length > 32 || p.Value is null || p.Value.Length > 512) ||
             draft.History is null || draft.History.Length > 24 || draft.History.Any(s => !Enum.IsDefined(s)) ||
             draft.HelpCamera is not ("bench" or "gripper" or "depth") || Path.GetFileName(draft.ReportFile) != draft.ReportFile ||

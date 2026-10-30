@@ -50,6 +50,7 @@ double Now() => clock.Elapsed.TotalSeconds;
 void Emit(object data) { Console.WriteLine(JsonSerializer.Serialize(data)); Console.Out.Flush(); }
 bool armed = false, enabled = false, wrotePower = false;
 double feedbackAt = -100, heartbeatAt = Now(), reportedAt = -100, position = 0, speed = 0;
+string lastMotorRequest = ""; double motorRequestAt = -100;
 double? target = null, arrivedAt = null; double stepAt = 0, targetAngle = 0, lastTargetAt = 0;
 JsonElement? telemetry = null;
 string message = "Reading telemetry; no enable or target command sent.";
@@ -79,11 +80,12 @@ try
                 switch (action)
                 {
                     case "heartbeat": heartbeatAt = Now(); break;
-                    case "disable": Disable("Operator stop."); break;
+                    case "disable": Disable("Operator stop."); lastMotorRequest = id; motorRequestAt = Now(); break;
                     case "enable":
                         if (!Fresh() || !command.TryGetProperty("clear", out var clear) || clear.ValueKind != JsonValueKind.True)
                             throw new InvalidOperationException("Fresh telemetry and finger-clear confirmation are required");
                         Write(11); wrotePower = armed = true; heartbeatAt = Now(); message = "Enable requested; waiting for enabled feedback.";
+                        lastMotorRequest = id; motorRequestAt = Now();
                         break;
                     case "position":
                         if (!Fresh() || !armed || !enabled || Now() - heartbeatAt > 1.5 || target is not null)
@@ -92,6 +94,7 @@ try
                         if (!PikaProtocol.ValidAngle(angle) || !double.IsFinite(width) || width < 0 || width > 90)
                             throw new InvalidOperationException("Opening target must be within 0–90 mm");
                         Write(22, angle); targetAngle = angle; lastTargetAt = Now(); target = width; arrivedAt = null; stepAt = Now(); message = $"Target {width:F2} mm; waiting for measured arrival.";
+                        lastMotorRequest = id; motorRequestAt = Now();
                         break;
                     case "disconnect":
                         if (armed || wrotePower) Disable("Session closed.");
@@ -133,7 +136,9 @@ try
         if (Now() - reportedAt >= .1)
         {
             Emit(new { type = "state", connected = true, fresh = Fresh(), enabled, armed, pending = target is not null,
-                message, telemetry, age_s = telemetry is null ? (double?)null : Now() - feedbackAt });
+                message, telemetry, age_s = telemetry is null ? (double?)null : Now() - feedbackAt,
+                last_motor_request = lastMotorRequest, request_time_s = lastMotorRequest.Length == 0 ? (double?)null : motorRequestAt,
+                feedback_time_s = telemetry is null ? (double?)null : feedbackAt });
             reportedAt = Now();
         }
     }

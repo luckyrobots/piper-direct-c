@@ -333,7 +333,8 @@ public sealed partial class PipersPlugin : ILuckyPlugin
                 if (!PikaMatchesProfile()) throw new InvalidOperationException("The Pika serial assignment does not match this robot.");
                 if (!pikaOwned || state?["pika"]?["armed"]?.GetValue<bool>() != true)
                     throw new InvalidOperationException("Pika is monitoring only. Use Enable robot before commanding its opening.");
-                double currentOpening = PikaProtocol.Width(state!["pika"]!["telemetry"]!["motor"]!["Position"]!.GetValue<double>());
+                if (!GripperLink.TryMeasuredOpening(state?["pika"] as JsonObject, out double currentOpening))
+                    throw new InvalidOperationException("Waiting for fresh gripper position before changing its opening.");
                 double opening = id == "pika.target" ? FiniteControlNumber(input.Value, "Gripper opening") : id == "pika.zero" ? 0 : Math.Clamp(currentOpening + (id == "pika.plus" ? 1 : -1), 0, 90);
                 await Call("/api/pika/position", new JsonObject { ["owner"] = owner, ["value"] = PikaProtocol.Angle(opening) }, cancellation);
             }
@@ -464,9 +465,10 @@ public sealed partial class PipersPlugin : ILuckyPlugin
         }
         patches["zero.all"] = new() { ["enabled"] = movable && joints?.All(j => j?["enabled"]?.GetValue<bool>() == true && j["limits_fresh"]?.GetValue<bool>() == true) == true && (device?["range_recovery"]?["required"]?.GetValue<bool>() != true || device["range_recovery"]?["can_move_to_zero"]?.GetValue<bool>() == true), ["hint"] = device?["range_recovery"]?["required"]?.GetValue<bool>() == true ? device["range_recovery"]!["reason"]?.GetValue<string>() ?? "Slow range entry, then synchronized zero position. Encoder zeros are unchanged." : "Move all joints to zero angles. This does not calibrate encoder zeros." };
         var pika = PikaMatchesProfile() ? state?["pika"] : null;
-        double? pikaAngle = pika?["telemetry"]?["motor"]?["Position"]?.GetValue<double>();
-        double? opening = pikaAngle.HasValue ? PikaProtocol.Width(pikaAngle.Value) : null;
-        patches["pika.value"] = new() { ["text"] = string.IsNullOrEmpty(ActiveProfile.PikaDevice) ? "Unassigned" : $"{opening?.ToString("F2") ?? "—"} mm", ["hint"] = pikaMonitorStatus };
+        double? opening = GripperLink.TryMeasuredOpening(pika as JsonObject, out double measuredOpening) ? measuredOpening : null;
+        string pikaReading = string.IsNullOrEmpty(ActiveProfile.PikaDevice) ? "Unassigned" : opening.HasValue ? $"{opening.Value:F2} mm"
+            : pika?["connected"]?.GetValue<bool>() != true ? "Disconnected" : "No feedback";
+        patches["pika.value"] = new() { ["text"] = pikaReading, ["hint"] = pikaMonitorStatus };
         patches["pika.target"] = new() { ["value"] = opening ?? 0, ["enabled"] = device is not null && !switchingProfile && pikaOwned && pika?["armed"]?.GetValue<bool>() == true && pika?["fresh"]?.GetValue<bool>() == true && pika["enabled"]?.GetValue<bool>() == true && pika["pending"]?.GetValue<bool>() != true };
         patches["pika.monitor"] = new() { ["text"] = pikaMonitorStatus };
         bool limitsFresh = joints?.All(j => j?["limits_fresh"]?.GetValue<bool>() == true && j["max_speed_rad_s"]?.GetValue<double>() > 0) == true;

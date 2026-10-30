@@ -24,7 +24,7 @@ public static class CalibrationWizardTests
         check(next.Step == CalibrationWizardStep.ModelPoint && !next.OperatorSaysTcpMatches, "Selecting a physical midpoint claimed model correspondence");
         var back = CalibrationWizardFlow.Back(next);
         check(back.Step == CalibrationWizardStep.ContactPoint && back.Epoch > next.Epoch, "Previous question did not invalidate delayed inputs");
-        var expected = new[] { CalibrationWizardStep.DeskFrame, CalibrationWizardStep.SceneSurfaceY, CalibrationWizardStep.DeskWidth, CalibrationWizardStep.DeskDepth,
+        var expected = new[] { CalibrationWizardStep.SceneSurfaceY, CalibrationWizardStep.DeskWidth, CalibrationWizardStep.DeskDepth, CalibrationWizardStep.DeskFrame, CalibrationWizardStep.DeskBack,
             CalibrationWizardStep.Precision, CalibrationWizardStep.Method, CalibrationWizardStep.PointIntro,
             CalibrationWizardStep.PointLeft, CalibrationWizardStep.PointBack, CalibrationWizardStep.PointHeight, CalibrationWizardStep.HandGuide, CalibrationWizardStep.Capture };
         foreach (var step in expected) { next = CalibrationWizardFlow.Advance(next); check(next.Step == step, "Manual wizard question order is wrong at " + step); }
@@ -74,6 +74,14 @@ public static class CalibrationWizardTests
         var resumedLegacy = CalibrationWizardFlow.TabletopDefault(tabletopDraft with { Step = CalibrationWizardStep.SceneFloorOrigin,
             History = [CalibrationWizardStep.SceneSurfaceY, CalibrationWizardStep.SceneFloorOrigin] });
         check(resumedLegacy.Step == CalibrationWizardStep.DeskWidth && !resumedLegacy.History.Contains(CalibrationWizardStep.SceneFloorOrigin), "An old draft still forced irrelevant floor questions on resume/back");
+        var abstractLegacy = CalibrationWizardFlow.TabletopDefault(tabletopDraft with { Schema = 1, Step = CalibrationWizardStep.PointIntro,
+            Answers = new(tabletopDraft.Answers) { ["frame"] = "old technical frame confirmation" } });
+        check(abstractLegacy.Schema == 2 && abstractLegacy.Step == CalibrationWizardStep.SceneSurfaceY && !abstractLegacy.Answers.ContainsKey("frame") && abstractLegacy.Epoch > tabletopDraft.Epoch,
+            "An uncaptured old draft invented confirmation of the new desk-edge pointers");
+        var savedLegacy = CalibrationWizardFlow.TabletopDefault(tabletopDraft with { Schema = 1, Step = CalibrationWizardStep.InspectSaved, ReportFile = "saved-calibration.json" });
+        check(savedLegacy.Step == CalibrationWizardStep.InspectSaved && savedLegacy.ReportFile == "saved-calibration.json", "Pointer-question migration discarded a saved placement inspection/report");
+        check((int)CalibrationWizardStep.DeskFrame == 3 && (int)CalibrationWizardStep.InspectSaved == 24 && (int)CalibrationWizardStep.DeskBack == 25,
+            "Appending BACK edge changed the meaning of existing saved numeric step values");
         var relativeSamples = new[] { (300d, 200d), (600d, 200d), (600d, 500d), (300d, 500d), (450d, 350d) }.Select((p, i) =>
         {
             var pointDraft = tabletopDraft with { Answers = new(tabletopDraft.Answers) { ["left"] = p.Item1.ToString(System.Globalization.CultureInfo.InvariantCulture), ["back"] = p.Item2.ToString(System.Globalization.CultureInfo.InvariantCulture) } };
@@ -109,5 +117,51 @@ public static class CalibrationWizardTests
         var clear = marker.Request(false);
         check(clear["entityId"]!.GetValue<string>() == "model-root-a" && clear["sceneId"]!.GetValue<string>() == "scene-a" && clear["expectedModelRevision"]!.GetValue<string>() == "revision-a" && !clear["visible"]!.GetValue<bool>(), "Clearing substituted a newly selected root instead of the pinned marker context");
         check(marker.Request(true)["durationSeconds"]!.GetValue<int>() == 30, "Temporary marker lost its bounded native expiry");
+        var edgeDraft = tabletopDraft with { Step = CalibrationWizardStep.DeskFrame, ModelAssetId = live.ModelAssetId, ModelRevision = live.ModelRevision,
+            Answers = new(tabletopDraft.Answers) { ["sceneconfirmed"] = "operator confirmed simulated tabletop" } };
+        var leftEdge = WizardReferenceHighlightScope.Create(live, edgeDraft);
+        check(leftEdge.Point.Distance(new(-.7, .803, 0)) < 1e-12 && leftEdge.Label == "LEFT desk edge", "LEFT pointer did not mark the measured desk's short-edge midpoint just above its confirmed surface");
+        var backDraft = edgeDraft with { Step = CalibrationWizardStep.DeskBack, Epoch = edgeDraft.Epoch + 1 };
+        var backEdge = WizardReferenceHighlightScope.Create(live, backDraft);
+        check(backEdge.Point.Distance(new(0, .803, -.35)) < 1e-12 && backEdge.Label == "BACK desk edge", "BACK pointer did not mark the measured far long edge");
+        check(leftEdge.DeskFingerprint() == backEdge.DeskFingerprint(), "Sequential LEFT/BACK confirmations did not refer to one fixed robot/desk reference");
+        check(leftEdge.Matches(live, edgeDraft, true, true) && !leftEdge.Matches(live, backDraft, true, true), "A LEFT pointer acknowledgement authorized the BACK question");
+        check(!leftEdge.Matches(live, edgeDraft with { Epoch = edgeDraft.Epoch + 1 }, true, true), "A stale pointer survived returning to an earlier question");
+        foreach (var changed in new[] { live with { ProfileId = "robot-b" }, live with { DeviceId = "can-b" }, live with { Generation = 4 }, live with { BackendSessionFingerprint = "backend-b" }, live with { SceneId = "scene-b" }, live with { RobotId = "root-b" }, live with { ModelRevision = "revision-b" } })
+            check(!leftEdge.Matches(changed, edgeDraft, true, true), "A desk pointer acknowledgement crossed its robot/backend/model identity");
+        foreach (string changedKey in new[] { "width", "depth", "sceney" })
+            check(!leftEdge.Matches(live, edgeDraft with { Answers = new(edgeDraft.Answers) { [changedKey] = changedKey == "sceney" ? "900" : "1000" } }, true, true), "A desk pointer survived changed measurements: " + changedKey);
+        check(!leftEdge.Matches(live, edgeDraft, false, true) && !leftEdge.Matches(live, edgeDraft, true, false), "A pointer remained confirmable after leaving the page or losing fresh feedback");
+        Reject(() => WizardReferenceHighlightScope.Create(live, edgeDraft with { Answers = new(edgeDraft.Answers.Where(p => p.Key != "width")) }), "Pointer guessed an unmeasured desk width");
+        Reject(() => WizardReferenceHighlightScope.Create(live, edgeDraft with { Answers = new(edgeDraft.Answers.Where(p => p.Key != "sceneconfirmed")) }), "Pointer assumed an unconfirmed simulated tabletop");
+        var edgeReply = JsonSerializer.SerializeToElement(new { highlighted = true, label = leftEdge.Label, point = new[] { -.7, .803, 0 } });
+        check(leftEdge.Acknowledged(edgeReply), "Exact native desk-pointer echo was rejected");
+        check(!backEdge.Acknowledged(edgeReply), "A returned LEFT pointer was accepted for the BACK question");
+        check(!leftEdge.Acknowledged(JsonSerializer.SerializeToElement(new { highlighted = true, label = leftEdge.Label, point = new[] { -.6, .803, 0 } })), "A wrong pointer position was accepted as shown");
+        check(!leftEdge.Acknowledged(JsonSerializer.SerializeToElement(new { highlighted = true })) && !leftEdge.Acknowledged(JsonSerializer.SerializeToElement(new { highlighted = false })), "An absent/incomplete marker acknowledgement enabled edge confirmation");
+        var edgeRequest = leftEdge.Request(true);
+        check(edgeRequest["point"]!.AsArray().Count == 3 && edgeRequest["siteName"] is null && edgeRequest["durationSeconds"]!.GetValue<int>() == 30 &&
+            edgeRequest["expectedModelRevision"]!.GetValue<string>() == live.ModelRevision, "Desk pointer request gained motion/site commands or lost revision/expiry scope");
+        foreach (string error in new[] { "Unsupported robot API", "Unsupported or unauthorized editor API: robot.highlightReference", "Unknown request: robot.highlightReference" })
+            check(WizardReferenceHighlightScope.FailureMessage(new InvalidOperationException(error)).StartsWith("Update Lucky Engine to show desk markers", StringComparison.Ordinal),
+                "An older engine exposed a raw unsupported-request error instead of update guidance");
+        check(!WizardReferenceHighlightScope.FailureMessage(new InvalidOperationException("Missing capability: scene.robots")).Contains("Update Lucky Engine", StringComparison.Ordinal),
+            "A real permission problem was mislabeled as an old engine");
+        check(WizardReferenceHighlightScope.FailureMessage(new OperationCanceledException()).Contains("Show edge to retry", StringComparison.Ordinal),
+            "A marker timeout did not explain the next action or kept confirming without a pointer");
+        check(WizardReferenceHighlightScope.DeskFingerprint(live, 1400, 700, 800) == leftEdge.DeskFingerprint() &&
+            WizardReferenceHighlightScope.DeskFingerprint(live with { ModelRevision = "changed" }, 1400, 700, 800) != leftEdge.DeskFingerprint(),
+            "Capture could reuse an old LEFT/BACK confirmation after the robot model revision changed");
+        const System.Reflection.BindingFlags hidden = System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic;
+        var copyPlugin = new PipersPlugin();
+        foreach (CalibrationWizardStep step in Enum.GetValues<CalibrationWizardStep>())
+        {
+            typeof(PipersPlugin).GetField("calibrationWizard", hidden)!.SetValue(copyPlugin, draft with { Step = step });
+            string prompt = (string)typeof(PipersPlugin).GetMethod("WizardPrompt", hidden)!.Invoke(copyPlugin, null)!;
+            string progress = (string)typeof(PipersPlugin).GetMethod("WizardStepName", hidden)!.Invoke(copyPlugin, null)!;
+            check(prompt.Length is > 0 and <= 110 && !new[] { "training", "validation", "coordinate frame", "TCP", "FK", "sceneY", "metric base" }.Any(word => prompt.Contains(word, StringComparison.OrdinalIgnoreCase)),
+                "Primary wizard instruction became long or required unexplained robotics terminology: " + step);
+            check(progress != step.ToString() && !progress.Contains("DeskFrame", StringComparison.Ordinal), "Raw enum names appeared in the user-facing wizard progress");
+        }
     }
 }

@@ -11,6 +11,13 @@ not establish a different mesh's physical contact geometry.
 The plugin does not change the real gripper's encoder calibration, firmware,
 joint zeros or mechanical limits when it displays these measurements.
 
+Fresh negative encoder readings within 0.25 mm of the closed stop are displayed
+as zero opening and map to the model's closed endpoints. Larger negative values
+are rejected rather than treated as calibrated measurements. This bounded
+feedback allowance never changes outgoing motor targets. A disconnected or
+stale gripper keeps its last scene pose and shows an unavailable reading in the
+controls; cached telemetry is not presented as a live opening.
+
 ## Audited CAD reference
 
 These numeric references came from the actual visual finger vertices in the

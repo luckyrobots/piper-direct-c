@@ -51,9 +51,10 @@ public sealed partial class PipersPlugin
             entered = await wizardHighlightGate.WaitAsync(TimeSpan.FromMilliseconds(800), cancellation);
             if (!entered) throw new InvalidOperationException("Tool marker is busy; read the named point again.");
             if (!WizardHighlightCurrent(scope)) throw new InvalidOperationException("Fresh matching robot subscription is required for the temporary marker.");
+            wizardReferenceHighlightScope = null; wizardReferenceAcknowledgedAt = 0;
             wizardHighlightScope = scope; wizardHighlightAttempt = Stopwatch.GetTimestamp();
             await RequestWizardHighlight(scope, true, cancellation);
-            wizardMessage = "Temporary scene marker shows the NAMED MODEL site, not a software-verified physical contact point. Compare it with the real midpoint before confirming.";
+            wizardMessage = "Compare the simulation marker with the midpoint between the real jaw tips. Continue only if they represent the same point.";
         }
         catch (Exception error)
         {
@@ -70,9 +71,16 @@ public sealed partial class PipersPlugin
         bool entered = false;
         try
         {
-            if (wizardHighlightScope is null || cancellation.IsCancellationRequested) return;
+            if (cancellation.IsCancellationRequested) return;
             entered = await wizardHighlightGate.WaitAsync(0, cancellation);
             if (!entered) return;
+            if (WizardReferenceStep) { await MaintainWizardReferenceWithinGate(cancellation); return; }
+            if (wizardReferenceHighlightScope is { } reference)
+            {
+                wizardReferenceHighlightScope = null; wizardReferenceAcknowledgedAt = 0;
+                try { await RequestWizardReference(reference, false, cancellation); }
+                catch (Exception error) { wizardMessage = "The desk pointer will expire: " + error.Message; }
+            }
             if (wizardHighlightScope is not { } scope) return;
             if (!WizardHighlightCurrent(scope))
             {
@@ -95,17 +103,23 @@ public sealed partial class PipersPlugin
     private async Task ClearWizardHighlight(CancellationToken cancellation)
     {
         var scope = Interlocked.Exchange(ref wizardHighlightScope, null);
-        if (scope is null) return;
+        var reference = Interlocked.Exchange(ref wizardReferenceHighlightScope, null);
+        wizardReferenceAcknowledgedAt = 0;
+        if (scope is null && reference is null) return;
         bool entered = false;
         try
         {
             entered = await wizardHighlightGate.WaitAsync(TimeSpan.FromMilliseconds(800), cancellation);
             if (!entered) return; // Native marker expires and clears on unload.
-            if (wizardHighlightScope is not null) return; // A newer marker owns this process now.
-            try { await RequestWizardHighlight(scope, false, cancellation); }
+            if (wizardHighlightScope is not null || wizardReferenceHighlightScope is not null) return; // A newer marker owns this process now.
+            try
+            {
+                if (reference is not null) await RequestWizardReference(reference, false, cancellation);
+                else if (scope is not null) await RequestWizardHighlight(scope, false, cancellation);
+            }
             catch (Exception error) { wizardMessage = "Temporary marker clear was not acknowledged; it will expire. " + error.Message; }
         }
-        catch (OperationCanceledException) { wizardHighlightScope = null; }
+        catch (OperationCanceledException) { wizardHighlightScope = null; wizardReferenceHighlightScope = null; wizardReferenceAcknowledgedAt = 0; }
         finally { if (entered) wizardHighlightGate.Release(); }
     }
 }
