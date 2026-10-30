@@ -56,6 +56,8 @@ public sealed class PiperGrpcService(PiperRpcContext state) : PiperControl.Piper
             if (request.Route.StartsWith("/api/pika/", StringComparison.Ordinal))
             {
                 if (state.Simulated) return new ControlReply { Status = 409, Json = "{\"error\":\"Pika hardware is disabled in simulation\"}" };
+                if (request.Route == "/api/pika/configure" && JsonNode.Parse(state.Controller.Snapshot())?["motion"]?["active"]?.GetValue<bool>() == true)
+                    throw new InvalidOperationException("Finish the active arm movement before changing Pika assignment");
                 var result = await state.Pika.ExecuteAsync(request.Route[10..], json.RootElement, context.CancellationToken);
                 return new ControlReply { Status = 200, Json = result.ToJsonString() };
             }

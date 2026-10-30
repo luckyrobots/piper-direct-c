@@ -18,6 +18,48 @@ over loopback gRPC (8766), alongside the existing web dashboard (8765).
 - Explicit recovery controls for controller stops; existing backend obstruction
   detection and motion leases remain authoritative.
 
+## Multiple robots
+
+The left sidebar stores up to eight named robot profiles and one shared
+Bench/Lumina camera. Select a robot to see its existing joint/Pika controls and
+its two wrist camera previews beside the viewport. The shared bench capture
+keeps running when profiles change. Only the selected robot's wrist captures
+run; new profiles start with cameras and hardware assignments unassigned.
+
+Assign each robot's **CAN adapter** explicitly using the adapter's stable device
+identity. Offline assignments remain visible and never fall back to the first
+connected adapter. Profiles retain separate scene-robot UUIDs, speed, jog,
+tolerance, wrist camera paths, D405 serials, simulation camera counterparts and
+lens calibration. One active robot is controlled at a time: the backend currently
+has one selected CAN/motion context. Switching holds only this session's active
+movement, releases its Pika connection, clears Enable approval and unlinks the
+previous scene robot. It never enables motors, repeats a move or links another
+robot automatically. A foreign active movement blocks switching. If another
+client changes the server's selected CAN adapter, this profile becomes read-only
+until **Activate assigned CAN** selects the correct adapter again.
+
+Set each robot's **Pika serial device** separately; blank means no gripper is
+assigned. On Windows, also choose its WSL distribution. Prefer a unique
+`/dev/serial/by-id/...` identity; if identical WCH adapters have no unique serial
+and their aliases collide, use `/dev/serial/by-path/...` for a fixed physical USB
+port. Map the physical gripper to its CAN robot deliberately. Do not select a
+generic first device or share one path between profiles. Camera names can also
+be ambiguous: use unique DirectShow device paths on Windows and stable
+`/dev/v4l/by-id/...` or `/dev/v4l/by-path/...` paths on Linux, plus an explicit
+D405 serial whenever multiple depth cameras are connected.
+
+The first legacy profile inherits the previous settings and the currently
+present, selected adapter. Other profiles require explicit assignment. Pika
+routing changes use owner-checked `/api/pika/configure` while arm motion is idle;
+configuration itself sends no motor commands and opens no serial device. An
+owned Pika session must first produce disabled feedback and disconnect. A failed
+agent does not prove its motor is off: reconnect that same device and verify
+disabled feedback before assigning another gripper. Retained old camera frames
+are hidden until the selected capture publishes fresh images.
+
+Workspace/desk measurements and multi-camera calibration remain separate from
+joint linking; see [the guided calibration roadmap](workspace-calibration-roadmap.md).
+
 ## Link the real robot and scene
 
 Select **Scene robots**, select the PiPER + Pika model, then **Link robot**.
@@ -34,9 +76,9 @@ feedback owns the pose; its saved enable setting is preserved. Link status repor
 the acknowledged joint error. Select an articulated link or its mesh, click the
 viewport Rotate tool and drag the blue ring. Hinge joints show one ring aligned
 to their actual MuJoCo axis, independent of global/local toolbar orientation.
-Releasing commits the target; cancelling sends none. Preview motion while dragging
-does not stream hardware targets; the real arm follows the committed position at
-the chosen speed, then the scene follows measured feedback.
+Outside Teleoperate, releasing commits a target and cancellation sends none.
+In Teleoperate, dragging streams targets while the button is held; release
+finishes the final target at the chosen speed. Escape holds the measured pose.
 Only the edited joint supplies a new target; the other five use fresh hardware
 measurements, even if a scene preview has changed. For precise J6 tests, select
 `link6`, put the pointer over the viewport, then use `R`, `Z`, `Z`, an angle in

@@ -26,17 +26,11 @@ public sealed partial class PipersPlugin
         var discovered = JsonNode.Parse((await engine.RequestAsync("scene.cameras", cancellation: cancellation)).GetRawText())!.AsObject();
         Materialize(discovered);
         simulationCameras = discovered;
-        var bindings = new Dictionary<string, SimulationCameraPreferences>(preferences.SimulationCameras ?? []);
         string sceneId = simulationCameras["sceneId"]!.GetValue<string>();
-        foreach (string id in new[] { "bench", "gripper", "depth" })
-        {
-            if (bindings.TryGetValue(id, out var saved))
-            {
-                if (simulationCameras["cameras"]!.AsArray().Any(c => c?["entityId"]?.GetValue<string>() == saved.CameraId))
-                    bindings[id] = saved with { SceneId = sceneId };
-            }
-        }
-        preferences = preferences with { SimulationCameras = bindings };
+        // Entity UUIDs survive scene reload; session scene IDs do not. Refresh
+        // every profile's valid camera bindings, including inactive robots.
+        preferences = RobotProfileRouting.RefreshCameraBindings(preferences, sceneId,
+            simulationCameras["cameras"]!.AsArray().Select(c => c!["entityId"]!.GetValue<string>()));
         await Save(cancellation);
     }
 
@@ -70,7 +64,7 @@ public sealed partial class PipersPlugin
             patches[$"camera.{id}.sim"] = new()
             {
                 ["sceneId"] = saved?.SceneId ?? "", ["cameraId"] = saved?.CameraId ?? "",
-                ["overlayImageId"] = saved?.Overlay == true && id != "depth" ? id : "",
+                ["overlayImageId"] = saved?.Overlay == true && id != "depth" && CameraFrameReady(id) ? CameraImageId(id) : "",
                 ["captureWidth"] = size.Width, ["captureHeight"] = size.Height, ["blend"] = .5,
                 ["streamKind"] = id == "depth" ? "depth" : "color", ["lensModel"] = id == "gripper" ? "fisheye" : "pinhole",
                 ["intrinsics"] = matches ? calibration!.DeepClone() : null

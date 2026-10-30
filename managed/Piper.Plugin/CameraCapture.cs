@@ -11,10 +11,12 @@ public sealed record CameraPreferences(string Device, bool Enabled = true, strin
 /// <summary>Preview acquisition via the bundled C# camera worker. Timestamps are host receipt times, not exposure triggers.</summary>
 public sealed class CameraCapture(PluginContext engine, string imageId,
     CameraPreferences settings, Action<string, string> status, string depthSerial = "",
-    Action<string, int, int>? dimensions = null, Action<string, JsonObject>? profile = null) : IAsyncDisposable
+    Action<string, int, int>? dimensions = null, Action<string, JsonObject>? profile = null, string? outputImageId = null) : IAsyncDisposable
 {
     public CameraFrame? LatestFrame => Volatile.Read(ref latestFrame);
+    public CameraFrame? PublishedFrame => Volatile.Read(ref publishedFrame);
     private CameraFrame? latestFrame;
+    private CameraFrame? publishedFrame;
     private readonly CancellationTokenSource stopping = new();
     private Task? worker;
     private long sequence;
@@ -70,7 +72,7 @@ public sealed class CameraCapture(PluginContext engine, string imageId,
                                 long timestamp = (DateTimeOffset.UtcNow.Ticks - DateTimeOffset.UnixEpoch.Ticks) / 10;
                                 var size = JpegDimensions.Read(frame.GetBuffer().AsSpan(0, (int)frame.Length));
                                 dimensions?.Invoke(imageId, size.Width, size.Height);
-                                var captured = new CameraFrame(imageId, size.Width, size.Height, Convert.ToBase64String(frame.GetBuffer(), 0, (int)frame.Length), ++sequence, timestamp, "host-utc-receipt", settings.Device);
+                                var captured = new CameraFrame(outputImageId ?? imageId, size.Width, size.Height, Convert.ToBase64String(frame.GetBuffer(), 0, (int)frame.Length), ++sequence, timestamp, "host-utc-receipt", settings.Device);
                                 Volatile.Write(ref latestFrame, captured);
                                 latest.Writer.TryWrite(captured);
                             }
@@ -109,6 +111,7 @@ public sealed class CameraCapture(PluginContext engine, string imageId,
             while (frames.TryRead(out var newer)) frame = newer;
             long sendStarted = Stopwatch.GetTimestamp();
             await engine.PublishFrameAsync(frame, cancellation);
+            Volatile.Write(ref publishedFrame, frame);
             ++sent;
             double elapsed = Stopwatch.GetElapsedTime(previous).TotalSeconds;
             if (elapsed >= 1) { rate = sent / elapsed; sent = 0; previous = Stopwatch.GetTimestamp(); }

@@ -1,7 +1,9 @@
 # PiPER Direct C and Pipers for Lucky Engine
 
 A local controller and compact dashboard for one selected PiPER arm, its Pika
-gripper and cameras. The Windows and Linux C# host exposes the same HTTP API and
+gripper and cameras. The native plugin stores up to eight robot profiles, with
+explicit CAN assignments, per-robot wrist cameras and a shared bench camera.
+The Windows and Linux C# host exposes the same HTTP API and
 web UI. The native Lucky Engine plugin adds joint controls, real/simulated camera
 previews and explicit scene-to-hardware linking through the public plugin SDK.
 

@@ -15,7 +15,9 @@ if (args is ["--device", "/dev/pika-fixture"])
         Console.WriteLine(JsonSerializer.Serialize(new { type = "state", connected = true, fresh = true, enabled,
             telemetry = new { motor = new { Position = .5756, Speed = 0 }, motorstatus = new { Status = enabled ? "0x40" : "0x00" } } }));
         Console.WriteLine(JsonSerializer.Serialize(new { type = "ack", id = root.GetProperty("id").GetString(), ok, message = ok ? "fixture accepted" : "finger-clear required" }));
-        Console.Out.Flush(); if (action == "disconnect") break;
+        Console.Out.Flush();
+        if (action == "position" && root.GetProperty("value").GetDouble() == .75) Environment.Exit(0); // Simulated enabled agent failure.
+        if (action == "disconnect") break;
     }
     return;
 }
@@ -40,10 +42,21 @@ Check(!parser.Push("{\"data\":[{\"value\":1,\"value\":2}]}").Any(), "nested arra
 Check(parser.Push("{\"x\":1,\"x\":2}{\"motor\":{\"Position\":0.5,\"Speed\":0},\"motorstatus\":{\"Status\":\"0x40\"}}").Count() == 1, "valid packet after ambiguous packet must recover immediately");
 Check(!PikaProtocol.Telemetry(JsonSerializer.SerializeToElement(new { motor = new { Position = "bad", Speed = 0 }, motorstatus = new { Status = "0x00" } }), out _, out _, out _), "malformed position rejected");
 string owner = Guid.NewGuid().ToString(), other = Guid.NewGuid().ToString();
+JsonElement Configure(string by, string path) => JsonSerializer.SerializeToElement(new { owner = by, device = path, distribution = OperatingSystem.IsWindows() ? "Ubuntu" : null });
+await using (var disconnected = new PikaProcessService("/dev/pika-old", "unused", OperatingSystem.IsWindows() ? "Ubuntu" : null))
+{
+    await disconnected.ExecuteAsync("configure", Configure(owner, "/dev/pika-new"), default);
+    Check(disconnected.Snapshot()["device"]!.GetValue<string>() == "/dev/pika-new" && !disconnected.Snapshot()["connected"]!.GetValue<bool>(), "configuration opened a serial device or did not update identity");
+    bool invalidPath = false;
+    try { await disconnected.ExecuteAsync("configure", Configure(owner, "COM9"), default); } catch (ArgumentException) { invalidPath = true; }
+    Check(invalidPath && disconnected.Snapshot()["device"]!.GetValue<string>() == "/dev/pika-new", "native Windows serial path was accepted or mutated active configuration");
+}
 if (OperatingSystem.IsLinux())
 {
     await using var service = new PikaProcessService("/dev/pika-fixture", Environment.ProcessPath!);
     await service.ExecuteAsync("connect", Input(owner), default);
+    await Reject(() => service.ExecuteAsync("configure", Configure(other, "/dev/pika-other"), default), "foreign owner reconfigured a live serial agent");
+    await Reject(() => service.ExecuteAsync("configure", Configure(owner, "/dev/pika-other"), default), "owner reconfigured without disconnecting");
     await Reject(() => service.ExecuteAsync("connect", Input(other), default), "second owner connected");
     await Reject(() => service.ExecuteAsync("disable", Input(other), default), "foreign owner accepted");
     await Reject(() => service.ExecuteAsync("enable", Input(owner), default), "enable without confirmation accepted");
@@ -55,8 +68,21 @@ if (OperatingSystem.IsLinux())
     await service.ExecuteAsync("heartbeat", Input(other), default);
     await service.ExecuteAsync("disconnect", Input(other), default);
     Check(!service.Snapshot()["connected"]!.GetValue<bool>(), "disconnect not verified");
+    await service.ExecuteAsync("configure", Configure(other, "/dev/pika-fixture"), default);
     await service.ExecuteAsync("connect", Input(other), default);
+    await service.ExecuteAsync("enable", Input(other, true), default);
+    await service.ExecuteAsync("position", JsonSerializer.SerializeToElement(new { owner = other, value = .75 }), default);
+    for (int i = 0; i < 100 && service.Snapshot()["connected"]!.GetValue<bool>(); i++) await Task.Delay(10);
+    Check(!service.Snapshot()["connected"]!.GetValue<bool>(), "failed fixture agent did not exit");
+    await Reject(() => service.ExecuteAsync("configure", Configure(owner, "/dev/pika-other"), default), "dead enabled process lost its foreign ownership guard");
+    await Reject(() => service.ExecuteAsync("configure", Configure(other, "/dev/pika-other"), default), "dead enabled process was treated as disabled");
+    await Reject(() => service.ExecuteAsync("disconnect", Input(other), default), "dead enabled process could discard uncertain motor state");
+    Check(service.Snapshot()["device"]!.GetValue<string>() == "/dev/pika-fixture", "failed reconfiguration changed routing");
+    await service.ExecuteAsync("connect", Input(other), default);
+    await service.ExecuteAsync("disable", Input(other), default);
     await service.ExecuteAsync("disconnect", Input(other), default);
+    await service.ExecuteAsync("configure", Configure(other, "/dev/pika-reassigned"), default);
+    Check(service.Snapshot()["device"]!.GetValue<string>() == "/dev/pika-reassigned", "verified released session could not be reassigned");
 }
 else
 {

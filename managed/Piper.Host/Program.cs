@@ -87,6 +87,7 @@ app.Run(async context => {
         }
         if (route.StartsWith("/api/pika/",StringComparison.Ordinal)) {
             if (simulated) { await Error(409,"Pika hardware is disabled in simulation"); return; }
+            if (route=="/api/pika/configure" && JsonNode.Parse(controller.Snapshot())?["motion"]?["active"]?.GetValue<bool>()==true) { await Error(409,"Finish the active arm movement before changing Pika assignment"); return; }
             try { await response.WriteAsJsonAsync(await pika.ExecuteAsync(route[10..],json.RootElement,context.RequestAborted)); }
             catch (Exception e) when (e is InvalidOperationException or IOException or TimeoutException or ArgumentException) { await Error(409,e.Message); }
             return;

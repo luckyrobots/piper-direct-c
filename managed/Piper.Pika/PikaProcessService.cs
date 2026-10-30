@@ -7,13 +7,21 @@ namespace LuckyRobots.Piper.Pika;
 
 /// <summary>Reusable C# owner of a Linux serial agent, local or through WSL.
 /// The Windows process never opens a WCH COM port.</summary>
-public sealed class PikaProcessService(string device, string agentPath, string? distribution = null) : IAsyncDisposable
+public sealed class PikaProcessService : IAsyncDisposable
 {
+    private string device;
+    private readonly string agentPath;
+    private string? distribution;
+    public PikaProcessService(string device, string agentPath, string? distribution = null)
+    { this.device = device; this.agentPath = agentPath; this.distribution = distribution; }
     private readonly SemaphoreSlim operations = new(1);
     private readonly object stateGate = new();
     private readonly ConcurrentDictionary<string, TaskCompletionSource<JsonElement>> pending = new();
     private Process? process;
     private string? owner;
+    // Closing a failed process does not prove that its motor was disabled. Keep
+    // this identity until fresh disabled feedback is observed on the same port.
+    private string? unresolvedOwner;
     private JsonObject? state;
     private bool connected;
     private string error = "Not connected";
@@ -28,6 +36,10 @@ public sealed class PikaProcessService(string device, string agentPath, string? 
             double age = stateAt == 0 ? double.PositiveInfinity : Stopwatch.GetElapsedTime(stateAt).TotalSeconds;
             var snapshot = state?.DeepClone().AsObject() ?? new JsonObject();
             snapshot["configured"] = Configured;
+            snapshot["device"] = device;
+            snapshot["distribution"] = distribution;
+            snapshot["owner"] = owner;
+            snapshot["configuration_blocked"] = process is not null || owner is not null || unresolvedOwner is not null;
             snapshot["transport"] = Configured ? distribution is null ? "linux-serial" : "wsl-linux-serial" : OperatingSystem.IsWindows() ? "disabled" : "browser";
             snapshot["connected"] = connected;
             snapshot["fresh"] = connected && age < 2 && snapshot["fresh"]?.GetValue<bool>() == true;
@@ -38,19 +50,36 @@ public sealed class PikaProcessService(string device, string agentPath, string? 
 
     public async Task<JsonObject> ExecuteAsync(string action, JsonElement input, CancellationToken cancellation)
     {
-        if (!Configured) throw new InvalidOperationException("Pika Linux serial transport has not been configured");
         string requestedOwner = input.TryGetProperty("owner", out var value) ? value.GetString() ?? "" : "";
         if (!Guid.TryParse(requestedOwner, out _)) throw new ArgumentException("A dashboard Pika owner ID is required");
         await operations.WaitAsync(cancellation);
         try
         {
+            if (action == "configure")
+            {
+                // A dead process may have left enabled hardware behind. Never
+                // discard its owner/state as a side effect of changing routing.
+                if (process is not null || owner is not null || unresolvedOwner is not null)
+                    throw new InvalidOperationException((owner ?? unresolvedOwner) != requestedOwner
+                        ? "Another dashboard owns the Pika session. It must verify disabled feedback and disconnect before changing the serial device."
+                        : "Verify disabled Pika feedback and disconnect this session before changing its serial device. Reconnect the same device if its agent exited.");
+                string nextDevice = input.GetProperty("device").GetString() ?? "";
+                string? nextDistribution = input.TryGetProperty("distribution", out var distro) ? distro.GetString() : distribution;
+                ValidateConfiguration(nextDevice, nextDistribution);
+                lock (stateGate) { device = nextDevice; distribution = nextDistribution; state = null; stateAt = 0; error = "Configured; connect to read telemetry."; }
+                return new JsonObject { ["ok"] = true, ["message"] = "Pika serial assignment changed. No device was opened or motor command sent.", ["device"] = device, ["distribution"] = distribution };
+            }
+            if (!Configured) throw new InvalidOperationException("Pika Linux serial transport has not been configured");
             if (action == "connect")
             {
+                bool takeOver = input.TryGetProperty("take_over", out var takeover) && takeover.ValueKind == JsonValueKind.True;
+                if ((owner ?? unresolvedOwner) is { } previousOwner && previousOwner != requestedOwner && !takeOver)
+                    throw new InvalidOperationException("Pika is controlled by another dashboard tab");
                 if (process is not null && process.HasExited) await CloseAsync();
                 if (process is not null && owner == requestedOwner) return new JsonObject { ["ok"] = true, ["message"] = "Session already connected" };
                 if (process is not null)
                 {
-                    if (!input.TryGetProperty("take_over", out var takeover) || takeover.ValueKind != JsonValueKind.True)
+                    if (!takeOver)
                         throw new InvalidOperationException("Pika is controlled by another dashboard tab");
                     // EOF disables the old session before another agent opens the port.
                     // Ownership changes never replay a position target.
@@ -86,6 +115,8 @@ public sealed class PikaProcessService(string device, string agentPath, string? 
             if (action is not ("heartbeat" or "enable" or "disable" or "position" or "disconnect")) throw new ArgumentException("Unsupported Pika action");
             if (action == "disconnect" && process.HasExited)
             {
+                if (unresolvedOwner is not null || !KnownDisabled())
+                    throw new InvalidOperationException("The Pika agent exited without verified disabled feedback. Reconnect the same device, disable it and verify feedback before changing its assignment.");
                 await CloseAsync(); return new JsonObject { ["ok"] = true, ["message"] = "Disconnected" };
             }
             string id = Guid.NewGuid().ToString("N");
@@ -94,18 +125,36 @@ public sealed class PikaProcessService(string device, string agentPath, string? 
             if (action == "position") command["value"] = input.GetProperty("value").GetDouble();
             var completion = new TaskCompletionSource<JsonElement>(TaskCreationOptions.RunContinuationsAsynchronously);
             pending[id] = completion;
+            bool disconnected = false;
             try
             {
+                if (action is "enable" or "position") lock (stateGate) unresolvedOwner = requestedOwner;
                 await process.StandardInput.WriteLineAsync(command.ToJsonString().AsMemory(), cancellation);
                 await process.StandardInput.FlushAsync(cancellation);
                 var response = await completion.Task.WaitAsync(TimeSpan.FromSeconds(3), cancellation);
                 bool ok = response.GetProperty("ok").GetBoolean();
                 if (!ok) throw new InvalidOperationException(response.GetProperty("message").GetString());
+                disconnected = action == "disconnect";
                 return new JsonObject { ["ok"] = true, ["message"] = response.GetProperty("message").GetString() };
             }
-            finally { pending.TryRemove(id, out _); if (action == "disconnect") await CloseAsync(); }
+            finally { pending.TryRemove(id, out _); if (disconnected) await CloseAsync(); }
         }
         finally { operations.Release(); }
+    }
+
+    private bool KnownDisabled()
+    {
+        lock (stateGate) return stateAt != 0 && Stopwatch.GetElapsedTime(stateAt).TotalSeconds < 2 &&
+            state?["fresh"]?.GetValue<bool>() == true && state["enabled"]?.GetValue<bool>() == false;
+    }
+
+    public static void ValidateConfiguration(string device, string? distribution)
+    {
+        if (device.Length > 1024 || device.Any(char.IsControl) || (device.Length > 0 && !device.StartsWith("/dev/", StringComparison.Ordinal)))
+            throw new ArgumentException("Choose a Linux /dev/serial/by-id device path, or leave it blank.");
+        if (distribution is not null && (distribution.Length is 0 or > 128 || distribution.Any(char.IsControl)))
+            throw new ArgumentException("Invalid WSL distribution name.");
+        if (OperatingSystem.IsWindows() && distribution is null) throw new InvalidOperationException("Native Windows WCH serial is disabled. Choose a WSL distribution.");
     }
 
     private async Task<string> ResolveWslPath(string path, CancellationToken cancellation)
@@ -186,10 +235,15 @@ public sealed class PikaProcessService(string device, string agentPath, string? 
                 switch (data.GetProperty("type").GetString())
                 {
                     case "ready":
-                        lock (stateGate) { connected = true; error = ""; }
+                        lock (stateGate) { connected = true; error = ""; unresolvedOwner = owner; }
                         sessionReady.TrySetResult(); break;
                     case "state":
-                        lock (stateGate) { state = JsonNode.Parse(line)!.AsObject(); stateAt = Stopwatch.GetTimestamp(); }
+                        lock (stateGate)
+                        {
+                            state = JsonNode.Parse(line)!.AsObject(); stateAt = Stopwatch.GetTimestamp();
+                            if (state["fresh"]?.GetValue<bool>() == true)
+                                unresolvedOwner = state["enabled"]?.GetValue<bool>() == false ? null : owner;
+                        }
                         break;
                     case "ack":
                         if (pending.TryRemove(data.GetProperty("id").GetString() ?? "", out var completion)) completion.TrySetResult(data.Clone());

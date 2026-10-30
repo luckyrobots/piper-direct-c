@@ -17,7 +17,7 @@ using (var absent = System.Text.Json.JsonDocument.Parse("{}"))
 {
     Check(LuckyRobots.Piper.SessionOwnerGuard.Allows("", "/api/command", absent.RootElement), "External server behavior changed");
     Check(LuckyRobots.Piper.SessionOwnerGuard.Allows("plugin-session", "/api/query", other.RootElement), "Readback query unnecessarily blocked");
-    foreach (string route in new[] { "/api/command", "/api/stop", "/api/reconnect", "/api/pika/connect", "/api/shutdown" })
+    foreach (string route in new[] { "/api/command", "/api/stop", "/api/reconnect", "/api/pika/connect", "/api/pika/configure", "/api/shutdown" })
     {
         Check(LuckyRobots.Piper.SessionOwnerGuard.Allows("plugin-session", route, authorized.RootElement), "Owner rejected for " + route);
         Check(!LuckyRobots.Piper.SessionOwnerGuard.Allows("plugin-session", route, other.RootElement), "Another client acquired session for " + route);
@@ -41,6 +41,58 @@ var oldPreferences = System.Text.Json.JsonSerializer.Deserialize<Preferences>(""
 Check(oldPreferences.Speed == 37 && oldPreferences.Step == 2 && oldPreferences.Tolerance == .3, "Camera runtime migration changed motion preferences");
 Check(oldPreferences.Bench is { Device: "camera-by-path", Enabled: false, FrameRate: 30 }, "Camera runtime migration lost device settings");
 Check(!System.Text.Json.JsonSerializer.Serialize(oldPreferences).Contains("removed-python-path"), "Obsolete Python runtime setting retained");
+var sharedBench = new CameraPreferences("lumina-shared", true, "1920x1080", 30, "mjpeg");
+var benchBinding = new SimulationCameraPreferences("scene-a", "bench-scene-camera");
+var wristBinding = new SimulationCameraPreferences("scene-a", "wrist-a");
+var legacyProfiles = RobotProfileRouting.Normalize(new Preferences(Speed: 37, Step: 2, Tolerance: .3, RobotId: "scene-robot-a", Bench: sharedBench,
+    Gripper: new("wrist-camera-a"), DepthSerial: "depth-a", SimulationCameras: new() { ["bench"] = benchBinding, ["gripper"] = wristBinding }, Backend: new("CustomUbuntu", "/dev/pika-a")));
+Check(legacyProfiles.Robots is { Length: 1 } && legacyProfiles.ActiveRobotId == "piper-1", "Legacy workspace did not migrate to one explicit robot");
+Check(RobotProfileRouting.Active(legacyProfiles) is { PikaDevice: "/dev/pika-a", WslDistribution: "CustomUbuntu", CameraSlot: 0 }, "Legacy Pika identity/distro did not migrate");
+Check(legacyProfiles.Bench == sharedBench && legacyProfiles.SimulationCameras!["bench"] == benchBinding, "Migration changed the shared bench camera");
+var profileA = RobotProfileRouting.Active(legacyProfiles) with { CanDeviceId = "can-a" };
+var profileB = new RobotProfile("piper-2", "Piper 2", "can-b", 55, 4, .2, "scene-robot-b", new("wrist-camera-b"), new("depth-camera-b"), "depth-b",
+    new() { ["gripper"] = new("scene-a", "wrist-b") }, "/dev/pika-b", "CustomUbuntu");
+var twoProfiles = RobotProfileRouting.Normalize(legacyProfiles with { Robots = [profileA, profileB] });
+twoProfiles = RobotProfileRouting.Activate(twoProfiles with { Speed = 42, Step = 3, Tolerance = .25 }, "piper-2");
+Check(twoProfiles is { Speed: 55, Step: 4, Tolerance: .2, RobotId: "scene-robot-b", DepthSerial: "depth-b" } && twoProfiles.Gripper?.Device == "wrist-camera-b", "Robot switch leaked the previous robot's controls or camera");
+Check(twoProfiles.Bench == sharedBench && twoProfiles.SimulationCameras!["bench"] == benchBinding && twoProfiles.SimulationCameras["gripper"].CameraId == "wrist-b", "Switch lost shared bench or selected wrong wrist camera");
+twoProfiles = RobotProfileRouting.Activate(twoProfiles, "piper-1");
+Check(twoProfiles is { Speed: 42, Step: 3, Tolerance: .25, RobotId: "scene-robot-a", DepthSerial: "depth-a" }, "Return to robot did not restore its retained settings");
+Check(twoProfiles.SimulationCameras!["gripper"] == wristBinding && !RobotProfileRouting.Active(twoProfiles).SimulationCameras!.ContainsKey("bench"), "Shared bench was copied into robot settings");
+var reloadedBindings = RobotProfileRouting.RefreshCameraBindings(twoProfiles, "new-scene-session", ["bench-scene-camera", "wrist-a", "wrist-b"]);
+Check(reloadedBindings.SimulationCameras!["bench"].SceneId == "new-scene-session" && reloadedBindings.SimulationCameras["gripper"].SceneId == "new-scene-session" &&
+    reloadedBindings.Robots![1].SimulationCameras!["gripper"].SceneId == "new-scene-session", "Scene reload left an inactive robot or shared bench bound to the previous scene session");
+var roundTripProfiles = RobotProfileRouting.Normalize(System.Text.Json.JsonSerializer.Deserialize<Preferences>(System.Text.Json.JsonSerializer.Serialize(twoProfiles))!);
+Check(roundTripProfiles.Robots!.Length == 2 && roundTripProfiles.ActiveRobotId == "piper-1" && roundTripProfiles.Robots.Select(p => p.CameraSlot).Distinct().Count() == 2, "Profile persistence lost active identity or camera slots");
+var routedSnapshot = JsonNode.Parse("""{"selected":"can-a","devices":[{"id":"can-a","generation":1},{"id":"can-b","generation":2}]}""")!.AsObject();
+var inventory = RobotProfileRouting.CanInventoryIds([], twoProfiles, routedSnapshot);
+string inventoryKey = RobotProfileRouting.CanInventoryKey(routedSnapshot);
+routedSnapshot["devices"]![0]!["joints"] = new JsonArray(new JsonObject { ["actual_deg"] = 42 });
+Check(RobotProfileRouting.CanInventoryKey(routedSnapshot) == inventoryKey, "Joint telemetry unnecessarily invalidated dropdown inventory");
+routedSnapshot["devices"]![0]!["present"] = true;
+Check(RobotProfileRouting.CanInventoryKey(routedSnapshot) != inventoryKey, "USB hotplug did not invalidate constructor-only dropdown choices");
+var reorderedInventory = JsonNode.Parse("""{"devices":[{"id":"can-c","present":true},{"id":"can-b","present":true}]}""")!.AsObject();
+Check(RobotProfileRouting.CanInventoryIds(inventory, twoProfiles, reorderedInventory).SequenceEqual(new[] { "can-a", "can-b", "can-c" }), "Hotplug/reordering changed a delayed CAN dropdown index");
+Check(RobotProfileRouting.Device(twoProfiles, routedSnapshot)["id"]!.GetValue<string>() == "can-a", "Assigned adapter not resolved by stable identity");
+routedSnapshot["selected"] = "can-b";
+Reject(() => RobotProfileRouting.Device(twoProfiles, routedSnapshot), "External CAN selection allowed controlling the wrong robot");
+routedSnapshot["selected"] = "can-a"; routedSnapshot["devices"] = new JsonArray(new JsonObject { ["id"] = "can-b" });
+Reject(() => RobotProfileRouting.Device(twoProfiles, routedSnapshot), "Disconnected profile silently fell back to another adapter");
+Reject(() => RobotProfileRouting.Device(RobotProfileRouting.Normalize(new Preferences()), routedSnapshot), "Unassigned profile silently bound to a selected adapter");
+Reject(() => RobotProfileRouting.ValidateCanAssignment(twoProfiles, "piper-2", "can-a"), "Duplicate CAN assignment accepted");
+Reject(() => RobotProfileRouting.Normalize(twoProfiles with { Robots = [profileA, profileA] }), "Duplicate robot identities accepted");
+Reject(() => RobotProfileRouting.Normalize(twoProfiles with { Robots = Enumerable.Range(0, 9).Select(i => new RobotProfile("r" + i, "Robot " + i)).ToArray() }), "Unbounded camera/profile allocation accepted");
+foreach (string id in new[] { "profiles.can", "profiles.name", "profiles.pika", "profiles.wsl", "profiles.remove", "profiles.activate", "joint.6.target", "pika.target", "safety.accept", "camera.gripper.device" })
+{
+    string scoped = RobotProfileRouting.ScopeEvent("piper-1", id);
+    Check(RobotProfileRouting.EventForProfile("piper-1", scoped) == id, "Current robot event was lost: " + id);
+    Check(RobotProfileRouting.EventForProfile("piper-2", scoped) == "", "Late previous-robot event was applied to new robot: " + id);
+    Check(RobotProfileRouting.EventForProfile("piper-2", id) == "", "Unscoped robot event bypassed profile identity: " + id);
+}
+Check(RobotProfileRouting.EventForProfile("piper-2", RobotProfileRouting.ScopeEvent("piper-1", "camera.bench.toggle")) == "camera.bench.toggle", "Shared bench became profile-dependent");
+Check(RobotProfileRouting.EventForProfile("piper-2", "profiles.select.piper-1") == "profiles.select.piper-1", "Profile selection unavailable after switching");
+var reusedSlot = RobotProfileRouting.Normalize(twoProfiles with { Robots = [twoProfiles.Robots![0], new("replacement", "Replacement")] });
+Check(reusedSlot.Robots!.All(p => p.CameraSlot is >= 0 and < RobotProfileRouting.MaximumProfiles) && reusedSlot.Robots!.Select(p => p.CameraSlot).Distinct().Count() == 2, "Deleted profile's camera slot was not bounded/reusable");
 var lensProfile = JsonNode.Parse("""{"schema":1,"device":"camera-a","width":640,"height":480,"model":"kannala-brandt","fx":250,"fy":251,"cx":317,"cy":238,"coefficients":[0.01,-0.001,0,0]}""")!.AsObject();
 Check(CameraProfile.Matches(lensProfile, "camera-a", 640, 480, false), "Valid fisheye profile rejected");
 Check(!CameraProfile.Matches(lensProfile, "camera-b", 640, 480, false), "Lens calibration leaked to another camera");

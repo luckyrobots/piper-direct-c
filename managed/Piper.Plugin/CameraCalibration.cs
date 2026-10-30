@@ -12,11 +12,17 @@ public sealed partial class PipersPlugin
     private long calibrationLastSequence;
     private Task? calibrationWorker;
 
-    private string CalibrationDirectory => Path.Combine(engine.Start.SettingsDirectory, "camera-calibration");
+    private string CalibrationDirectory => Path.Combine(engine.Start.SettingsDirectory, "camera-calibration", ActiveProfile.Id);
 
     private async Task LoadCameraCalibration(CancellationToken cancellation)
     {
         string path = Path.Combine(CalibrationDirectory, "gripper.json");
+        string legacy = Path.Combine(engine.Start.SettingsDirectory, "camera-calibration", "gripper.json");
+        if (ActiveProfile.Id == "piper-1" && !File.Exists(path) && File.Exists(legacy))
+        {
+            Directory.CreateDirectory(CalibrationDirectory);
+            File.Copy(legacy, path);
+        }
         if (!File.Exists(path)) return;
         try
         {

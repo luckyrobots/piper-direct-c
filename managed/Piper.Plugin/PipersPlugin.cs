@@ -13,7 +13,8 @@ namespace LuckyRobots.Piper.Plugin;
 public sealed record Preferences(double Speed = 10, double Step = 1, double Tolerance = 0.5, string RobotId = "",
     CameraPreferences? Bench = null, CameraPreferences? Gripper = null, CameraPreferences? Depth = null,
     string DepthSerial = "",
-    Dictionary<string, SimulationCameraPreferences>? SimulationCameras = null, BackendSettings? Backend = null);
+    Dictionary<string, SimulationCameraPreferences>? SimulationCameras = null, BackendSettings? Backend = null,
+    RobotProfile[]? Robots = null, string ActiveRobotId = "");
 
 public sealed partial class PipersPlugin : ILuckyPlugin
 {
@@ -57,11 +58,19 @@ public sealed partial class PipersPlugin : ILuckyPlugin
             try { preferences = JsonSerializer.Deserialize<Preferences>(await File.ReadAllTextAsync(file, cancellation), PluginProtocol.Json) ?? new(); }
             catch (JsonException) { message = "Invalid saved preferences; defaults restored."; }
         }
-        preferences = preferences with { Speed = Math.Clamp(preferences.Speed, 0, 100), Step = Math.Clamp(preferences.Step, 0.1, 5), Tolerance = Math.Clamp(preferences.Tolerance, 0.05, 1) };
+        legacyImportPending = preferences.Robots is not { Length: > 0 };
+        preferences = RobotProfileRouting.Normalize(preferences);
+        knownCanIds = preferences.Robots!.Select(p => p.CanDeviceId).Where(id => id.Length > 0).Distinct(StringComparer.Ordinal).ToArray();
         client = new(channel);
         await LoadCameraCalibration(cancellation);
         try { await DiscoverSimulationCameras(cancellation); }
         catch (PluginRequestException error) { message = "Simulation camera discovery: " + error.Message; }
+        try
+        {
+            scene = JsonNode.Parse((await engine.RequestAsync("scene.robots", cancellation: cancellation)).GetRawText())!.AsObject();
+            Materialize(scene);
+        }
+        catch (PluginRequestException error) { message = "Scene robot discovery: " + error.Message; }
         await Render(cancellation);
         worker = Watch(shutdown.Token);
         foreach (string camera in new[] { "bench", "gripper", "depth" }) await RestartCamera(camera);
@@ -72,9 +81,8 @@ public sealed partial class PipersPlugin : ILuckyPlugin
         var snapshot = state ?? throw new InvalidOperationException("Waiting for the controller server.");
         if (Stopwatch.GetElapsedTime(Interlocked.Read(ref stateAt)).TotalMilliseconds > 500)
             throw new InvalidOperationException("Robot feedback is stale.");
-        string selected = snapshot["selected"]?.GetValue<string>() ?? "";
-        return snapshot["devices"]!.AsArray().OfType<JsonObject>().SingleOrDefault(d => d["id"]?.GetValue<string>() == selected)
-            ?? throw new InvalidOperationException("No selected robot. Connect the USB-CAN adapter.");
+        if (switchingProfile) throw new InvalidOperationException("Changing robot assignment; wait for measured feedback.");
+        return RobotProfileRouting.Device(preferences, snapshot);
     }
 
     private async Task Watch(CancellationToken cancellation)
@@ -92,6 +100,7 @@ public sealed partial class PipersPlugin : ILuckyPlugin
                     string nextToken = next["token"]!.GetValue<string>();
                     if (token != nextToken) { teleoperating = false; link = null; linkCommandsEnabled = false; recoveryInProgress = false; lease = 0; approved = false; pikaOwned = false; token = nextToken; }
                     state = next;
+                    await ObserveProfileRouting(next, cancellation);
                     if (message.StartsWith("Connecting to", StringComparison.Ordinal) || message.StartsWith("Controller unavailable", StringComparison.Ordinal))
                         message = "Connected · monitoring live robot feedback";
                     Interlocked.Exchange(ref stateAt, Stopwatch.GetTimestamp());
@@ -210,7 +219,13 @@ public sealed partial class PipersPlugin : ILuckyPlugin
         await commands.WaitAsync(cancellation);
         try
         {
-            string id = input.WidgetId;
+            string id = UnscopeEvent(input.WidgetId);
+            if (id.Length == 0) return; // Late gesture from a previously selected robot.
+            if (id.StartsWith("profiles.", StringComparison.Ordinal))
+            {
+                await ProfileEvent(id[9..], input.Value, cancellation);
+                await Render(cancellation); await Update(cancellation); return;
+            }
             if (teleoperating && id is "stop" or "disable" or "recovery.run" or "robots.select" or "link")
             {
                 try { await PauseTeleoperation(cancellation); }
@@ -220,18 +235,22 @@ public sealed partial class PipersPlugin : ILuckyPlugin
                 await BackendEvent(id[8..], input.Value.ValueKind == JsonValueKind.String ? input.Value.GetString() ?? "" : "", cancellation);
             else if (id == "stop")
             {
+                string stopDevice = ActiveProfile.CanDeviceId;
+                if (stopDevice.Length == 0) throw new InvalidOperationException("Assign this robot's CAN adapter before sending its stop.");
                 link = null;
-                await Call("/api/stop", new JsonObject { ["owner"] = owner }, cancellation);
+                // Stop keeps its best-effort behavior when feedback is stale;
+                // the backend still rejects a changed selected adapter.
+                await Call("/api/stop", new JsonObject { ["owner"] = owner, ["device_id"] = stopDevice }, cancellation);
                 lease = 0;
                 if (pikaOwned) await Call("/api/pika/disable", new JsonObject { ["owner"] = owner }, cancellation);
             }
             else if (id == "enable")
             {
-                if (!approved) { await engine.PatchAsync(Panel, new Dictionary<string, JsonObject> { ["safety"] = new() { ["visible"] = true } }, cancellation); return; }
+                if (!approved) { await Patch(new Dictionary<string, JsonObject> { ["safety"] = new() { ["visible"] = true } }, cancellation); return; }
                 await Enable(cancellation);
             }
             else if (id == "safety.accept") { approved = true; await Enable(cancellation); await Render(cancellation); }
-            else if (id == "safety.cancel") await engine.PatchAsync(Panel, new Dictionary<string, JsonObject> { ["safety"] = new() { ["visible"] = false } }, cancellation);
+            else if (id == "safety.cancel") await Patch(new Dictionary<string, JsonObject> { ["safety"] = new() { ["visible"] = false } }, cancellation);
             else if (id == "disable")
             {
                 link = null;
@@ -255,7 +274,7 @@ public sealed partial class PipersPlugin : ILuckyPlugin
                 if (parts[2] == "settings")
                 {
                     if (!cameraSettingsOpen.Add(camera)) cameraSettingsOpen.Remove(camera);
-                    await engine.PatchAsync(Panel, new Dictionary<string, JsonObject> { ["camera." + camera + ".settings.form"] = new() { ["visible"] = cameraSettingsOpen.Contains(camera) } }, cancellation);
+                    await Patch(new Dictionary<string, JsonObject> { ["camera." + camera + ".settings.form"] = new() { ["visible"] = cameraSettingsOpen.Contains(camera) } }, cancellation);
                 }
                 else if (parts[2].StartsWith("sim", StringComparison.Ordinal))
                 {
@@ -346,7 +365,12 @@ public sealed partial class PipersPlugin : ILuckyPlugin
                 await Command(action == "target" ? "joint" : action == "zero" ? "zero" : "jog",
                     new() { ["joint"] = joint, ["degrees"] = action == "target" ? input.Value.GetDouble() : action == "plus" ? preferences.Step : action == "minus" ? -preferences.Step : 0 }, cancellation);
             }
-            else if (id == "pika.target") await Call("/api/pika/position", new JsonObject { ["owner"] = owner, ["value"] = PikaProtocol.Angle(input.Value.GetDouble()) }, cancellation);
+            else if (id == "pika.target")
+            {
+                Device();
+                if (!PikaMatchesProfile()) throw new InvalidOperationException("The Pika serial assignment does not match this robot.");
+                await Call("/api/pika/position", new JsonObject { ["owner"] = owner, ["value"] = PikaProtocol.Angle(input.Value.GetDouble()) }, cancellation);
+            }
             await Update(cancellation);
         }
         catch (Exception error) when (error is not OperationCanceledException) { message = error.Message; await Update(cancellation); }
@@ -356,6 +380,7 @@ public sealed partial class PipersPlugin : ILuckyPlugin
     private async Task Enable(CancellationToken cancellation)
     {
         var device = Device();
+        await ConfigureProfilePika(cancellation);
         if (device["recovery_required"]?.GetValue<bool>() == true)
             await Command(device["reset_pending"]?.GetValue<bool>() == true ? "verify-reset" : "verify-current", null, cancellation);
         if (!device["joints"]!.AsArray().All(j => j?["enabled"]?.GetValue<bool>() == true))
@@ -376,7 +401,7 @@ public sealed partial class PipersPlugin : ILuckyPlugin
                 await Task.Delay(25, cancellation);
             }
         }
-        if (state?["pika"]?["configured"]?.GetValue<bool>() == true)
+        if (PikaMatchesProfile() && state?["pika"]?["configured"]?.GetValue<bool>() == true)
         {
             await Call("/api/pika/connect", new JsonObject { ["owner"] = owner, ["take_over"] = true }, cancellation);
             pikaOwned = true;
@@ -389,11 +414,15 @@ public sealed partial class PipersPlugin : ILuckyPlugin
             }
             await Call("/api/pika/enable", new JsonObject { ["owner"] = owner, ["clear"] = true }, cancellation);
         }
-        message = "Controls enabled · robot and Pika use the same controller session";
+        message = PikaMatchesProfile() ? "Controls enabled · robot and assigned Pika use the same controller session" : "Robot controls enabled · no Pika assigned to this robot";
         linkCommandsEnabled = link is not null;
     }
 
-    private Task Save(CancellationToken cancellation) => File.WriteAllTextAsync(Path.Combine(engine.Start.SettingsDirectory, "preferences.json"), JsonSerializer.Serialize(preferences, PluginProtocol.Json), cancellation);
+    private Task Save(CancellationToken cancellation)
+    {
+        preferences = RobotProfileRouting.Capture(preferences);
+        return File.WriteAllTextAsync(Path.Combine(engine.Start.SettingsDirectory, "preferences.json"), JsonSerializer.Serialize(preferences, PluginProtocol.Json), cancellation);
+    }
 
     private Task Render(CancellationToken cancellation)
     {
@@ -410,7 +439,7 @@ public sealed partial class PipersPlugin : ILuckyPlugin
                 Widget.Button("motion.hold", "Stop movement") with { Width = 130, Enabled = false }),
             Widget.Row("teleoperate", new[] { Widget.Button("teleoperate.toggle", "Start Teleoperate") with { Width = 170 } }.Concat(
                 Enumerable.Range(1, 6).Select(i => Widget.Button("teleoperate.joint." + i, "J" + i) with { Width = 42, Enabled = false })).ToArray()),
-            Widget.Row("cameras", Camera("depth", "Pika D405"), Camera("gripper", "Pika gripper camera"), Camera("bench", "Bench · Lumina")),
+            Widget.Row("cameras", Camera("depth", "Pika D405"), Camera("gripper", "Pika gripper camera")),
             Widget.Row("pika", Widget.Label("pika.value", "Pika · waiting for feedback") with { Width = 190 }, Widget.Slider("pika.target", 0, 0, 90, .1) with { Enabled = false }),
             Widget.Row("preferences", Widget.Label("speed.label", "Speed %"), Widget.Slider("speed", preferences.Speed, 0, 100, 1), Widget.Label("step.label", "Jog °"), Widget.Slider("step", preferences.Step, .1, 5, .1), Widget.Label("tolerance.label", "Tolerance °"), Widget.Slider("tolerance", preferences.Tolerance, .05, 1, .05)),
             Widget.Label("speed.actual", "Waiting for reported speed limits") with { Height = 34 },
@@ -421,7 +450,7 @@ public sealed partial class PipersPlugin : ILuckyPlugin
         widgets.Add(Widget.Label("incident", ""));
         widgets.Add(Widget.Label("recovery.next", ""));
         widgets.Add(Widget.Row("recovery", Widget.Button("recovery.run", "Clear & support arm — recover")) with { Visible = false });
-        return engine.PublishViewAsync(Panel, Widget.Column("root", widgets.ToArray()), cancellation);
+        return engine.PublishViewAsync(Panel, Widget.Row("workspace", ScopeRobotWidget(RobotSidebar()), ScopeRobotWidget(Widget.Column("controls", widgets.ToArray()))), cancellation);
     }
 
     private CameraPreferences CameraSettings(string id) => id switch
@@ -437,14 +466,14 @@ public sealed partial class PipersPlugin : ILuckyPlugin
         if (cameras.Remove(id, out var previous)) await previous.DisposeAsync();
         var camera = new CameraCapture(engine, id, CameraSettings(id), (key, value) => cameraStatus[key] = value, preferences.DepthSerial,
             (key, width, height) => cameraDimensions[key] = (width, height),
-            (key, profile) => { Materialize(profile); cameraCalibration[key] = profile; });
+            (key, profile) => { Materialize(profile); cameraCalibration[key] = profile; }, CameraImageId(id));
         cameras[id] = camera; camera.Start();
     }
 
     private Widget Camera(string id, string title) => Widget.Column("camera." + id,
         Widget.Row("camera." + id + ".header", Widget.Label("camera." + id + ".title", title), Widget.Button("camera." + id + ".settings", "⚙") with { Hint = "Choose camera, start/stop and capture settings" }),
         Widget.Label("camera." + id + ".real.title", id == "depth" ? "REAL · depth 7–50 cm · white = near" : "REAL"),
-        new Widget("image", "camera." + id + ".image") { ImageId = id, Height = 150 },
+        new Widget("image", "camera." + id + ".image") { ImageId = CameraImageId(id), Visible = CameraFrameReady(id), Height = 150 },
         Widget.Label("camera." + id + ".sim.title", id == "depth" ? "SIM · ideal metric depth · same 7–50 cm scale" : id == "gripper" ? "SIM · fisheye lens" : "SIM · camera viewpoint"),
         new Widget("scene-camera", "camera." + id + ".sim") { Height = 150 },
         Widget.Label("camera." + id + ".sim.status", "Camera alignment not calibrated") with { Height = 34 },
@@ -475,6 +504,7 @@ public sealed partial class PipersPlugin : ILuckyPlugin
         patches["backend.setup"] = new() { ["visible"] = backendSetupOpen || state is null };
         patches["backend.status"] = new() { ["text"] = backendStatus };
         patches["backend.prerequisites"] = new() { ["text"] = setupStatus };
+        AddProfilePatches(patches);
         JsonObject? device = null;
         try { device = Device(); } catch (InvalidOperationException) { }
         bool movable = approved && state?["motion"]?["active"]?.GetValue<bool>() != true && device?["fresh"]?.GetValue<bool>() == true && device["recovery_required"]?.GetValue<bool>() != true && string.IsNullOrEmpty(device["blocker"]?.GetValue<string>());
@@ -502,11 +532,11 @@ public sealed partial class PipersPlugin : ILuckyPlugin
             foreach (string action in new[] { "minus", "plus", "zero" }) patches[$"joint.{i}.{action}"] = new() { ["enabled"] = available };
         }
         patches["zero.all"] = new() { ["enabled"] = movable && joints?.All(j => j?["enabled"]?.GetValue<bool>() == true && j["limits_fresh"]?.GetValue<bool>() == true) == true };
-        var pika = state?["pika"];
+        var pika = PikaMatchesProfile() ? state?["pika"] : null;
         double? pikaAngle = pika?["telemetry"]?["motor"]?["Position"]?.GetValue<double>();
         double? opening = pikaAngle.HasValue ? PikaProtocol.Width(pikaAngle.Value) : null;
-        patches["pika.value"] = new() { ["text"] = $"Pika · {opening?.ToString("F2") ?? "—"} mm" };
-        patches["pika.target"] = new() { ["value"] = opening ?? 0, ["enabled"] = pikaOwned && pika?["fresh"]?.GetValue<bool>() == true && pika["enabled"]?.GetValue<bool>() == true && pika["pending"]?.GetValue<bool>() != true };
+        patches["pika.value"] = new() { ["text"] = string.IsNullOrEmpty(ActiveProfile.PikaDevice) ? "Pika · unassigned" : $"Pika · {opening?.ToString("F2") ?? "—"} mm" };
+        patches["pika.target"] = new() { ["value"] = opening ?? 0, ["enabled"] = device is not null && !switchingProfile && pikaOwned && pika?["fresh"]?.GetValue<bool>() == true && pika["enabled"]?.GetValue<bool>() == true && pika["pending"]?.GetValue<bool>() != true };
         bool limitsFresh = joints?.All(j => j?["limits_fresh"]?.GetValue<bool>() == true && j["max_speed_rad_s"]?.GetValue<double>() > 0) == true;
         double speed = limitsFresh ? joints!.Min(j => j!["max_speed_rad_s"]!.GetValue<double>()) * 180 / Math.PI : 0;
         patches["speed.actual"] = new() { ["text"] = limitsFresh ? $"{preferences.Speed:F0}% · {speed * preferences.Speed / 100:F2}°/s target ceiling · measured per-joint limit · jog {preferences.Step:F1}° · tolerance {preferences.Tolerance:F1}°" : "Waiting for fresh robot speed limits" };
@@ -517,10 +547,14 @@ public sealed partial class PipersPlugin : ILuckyPlugin
         patches["recovery"] = new() { ["visible"] = needsRecovery };
         patches["recovery.run"] = new() { ["enabled"] = recovery?.Action is not null && !recoveryInProgress,
             ["text"] = recoveryInProgress ? "Verifying recovery…" : recovery?.Action == "reset" ? "Clear & support arm — recover" : "Verify current state (no movement)" };
-        foreach (var camera in cameraStatus) patches["camera." + camera.Key + ".info"] = new() { ["text"] = camera.Value };
+        foreach (string id in new[] { "bench", "gripper", "depth" })
+        {
+            patches["camera." + id + ".image"] = new() { ["visible"] = CameraFrameReady(id) };
+            patches["camera." + id + ".info"] = new() { ["text"] = cameraStatus.GetValueOrDefault(id, "Waiting for a fresh frame…") };
+        }
         patches["camera.gripper.calibration.status"] = new() { ["text"] = calibrationStatus };
         AddCameraComparisonPatches(patches);
-        await engine.PatchAsync(Panel, patches, cancellation);
+        await Patch(patches, cancellation);
     }
 
     public async ValueTask DisposeAsync()
@@ -529,6 +563,13 @@ public sealed partial class PipersPlugin : ILuckyPlugin
         {
             try { await HoldFollowing(releaseTimeout.Token); }
             catch (Exception error) { Trace.TraceWarning("Following shutdown: {0}", error.Message); }
+        }
+        // Keep telemetry/heartbeats running until this session's Pika disable is
+        // verified. Closing an external backend must not strand its old owner.
+        using (var pikaReleaseTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(3)))
+        {
+            try { await ReleaseOwnPika(pikaReleaseTimeout.Token); }
+            catch (Exception error) { Trace.TraceWarning("Pika shutdown release: {0}", error.Message); }
         }
         await shutdown.CancelAsync();
         if (calibrationWorker is not null) { try { await calibrationWorker; } catch (OperationCanceledException) { } }
