@@ -92,7 +92,7 @@ public sealed partial class PipersPlugin
         : teaching.ReturnRequired ? "Recording ended. Use Back to robot controls for the supported return to CAN control."
         : "Single-click the physical teach button for hand guiding (solid green). Linking reads the arm's measured pose.";
 
-    private Widget TeachingControls() => alignmentOpen ? Widget.Column("teaching",
+    private Widget TeachingControls() => FocusedRobotView ? Widget.Column("teaching",
         Widget.Label("teaching.label", teaching.Label) with { Height = 28 },
         Widget.Label("teaching.next", AlignmentTeachingPrompt) with { Height = 38, Hint = teaching.NextStep }) : Widget.Column("teaching",
         Widget.Row("teaching.header", Widget.Label("teaching.label", teaching.Label) with { Height = 34 },
@@ -124,7 +124,7 @@ public sealed partial class PipersPlugin
     private void AddTeachingPatches(Dictionary<string, JsonObject> patches, JsonObject? device)
     {
         patches["teaching.label"] = new() { ["text"] = teaching.Label };
-        patches["teaching.next"] = new() { ["text"] = alignmentOpen ? AlignmentTeachingPrompt : teaching.NextStep, ["visible"] = alignmentOpen || teaching.BlocksTargets || teachingHelpOpen };
+        patches["teaching.next"] = new() { ["text"] = FocusedRobotView ? AlignmentTeachingPrompt : teaching.NextStep, ["visible"] = FocusedRobotView || teaching.BlocksTargets || teachingHelpOpen };
         string zero = device?["joints"] is JsonArray joints ? string.Join(" · ", joints.Select((j, i) => $"J{i + 1} {j?["actual_deg"]?.GetValue<double>().ToString("F2") ?? "—"}°")) : "Waiting for six fresh joint measurements";
         patches["teaching.zero"] = new() { ["visible"] = teaching.ReturnRequired, ["text"] = zero + " · return guard ±1° (not encoder calibration)" };
         patches["teaching.return"] = new() { ["visible"] = teaching.ReturnRequired, ["enabled"] = teaching.CanReturn };

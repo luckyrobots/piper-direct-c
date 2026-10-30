@@ -17,9 +17,10 @@ public sealed partial class PipersPlugin
     private TeachingResetSnapshot ResetSnapshot(string? expectedToken = null)
     {
         if (expectedToken is not null && token != expectedToken) throw new InvalidOperationException("The backend session changed; confirm support again before any new reset-assisted action.");
-        var snapshot = state ?? throw new InvalidOperationException("Controller state is unavailable.");
+        var receipt = telemetry.Latest ?? throw new InvalidOperationException("Controller state is unavailable.");
+        var snapshot = receipt.State;
         var device = RobotProfileRouting.Device(preferences, snapshot);
-        if (Stopwatch.GetElapsedTime(Interlocked.Read(ref stateAt)).TotalMilliseconds > 500)
+        if (!receipt.HasFreshDevice(device, Stopwatch.GetTimestamp()) || receipt.BackendToken != token)
         {
             // Keep identity available for a generation-guarded best-effort STOP,
             // but never treat an old transport snapshot as fresh motor evidence.

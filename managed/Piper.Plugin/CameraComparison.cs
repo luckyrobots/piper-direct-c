@@ -45,7 +45,7 @@ public sealed partial class PipersPlugin
             else if (simulationCameras is not null && index < simulationCameras["cameras"]!.AsArray().Count)
                 bindings[camera] = new(simulationCameras["sceneId"]!.GetValue<string>(), simulationCameras["cameras"]![index]!["entityId"]!.GetValue<string>());
         }
-        else if (action == "simoverlay" && camera != "depth" && bindings.TryGetValue(camera, out var saved))
+        else if (action == "simoverlay" && !D405View.MetricDepth(camera, CameraSettings(camera)) && bindings.TryGetValue(camera, out var saved))
             bindings[camera] = saved with { Overlay = !saved.Overlay };
         preferences = preferences with { SimulationCameras = bindings };
         await Save(cancellation);
@@ -58,25 +58,31 @@ public sealed partial class PipersPlugin
             var saved = preferences.SimulationCameras?.GetValueOrDefault(id);
             var size = cameraDimensions.GetValueOrDefault(id, (Width: 640, Height: 480));
             cameraCalibration.TryGetValue(id, out var calibration);
+            bool metricDepth = D405View.MetricDepth(id, CameraSettings(id));
+            string streamKind = metricDepth ? "depth" : "color";
             string identity = id == "depth" ? preferences.DepthSerial : CameraSettings(id).Device;
             if (id == "depth" && string.IsNullOrEmpty(identity)) identity = calibration?["device"]?.GetValue<string>() ?? "";
-            bool matches = calibration is not null && CameraProfile.Matches(calibration, identity, size.Width, size.Height, id == "depth");
+            bool matches = calibration is not null && (id == "depth"
+                ? CameraProfile.MatchesD405(calibration, identity, size.Width, size.Height, streamKind)
+                : CameraProfile.Matches(calibration, identity, size.Width, size.Height, false));
             patches[$"camera.{id}.sim"] = new()
             {
                 ["sceneId"] = saved?.SceneId ?? "", ["cameraId"] = saved?.CameraId ?? "",
-                ["overlayImageId"] = saved?.Overlay == true && id != "depth" && CameraFrameReady(id) ? CameraImageId(id) : "",
+                ["overlayImageId"] = saved?.Overlay == true && !metricDepth && CameraFrameReady(id) ? CameraImageId(id) : "",
                 ["captureWidth"] = size.Width, ["captureHeight"] = size.Height, ["blend"] = .5,
-                ["streamKind"] = id == "depth" ? "depth" : "color", ["lensModel"] = id == "gripper" ? "fisheye" : "pinhole",
+                ["streamKind"] = streamKind, ["lensModel"] = id == "gripper" ? "fisheye" : "pinhole",
                 ["intrinsics"] = matches ? calibration!.DeepClone() : null
             };
             patches[$"camera.{id}.sim.status"] = new() { ["text"] = saved is null
                 ? "Choose a counterpart using ⚙ → Find simulation cameras"
                 : teleoperating ? "SIM leader pose · not time synchronized with measured camera"
                 : matches ? "Lens profile active · mount alignment / exposure sync unverified"
+                : id == "depth" && !metricDepth && calibration?["model"]?.GetValue<string>() == "realsense-distorted"
+                    ? "Real color uses factory distortion · sim lens/mount alignment unverified"
                 : calibration is not null ? "Profile mismatch · check camera device and resolution"
                 : id == "gripper" ? "Estimated 150° fisheye · use ⚙ to calibrate lens and mount"
                 : "Estimated pose/lens · calibration not verified · preview clocks not synchronized" };
-            patches[$"camera.{id}.simoverlay"] = new() { ["text"] = saved?.Overlay == true ? "Show simulation only" : "Real / simulation overlay" };
+            patches[$"camera.{id}.simoverlay"] = new() { ["text"] = saved?.Overlay == true ? "Show simulation only" : "Real / simulation overlay", ["enabled"] = !metricDepth };
         }
     }
 }

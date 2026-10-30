@@ -34,12 +34,13 @@ public sealed partial class PipersPlugin
     private async Task HoldFollowing(CancellationToken cancellation)
     {
         long request = followRequest;
+        string expectedToken = linkBackendToken;
         followRequest = 0; followInput.End();
         if (request == 0 || link is not { } linked) return;
         if (state?["motion"]?["request_id"]?.GetValue<long>() == request && state["motion"]?["active"]?.GetValue<bool>() == false) return;
         await Call("/api/command", new JsonObject {
             ["action"] = "follow-end", ["request_id"] = request, ["owner"] = owner,
-            ["device_id"] = linked.DeviceId, ["generation"] = linked.Generation }, cancellation);
+            ["device_id"] = linked.DeviceId, ["generation"] = linked.Generation }, cancellation, expectedToken);
     }
 
     private async Task PauseTeleoperation(CancellationToken cancellation)
@@ -56,6 +57,9 @@ public sealed partial class PipersPlugin
 
     private async Task FollowViewport(JsonObject input, CancellationToken cancellation)
     {
+        long permissionEpoch = Interlocked.Read(ref targetPermissionEpoch);
+        long sceneEpoch = Interlocked.Read(ref scenePermissionEpoch);
+        string expectedToken = linkBackendToken;
         try
         {
             if (!teleoperating || !approved || !linkCommandsEnabled || link is not { } linked)
@@ -72,7 +76,9 @@ public sealed partial class PipersPlugin
                 message = "Movement stopped · holding measured pose";
                 return;
             }
-            double[] target = linked.Target(input, Device());
+            if (permissionEpoch != Interlocked.Read(ref targetPermissionEpoch) || sceneEpoch != Interlocked.Read(ref scenePermissionEpoch) || !ReferenceEquals(link, linked))
+                throw new InvalidOperationException("The previous gesture was discarded after a connection or scene change; start a new drag.");
+            double[] target = linked.Target(input, Device(linked.DeviceId, linked.Generation, expectedToken));
             if (phase == "begin")
             {
                 followJoint = input["editedJoint"]!.GetValue<string>();
@@ -80,11 +86,13 @@ public sealed partial class PipersPlugin
                 followRequest = lease;
             }
             if (followRequest == 0) throw new InvalidOperationException("Following expired. Start a new drag.");
+            if (permissionEpoch != Interlocked.Read(ref targetPermissionEpoch) || sceneEpoch != Interlocked.Read(ref scenePermissionEpoch) || !ReferenceEquals(link, linked))
+                throw new InvalidOperationException("The previous gesture is no longer authorized; start a new drag.");
             await Call("/api/command", new JsonObject {
                 ["action"] = phase == "commit" ? "follow-commit" : "follow-update", ["request_id"] = followRequest, ["owner"] = owner,
                 ["device_id"] = linked.DeviceId, ["generation"] = linked.Generation,
                 ["sequence"] = input["sequence"]!.DeepClone(),
-                ["degrees"] = JsonSerializer.SerializeToNode(target) }, cancellation);
+                ["degrees"] = JsonSerializer.SerializeToNode(target) }, cancellation, expectedToken);
             if (phase == "commit") message = "Movement in progress to released target";
         }
         catch

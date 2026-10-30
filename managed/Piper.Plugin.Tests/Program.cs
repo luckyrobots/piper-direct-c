@@ -100,6 +100,41 @@ Check(!CameraProfile.Matches(lensProfile, "camera-a", 1280, 720, false), "Calibr
 Check(!CameraProfile.Matches(lensProfile, "camera-a", 640, 480, true), "Fisheye profile accepted for depth");
 lensProfile["fx"] = -1;
 Check(!CameraProfile.Matches(lensProfile, "camera-a", 640, 480, false), "Invalid focal length accepted");
+var legacyD405 = System.Text.Json.JsonSerializer.Deserialize<CameraPreferences>("""{"Device":"d405","Enabled":false}""")!;
+Check(D405View.Mode(legacyD405) == "color" && !legacyD405.Enabled, "Legacy camera preferences did not migrate to color without changing enable state");
+Check(D405View.Mode(null) == "color" && D405View.MetricDepth("depth", new("d405", ViewMode: "depth")) && !D405View.MetricDepth("bench", new("bench", ViewMode: "depth")), "D405 stream kind leaked into another camera");
+var selectedDepth = D405View.Select(legacyD405, 1);
+Check(selectedDepth is { ViewMode: "depth", Enabled: false, Device: "d405" } && D405View.Select(selectedDepth, 0).ViewMode == "color", "View selection changed camera identity/power preference");
+bool invalidD405Index = false;
+try { D405View.Select(legacyD405, 2); } catch (ArgumentOutOfRangeException) { invalidD405Index = true; }
+Check(invalidD405Index, "Invalid D405 dropdown index silently selected a stream");
+var viewProfiles = RobotProfileRouting.Normalize(new Preferences(Depth: new("a", ViewMode: "depth")));
+viewProfiles = viewProfiles with { Robots = [viewProfiles.Robots![0], new("b", "B", Depth: new("b", ViewMode: "color"))] };
+viewProfiles = RobotProfileRouting.Activate(viewProfiles, "b");
+Check(viewProfiles.Depth?.ViewMode == "color", "Robot switch reused another D405 stream mode");
+viewProfiles = RobotProfileRouting.Activate(viewProfiles, "piper-1");
+var savedViews = RobotProfileRouting.Normalize(System.Text.Json.JsonSerializer.Deserialize<Preferences>(System.Text.Json.JsonSerializer.Serialize(viewProfiles))!);
+Check(savedViews.Depth?.ViewMode == "depth" && savedViews.Robots!.Single(p => p.Id == "b").Depth?.ViewMode == "color", "Per-robot D405 view did not survive save/reload");
+var pinhole = JsonNode.Parse("""{"schema":1,"device":"d405","width":640,"height":480,"model":"pinhole","streamKind":"depth","depthScale":0.0001,"fx":386,"fy":386,"cx":315,"cy":234,"coefficients":[0,0,0,0,0]}""")!.AsObject();
+Check(CameraProfile.MatchesD405(pinhole, "d405", 640, 480, "depth"), "Rectified D405 depth profile rejected");
+Check(!CameraProfile.MatchesD405(pinhole, "d405", 640, 480, "color"), "Same-serial/resolution depth intrinsics were accepted for color");
+pinhole["streamKind"] = "color"; pinhole["depthScale"] = null;
+Check(CameraProfile.MatchesD405(pinhole, "d405", 640, 480, "color"), "Rectified D405 color profile rejected");
+Check(!CameraProfile.MatchesD405(pinhole, "other", 640, 480, "color") && !CameraProfile.MatchesD405(pinhole, "d405", 1280, 720, "color"), "D405 factory profile identity/resolution guard failed");
+pinhole["coefficients"]![0] = -.053;
+Check(!CameraProfile.MatchesD405(pinhole, "d405", 640, 480, "color"), "Engine pinhole renderer accepted unsupported color distortion");
+pinhole["model"] = "realsense-distorted";
+Check(!CameraProfile.MatchesD405(pinhole, "d405", 640, 480, "color"), "Unrectified factory color lens was claimed matched");
+pinhole["streamKind"] = "depth"; pinhole["model"] = "pinhole"; pinhole["coefficients"]![0] = 0.0;
+Check(!CameraProfile.MatchesD405(pinhole, "d405", 640, 480, "depth"), "Depth profile without factory unit scale was accepted");
+pinhole["depthScale"] = 1e-9;
+Check(!CameraProfile.MatchesD405(pinhole, "d405", 640, 480, "depth"), "Depth unit scale below the native renderer's range was accepted");
+pinhole["depthScale"] = .1;
+Check(!CameraProfile.MatchesD405(pinhole, "d405", 640, 480, "depth"), "Depth unit scale above the native renderer's range was accepted");
+pinhole["depthScale"] = 1e-6;
+bool minimumScale = CameraProfile.MatchesD405(pinhole, "d405", 640, 480, "depth");
+pinhole["depthScale"] = .01;
+Check(minimumScale && CameraProfile.MatchesD405(pinhole, "d405", 640, 480, "depth"), "Native renderer's inclusive depth-scale bounds were rejected");
 var joints = new JsonArray(Enumerable.Range(1, 6).Select(i => (JsonNode)new JsonObject { ["name"] = "joint" + i, ["unit"] = "rad", ["position"] = 0.0 }).ToArray());
 var device = new JsonObject { ["id"] = "test-device", ["generation"] = 1L, ["fresh"] = true,
     ["joints"] = new JsonArray(Enumerable.Range(1, 6).Select(i => (JsonNode)new JsonObject { ["actual_deg"] = 90.0, ["min_deg"] = -150.0, ["max_deg"] = 150.0, ["limits_fresh"] = true }).ToArray()) };
@@ -269,6 +304,7 @@ Check(!alignmentReport.MetricCalibrationValid && !alignmentReport.ExposureSynchr
     "Copied joint angles or operator confirmation were incorrectly promoted to metric/timing calibration");
 Reject(() => checkSession.Observe(observation, true, null), "Finished alignment report accepted new observations");
 GripperLinkTests.Run(Check);
+CalibrationTests.Run(Check);
 var monitorPika = new JsonObject { ["configured"] = true };
 Check(PikaMonitorPolicy.MayConnect(monitorPika, true, "this-reader"), "Unowned configured Pika could not be monitored without enabling it");
 Check(!PikaMonitorPolicy.MayConnect(monitorPika, false, "this-reader"), "Read-only monitoring used another robot's serial assignment");
@@ -310,6 +346,7 @@ monitorPika["configured"] = false;
 Check(!PikaMonitorPolicy.MayConnect(monitorPika, true, "this-reader"), "Scene linking tried to configure or open an unassigned gripper");
 
 await TeachingResetTests.Run(Check);
+await TelemetryPipelineTests.Run(Check);
 var resetGapDevice = new JsonObject { ["id"] = "reset-arm", ["generation"] = 7L, ["present"] = true, ["up"] = true, ["fresh"] = false };
 var resetGapSnapshot = new JsonObject { ["selected"] = "reset-arm", ["devices"] = new JsonArray(resetGapDevice) };
 Check(TeachingResetAssisted.ExpectedFeedbackGap(true, resetGapSnapshot, "reset-arm", 7), "Expected MCU reset gap discarded an unchanged connected scene binding");

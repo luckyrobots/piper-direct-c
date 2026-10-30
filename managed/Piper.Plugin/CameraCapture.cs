@@ -6,7 +6,16 @@ using LuckyEngine.PluginSdk;
 
 namespace LuckyRobots.Piper.Plugin;
 
-public sealed record CameraPreferences(string Device, bool Enabled = true, string VideoSize = "", int FrameRate = 0, string InputCodec = "");
+public sealed record CameraPreferences(string Device, bool Enabled = true, string VideoSize = "", int FrameRate = 0, string InputCodec = "", string ViewMode = "color");
+
+public static class D405View
+{
+    public static string Mode(CameraPreferences? settings) => settings?.ViewMode == "depth" ? "depth" : "color";
+    public static bool MetricDepth(string id, CameraPreferences settings) => id == "depth" && Mode(settings) == "depth";
+    public static CameraPreferences Select(CameraPreferences settings, int index) => index is 0 or 1
+        ? settings with { ViewMode = index == 0 ? "color" : "depth" }
+        : throw new ArgumentOutOfRangeException(nameof(index), "Choose Color or Depth.");
+}
 
 /// <summary>Preview acquisition via the bundled C# camera worker. Timestamps are host receipt times, not exposure triggers.</summary>
 public sealed class CameraCapture(PluginContext engine, string imageId,
@@ -32,7 +41,7 @@ public sealed class CameraCapture(PluginContext engine, string imageId,
                 bool depth = imageId == "depth";
                 var info = CameraWorker.StartInfo(engine.Start.PackageDirectory);
                 string[] arguments = depth
-                    ? ["depth", "--serial", depthSerial]
+                    ? ["d405", "--serial", depthSerial, "--view", D405View.Mode(settings)]
                     : ["color", "--device", settings.Device, "--size", settings.VideoSize,
                         "--fps", settings.FrameRate.ToString(System.Globalization.CultureInfo.InvariantCulture), "--codec", settings.InputCodec];
                 foreach (string argument in arguments) info.ArgumentList.Add(argument);

@@ -4,6 +4,19 @@ namespace LuckyRobots.Piper.Plugin;
 
 public static class CameraProfile
 {
+    public static bool MatchesD405(JsonObject profile, string device, int width, int height, string streamKind)
+    {
+        try
+        {
+            // The current engine pinhole view does not apply Brown coefficients.
+            // Color is still shown, but distorted factory lenses stay unverified.
+            return streamKind is "color" or "depth" && profile["streamKind"]?.GetValue<string>() == streamKind &&
+                Matches(profile, device, width, height, true) &&
+                (streamKind == "color" || profile["depthScale"]?.GetValue<double>() is double scale && double.IsFinite(scale) && scale is >= 1e-6 and <= .01);
+        }
+        catch (Exception error) when (error is InvalidOperationException or FormatException) { return false; }
+    }
+
     public static bool Matches(JsonObject profile, string device, int width, int height, bool depth)
     {
         try

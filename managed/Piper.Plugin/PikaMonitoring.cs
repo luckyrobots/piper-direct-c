@@ -26,7 +26,7 @@ public sealed partial class PipersPlugin
     private CancellationTokenSource? pikaMonitorCancellation;
     private bool pikaMonitorStopping;
 
-    private bool PikaMonitorRetryNeeded() => !switchingProfile && !teachingResetBusy &&
+    private bool PikaMonitorRetryNeeded() => TelemetryIsFresh() && !switchingProfile && !teachingResetBusy &&
         PikaMonitorPolicy.ShouldRetry(state?["pika"] as JsonObject, PikaMatchesProfile(), owner, link is not null, pikaOwned, pikaMonitoring,
             state?["motion"]?["active"]?.GetValue<bool>() == true, teleoperating);
 

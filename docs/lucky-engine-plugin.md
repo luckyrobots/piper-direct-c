@@ -131,9 +131,14 @@ Never infer calibration success from a screenshot or automatically drive a desk-
 
 Camera frames currently contain host receipt timestamps and sequence numbers.
 They are previews, not hardware-triggered synchronized exposure or metric D405
-depth recording. The D405 tile uses the official RealSense C# binding to
-produce a metric grayscale preview; its raw depth and device timestamps are not
-yet included in a dataset recorder. All three cameras belong in the later
+depth recording. The D405 tile uses the official RealSense C# binding and defaults
+to its ordinary color image, matching the web dashboard's video view. Its cog
+offers **Color image (RGB)** or **Depth distance (7–50 cm)**, remembered per robot.
+Depth is a measured-distance grayscale preview, with nearer surfaces brighter;
+color is a regular image rather than colorized depth. The simulation counterpart
+uses the engine's existing color or depth renderer to match the selected view.
+Raw depth and device timestamps are not yet included in a dataset recorder.
+All three cameras belong in the later
 timestamp-aligned recorder.
 
 ## Install and build
@@ -154,8 +159,14 @@ FFmpeg, .NET or the RealSense SDK. Existing lens profiles and camera preferences
 are preserved; obsolete Python/FFmpeg path settings are ignored.
 
 The camera worker is isolated from the editor and has no robot-control references.
-D405 frames and factory intrinsics use the official RealSense C# wrapper. Color
-capture uses OpenCV DirectShow on Windows and V4L2 on Linux; named cameras are
+D405 color/depth frames and their separate factory intrinsics use the official
+RealSense C# wrapper, selected by device serial. Changing views clears the previous
+stream's cached profile before accepting new frames. Only supported rectified
+pinhole profiles are applied to the simulation. A D405 color stream with nonzero
+factory distortion is displayed normally, but the current native pinhole preview
+cannot reproduce that distortion and keeps its lens/mount alignment unverified.
+Factory intrinsics alone do not establish camera-mount or exposure alignment.
+Bench and gripper color capture uses OpenCV DirectShow on Windows and V4L2 on Linux; named cameras are
 resolved at connection time, with ambiguous duplicates rejected. Use the unique
 DirectShow device path for identical cameras, and a stable `/dev/v4l/by-id/...`
 path on Linux. Specify the serial when more than one D405 is connected.

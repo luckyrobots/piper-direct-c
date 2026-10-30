@@ -27,12 +27,11 @@ public sealed partial class PipersPlugin : ILuckyPlugin
     private PiperControl.PiperControlClient client = null!;
     private Preferences preferences = new();
     private volatile JsonObject? state;
-    private long stateAt;
     private string token = "", message = "Connecting to the existing Piper server…";
     private long lease, lastCommand;
-    private bool approved, pikaOwned;
-    private RobotLink? link;
-    private bool linkCommandsEnabled, recoveryInProgress;
+    private volatile bool approved, pikaOwned;
+    private volatile RobotLink? link;
+    private volatile bool linkCommandsEnabled, recoveryInProgress;
     private double? linkErrorDegrees;
     private JsonObject? scene;
     private Task? worker;
@@ -79,11 +78,13 @@ public sealed partial class PipersPlugin : ILuckyPlugin
 
     private JsonObject Device(string? expectedDeviceId = null, long? expectedGeneration = null, string? expectedToken = null)
     {
-        var snapshot = state ?? throw new InvalidOperationException("Waiting for the controller server.");
-        if (Stopwatch.GetElapsedTime(Interlocked.Read(ref stateAt)).TotalMilliseconds > 500)
+        var receipt = telemetry.Latest ?? throw new InvalidOperationException("Waiting for the controller server.");
+        if (!receipt.IsFresh(Stopwatch.GetTimestamp()))
             throw new InvalidOperationException("Robot feedback is stale.");
+        if (receipt.BackendToken != token) throw new InvalidOperationException("The controller session changed; wait for fresh feedback.");
         if (switchingProfile) throw new InvalidOperationException("Changing robot assignment; wait for measured feedback.");
-        var device = RobotProfileRouting.Device(preferences, snapshot);
+        var device = RobotProfileRouting.Device(preferences, receipt.State);
+        if (!receipt.HasFreshDevice(device, Stopwatch.GetTimestamp())) throw new InvalidOperationException("Robot joint feedback is stale.");
         if (expectedDeviceId is not null && device["id"]?.GetValue<string>() != expectedDeviceId ||
             expectedGeneration.HasValue && device["generation"]?.GetValue<long>() != expectedGeneration.Value ||
             expectedToken is not null && token != expectedToken)
@@ -91,114 +92,9 @@ public sealed partial class PipersPlugin : ILuckyPlugin
         return device;
     }
 
-    private async Task Watch(CancellationToken cancellation)
-    {
-        while (!cancellation.IsCancellationRequested)
-        {
-            try
-            {
-                using var stream = client.WatchState(new(), cancellationToken: cancellation);
-                long lastUi = 0, lastHeartbeat = 0;
-                await foreach (var frame in stream.ResponseStream.ReadAllAsync(cancellation))
-                {
-                    var next = JsonNode.Parse(frame.Json)!.AsObject();
-                    Materialize(next);
-                    string nextToken = next["token"]!.GetValue<string>();
-                    if (token != nextToken) { teleoperating = false; link = null; linkCommandsEnabled = false; recoveryInProgress = false; lease = 0; approved = false; pikaOwned = pikaMonitoring = false; teachingSeen = approvalBeforeTeaching = false; token = nextToken; }
-                    state = next;
-                    await ObserveProfileRouting(next, cancellation);
-                    if (message.StartsWith("Connecting to", StringComparison.Ordinal) || message.StartsWith("Controller unavailable", StringComparison.Ordinal))
-                        message = "Connected · monitoring live robot feedback";
-                    Interlocked.Exchange(ref stateAt, Stopwatch.GetTimestamp());
-                    await ObserveTeaching(cancellation);
-                    if (Stopwatch.GetElapsedTime(lastHeartbeat).TotalMilliseconds > 200)
-                    {
-                        lastHeartbeat = Stopwatch.GetTimestamp();
-                        if (next["motion"]?["request_id"]?.GetValue<long>() >= lease && next["motion"]?["active"]?.GetValue<bool>() != true) lease = 0;
-                        if (lease != 0)
-                        {
-                            try { await Call("/api/heartbeat", new JsonObject { ["request_id"] = lease, ["owner"] = owner }, cancellation); }
-                            catch (InvalidOperationException) { lease = 0; }
-                        }
-                        if (pikaOwned || pikaMonitoring)
-                        {
-                            try { await Call("/api/pika/heartbeat", new JsonObject { ["owner"] = owner }, cancellation); }
-                            catch (InvalidOperationException error) { pikaOwned = pikaMonitoring = false; message = "Pika connection: " + error.Message; }
-                        }
-                    }
-                    if (Stopwatch.GetElapsedTime(lastUi).TotalMilliseconds < 100) continue;
-                    lastUi = Stopwatch.GetTimestamp();
-                    RetryLinkedPikaMonitor();
-                    if (lastCommand != 0 && next["motion"]?["request_id"]?.GetValue<long>() == lastCommand)
-                    {
-                        message = next["message"]?.GetValue<string>() ?? message;
-                        if (next["motion"]?["active"]?.GetValue<bool>() != true) lastCommand = 0;
-                    }
-                    if (link is { } waiting && TeachingResetAssisted.ExpectedFeedbackGap(teachingResetBusy, next, waiting.DeviceId, waiting.Generation))
-                        linkErrorDegrees = null;
-                    else if (link is { } current)
-                    {
-                        try {
-                            if (Device()["recovery_required"]?.GetValue<bool>() == true) linkCommandsEnabled = false;
-                            var measuredDevice = Device();
-                            var requested = current.Feedback(measuredDevice, next["pika"] as JsonObject, PikaMatchesProfile());
-                            if (teleoperating && next["motion"]?["finishing_target"]?.GetValue<bool>() == true && next["motion"]?["owner"]?.GetValue<string>() == owner)
-                            {
-                                int jointIndex = Array.IndexOf(current.JointNames, followJoint);
-                                double? target = jointIndex >= 0 ? Device()["joints"]?[jointIndex]?["target_deg"]?.GetValue<double>() : null;
-                                if (target.HasValue)
-                                {
-                                    requested["leaderJoint"] = followJoint;
-                                    requested["leaderPosition"] = target.Value * Math.PI / 180;
-                                }
-                            }
-                            var reply = await engine.RequestAsync("robot.feedback", requested, cancellation);
-                            if (teleoperating && (!linkCommandsEnabled || (reply.TryGetProperty("teleoperating", out var mode) && !mode.GetBoolean())) && await commands.WaitAsync(0, cancellation))
-                            {
-                                try { await PauseTeleoperation(cancellation); }
-                                finally { commands.Release(); }
-                            }
-                            if (reply.TryGetProperty("applied", out var applied) && applied.GetBoolean())
-                            {
-                                var acknowledgement = JsonNode.Parse(reply.GetRawText())!.AsObject();
-                                linkErrorDegrees = current.FeedbackError(requested, acknowledgement);
-                                acknowledgedScenePose = acknowledgement;
-                                acknowledgedSceneAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-                                SampleAlignment(measuredDevice);
-                            }
-                        }
-                        catch (Exception error) when (error is not OperationCanceledException) { await FinishAlignment("Linked scene unavailable", cancellation); link = null; message = error.Message; }
-                    }
-                    if (recoveryInProgress)
-                    {
-                        var device = Device();
-                        if (device["recovery_required"]?.GetValue<bool>() != true && device["reset_pending"]?.GetValue<bool>() != true)
-                        {
-                            recoveryInProgress = false;
-                            message = "Recovery verified. The interrupted move was discarded. Enable robot when ready; measured scene tracking continues.";
-                        }
-                        else if (RecoveryPlan.Inspect(device, next["motion"]?["active"]?.GetValue<bool>() == true).Action == "verify-reset" && await commands.WaitAsync(0, cancellation))
-                        {
-                            try { await Command("verify-reset", null, cancellation, recoveryAcknowledged: true); recoveryInProgress = false; }
-                            catch (InvalidOperationException error) { message = error.Message; recoveryInProgress = false; }
-                            finally { commands.Release(); }
-                        }
-                    }
-                    await Update(cancellation);
-                }
-            }
-            catch (Exception error) when (!cancellation.IsCancellationRequested)
-            {
-                await FinishAlignment("Controller or scene connection interrupted", cancellation);
-                teleoperating = false; link = null; lease = 0; pikaOwned = pikaMonitoring = false; approved = false; state = null;
-                message = error is RpcException { StatusCode: StatusCode.Unavailable }
-                    ? "Controller unavailable on 127.0.0.1:8766. Start the updated backend; reconnecting automatically."
-                    : "Controller connection interrupted: " + error.Message;
-                await Update(cancellation);
-                await Task.Delay(1000, cancellation);
-            }
-        }
-    }
+    private Task Watch(CancellationToken cancellation) => Task.WhenAll(
+        ReadTelemetry(cancellation), ProcessTelemetry(cancellation),
+        ArmHeartbeats(cancellation), PikaHeartbeats(cancellation));
 
     private async Task<JsonObject> Call(string route, JsonObject body, CancellationToken cancellation, string? expectedToken = null)
     {
@@ -222,8 +118,11 @@ public sealed partial class PipersPlugin : ILuckyPlugin
     private async Task Command(string action, JsonObject? fields, CancellationToken cancellation, bool recoveryAcknowledged = false, bool teachingAcknowledged = false,
         string? expectedDeviceId = null, long? expectedGeneration = null, string? expectedToken = null)
     {
+        long permissionEpoch = Interlocked.Read(ref targetPermissionEpoch);
+        expectedToken ??= token;
         bool recoveryOnly = recoveryAcknowledged && action is "reset" or "verify-reset" or "verify-current";
         bool teachingOnly = teachingAcknowledged && action == "teach-return";
+        if (calibrationOpen && !recoveryOnly && !teachingOnly) throw new InvalidOperationException("Calibrate robot is read-only. Use Back to robot controls before sending arm targets or enable commands.");
         if (!approved && !recoveryOnly && !teachingOnly) throw new InvalidOperationException("Use Enable robot and confirm the workspace is clear first.");
         var device = Device(expectedDeviceId, expectedGeneration, expectedToken);
         if (!teachingOnly && !recoveryOnly && TeachingState.Inspect(device).BlocksTargets)
@@ -234,7 +133,10 @@ public sealed partial class PipersPlugin : ILuckyPlugin
         body["generation"] = expectedGeneration.HasValue ? JsonValue.Create(expectedGeneration.Value) : device["generation"]!.DeepClone();
         body["owner"] = owner; body["standalone"] = true; body["clear"] = true; body["supported"] = true; body["reset_completed"] = true;
         body["speed_percent"] = preferences.Speed; body["tolerance_deg"] = preferences.Tolerance;
+        if (permissionEpoch != Interlocked.Read(ref targetPermissionEpoch)) throw new InvalidOperationException("Control permission changed while preparing the command; start a new action.");
         var result = await Call("/api/command", body, cancellation, expectedToken);
+        if (permissionEpoch != Interlocked.Read(ref targetPermissionEpoch) || token != expectedToken)
+            throw new InvalidOperationException("Control permission changed before acknowledgement; the old action will not be renewed or resumed.");
         lease = result["request_id"]?.GetValue<long>() ?? lease;
         lastCommand = result["request_id"]?.GetValue<long>() ?? 0;
         message = result["message"]?.GetValue<string>() ?? "Command accepted.";
@@ -255,6 +157,7 @@ public sealed partial class PipersPlugin : ILuckyPlugin
         {
             string id = UnscopeEvent(input.WidgetId);
             if (id.Length == 0) return; // Late gesture from a previously selected robot.
+            if (CalibrationCommandGuard.Blocks(id, calibrationOpen)) throw new InvalidOperationException("Calibrate robot is read-only. Use Back to robot controls before enabling or moving the real robot.");
             if (id.StartsWith("profiles.", StringComparison.Ordinal))
             {
                 await ProfileEvent(id[9..], input.Value, cancellation);
@@ -271,6 +174,8 @@ public sealed partial class PipersPlugin : ILuckyPlugin
                 await TeachingEvent(id[9..], cancellation);
             else if (id.StartsWith("alignment.", StringComparison.Ordinal))
                 await AlignmentEvent(id[10..], input.Value, cancellation);
+            else if (id.StartsWith("calibration.", StringComparison.Ordinal))
+                await CalibrationEvent(id[12..], input.Value, cancellation);
             else if (id == "stop")
             {
                 await FinishAlignment("Operator stop", cancellation);
@@ -326,9 +231,11 @@ public sealed partial class PipersPlugin : ILuckyPlugin
                 {
                     if (parts[2] == "device") settings = settings with { Device = input.Value.GetString() ?? "", Enabled = true };
                     if (parts[2] == "toggle") settings = settings with { Enabled = !settings.Enabled };
+                    if (camera == "depth" && parts[2] == "view") settings = D405View.Select(settings, input.Value.GetInt32());
                     if (parts[2] == "serial") preferences = preferences with { DepthSerial = input.Value.GetString() ?? "" };
                     preferences = camera switch { "bench" => preferences with { Bench = settings }, "gripper" => preferences with { Gripper = settings }, _ => preferences with { Depth = settings } };
                     await Save(cancellation); await RestartCamera(camera);
+                    if (parts[2] == "view") await Render(cancellation);
                 }
             }
             else if (id == "robots.refresh")
@@ -350,20 +257,24 @@ public sealed partial class PipersPlugin : ILuckyPlugin
                 if (link is not null) { await FinishAlignment("Robot unlinked", cancellation); link = null; linkCommandsEnabled = false; message = "Robot unlinked · monitoring continues"; await engine.RequestAsync("robot.unsubscribe", cancellation: cancellation); }
                 else
                 {
+                    string expectedLinkToken = token;
                     scene = JsonNode.Parse((await engine.RequestAsync("scene.robots", cancellation: cancellation)).GetRawText())!.AsObject();
                     if (scene["robots"] is JsonArray { Count: 1 } available && string.IsNullOrEmpty(preferences.RobotId))
                         preferences = preferences with { RobotId = available[0]!["entityId"]!.GetValue<string>() };
                     var robot = scene["robots"]!.AsArray().OfType<JsonObject>().SingleOrDefault(r => r["entityId"]?.GetValue<string>() == preferences.RobotId)
                         ?? throw new InvalidOperationException("Select the scene robot before linking.");
-                    var next = new RobotLink(scene["sceneId"]!.GetValue<string>(), preferences.RobotId, robot["joints"]!.AsArray(), Device());
-                    var requested = next.Feedback(Device(), state?["pika"] as JsonObject, PikaMatchesProfile());
+                    var next = new RobotLink(scene["sceneId"]!.GetValue<string>(), preferences.RobotId, robot["joints"]!.AsArray(), Device(expectedToken: expectedLinkToken));
+                    var requested = next.Feedback(Device(expectedToken: expectedLinkToken), state?["pika"] as JsonObject, PikaMatchesProfile());
                     var applied = JsonNode.Parse((await engine.RequestAsync("robot.feedback", requested, cancellation)).GetRawText())!.AsObject();
                     if (applied["applied"]?.GetValue<bool>() != true)
                         throw new InvalidOperationException("Finish the active viewport joint edit, then link again.");
                     linkErrorDegrees = next.FeedbackError(requested, applied);
                     await engine.RequestAsync("robot.subscribe", new JsonObject { ["sceneId"] = next.SceneId, ["entityId"] = next.EntityId }, cancellation);
                     await Save(cancellation);
-                      link = next; linkCommandsEnabled = Device()["recovery_required"]?.GetValue<bool>() != true;
+                      var currentDevice = Device(next.DeviceId, next.Generation, expectedLinkToken);
+                      linkBackendToken = expectedLinkToken;
+                      link = next; linkCommandsEnabled = currentDevice["recovery_required"]?.GetValue<bool>() != true;
+                      sceneTrackingStatus = "Measured scene link established";
                       RetryLinkedPikaMonitor();
                       message = "Measured pose linked. Start Teleoperate to drag joints; release finishes the target. Calibration is not verified.";
                       await Render(cancellation);
@@ -423,6 +334,7 @@ public sealed partial class PipersPlugin : ILuckyPlugin
 
     private async Task Enable(CancellationToken cancellation, bool includePika = true, string? expectedDeviceId = null, long? expectedGeneration = null, string? expectedToken = null)
     {
+        if (calibrationOpen) throw new InvalidOperationException("Calibrate robot is read-only. Use Back to robot controls before enabling motors.");
         var device = Device(expectedDeviceId, expectedGeneration, expectedToken);
         if (TeachingState.Inspect(device).BlocksTargets)
             throw new InvalidOperationException("End hand guiding/playback and return to CAN control before enabling plugin targets.");
@@ -486,7 +398,8 @@ public sealed partial class PipersPlugin : ILuckyPlugin
             Widget.Row("scene.binding", Widget.Button("robots.refresh", "Scene robots"), new Widget("dropdown", "robots.select") { Width = 200, Options = robots.Select(r => r["name"]!.GetValue<string>()).ToArray(), Value = Math.Max(0, Array.FindIndex(robots, r => r["entityId"]!.GetValue<string>() == preferences.RobotId)) }, Widget.Button("link", "Link robot")),
             Widget.Label("link.status", "Unlinked · joint/desk/camera calibration not verified") with { Height = 34 },
             TeachingControls(),
-            AlignmentControls(),
+            CalibrationControls(),
+            AlignmentControls() with { Visible = !calibrationOpen },
         };
         var robotControls = new List<Widget>
         {
@@ -505,7 +418,7 @@ public sealed partial class PipersPlugin : ILuckyPlugin
         robotControls.Add(Widget.Button("zero.all", "All joints to zero"));
         // A focused check remains usable without relying on nested native-panel
         // scrolling. Visibility changes only; acquisition and measured linking run on.
-        widgets.Add(Widget.Column("robot.controls", robotControls.ToArray()) with { Visible = !alignmentOpen });
+        widgets.Add(Widget.Column("robot.controls", robotControls.ToArray()) with { Visible = !FocusedRobotView });
         widgets.Add(Widget.Label("incident", ""));
         widgets.Add(Widget.Label("recovery.next", ""));
         widgets.Add(Widget.Row("recovery", Widget.Button("recovery.run", "Clear & support arm — recover")) with { Visible = false });
@@ -523,6 +436,13 @@ public sealed partial class PipersPlugin : ILuckyPlugin
     private async Task RestartCamera(string id)
     {
         if (cameras.Remove(id, out var previous)) await previous.DisposeAsync();
+        if (id == "depth")
+        {
+            // Color and depth can share a serial/resolution but not intrinsics.
+            // Keep cached images hidden until this new worker publishes its frame.
+            cameraCalibration.TryRemove(id, out _); cameraDimensions.TryRemove(id, out _);
+            cameraStatus[id] = "Connecting D405 " + D405View.Mode(CameraSettings(id)) + " view…";
+        }
         var camera = new CameraCapture(engine, id, CameraSettings(id), (key, value) => cameraStatus[key] = value, preferences.DepthSerial,
             (key, width, height) => cameraDimensions[key] = (width, height),
             (key, profile) => { Materialize(profile); cameraCalibration[key] = profile; }, CameraImageId(id));
@@ -531,16 +451,18 @@ public sealed partial class PipersPlugin : ILuckyPlugin
 
     private Widget Camera(string id, string title) => Widget.Column("camera." + id,
         Widget.Row("camera." + id + ".header", Widget.Label("camera." + id + ".title", title), Widget.Button("camera." + id + ".settings", "⚙") with { Hint = "Choose camera, start/stop and capture settings" }),
-        Widget.Label("camera." + id + ".real.title", id == "depth" ? "REAL · depth 7–50 cm · white = near" : "REAL"),
+        Widget.Label("camera." + id + ".real.title", id == "depth" ? D405View.MetricDepth(id, CameraSettings(id)) ? "REAL · depth 7–50 cm · white = near" : "REAL · D405 color image · not depth distance" : "REAL"),
         new Widget("image", "camera." + id + ".image") { ImageId = CameraImageId(id), Visible = CameraFrameReady(id), Height = 150 },
-        Widget.Label("camera." + id + ".sim.title", id == "depth" ? "SIM · ideal metric depth · same 7–50 cm scale" : id == "gripper" ? "SIM · fisheye lens" : "SIM · camera viewpoint"),
+        Widget.Label("camera." + id + ".sim.title", D405View.MetricDepth(id, CameraSettings(id)) ? "SIM · ideal metric depth · same 7–50 cm scale" : id == "gripper" ? "SIM · fisheye lens" : "SIM · color camera viewpoint"),
         new Widget("scene-camera", "camera." + id + ".sim") { Height = 150 },
         Widget.Label("camera." + id + ".sim.status", "Camera alignment not calibrated") with { Height = 34 },
         Widget.Label("camera." + id + ".info", "Connecting…") with { Height = 34 },
-        Widget.Column("camera." + id + ".settings.form", new Widget("input", "camera." + id + ".device") { Text = CameraSettings(id).Device, Hint = "Camera name or stable device path" },
+        Widget.Column("camera." + id + ".settings.form",
+            new Widget("dropdown", "camera." + id + ".view") { Options = ["Color image (RGB)", "Depth distance (7–50 cm)"], Value = D405View.Mode(CameraSettings(id)) == "depth" ? 1 : 0, Visible = id == "depth", Hint = "Color is a regular image; Depth shows measured distance. The simulation uses the same view type. Remembered per robot." },
+            new Widget("input", "camera." + id + ".device") { Text = CameraSettings(id).Device, Hint = "Camera name or stable device path", Visible = id != "depth" },
             Widget.Button("camera." + id + ".simrefresh", "Find simulation cameras"),
             new Widget("dropdown", "camera." + id + ".simselect") { Options = SimulationCameraNames(), Value = SimulationCameraIndex(id) },
-            Widget.Button("camera." + id + ".simoverlay", "Real / simulation overlay") with { Enabled = id != "depth", Hint = "Blend views for alignment. Does not establish calibrated or time-synchronized data." },
+            Widget.Button("camera." + id + ".simoverlay", "Real / simulation overlay") with { Enabled = !D405View.MetricDepth(id, CameraSettings(id)), Hint = "Blend views for alignment. Does not establish calibrated or time-synchronized data." },
             Widget.Column("camera." + id + ".calibration",
                 Widget.Button("camera." + id + ".calibrationtools", "Check camera runtime") with { Hint = "Checks the bundled C# camera tools without opening a camera. No Python, SDK installation or runtime download is needed." },
                 Widget.Label("camera." + id + ".calibration.help", "Lens calibration: print the 8 × 6 checkerboard at actual size (20 mm squares), keep it flat. Capture 20+ sharp views with different tilts and positions, including all image edges. Keep the robot stationary; move the board."),
@@ -558,7 +480,7 @@ public sealed partial class PipersPlugin : ILuckyPlugin
         var patches = new Dictionary<string, JsonObject>
         {
             ["status"] = new() { ["text"] = ownedBackend is null ? message : message + " · controller closes with Pipers" }, ["link"] = new() { ["text"] = link is null ? "Link robot" : "Unlink robot" },
-            ["link.status"] = new() { ["text"] = link is null ? "Unlinked · use Edit mode · calibration not verified" : $"{(linkCommandsEnabled ? "Linked" : "Tracking only — motion blocked")} · joint error {linkErrorDegrees?.ToString("F4") ?? "—"}° · {link.GripperStatus} · calibration unverified" }
+            ["link.status"] = new() { ["text"] = link is null ? "Unlinked · use Edit mode · calibration not verified" : $"{(linkCommandsEnabled ? "Linked" : "Tracking only — motion blocked")} · joint error {linkErrorDegrees?.ToString("F4") ?? "—"}° · {link.GripperStatus} · {sceneTrackingStatus} · calibration unverified" }
         };
         patches["backend.setup"] = new() { ["visible"] = backendSetupOpen || state is null };
         patches["backend.status"] = new() { ["text"] = backendStatus };
@@ -615,6 +537,7 @@ public sealed partial class PipersPlugin : ILuckyPlugin
         patches["camera.gripper.calibration.status"] = new() { ["text"] = calibrationStatus };
         AddTeachingPatches(patches, device);
         AddAlignmentPatches(patches);
+        AddCalibrationPatches(patches, device);
         AddCameraComparisonPatches(patches);
         AddResetAssistedPatches(patches, device);
         await Patch(patches, cancellation);
