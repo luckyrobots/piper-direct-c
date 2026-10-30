@@ -1,6 +1,12 @@
 param([ValidateSet('win-x64','linux-x64')][string]$Runtime='win-x64')
 $ErrorActionPreference='Stop'
 $taskRepo=Split-Path $PSScriptRoot -Parent
+# NuGet may rewrite lock-file formatting during RID-specific publish. Preserve
+# the input source bytes so the source bundle reflects the files we built from.
+$taskLockSources=@{}
+foreach($taskLock in Get-ChildItem -LiteralPath (Join-Path $taskRepo 'managed') -Filter packages.lock.json -File -Recurse | Where-Object {$_.FullName -notmatch '[\\/](bin|obj)[\\/]'}) {
+    $taskLockSources[$taskLock.FullName]=[IO.File]::ReadAllBytes($taskLock.FullName)
+}
 $taskPackage=Join-Path $taskRepo ('build/engine-plugin/'+$Runtime+'-'+[Guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $taskPackage -Force | Out-Null
 dotnet publish (Join-Path $taskRepo 'managed/Piper.Plugin') -c Release -r $Runtime --self-contained true -o $taskPackage
@@ -54,7 +60,11 @@ foreach($taskProject in @('Piper.Contracts','Piper.Core','Piper.Host','Piper.Pik
         $taskRelative=$taskFile.FullName.Substring($taskRepo.Length+1)
         $taskDestination=Join-Path $taskSource $taskRelative
         New-Item -ItemType Directory -Path (Split-Path $taskDestination -Parent) -Force | Out-Null
-        Copy-Item -LiteralPath $taskFile.FullName -Destination $taskDestination -Force
+        if($taskLockSources.ContainsKey($taskFile.FullName)) {
+            [IO.File]::WriteAllBytes($taskDestination,$taskLockSources[$taskFile.FullName])
+        } else {
+            Copy-Item -LiteralPath $taskFile.FullName -Destination $taskDestination -Force
+        }
     }
 }
 Copy-Item -LiteralPath (Join-Path $taskRepo 'vendor/realsense'),(Join-Path $taskRepo 'vendor/camera-licenses') -Destination (Join-Path $taskSource 'vendor') -Recurse -Force
