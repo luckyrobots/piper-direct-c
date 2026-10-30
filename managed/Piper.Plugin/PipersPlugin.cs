@@ -483,6 +483,10 @@ public sealed partial class PipersPlugin : ILuckyPlugin
             Widget.Row("scene.binding", Widget.Button("robots.refresh", "Scene robots"), new Widget("dropdown", "robots.select") { Width = 200, Options = robots.Select(r => r["name"]!.GetValue<string>()).ToArray(), Value = Math.Max(0, Array.FindIndex(robots, r => r["entityId"]!.GetValue<string>() == preferences.RobotId)) }, Widget.Button("link", "Link robot")),
             Widget.Label("link.status", "Unlinked · joint/desk/camera calibration not verified") with { Height = 34 },
             TeachingControls(),
+            AlignmentControls(),
+        };
+        var robotControls = new List<Widget>
+        {
             Widget.Row("motion", Widget.Label("motion.progress", "Idle") with { Width = 560, Height = 34 },
                 Widget.Button("motion.hold", "Stop movement") with { Width = 130, Enabled = false }),
             Widget.Row("teleoperate", new[] { Widget.Button("teleoperate.toggle", "Start Teleoperate") with { Width = 170 } }.Concat(
@@ -494,12 +498,14 @@ public sealed partial class PipersPlugin : ILuckyPlugin
             Widget.Label("speed.actual", "Waiting for reported speed limits") with { Height = 34 },
         };
         for (int i = 1; i <= 6; i++)
-            widgets.Add(Widget.Row("joint." + i, Widget.Label($"joint.{i}.value", $"J{i} · —") with { Width = 190, Height = 28 }, Widget.Button($"joint.{i}.minus", "−") with { Width = 32 }, Widget.Slider($"joint.{i}.target", 0, -180, 180, .1) with { Enabled = false }, Widget.Button($"joint.{i}.plus", "+") with { Width = 32 }, Widget.Button($"joint.{i}.zero", "Zero") with { Width = 52 }));
-        widgets.Add(Widget.Button("zero.all", "All joints to zero"));
-        widgets.Add(AlignmentControls());
-        widgets.Add(Widget.Label("incident", ""));
-        widgets.Add(Widget.Label("recovery.next", ""));
-        widgets.Add(Widget.Row("recovery", Widget.Button("recovery.run", "Clear & support arm — recover")) with { Visible = false });
+            robotControls.Add(Widget.Row("joint." + i, Widget.Label($"joint.{i}.value", $"J{i} · —") with { Width = 190, Height = 28 }, Widget.Button($"joint.{i}.minus", "−") with { Width = 32 }, Widget.Slider($"joint.{i}.target", 0, -180, 180, .1) with { Enabled = false }, Widget.Button($"joint.{i}.plus", "+") with { Width = 32 }, Widget.Button($"joint.{i}.zero", "Zero") with { Width = 52 }));
+        robotControls.Add(Widget.Button("zero.all", "All joints to zero"));
+        robotControls.Add(Widget.Label("incident", ""));
+        robotControls.Add(Widget.Label("recovery.next", ""));
+        robotControls.Add(Widget.Row("recovery", Widget.Button("recovery.run", "Clear & support arm — recover")) with { Visible = false });
+        // A focused check remains usable without relying on nested native-panel
+        // scrolling. Visibility changes only; acquisition and measured linking run on.
+        widgets.Add(Widget.Column("robot.controls", robotControls.ToArray()) with { Visible = !alignmentOpen });
         return engine.PublishViewAsync(Panel, Widget.Row("workspace", ScopeRobotWidget(RobotSidebar()), ScopeRobotWidget(Widget.Column("controls", widgets.ToArray()))), cancellation);
     }
 

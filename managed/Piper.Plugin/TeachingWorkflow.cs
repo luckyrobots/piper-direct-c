@@ -86,7 +86,15 @@ public sealed partial class PipersPlugin
                 j["enabled"]?.GetValue<bool>() == true && j["fault"]?.GetValue<int>() == 0);
     }
 
-    private Widget TeachingControls() => Widget.Column("teaching",
+    private string AlignmentTeachingPrompt => teaching.HandGuiding
+        ? "Hand guiding active. Guide the named tool point to the reference and hold it still before Capture."
+        : teaching.Active ? "Onboard playback owns the arm. Wait for it to finish; do not guide or capture during playback."
+        : teaching.ReturnRequired ? "Recording ended. Use Back to robot controls for the supported return to CAN control."
+        : "Single-click the physical teach button for hand guiding (solid green). Linking reads the arm's measured pose.";
+
+    private Widget TeachingControls() => alignmentOpen ? Widget.Column("teaching",
+        Widget.Label("teaching.label", teaching.Label) with { Height = 28 },
+        Widget.Label("teaching.next", AlignmentTeachingPrompt) with { Height = 38, Hint = teaching.NextStep }) : Widget.Column("teaching",
         Widget.Row("teaching.header", Widget.Label("teaching.label", teaching.Label) with { Height = 34 },
             Widget.Button("teaching.help", "Hand-guide help") with { Width = 150 }),
         Widget.Label("teaching.next", teaching.NextStep) with { Height = 86, Visible = teaching.BlocksTargets || teachingHelpOpen },
@@ -116,7 +124,7 @@ public sealed partial class PipersPlugin
     private void AddTeachingPatches(Dictionary<string, JsonObject> patches, JsonObject? device)
     {
         patches["teaching.label"] = new() { ["text"] = teaching.Label };
-        patches["teaching.next"] = new() { ["text"] = teaching.NextStep, ["visible"] = teaching.BlocksTargets || teachingHelpOpen };
+        patches["teaching.next"] = new() { ["text"] = alignmentOpen ? AlignmentTeachingPrompt : teaching.NextStep, ["visible"] = alignmentOpen || teaching.BlocksTargets || teachingHelpOpen };
         string zero = device?["joints"] is JsonArray joints ? string.Join(" · ", joints.Select((j, i) => $"J{i + 1} {j?["actual_deg"]?.GetValue<double>().ToString("F2") ?? "—"}°")) : "Waiting for six fresh joint measurements";
         patches["teaching.zero"] = new() { ["visible"] = teaching.ReturnRequired, ["text"] = zero + " · return guard ±1° (not encoder calibration)" };
         patches["teaching.return"] = new() { ["visible"] = teaching.ReturnRequired, ["enabled"] = teaching.CanReturn };
@@ -124,23 +132,31 @@ public sealed partial class PipersPlugin
         patches["enable"] = new() { ["enabled"] = device is not null && !switchingProfile && !teaching.BlocksTargets };
     }
 
-    private Widget AlignmentControls() => Widget.Column("alignment",
-        Widget.Button("alignment.toggle", "Guided desk alignment check"),
-        Widget.Column("alignment.form",
-            Widget.Label("alignment.instructions", "Place a distinct object on the measured desk cross, and the corresponding object at the same scene reference. Enter its height above the desk. Define the exact contact/tool point (for example the model's grasp_site), not a camera origin or an unspecified fingertip. Link the robot, single-click its physical teach button and move that point to the object's top. The scene should follow. Capture while stationary, then confirm both views. Repeat with different approach poses. Finish by hand-guiding to zero and turning the teach light off; this wizard sends no homing or playback.") with { Height = 122 },
-            new Widget("input", "alignment.name") { Text = AlignmentOptions.Name, Hint = "Physical reference name" },
-            new Widget("input", "alignment.tool") { Text = AlignmentOptions.ToolPoint, Hint = "The exact named model TCP/contact point; it is recorded, not inferred" },
+    private Widget AlignmentControls() => !alignmentOpen
+        ? Widget.Button("alignment.toggle", "Guided desk alignment check")
+        : Widget.Column("alignment",
+            Widget.Row("alignment.header", Widget.Label("alignment.title", "Guided desk alignment check"),
+                Widget.Button("alignment.toggle", "Back to robot controls") with { Width = 190 }),
+            Widget.Column("alignment.form",
+            Widget.Label("alignment.instructions", "1. Put a distinct object at the measured desk cross and the same scene reference; enter its height above the desk.\n2. Name the exact tool/contact point (for example grasp_site), then hand-guide it to the object's top.\n3. Capture while stationary, compare both views and repeat from different approach poses.") with { Height = 66,
+                Hint = "The tool point is recorded, not inferred. A camera origin or an unspecified fingertip is not a defined contact point. This wizard sends no homing or playback. Use Back to robot controls for the supported teaching return flow." },
+            Widget.Row("alignment.identity", Widget.Label("alignment.name.label", "Reference") with { Width = 70 },
+                new Widget("input", "alignment.name") { Text = AlignmentOptions.Name, Hint = "Physical reference name" },
+                Widget.Label("alignment.tool.label", "Tool point") with { Width = 75 },
+                new Widget("input", "alignment.tool") { Text = AlignmentOptions.ToolPoint, Hint = "Exact named model TCP/contact point; not inferred" }),
             Widget.Row("alignment.reference", Widget.Label("alignment.x.label", "Scene X m"), Widget.Slider("alignment.x", AlignmentOptions.X, -20, 20, .001),
                 Widget.Label("alignment.y.label", "Desk Y m"), Widget.Slider("alignment.y", AlignmentOptions.DeskY, -20, 20, .001),
                 Widget.Label("alignment.z.label", "Scene Z m"), Widget.Slider("alignment.z", AlignmentOptions.Z, -20, 20, .001)),
             Widget.Row("alignment.height.row", Widget.Label("alignment.height.label", "Measured object height mm (0 = bare desk)"), Widget.Slider("alignment.height", AlignmentOptions.ObjectHeightMm, 0, 1000, 1)),
             Widget.Row("alignment.actions", Widget.Button("alignment.start", "Start local check / trace"), Widget.Button("alignment.capture", "Capture stationary pose"), Widget.Button("alignment.finish", "Finish & save report")),
-            Widget.Label("alignment.status", alignmentStatus) with { Height = 68 },
-            Widget.Row("alignment.confirmation", Widget.Label("alignment.confirm.text", "Captured. Is the defined physical tool point at the reference, and does the simulated point visibly agree?"),
-                Widget.Button("alignment.match", "Both look aligned"), Widget.Button("alignment.mismatch", "Mismatch")) with { Visible = alignmentPending is not null },
-            Widget.Row("alignment.gap.row", Widget.Label("alignment.gap.label", "Estimated gap mm (0 = unmeasured)"), Widget.Slider("alignment.gap", alignmentGapMm, 0, 1000, 1)),
+            Widget.Label("alignment.status", alignmentStatus) with { Height = 48 },
+            Widget.Column("alignment.confirmation",
+                Widget.Label("alignment.confirm.text", "Is the defined physical tool point at the reference, and does the simulated point visibly agree?") with { Height = 34 },
+                Widget.Row("alignment.confirm.actions", Widget.Button("alignment.match", "Both look aligned"), Widget.Button("alignment.mismatch", "Mismatch")),
+                Widget.Row("alignment.gap.row", Widget.Label("alignment.gap.label", "Estimated gap mm (0 = unmeasured)"), Widget.Slider("alignment.gap", alignmentGapMm, 0, 1000, 1))) with { Visible = alignmentPending is not null },
             Widget.Button("alignment.open", "Open saved report"),
-            Widget.Label("alignment.limits", "This records joint agreement and operator visual observations. It does not solve base/tool/camera transforms, independently measure TCP position, validate contact force or synchronize camera exposures. Metric calibration remains unverified; returning to zero alone does not make a dataset calibrated.") with { Height = 68 }) with { Visible = alignmentOpen });
+            Widget.Label("alignment.limits", "Visual check only · metric calibration and camera exposure synchronization remain unverified.") with { Height = 34,
+                Hint = "This records joint agreement and operator observations. It does not solve base/tool/camera transforms, independently measure TCP position or validate contact force. Returning to zero alone does not make a dataset calibrated." }));
 
     private async Task AlignmentEvent(string action, JsonElement value, CancellationToken cancellation)
     {
