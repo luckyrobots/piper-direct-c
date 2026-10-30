@@ -5,7 +5,7 @@ namespace LuckyRobots.Piper.Plugin;
 
 public sealed partial class PipersPlugin
 {
-    private static Widget Info(string id, string hint) => Widget.Button(id, "ⓘ") with { Width = 28, Appearance = "quiet", Hint = hint };
+    private static Widget Info(string id, string hint) => Widget.Button(id, "(i)") with { Width = 28, Appearance = "quiet", Hint = hint };
     private Widget Nav(string page, string text) => Widget.Button("workspace." + page, text) with { Appearance = workspacePage == page ? "selected" : "quiet", Width = 118 };
 
     private Task Render(CancellationToken cancellation)
