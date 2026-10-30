@@ -60,7 +60,11 @@ static void run_case(double measured,const char *action,unsigned joint,double de
     assert(status==expected);
     cJSON_Delete(reply); cJSON_Delete(body);
     if (expected==202) {
-        if (!strcmp(action,"pose")) {
+        if (c.range_followup) {
+            assert(c.op==OP_ALIGN && c.speed_percent==1);
+            if (!strcmp(action,"pose")||!strcmp(action,"move-to-zero"))
+                for (unsigned i=0;i<6;++i) assert(c.range_followup_target[i]==0);
+        } else if (!strcmp(action,"pose")) {
             assert(c.synchronized_pose);
             for (unsigned i=0;i<6;++i) assert(c.target[i]==0);
         } else if (joint!=5) assert(c.target[4]==copysign(70,measured));
@@ -98,5 +102,11 @@ int main(void)
     run_case(-70.101,"joint",6,2,409);
     run_case(70.007,"pose",0,0,202); /* All-zero coordinated position move. */
     run_case(-70.007,"pose",0,0,202);
+    run_case(72,"joint",5,69,202); /* Explicit inward target stages entry. */
+    run_case(-72,"jog",5,.5,202);
+    run_case(72,"jog",5,.5,400); /* Outward remains invalid. */
+    run_case(72,"move-to-zero",0,0,202);
+    run_case(-72,"pose",0,0,202); /* Legacy all-zero target shares the flow. */
+    run_case(72.501,"move-to-zero",0,0,409); /* Includes the .5 degree entry margin. */
     puts("Range drift passed: normal inward and other-joint moves, strict emitted limits, larger excursion rejection, synchronized all-zero pose.");
 }

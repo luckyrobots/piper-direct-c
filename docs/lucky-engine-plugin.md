@@ -16,10 +16,61 @@ over loopback gRPC (8766), alongside the existing web dashboard (8765).
 - Bench/Lumina, Pika gripper and D405 preview tiles with preserved aspect ratio.
 - Camera, speed, jog and tolerance settings retained between editor sessions.
 - Hand-guided teaching detection, a verified standby/CAN return at physical zero,
-  and a per-robot manual desk-alignment observation workflow. See
+  and a step-by-step per-robot desk calibration wizard. See
   [teaching and alignment](teaching-alignment.md).
 - Explicit recovery controls for controller stops; existing backend obstruction
   detection and motion leases remain authoritative.
+
+## Native workspace
+
+Controls, Calibration, Recording and Settings are separate views. The padded
+robot sidebar keeps the shared bench preview visible. CAN assignment, serial
+device paths, controller setup and camera stream/lens tools live in Settings;
+ordinary operation shows compact measured rows and contextual tooltips.
+Enlarge a camera to compare its real and simulation counterparts. Background
+capture and telemetry continue independently of page navigation.
+
+Each rendered view has an event epoch as well as its robot profile identity.
+Leaving Controls ends this session's active viewport gesture/target and discards
+its control permission; returning never resumes old gestures. STOP and hold
+remain tied to the same robot across page changes. One explicit workspace-clear
+prompt precedes enabling controls. Reset/recovery support requirements remain
+visible when they apply.
+
+Calibration asks one question or measurement at a time, preserves drafts per
+robot, and uses the existing solver, fresh-pose guards and scene-only Apply/
+Rollback transactions. Physical ruler height and the explicitly confirmed scene
+surface/floor frame are separate evidence. Four training points and an independent
+validation point are required. Existing visual observations remain in Diagnostics.
+See [the calibration guide](robot-base-calibration.md). JPEG previews help with
+framing and contact; they are not a metric depth query or proof of camera alignment.
+The Recording view reports setup requirements; it does not claim synchronized
+data or start the engine recorder before those requirements are verified.
+
+## Bounded range entry
+
+A small measured range overrun is distinct from a driver fault. The offending
+joint's normal inward control remains available when it is the only significant
+overrun and the full requested pose is legal. `Move all to zero` also accepts an
+explicit bounded correction (at most 3 degrees), enters the valid range at 1%
+controller speed, verifies measured settling, then proceeds to zero under the
+same lease. It changes position, never encoder calibration.
+
+Every CAN position command includes all six joints. A different joint therefore
+remains blocked while another joint prevents a legal six-joint target; its tooltip
+identifies that joint and the available inward/all-zero action. Multiple overruns
+require the explicit all-zero route. Faults, stale feedback, excessive correction,
+lost leases and obstruction stops retain their existing protections. Cancelling,
+teaching takeover or reconnecting discards the pending destination. Range entry
+and homing never start automatically from refresh, reconnection or calibration.
+
+## Public SDK dependency
+
+The source uses the public MIT `LuckyEngine.PluginSdk` 0.1.1 preview package,
+pinned under `vendor/plugin-sdk` with its SHA-256 and provenance. Relative
+`NuGet.Config` and bundled source include that feed, so independent authors need
+no engine checkout or private assemblies. Installed packages include the SDK,
+.NET and camera libraries; they do not invoke NuGet or require Python.
 
 ## Multiple robots
 
@@ -273,6 +324,13 @@ displacement in the commanded direction, not error to a moving cursor target;
 retargeting alone cannot renew the obstruction timer. A new gesture is required after expiry;
 reconnecting never resumes an old target. These software checks are not a
 hardware collision safety system.
+
+Arrival uses the selected tolerance and fresh stationary feedback. If the MCU
+retains its busy flag after reaching the final target, the controller verifies
+all six measured positions and velocities, sends a legal measured-position hold
+at 1%, and verifies another stationary feedback window before completing. This
+keeps holding torque enabled without manufacturing a STOP/recovery incident.
+Outside-tolerance obstruction and actual fault checks still apply.
 
 Each real camera now has a selectable native simulation counterpart and optional
 overlay under its cog. Bindings persist by camera UUID. Views preserve the real

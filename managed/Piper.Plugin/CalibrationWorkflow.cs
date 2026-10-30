@@ -76,41 +76,7 @@ public sealed partial class PipersPlugin
             : "A saved base-calibration report is available. Start a new check to verify the current hardware, scene and contact point.";
     }
 
-    private Widget CalibrationInput(string id, string label, int labelWidth = 90) => Widget.Row("calibration." + id + ".row",
-        Widget.Label("calibration." + id + ".label", label) with { Width = labelWidth },
-        new Widget("input", "calibration." + id) { Text = calibrationInputs.GetValueOrDefault(id, ""), Hint = id == "tool" ? "Exact named model tool site; fixed throughout this check"
-            : id == "height" ? "Measured contact-point height above the desk, including grid-mat thickness; millimetres"
-            : id is "square" or "originleft" or "originback" or "column" or "row" ? "Secure the mat flat and aligned with desk edges (rotated grids are not supported). Verify square size with a ruler. Include mat thickness in Above desk mm. Row/column are whole intersection numbers."
-            : "Millimetres" });
-
-    private Widget CalibrationControls()
-    {
-        LoadCalibrationPreferences();
-        if (!calibrationOpen) return Widget.Button("calibration.toggle", "Calibrate robot · desk measurements");
-        bool grid = calibrationMode == "grid intersections";
-        return Widget.Column("calibration",
-            Widget.Row("calibration.header", Widget.Label("calibration.title", "Calibrate robot · base placement"), Widget.Button("calibration.toggle", "Back to robot controls") with { Width = 190 }),
-            Widget.Label("calibration.instructions", "Use the physical teach button (solid green). Touch/hold the SAME named contact point at four measured desk locations, then one NEW validation location. Measure left-edge distance, back-edge distance and height above the desk; no object is required. Spread points in both desk directions. This wizard never moves or enables the real arm.") with { Height = 66 },
-            Widget.Label("calibration.frame", "Required SCENE desk frame: centre X=0, Z=0; width along X; back edge is −Z. Surface Y is its world height. This wizard does not measure or infer the scene desk transform.") with { Height = 38 },
-            Widget.Row("calibration.desk", CalibrationInput("width", "Desk width mm"), CalibrationInput("depth", "Depth mm", 70), CalibrationInput("surface", "Surface Y mm")),
-            Widget.Row("calibration.reference", CalibrationInput("tool", "Named TCP", 85), CalibrationInput("precision", "Precision mm", 90),
-                Widget.Button("calibration.tcp", calibrationTcpConfirmed ? "Desk frame + TCP confirmed" : "Confirm desk frame + TCP")),
-            Widget.Label("calibration.tcp.help", "For grasp_site, verify on the model that it is the same midpoint between the jaw tips you measure physically. If it is not, select/fix the correct named site first. A fingertip or camera origin is not interchangeable with that point.") with { Height = 44 },
-            Widget.Row("calibration.mode.row", new Widget("dropdown", "calibration.mode") { Options = ["Edge measurements", "Grid mat intersections"], Value = grid ? 1 : 0 },
-                CalibrationInput("height", "Above desk mm", 100)),
-            Widget.Row("calibration.edges", CalibrationInput("left", "From LEFT mm", 100), CalibrationInput("back", "From BACK mm", 100)) with { Visible = !grid },
-            Widget.Row("calibration.grid.origin", CalibrationInput("originleft", "Grid origin left mm", 130), CalibrationInput("originback", "Origin back mm", 110), CalibrationInput("square", "Square mm", 80)) with { Visible = grid },
-            Widget.Row("calibration.grid.point", CalibrationInput("column", "Intersection column", 130), CalibrationInput("row", "Intersection row", 110)) with { Visible = grid },
-            Widget.Row("calibration.capture.actions", Widget.Button("calibration.new", "New / edit settings"), Widget.Button("calibration.start", "Start calibration"), Widget.Button("calibration.capture", "Capture training point"), Widget.Button("calibration.validate", "Capture NEW validation point")),
-            Widget.Column("calibration.archive.confirmation",
-                Widget.Label("calibration.archive.warning", "A saved/pending scene placement remains in the report. Starting a new check archives its rollback context; it does not undo or repeat a scene write. Inspect/save the report first.") with { Height = 44 },
-                Widget.Row("calibration.archive.actions", Widget.Button("calibration.archive", "Keep report & start new check"), Widget.Button("calibration.archive.cancel", "Cancel"))) with { Visible = calibrationArchiveConfirmation },
-            Widget.Label("calibration.status", robotCalibrationStatus) with { Height = 52 },
-            Widget.Label("calibration.preview", CalibrationPreview()) with { Height = calibrationFit is null ? 28 : 110 },
-            Widget.Row("calibration.apply.actions", Widget.Button("calibration.fit", "Fit / preview"), Widget.Button("calibration.apply", "Apply to SCENE only"),
-                Widget.Button("calibration.rollback", "Roll back scene placement"), Widget.Button("calibration.inspect", "Check scene placement") with { Visible = calibrationPlacementUnverified }, Widget.Button("calibration.open", "Open report")),
-            Widget.Label("calibration.limits", "Fits base yaw and desk-plane translation only. No joint zeros, tool offsets, scale or real robot targets change. Camera calibration and exposure timing remain unverified.") with { Height = 38 });
-    }
+    private Widget CalibrationControls() => GuidedCalibrationControls();
 
     private double CalibrationValue(string key)
     {
@@ -166,6 +132,7 @@ public sealed partial class PipersPlugin
     private async Task CalibrationEvent(string action, JsonElement value, CancellationToken cancellation)
     {
         LoadCalibrationPreferences();
+        if (!calibrationOpen && action != "toggle") throw new InvalidOperationException("Open calibration before editing its draft or invoking an action.");
         if (calibrationInputs.ContainsKey(action))
         {
             if (calibrationIdentity is not null && action is "width" or "depth" or "surface" or "precision" or "tool")

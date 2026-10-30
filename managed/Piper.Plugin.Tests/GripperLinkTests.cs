@@ -25,8 +25,8 @@ internal static class GripperLinkTests
                 var request = link.Feedback(device, Pika(width), true);
                 double first = request["joints"]!["joint7"]!.GetValue<double>();
                 double second = request["joints"]!["joint8"]!.GetValue<double>();
-                check(Math.Abs(first - (reversed ? 1 : -1) * width / 2000) < 1e-10 && Math.Abs(first + second) < 1e-12,
-                    "Pika closed/half/open measurement lost opposed slide direction or millimetre-to-metre conversion");
+                check(Math.Abs(first - (reversed ? 1 : -1) * (.05 - width / 2000)) < 1e-10 && Math.Abs(first + second) < 1e-12,
+                    "Pika opening must decrease closing travel from the signed endpoint toward q=0");
                 var pose = new JsonArray(request["joints"]!.AsObject().Select(j => (JsonNode)new JsonObject { ["name"] = j.Key, ["position"] = j.Value!.DeepClone() }).ToArray());
                 link.FeedbackError(request, new JsonObject { ["pose"] = new JsonObject { ["joints"] = pose } });
                 check(link.GripperErrorMm == 0, "Measured Pika finger acknowledgement was not verified separately in millimetres");
@@ -64,11 +64,25 @@ internal static class GripperLinkTests
         {
             noisyClosed["telemetry"]!["motor"]!["Position"] = -PikaProtocol.Angle(noise);
             var request = new RobotLink("scene-a", "robot-a", Model(), device).Feedback(device, noisyClosed, true);
-            check(request["joints"]?["joint7"]?.GetValue<double>() == 0 && request["joints"]?["joint8"]?.GetValue<double>() == 0,
+            check(request["joints"]?["joint7"]?.GetValue<double>() == -.05 && request["joints"]?["joint8"]?.GetValue<double>() == .05,
                 "Small negative closed-position feedback left the simulated gripper open");
         }
         noisyClosed["telemetry"]!["motor"]!["Position"] = -PikaProtocol.Angle(.2);
         check(new RobotLink("scene-a", "robot-a", Model(), device).Feedback(device, noisyClosed, true)["joints"]!.AsObject().Count == 6,
             "Negative Pika opening beyond the closed-noise allowance was silently clamped");
+
+        // Audited PiperPod visual mesh: q=0 leaves a 94.044382 mm inner-jaw
+        // gap; calibrated signed endpoints close that gap without overlap.
+        const double openGapMm = 94.04438247823715;
+        var calibrated = new RobotLink("scene-a", "mesh-audited-tool", Model(openGapMm / 2000), device);
+        foreach (double width in new[] { 0.0, 20.0, 45.0, 90.0 })
+        {
+            var request = calibrated.Feedback(device, Pika(width), true);
+            double left = request["joints"]!["joint7"]!.GetValue<double>();
+            double right = request["joints"]!["joint8"]!.GetValue<double>();
+            double visualGapMm = openGapMm + (left - right) * 1000;
+            check(Math.Abs(visualGapMm - width) < 1e-7 && left <= 0 && right >= 0,
+                "Audited Pika geometry did not reproduce the measured inner-jaw opening");
+        }
     }
 }

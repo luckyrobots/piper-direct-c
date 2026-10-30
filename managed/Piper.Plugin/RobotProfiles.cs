@@ -131,32 +131,27 @@ public sealed partial class PipersPlugin
     private string CameraImageId(string id) => id == "bench" ? id : "piper-" + ActiveProfile.CameraSlot + "." + id;
     private bool CameraFrameReady(string id) => cameras.TryGetValue(id, out var camera) && camera.PublishedFrame is { } frame &&
         DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - frame.TimestampUnixMicroseconds / 1000 < 2000;
-    private string ScopeWidgetId(string id) => RobotProfileRouting.ScopeEvent(ActiveProfile.Id, id);
+    private string ScopeWidgetId(string id) => WorkspaceEventScope.Wrap(Interlocked.Read(ref workspaceViewEpoch), ActiveProfile.Id, id);
     private Widget ScopeRobotWidget(Widget widget) => widget with { Id = ScopeWidgetId(widget.Id), Children = widget.Children?.Select(ScopeRobotWidget).ToArray() };
     private Task Patch(Dictionary<string, JsonObject> patches, CancellationToken cancellation) => engine.PatchAsync(Panel,
         patches.ToDictionary(p => ScopeWidgetId(p.Key), p => p.Value), cancellation);
-    private string UnscopeEvent(string id) => RobotProfileRouting.EventForProfile(ActiveProfile.Id, id);
+    private string UnscopeEvent(string id) => WorkspaceEventScope.Unwrap(Interlocked.Read(ref workspaceViewEpoch), ActiveProfile.Id, id);
 
     private Widget RobotSidebar()
     {
-        var rows = preferences.Robots!.Select(p => Widget.Button("profiles.select." + p.Id, ProfileLabel(p))).ToArray();
-        return Widget.Column("sidebar", Widget.Label("profiles.heading", "Pipers"), Widget.Column("profiles.list", rows),
-            Widget.Row("profiles.edit", Widget.Button("profiles.add", "+ Robot") with { Enabled = rows.Length < RobotProfileRouting.MaximumProfiles },
-                Widget.Button("profiles.remove", "Remove") with { Enabled = rows.Length > 1 }),
-            new Widget("input", "profiles.name") { Text = ActiveProfile.Name, Hint = "Robot name" },
-            Widget.Label("profiles.can.label", "CAN adapter"), new Widget("dropdown", "profiles.can") { Options = CanOptions(), Value = CanIndex() },
-            Widget.Button("profiles.activate", "Activate assigned CAN"), Widget.Label("profiles.can.status", "Assign a CAN adapter") with { Height = 52 },
-            Widget.Label("profiles.pika.label", "Pika serial device"),
-            new Widget("input", "profiles.pika") { Text = ActiveProfile.PikaDevice, Hint = "This robot's /dev/serial/by-id/... gripper; blank = unassigned" },
-            new Widget("input", "profiles.wsl") { Text = ActiveProfile.WslDistribution, Visible = OperatingSystem.IsWindows(), Hint = "WSL distribution for this robot's Pika" },
-            Widget.Label("profiles.mode", "One selected robot controls at a time. Switching holds this session's movement; other arms keep their measured state.") with { Height = 66 },
-            Camera("bench", "Shared bench · Lumina")) with { Width = 280 };
+        var rows = preferences.Robots!.Select(p => Widget.Button("profiles.select." + p.Id, ProfileLabel(p)) with
+        { Height = 56, Padding = 12, Appearance = p.Id == ActiveProfile.Id ? "selected" : "quiet", Hint = p.CanDeviceId.Length == 0 ? "Assign an adapter in Settings → Robot" : "Switch to " + p.Name }).ToArray();
+        return Widget.Column("sidebar", Widget.Row("profiles.heading.row", Widget.Label("profiles.heading", "ROBOTS") with { Appearance = "muted" },
+                Widget.Button("workspace.settings.robot@sidebar", "⚙") with { Width = 32, Appearance = "quiet", Hint = "Manage robot assignments" }),
+            Widget.Column("profiles.list", rows) with { Spacing = 8 },
+            (workspacePage == "camera" && cameraDetail == "bench" ? Widget.Label("workspace.bench.enlarged", "Bench camera is enlarged") with { Height = 60, Appearance = "muted" } : Camera("bench", "Bench camera")),
+            Widget.Button("workspace.camera.bench@compare", "Compare with simulation") with { Appearance = "quiet", Hint = "The bench camera is shared by every robot." }) with { Width = 230, Padding = 16, Spacing = 18, Appearance = "sidebar" };
     }
 
     private string ProfileLabel(RobotProfile profile)
     {
         string status = string.IsNullOrEmpty(profile.CanDeviceId) ? "unassigned" : state?["devices"]?.AsArray().Any(d => d?["id"]?.GetValue<string>() == profile.CanDeviceId && d["present"]?.GetValue<bool>() == true) == true ? "connected" : "offline";
-        return (profile.Id == preferences.ActiveRobotId ? "● " : "") + profile.Name + " · " + status;
+        return profile.Name + "\n" + status;
     }
 
     private int CanIndex() => Array.IndexOf(knownCanIds, ActiveProfile.CanDeviceId) + 1;

@@ -29,19 +29,13 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
-      - name: Restore against the public plugin SDK
+      - name: Restore against the pinned public plugin SDK preview
         shell: pwsh
         run: |
-          $sdk = Join-Path $env:RUNNER_TEMP 'public-plugin-sdk'
-          New-Item -ItemType Directory -Path $sdk -Force | Out-Null
-          $package = Join-Path $sdk 'LuckyEngine.PluginSdk.0.1.0.nupkg'
-          Invoke-WebRequest -Uri 'https://github.com/luckyrobots/luckyengine-plugins/releases/download/sdk-v0.1.0/LuckyEngine.PluginSdk.0.1.0.nupkg' -OutFile $package
-          if ((Get-FileHash -LiteralPath $package -Algorithm SHA256).Hash -ne '106A9B3877AB8079541D7BFB9D49394B06965977CA35A002C339BBF37430DD0F') { throw 'Unexpected public SDK package digest' }
-          $config = Join-Path $sdk 'NuGet.Config'
-          $localSource = [Security.SecurityElement]::Escape($sdk)
-          [IO.File]::WriteAllText($config, "<configuration><packageSources><clear/><add key=`"PublicPluginSdk`" value=`"$localSource`"/><add key=`"nuget.org`" value=`"https://api.nuget.org/v3/index.json`"/></packageSources></configuration>")
+          $package = 'vendor/plugin-sdk/LuckyEngine.PluginSdk.0.1.1-preview.1.nupkg'
+          if ((Get-FileHash -LiteralPath $package -Algorithm SHA256).Hash -ne '037E3A92F303BBE517091EFCAE5AA8137B2DC44106D997D8E56F1F1290027361') { throw 'Unexpected public SDK preview digest' }
           foreach ($project in @('Piper.Plugin.Tests','Piper.Pika.Tests')) {
-            dotnet restore "managed/$project" --configfile $config
+            dotnet restore "managed/$project" --configfile NuGet.Config
             if ($LASTEXITCODE) { throw "Restore failed: $project" }
           }
       - name: Managed protocol and plugin fixtures

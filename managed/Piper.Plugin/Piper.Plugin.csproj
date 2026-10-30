@@ -2,7 +2,7 @@
   <PropertyGroup><OutputType>Exe</OutputType><TargetFramework>net9.0</TargetFramework><ImplicitUsings>enable</ImplicitUsings><Nullable>enable</Nullable><TreatWarningsAsErrors>true</TreatWarningsAsErrors><AssemblyName>LuckyRobots.Pipers</AssemblyName></PropertyGroup>
   <ItemGroup>
     <None Include="camera/checkerboard.svg" CopyToOutputDirectory="PreserveNewest" />
-    <PackageReference Include="LuckyEngine.PluginSdk" Version="0.1.0" />
+    <PackageReference Include="LuckyEngine.PluginSdk" Version="0.1.1-preview.1" />
     <PackageReference Include="Grpc.Net.Client" Version="2.76.0" />
     <ProjectReference Include="../Piper.Contracts/Piper.Contracts.csproj" />
     <ProjectReference Include="../Piper.Pika/Piper.Pika.csproj" />

@@ -38,7 +38,6 @@ public sealed partial class PipersPlugin : ILuckyPlugin
     private readonly Dictionary<string, CameraCapture> cameras = [];
     private readonly ConcurrentDictionary<string, string> cameraStatus = new();
     private readonly ConcurrentDictionary<string, (int Width, int Height)> cameraDimensions = new();
-    private readonly HashSet<string> cameraSettingsOpen = [];
 
     public PipersPlugin(string address = "http://127.0.0.1:8766")
     {
@@ -121,9 +120,11 @@ public sealed partial class PipersPlugin : ILuckyPlugin
         long permissionEpoch = Interlocked.Read(ref targetPermissionEpoch);
         expectedToken ??= token;
         bool recoveryOnly = recoveryAcknowledged && action is "reset" or "verify-reset" or "verify-current";
+        bool releasingPower = action == "disable";
         bool teachingOnly = teachingAcknowledged && action == "teach-return";
-        if (calibrationOpen && !recoveryOnly && !teachingOnly) throw new InvalidOperationException("Calibrate robot is read-only. Use Back to robot controls before sending arm targets or enable commands.");
-        if (!approved && !recoveryOnly && !teachingOnly) throw new InvalidOperationException("Use Enable robot and confirm the workspace is clear first.");
+        if (calibrationOpen && !recoveryOnly && !teachingOnly && !releasingPower && action != "hold") throw new InvalidOperationException("Calibrate robot is read-only. Use Back to robot controls before sending arm targets or enable commands.");
+        if (workspacePage != "controls" && !recoveryOnly && !teachingOnly && !releasingPower && action != "hold") throw new InvalidOperationException("Return to Controls before enabling or moving the real robot.");
+        if (!approved && !recoveryOnly && !teachingOnly && !releasingPower) throw new InvalidOperationException("Use Enable robot and confirm the workspace is clear first.");
         var device = Device(expectedDeviceId, expectedGeneration, expectedToken);
         if (!teachingOnly && !recoveryOnly && TeachingState.Inspect(device).BlocksTargets)
             throw new InvalidOperationException("The physical teaching controller owns the arm. End teaching and return to CAN before sending new targets.");
@@ -157,10 +158,22 @@ public sealed partial class PipersPlugin : ILuckyPlugin
         {
             string id = UnscopeEvent(input.WidgetId);
             if (id.Length == 0) return; // Late gesture from a previously selected robot.
+            if (workspacePage != "controls" && WorkspaceCommandPolicy.RequiresControls(id)) throw new InvalidOperationException("Return to Controls before enabling or moving the robot.");
             if (CalibrationCommandGuard.Blocks(id, calibrationOpen)) throw new InvalidOperationException("Calibrate robot is read-only. Use Back to robot controls before enabling or moving the real robot.");
+            if (id.StartsWith("workspace.", StringComparison.Ordinal))
+            {
+                await WorkspaceEvent(id[10..], cancellation); await Update(cancellation); return;
+            }
+            if (id.StartsWith("wizard.", StringComparison.Ordinal))
+            {
+                if (!calibrationOpen) throw new InvalidOperationException("Open Calibration before continuing its guided measurements.");
+                await WizardEvent(id[7..], input.Value, cancellation); await Update(cancellation); return;
+            }
             if (id.StartsWith("profiles.", StringComparison.Ordinal))
             {
+                if (calibrationOpen && (id.StartsWith("profiles.select.", StringComparison.Ordinal) || id is "profiles.add" or "profiles.remove")) await ClearWizardHighlight(cancellation);
                 await ProfileEvent(id[9..], input.Value, cancellation);
+                if (id.StartsWith("profiles.select.", StringComparison.Ordinal) || id is "profiles.add" or "profiles.remove") { workspacePage = "controls"; calibrationOpen = alignmentOpen = false; }
                 await Render(cancellation); await Update(cancellation); return;
             }
             if (teleoperating && id is "stop" or "disable" or "recovery.run" or "robots.select" or "link")
@@ -216,11 +229,7 @@ public sealed partial class PipersPlugin : ILuckyPlugin
             {
                 string[] parts = id.Split('.'); string camera = parts[1];
                 var settings = CameraSettings(camera);
-                if (parts[2] == "settings")
-                {
-                    if (!cameraSettingsOpen.Add(camera)) cameraSettingsOpen.Remove(camera);
-                    await Patch(new Dictionary<string, JsonObject> { ["camera." + camera + ".settings.form"] = new() { ["visible"] = cameraSettingsOpen.Contains(camera) } }, cancellation);
-                }
+                if (parts[2] == "settings") await WorkspaceEvent("settings.cameras." + camera, cancellation);
                 else if (parts[2].StartsWith("sim", StringComparison.Ordinal))
                 {
                     await CameraComparisonEvent(camera, parts[2], input.Value, cancellation);
@@ -231,11 +240,11 @@ public sealed partial class PipersPlugin : ILuckyPlugin
                 {
                     if (parts[2] == "device") settings = settings with { Device = input.Value.GetString() ?? "", Enabled = true };
                     if (parts[2] == "toggle") settings = settings with { Enabled = !settings.Enabled };
-                    if (camera == "depth" && parts[2] == "view") settings = D405View.Select(settings, input.Value.GetInt32());
+                    if (camera == "depth" && parts[2] is "view" or "selectcolor" or "selectdepth") settings = D405View.Select(settings, parts[2] == "view" ? input.Value.GetInt32() : parts[2] == "selectdepth" ? 1 : 0);
                     if (parts[2] == "serial") preferences = preferences with { DepthSerial = input.Value.GetString() ?? "" };
                     preferences = camera switch { "bench" => preferences with { Bench = settings }, "gripper" => preferences with { Gripper = settings }, _ => preferences with { Depth = settings } };
                     await Save(cancellation); await RestartCamera(camera);
-                    if (parts[2] == "view") await Render(cancellation);
+                    await Render(cancellation);
                 }
             }
             else if (id == "robots.refresh")
@@ -306,11 +315,11 @@ public sealed partial class PipersPlugin : ILuckyPlugin
             }
             else if (id == "speed" || id == "step" || id == "tolerance")
             {
-                double value = input.Value.GetDouble();
+                double value = FiniteControlNumber(input.Value, id);
                 preferences = id switch { "speed" => preferences with { Speed = Math.Clamp(value, 0, 100) }, "step" => preferences with { Step = Math.Clamp(value, .1, 5) }, _ => preferences with { Tolerance = Math.Clamp(value, .05, 1) } };
                 await Save(cancellation);
             }
-            else if (id == "zero.all") await Command("pose", new() { ["degrees"] = JsonSerializer.SerializeToNode(new double[6]), ["synchronized"] = true }, cancellation);
+            else if (id == "zero.all") await Command("move-to-zero", null, cancellation);
             else if (id.StartsWith("joint.", StringComparison.Ordinal))
             {
                 string[] parts = id.Split('.'); int joint = int.Parse(parts[1]);
@@ -318,13 +327,15 @@ public sealed partial class PipersPlugin : ILuckyPlugin
                 await Command(action == "target" ? "joint" : action == "zero" ? "zero" : "jog",
                     new() { ["joint"] = joint, ["degrees"] = action == "target" ? input.Value.GetDouble() : action == "plus" ? preferences.Step : action == "minus" ? -preferences.Step : 0 }, cancellation);
             }
-            else if (id == "pika.target")
+            else if (id is "pika.target" or "pika.plus" or "pika.minus" or "pika.zero")
             {
                 Device();
                 if (!PikaMatchesProfile()) throw new InvalidOperationException("The Pika serial assignment does not match this robot.");
                 if (!pikaOwned || state?["pika"]?["armed"]?.GetValue<bool>() != true)
                     throw new InvalidOperationException("Pika is monitoring only. Use Enable robot before commanding its opening.");
-                await Call("/api/pika/position", new JsonObject { ["owner"] = owner, ["value"] = PikaProtocol.Angle(input.Value.GetDouble()) }, cancellation);
+                double currentOpening = PikaProtocol.Width(state!["pika"]!["telemetry"]!["motor"]!["Position"]!.GetValue<double>());
+                double opening = id == "pika.target" ? FiniteControlNumber(input.Value, "Gripper opening") : id == "pika.zero" ? 0 : Math.Clamp(currentOpening + (id == "pika.plus" ? 1 : -1), 0, 90);
+                await Call("/api/pika/position", new JsonObject { ["owner"] = owner, ["value"] = PikaProtocol.Angle(opening) }, cancellation);
             }
             await Update(cancellation);
         }
@@ -386,45 +397,6 @@ public sealed partial class PipersPlugin : ILuckyPlugin
         return File.WriteAllTextAsync(Path.Combine(engine.Start.SettingsDirectory, "preferences.json"), JsonSerializer.Serialize(preferences, PluginProtocol.Json), cancellation);
     }
 
-    private Task Render(CancellationToken cancellation)
-    {
-        var robots = scene?["robots"]?.AsArray().OfType<JsonObject>().ToArray() ?? [];
-        var widgets = new List<Widget>
-        {
-            Widget.Row("header", Widget.Button("enable", "Enable robot"), Widget.Button("disable", "Disable"), Widget.Button("stop", "STOP"), Widget.Button("backend.toggle", "Controller setup")),
-            Widget.Label("status", message) with { Height = 42 },
-            BackendSetup(),
-            Widget.Row("safety", Widget.Label("safety.text", "Make sure the workspace is clear and safe to move."), Widget.Button("safety.accept", "Enable controls"), Widget.Button("safety.cancel", "Cancel")) with { Visible = false },
-            Widget.Row("scene.binding", Widget.Button("robots.refresh", "Scene robots"), new Widget("dropdown", "robots.select") { Width = 200, Options = robots.Select(r => r["name"]!.GetValue<string>()).ToArray(), Value = Math.Max(0, Array.FindIndex(robots, r => r["entityId"]!.GetValue<string>() == preferences.RobotId)) }, Widget.Button("link", "Link robot")),
-            Widget.Label("link.status", "Unlinked · joint/desk/camera calibration not verified") with { Height = 34 },
-            TeachingControls(),
-            CalibrationControls(),
-            AlignmentControls() with { Visible = !calibrationOpen },
-        };
-        var robotControls = new List<Widget>
-        {
-            Widget.Row("motion", Widget.Label("motion.progress", "Idle") with { Width = 560, Height = 34 },
-                Widget.Button("motion.hold", "Stop movement") with { Width = 130, Enabled = false }),
-            Widget.Row("teleoperate", new[] { Widget.Button("teleoperate.toggle", "Start Teleoperate") with { Width = 170 } }.Concat(
-                Enumerable.Range(1, 6).Select(i => Widget.Button("teleoperate.joint." + i, "J" + i) with { Width = 42, Enabled = false })).ToArray()),
-            Widget.Row("cameras", Camera("depth", "Pika D405"), Camera("gripper", "Pika gripper camera")),
-            Widget.Row("pika", Widget.Label("pika.value", "Pika · waiting for feedback") with { Width = 190 }, Widget.Slider("pika.target", 0, 0, 90, .1) with { Enabled = false }),
-            Widget.Label("pika.monitor", pikaMonitorStatus) with { Height = 28 },
-            Widget.Row("preferences", Widget.Label("speed.label", "Speed %"), Widget.Slider("speed", preferences.Speed, 0, 100, 1), Widget.Label("step.label", "Jog °"), Widget.Slider("step", preferences.Step, .1, 5, .1), Widget.Label("tolerance.label", "Tolerance °"), Widget.Slider("tolerance", preferences.Tolerance, .05, 1, .05)),
-            Widget.Label("speed.actual", "Waiting for reported speed limits") with { Height = 34 },
-        };
-        for (int i = 1; i <= 6; i++)
-            robotControls.Add(Widget.Row("joint." + i, Widget.Label($"joint.{i}.value", $"J{i} · —") with { Width = 190, Height = 28 }, Widget.Button($"joint.{i}.minus", "−") with { Width = 32 }, Widget.Slider($"joint.{i}.target", 0, -180, 180, .1) with { Enabled = false }, Widget.Button($"joint.{i}.plus", "+") with { Width = 32 }, Widget.Button($"joint.{i}.zero", "Zero") with { Width = 52 }));
-        robotControls.Add(Widget.Button("zero.all", "All joints to zero"));
-        // A focused check remains usable without relying on nested native-panel
-        // scrolling. Visibility changes only; acquisition and measured linking run on.
-        widgets.Add(Widget.Column("robot.controls", robotControls.ToArray()) with { Visible = !FocusedRobotView });
-        widgets.Add(Widget.Label("incident", ""));
-        widgets.Add(Widget.Label("recovery.next", ""));
-        widgets.Add(Widget.Row("recovery", Widget.Button("recovery.run", "Clear & support arm — recover")) with { Visible = false });
-        return engine.PublishViewAsync(Panel, Widget.Row("workspace", ScopeRobotWidget(RobotSidebar()), ScopeRobotWidget(Widget.Column("controls", widgets.ToArray()))), cancellation);
-    }
-
     private CameraPreferences CameraSettings(string id) => id switch
     {
         "bench" => preferences.Bench ?? new(OperatingSystem.IsWindows() ? "Lumina Camera - Raw" : "", OperatingSystem.IsWindows(), "1920x1080", 30, "mjpeg"),
@@ -449,32 +421,6 @@ public sealed partial class PipersPlugin : ILuckyPlugin
         cameras[id] = camera; camera.Start();
     }
 
-    private Widget Camera(string id, string title) => Widget.Column("camera." + id,
-        Widget.Row("camera." + id + ".header", Widget.Label("camera." + id + ".title", title), Widget.Button("camera." + id + ".settings", "⚙") with { Hint = "Choose camera, start/stop and capture settings" }),
-        Widget.Label("camera." + id + ".real.title", id == "depth" ? D405View.MetricDepth(id, CameraSettings(id)) ? "REAL · depth 7–50 cm · white = near" : "REAL · D405 color image · not depth distance" : "REAL"),
-        new Widget("image", "camera." + id + ".image") { ImageId = CameraImageId(id), Visible = CameraFrameReady(id), Height = 150 },
-        Widget.Label("camera." + id + ".sim.title", D405View.MetricDepth(id, CameraSettings(id)) ? "SIM · ideal metric depth · same 7–50 cm scale" : id == "gripper" ? "SIM · fisheye lens" : "SIM · color camera viewpoint"),
-        new Widget("scene-camera", "camera." + id + ".sim") { Height = 150 },
-        Widget.Label("camera." + id + ".sim.status", "Camera alignment not calibrated") with { Height = 34 },
-        Widget.Label("camera." + id + ".info", "Connecting…") with { Height = 34 },
-        Widget.Column("camera." + id + ".settings.form",
-            new Widget("dropdown", "camera." + id + ".view") { Options = ["Color image (RGB)", "Depth distance (7–50 cm)"], Value = D405View.Mode(CameraSettings(id)) == "depth" ? 1 : 0, Visible = id == "depth", Hint = "Color is a regular image; Depth shows measured distance. The simulation uses the same view type. Remembered per robot." },
-            new Widget("input", "camera." + id + ".device") { Text = CameraSettings(id).Device, Hint = "Camera name or stable device path", Visible = id != "depth" },
-            Widget.Button("camera." + id + ".simrefresh", "Find simulation cameras"),
-            new Widget("dropdown", "camera." + id + ".simselect") { Options = SimulationCameraNames(), Value = SimulationCameraIndex(id) },
-            Widget.Button("camera." + id + ".simoverlay", "Real / simulation overlay") with { Enabled = !D405View.MetricDepth(id, CameraSettings(id)), Hint = "Blend views for alignment. Does not establish calibrated or time-synchronized data." },
-            Widget.Column("camera." + id + ".calibration",
-                Widget.Button("camera." + id + ".calibrationtools", "Check camera runtime") with { Hint = "Checks the bundled C# camera tools without opening a camera. No Python, SDK installation or runtime download is needed." },
-                Widget.Label("camera." + id + ".calibration.help", "Lens calibration: print the 8 × 6 checkerboard at actual size (20 mm squares), keep it flat. Capture 20+ sharp views with different tilts and positions, including all image edges. Keep the robot stationary; move the board."),
-                Widget.Button("camera." + id + ".calibrationboard", "Open printable board"),
-                Widget.Button("camera." + id + ".calibrationnew", "New capture session"),
-                Widget.Button("camera." + id + ".calibrationcapture", "Capture board image"),
-                Widget.Button("camera." + id + ".calibrationsolve", "Solve & validate fisheye lens"),
-                Widget.Label("camera." + id + ".calibration.status", "No lens calibration. Camera mount remains unverified.")) with { Visible = id == "gripper" },
-            new Widget("input", "camera." + id + ".serial") { Text = preferences.DepthSerial, Hint = "D405 serial; blank only when exactly one is connected", Visible = id == "depth" },
-            Widget.Button("camera." + id + ".toggle", "Start / Stop"),
-            Widget.Label("camera." + id + ".clock", "Preview uses host receipt timestamps. Hardware exposure synchronization and metric depth recording are not calibrated.")) with { Visible = cameraSettingsOpen.Contains(id) });
-
     private async Task Update(CancellationToken cancellation)
     {
         var patches = new Dictionary<string, JsonObject>
@@ -488,7 +434,7 @@ public sealed partial class PipersPlugin : ILuckyPlugin
         AddProfilePatches(patches);
         JsonObject? device = null;
         try { device = Device(); } catch (InvalidOperationException) { }
-        bool movable = approved && !TeachingState.Inspect(device).BlocksTargets && state?["motion"]?["active"]?.GetValue<bool>() != true && device?["fresh"]?.GetValue<bool>() == true && device["recovery_required"]?.GetValue<bool>() != true && string.IsNullOrEmpty(device["blocker"]?.GetValue<string>());
+        bool movable = workspacePage == "controls" && approved && !TeachingState.Inspect(device).BlocksTargets && state?["motion"]?["active"]?.GetValue<bool>() != true && device?["fresh"]?.GetValue<bool>() == true && device["recovery_required"]?.GetValue<bool>() != true && string.IsNullOrEmpty(device["blocker"]?.GetValue<string>());
         var joints = device?["joints"]?.AsArray();
         bool ownMove = state?["motion"]?["active"]?.GetValue<bool>() == true && state["motion"]?["owner"]?.GetValue<string>() == owner;
         var remaining = joints?.Select((j, i) => new { Joint = i + 1, Actual = j?["actual_deg"]?.GetValue<double>(), Target = j?["target_deg"]?.GetValue<double>() })
@@ -496,9 +442,9 @@ public sealed partial class PipersPlugin : ILuckyPlugin
             .Select(j => $"J{j.Joint} {j.Actual:F1}° → {j.Target:F1}°").ToArray() ?? [];
         patches["motion.progress"] = new() { ["text"] = ownMove
             ? (state?["motion"]?["following"]?.GetValue<bool>() == true ? "Following drag · " : "Movement in progress · ") + (remaining.Length > 0 ? string.Join(" · ", remaining) : "settling at target")
-            : device?["recovery_required"]?.GetValue<bool>() == true ? "Stopped · recovery required" : "Idle" };
+            : device?["recovery_required"]?.GetValue<bool>() == true ? "Stopped · recovery required" : device?["range_recovery"]?["required"]?.GetValue<bool>() == true ? "Range overrun · move the affected joint inward or Move all to zero" : "Idle" };
         patches["motion.hold"] = new() { ["enabled"] = ownMove && joints?.Any(j => j?["target_deg"] is not null) == true };
-        bool canTeleoperate = movable && link is not null && linkCommandsEnabled && joints?.All(j => j?["enabled"]?.GetValue<bool>() == true) == true;
+        bool canTeleoperate = movable && link is not null && linkCommandsEnabled && device?["range_recovery"]?["required"]?.GetValue<bool>() != true && joints?.All(j => j?["enabled"]?.GetValue<bool>() == true) == true;
         patches["teleoperate.toggle"] = new() { ["text"] = teleoperating ? "Pause Teleoperate" : "Start Teleoperate", ["enabled"] = teleoperating || canTeleoperate };
         for (int i = 1; i <= 6; i++) patches["teleoperate.joint." + i] = new() {
             ["text"] = teleoperating && teleoperationJoint == "joint" + i ? "[J" + i + "]" : "J" + i,
@@ -506,17 +452,21 @@ public sealed partial class PipersPlugin : ILuckyPlugin
         for (int i = 1; i <= 6; i++)
         {
             var joint = joints?.ElementAtOrDefault(i - 1);
-            bool available = movable && joint?["enabled"]?.GetValue<bool>() == true && joint["limits_fresh"]?.GetValue<bool>() == true;
+            bool available = movable && joint?["enabled"]?.GetValue<bool>() == true && joint["limits_fresh"]?.GetValue<bool>() == true && joint["can_move"]?.GetValue<bool>() != false;
             double? actual = joint?["actual_deg"]?.GetValue<double>();
-            patches[$"joint.{i}.value"] = new() { ["text"] = $"J{i} · {actual?.ToString("F3") ?? "—"}° · {joint?["current_a"]?.GetValue<double>().ToString("F2") ?? "—"} A" };
-            patches[$"joint.{i}.target"] = new() { ["value"] = actual ?? 0, ["min"] = joint?["min_deg"]?.DeepClone() ?? JsonValue.Create(-180), ["max"] = joint?["max_deg"]?.DeepClone() ?? JsonValue.Create(180), ["enabled"] = available };
-            foreach (string action in new[] { "minus", "plus", "zero" }) patches[$"joint.{i}.{action}"] = new() { ["enabled"] = available };
+            patches[$"joint.{i}.value"] = new() { ["text"] = actual?.ToString("F3") ?? "—" };
+            patches[$"joint.{i}.current"] = new() { ["text"] = joint?["current_a"]?.GetValue<double>().ToString("F2") ?? "—" };
+            string rangeHint = joint?["motion_blocker"]?.GetValue<string>() ?? $"Reported range {joint?["min_deg"]}° to {joint?["max_deg"]}°";
+            patches[$"joint.{i}.target"] = new() { ["value"] = actual ?? 0, ["min"] = joint?["min_deg"]?.DeepClone() ?? JsonValue.Create(-180), ["max"] = joint?["max_deg"]?.DeepClone() ?? JsonValue.Create(180), ["enabled"] = available, ["hint"] = rangeHint };
+            patches[$"joint.{i}.minus"] = new() { ["enabled"] = available && joint?["can_move_negative"]?.GetValue<bool>() != false, ["hint"] = rangeHint };
+            patches[$"joint.{i}.plus"] = new() { ["enabled"] = available && joint?["can_move_positive"]?.GetValue<bool>() != false, ["hint"] = rangeHint };
+            patches[$"joint.{i}.zero"] = new() { ["enabled"] = available, ["hint"] = rangeHint };
         }
-        patches["zero.all"] = new() { ["enabled"] = movable && joints?.All(j => j?["enabled"]?.GetValue<bool>() == true && j["limits_fresh"]?.GetValue<bool>() == true) == true };
+        patches["zero.all"] = new() { ["enabled"] = movable && joints?.All(j => j?["enabled"]?.GetValue<bool>() == true && j["limits_fresh"]?.GetValue<bool>() == true) == true && (device?["range_recovery"]?["required"]?.GetValue<bool>() != true || device["range_recovery"]?["can_move_to_zero"]?.GetValue<bool>() == true), ["hint"] = device?["range_recovery"]?["required"]?.GetValue<bool>() == true ? device["range_recovery"]!["reason"]?.GetValue<string>() ?? "Slow range entry, then synchronized zero position. Encoder zeros are unchanged." : "Move all joints to zero angles. This does not calibrate encoder zeros." };
         var pika = PikaMatchesProfile() ? state?["pika"] : null;
         double? pikaAngle = pika?["telemetry"]?["motor"]?["Position"]?.GetValue<double>();
         double? opening = pikaAngle.HasValue ? PikaProtocol.Width(pikaAngle.Value) : null;
-        patches["pika.value"] = new() { ["text"] = string.IsNullOrEmpty(ActiveProfile.PikaDevice) ? "Pika · unassigned" : $"Pika · {opening?.ToString("F2") ?? "—"} mm" };
+        patches["pika.value"] = new() { ["text"] = string.IsNullOrEmpty(ActiveProfile.PikaDevice) ? "Unassigned" : $"{opening?.ToString("F2") ?? "—"} mm", ["hint"] = pikaMonitorStatus };
         patches["pika.target"] = new() { ["value"] = opening ?? 0, ["enabled"] = device is not null && !switchingProfile && pikaOwned && pika?["armed"]?.GetValue<bool>() == true && pika?["fresh"]?.GetValue<bool>() == true && pika["enabled"]?.GetValue<bool>() == true && pika["pending"]?.GetValue<bool>() != true };
         patches["pika.monitor"] = new() { ["text"] = pikaMonitorStatus };
         bool limitsFresh = joints?.All(j => j?["limits_fresh"]?.GetValue<bool>() == true && j["max_speed_rad_s"]?.GetValue<double>() > 0) == true;
@@ -540,11 +490,18 @@ public sealed partial class PipersPlugin : ILuckyPlugin
         AddCalibrationPatches(patches, device);
         AddCameraComparisonPatches(patches);
         AddResetAssistedPatches(patches, device);
+        foreach (string action in new[] { "minus", "plus", "zero" }) patches["pika." + action] = new() { ["enabled"] = workspacePage == "controls" && pikaOwned && pika?["fresh"]?.GetValue<bool>() == true && pika["armed"]?.GetValue<bool>() == true && pika["pending"]?.GetValue<bool>() != true };
+        AddWorkspacePatches(patches, device);
         await Patch(patches, cancellation);
     }
 
     public async ValueTask DisposeAsync()
     {
+        using (var markerTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(1)))
+        {
+            try { await ClearWizardHighlight(markerTimeout.Token); }
+            catch (Exception error) { Trace.TraceWarning("Calibration marker shutdown: {0}", error.Message); }
+        }
         await StopPikaMonitorRetries();
         await StopResetAssistedOnDispose();
         using (var saveTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(1)))
@@ -565,6 +522,7 @@ public sealed partial class PipersPlugin : ILuckyPlugin
             catch (Exception error) { Trace.TraceWarning("Pika shutdown release: {0}", error.Message); }
         }
         await shutdown.CancelAsync();
+        if (wizardHighlightMaintenance is not null) { try { await wizardHighlightMaintenance; } catch (OperationCanceledException) { } }
         if (calibrationWorker is not null) { try { await calibrationWorker; } catch (OperationCanceledException) { } }
         foreach (var camera in cameras.Values) await camera.DisposeAsync();
         if (worker is not null) { try { await worker; } catch (OperationCanceledException) { } catch (RpcException error) when (error.StatusCode == StatusCode.Cancelled) { } }

@@ -25,6 +25,23 @@ static void action(struct controller *c,const char *name,int expected)
     cJSON_AddStringToObject(j,"device_id",d->id); cJSON_AddNumberToObject(j,"generation",d->generation);
     cJSON_AddStringToObject(j,"owner","startup-regression-client"); cJSON_AddStringToObject(j,"action",name);
     cJSON_AddBoolToObject(j,"standalone",true); cJSON_AddBoolToObject(j,"supported",true); cJSON_AddBoolToObject(j,"clear",true);
+    /* A previous completion persists its recovery record synchronously. A slow
+       fsync/CI scheduling pause can age the last simulated frame before the
+       next healthy action. Poll genuine simulator frames rather than extending
+       the controller freshness guard or stamping old readings as current.
+       Rejection cases retain their deliberately injected fault/stale feedback. */
+    if (expected==202&&!piper_fresh(&d->feedback.arm[0],piper_now())) {
+        for (unsigned poll=0;poll<100&&!piper_fresh(&d->feedback.arm[0],piper_now());++poll) tick(c);
+        assert(piper_fresh(&d->feedback.arm[0],piper_now()));
+        /* A real status gap invalidates static information too. Re-read it
+           through the normal read-only query path before the next command. */
+        if (!*d->feedback.version) {
+            int query_status; cJSON *query=controller_action(c,"/api/query",j,&query_status);
+            assert(query_status==202); cJSON_Delete(query);
+            for (unsigned poll=0;poll<600&&c->query;++poll) tick(c);
+            assert(!c->query&&piper_fresh(&d->feedback.arm[0],piper_now()));
+        }
+    }
     int status; cJSON *r=controller_action(c,"/api/command",j,&status);
     if (status!=expected) { char *s=cJSON_Print(r); fprintf(stderr,"%s: %s\n",name,s); free(s); }
     assert(status==expected); cJSON_Delete(r); cJSON_Delete(j);

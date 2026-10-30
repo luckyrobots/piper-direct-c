@@ -53,9 +53,12 @@ public sealed class GripperLink
             Status = $"Scene gripper unchanged: measured opening {width:F1} mm is outside the model's 0–{maximumMm:F1} mm range. Check the tool model/calibration.";
             return;
         }
-        double halfWidthMetres = width / 2000;
-        joints["joint7"] = firstSign * halfWidthMetres;
-        joints["joint8"] = -firstSign * halfWidthMetres;
+        // The canonical Pika slides are open at q=0. Their signed range
+        // endpoints bring the two inner jaw faces together. Opening therefore
+        // decreases slide travel; using width directly inverts the real jaws.
+        double closingTravelMetres = (maximumMm - width) / 2000;
+        joints["joint7"] = firstSign * closingTravelMetres;
+        joints["joint8"] = -firstSign * closingTravelMetres;
         Status = $"Scene gripper linked · measured {width:F1} mm / model {maximumMm:F1} mm";
     }
 

@@ -257,6 +257,7 @@ public sealed partial class PipersPlugin
                     if (next["motion"]?["active"]?.GetValue<bool>() != true) lastCommand = 0;
                 }
                 await PublishMeasuredScene(cancellation);
+                QueueWizardHighlight();
                 if (recoveryInProgress && HasFreshControlTelemetry(out var recoveryReceipt))
                 {
                     var device = Device();

@@ -33,6 +33,12 @@ build/test-control: tests/test_control.c $(CORE) $(HEADERS) | build
 build/test-range-drift: tests/test_range_drift.c $(CORE) $(HEADERS) | build
 	$(CC) $(CPPFLAGS) $(CFLAGS) tests/test_range_drift.c $(CORE) -o $@ $(LDLIBS)
 
+build/test-range-transition: tests/test_range_transition.c $(CORE) $(HEADERS) | build
+	$(CC) $(CPPFLAGS) $(CFLAGS) tests/test_range_transition.c $(CORE) -o $@ $(LDLIBS)
+
+build/test-arrival-tolerance: tests/test_arrival_tolerance.c $(CORE) $(HEADERS) | build
+	$(CC) $(CPPFLAGS) $(CFLAGS) tests/test_arrival_tolerance.c $(CORE) -Wl,--wrap=can_bus_receive -Wl,--wrap=can_bus_send -o $@ $(LDLIBS)
+
 build/test-configuration-cache: tests/test_configuration_cache.c $(CORE) $(HEADERS) | build
 	$(CC) $(CPPFLAGS) $(CFLAGS) tests/test_configuration_cache.c $(CORE) -o $@ $(LDLIBS)
 
@@ -63,12 +69,14 @@ build/test-teaching: tests/test_teaching.c $(CORE) $(HEADERS) | build
 build/test-stop-generation: tests/test_stop_generation.c $(CORE) $(HEADERS) | build
 	$(CC) $(CPPFLAGS) $(CFLAGS) tests/test_stop_generation.c $(CORE) -o $@ $(LDLIBS)
 
-test: all build/test-protocol build/test-control build/test-camera build/test-startup build/test-cycle build/test-gripper build/test-obstruction build/test-obstruction-controller build/test-range-drift build/test-configuration-cache build/test-follow build/test-teaching build/test-stop-generation
+test: all build/test-protocol build/test-control build/test-camera build/test-startup build/test-cycle build/test-gripper build/test-obstruction build/test-obstruction-controller build/test-range-drift build/test-range-transition build/test-arrival-tolerance build/test-configuration-cache build/test-follow build/test-teaching build/test-stop-generation
 	./build/test-stop-generation
 	./build/test-teaching
 	./build/test-follow
 	./build/test-configuration-cache
 	./build/test-range-drift
+	./build/test-range-transition
+	./build/test-arrival-tolerance
 	./build/test-obstruction
 	./build/test-obstruction-controller
 	./build/test-protocol

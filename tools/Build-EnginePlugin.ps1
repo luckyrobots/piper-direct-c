@@ -37,6 +37,7 @@ Copy-Item -LiteralPath (Join-Path $taskRepo 'docs/lucky-engine-plugin.md') -Dest
 Copy-Item -LiteralPath (Join-Path $taskRepo 'docs/workspace-calibration-roadmap.md') -Destination (Join-Path $taskPackage 'docs') -Force
 Copy-Item -LiteralPath (Join-Path $taskRepo 'docs/teaching-alignment.md') -Destination (Join-Path $taskPackage 'docs') -Force
 Copy-Item -LiteralPath (Join-Path $taskRepo 'docs/robot-base-calibration.md') -Destination (Join-Path $taskPackage 'docs') -Force
+Copy-Item -LiteralPath (Join-Path $taskRepo 'docs/pika-model-reference.md') -Destination (Join-Path $taskPackage 'docs') -Force
 Copy-Item -LiteralPath (Join-Path $taskRepo 'managed/THIRD-PARTY-NOTICES.txt') -Destination $taskPackage -Force
 Copy-Item -LiteralPath (Join-Path $taskRepo 'vendor/candle') -Destination (Join-Path $taskPackage 'transport-source') -Recurse -Force
 # Include reproducible plugin/controller sources, never local state, captures, credentials or engine code.
@@ -57,16 +58,26 @@ foreach($taskProject in @('Piper.Contracts','Piper.Core','Piper.Host','Piper.Pik
     }
 }
 Copy-Item -LiteralPath (Join-Path $taskRepo 'vendor/realsense'),(Join-Path $taskRepo 'vendor/camera-licenses') -Destination (Join-Path $taskSource 'vendor') -Recurse -Force
+Copy-Item -LiteralPath (Join-Path $taskRepo 'vendor/plugin-sdk') -Destination (Join-Path $taskSource 'vendor') -Recurse -Force
+Copy-Item -LiteralPath (Join-Path $taskRepo 'NuGet.Config') -Destination $taskSource -Force
 New-Item -ItemType Directory -Path (Join-Path $taskSource 'tools'),(Join-Path $taskSource 'docs') -Force | Out-Null
 foreach($taskFile in @('Build-EnginePlugin.ps1','Prepare-CameraRuntime.ps1','build-windows.ps1','build-native-linux.sh')){Copy-Item -LiteralPath (Join-Path $taskRepo ('tools/'+$taskFile)) -Destination (Join-Path $taskSource 'tools') -Force}
 Copy-Item -LiteralPath (Join-Path $taskRepo 'lucky-plugin.yaml') -Destination $taskSource -Force
 Copy-Item -LiteralPath (Join-Path $taskRepo 'Makefile') -Destination $taskSource -Force
+$taskTrackedTests = & git -C $taskRepo ls-files tests
+if($LASTEXITCODE){throw 'Could not enumerate tracked test sources'}
+foreach($taskTest in $taskTrackedTests) {
+    $taskDestination=Join-Path $taskSource $taskTest
+    New-Item -ItemType Directory -Path (Split-Path $taskDestination -Parent) -Force | Out-Null
+    Copy-Item -LiteralPath (Join-Path $taskRepo $taskTest) -Destination $taskDestination -Force
+}
 Copy-Item -LiteralPath (Join-Path $taskRepo 'README.md') -Destination $taskSource -Force
 Copy-Item -LiteralPath (Join-Path $taskRepo 'managed/README.md') -Destination (Join-Path $taskSource 'managed') -Force
 Copy-Item -LiteralPath (Join-Path $taskRepo 'docs/lucky-engine-plugin.md') -Destination (Join-Path $taskSource 'docs') -Force
 Copy-Item -LiteralPath (Join-Path $taskRepo 'docs/workspace-calibration-roadmap.md') -Destination (Join-Path $taskSource 'docs') -Force
 Copy-Item -LiteralPath (Join-Path $taskRepo 'docs/teaching-alignment.md') -Destination (Join-Path $taskSource 'docs') -Force
 Copy-Item -LiteralPath (Join-Path $taskRepo 'docs/robot-base-calibration.md') -Destination (Join-Path $taskSource 'docs') -Force
+Copy-Item -LiteralPath (Join-Path $taskRepo 'docs/pika-model-reference.md') -Destination (Join-Path $taskSource 'docs') -Force
 Copy-Item -LiteralPath (Join-Path $taskRepo 'managed/THIRD-PARTY-NOTICES.txt') -Destination (Join-Path $taskSource 'managed') -Force
 $taskArchive=Join-Path $taskRepo ('build/Pipers-0.1.0-preview.1-'+$Runtime+'.zip')
 Add-Type -AssemblyName System.IO.Compression

@@ -246,6 +246,26 @@ static double range_distance(struct can_device *d)
     }
     return distance;
 }
+static bool joint_outside_range(const struct can_device *d,unsigned i)
+{
+    const struct piper_limit *l=&d->feedback.limit[i];
+    double angle=d->feedback.arm[0].deg[i];
+    return angle<l->min-limit_feedback_slop_deg||angle>l->max+limit_feedback_slop_deg;
+}
+static unsigned outside_range_count(const struct can_device *d)
+{
+    unsigned count=0;
+    for (unsigned i=0;i<6;++i) if (joint_outside_range(d,i)) ++count;
+    return count;
+}
+static const char *range_reason(struct controller *c,struct can_device *d)
+{
+    for (unsigned i=0;i<6;++i) if (joint_outside_range(d,i)) {
+        snprintf(c->error,sizeof c->error,"J%u reads %.3f degrees outside %.3f to %.3f. Move that joint inward or explicitly move all joints to zero; every CAN position command contains all six joints.",i+1,d->feedback.arm[0].deg[i],d->feedback.limit[i].min,d->feedback.limit[i].max);
+        return c->error;
+    }
+    return "No range correction is required.";
+}
 static bool valid_target(struct controller *c,struct can_device *d,const double targets[6])
 {
     for (unsigned i=0;i<6;++i) {
@@ -262,6 +282,22 @@ static bool enabled(struct can_device *d,bool wanted,double after)
         struct piper_motor *m=&d->feedback.motor[i];
         if (!m->seen||m->enabled!=wanted||m->at<=after) return false;
     }
+    return true;
+}
+static bool measured_stationary(struct can_device *d,double now,double after)
+{
+    if (!d->stationary_since||now-d->stationary_since<.4) return false;
+    for (unsigned i=0;i<6;++i) {
+        struct piper_motor *m=&d->feedback.motor[i];
+        if (!m->high_seen||m->high_at<=after||!piper_recent(m->high_at,now)||!isfinite(m->velocity)||fabs(m->velocity)>.01) return false;
+    }
+    return true;
+}
+static bool measured_through(struct can_device *d,double endpoint)
+{
+    struct piper_sample *s=&d->feedback.arm[0];
+    if (s->status_at<endpoint) return false;
+    for (unsigned i=0;i<6;++i) if (s->joint_at[i]<endpoint||d->feedback.motor[i].high_at<endpoint) return false;
     return true;
 }
 static bool teaching_zero(const struct can_device *d)
@@ -301,7 +337,7 @@ static bool relinquish_to_teaching(struct controller *c,struct can_device *d,dou
     cJSON *r=record(c,d->id);
     bool own_intent=!strcmp(text_field(r,"reason"),"Control action interrupted before verified completion")&&
         !yes(r,"stop_event_active")&&!reset_pending(c,d->id);
-    c->op=OP_IDLE; c->cycle_stage=0; c->owner[0]=0; c->following=c->follow_committed=false;
+    c->op=OP_IDLE; c->cycle_stage=0; c->owner[0]=0; c->following=c->follow_committed=false; c->range_followup=c->arrival_hold=false;
     c->teach_return_stage=0;
     if (own_intent&&!clear_latch(c,d->id)) message(c,"blocked","Teaching took over, but state storage failed; previous target discarded.");
     else message(c,"teaching","Onboard teaching took control. The previous movement and lease were discarded; measured scene tracking continues.");
@@ -314,7 +350,7 @@ static void abandon_teaching_return(struct controller *c,const char *reason)
 }
 static bool send_pose(struct controller *c,struct can_device *d,const double target[6])
 {
-    struct can_frame f[4]; f[0]=piper_mode(c->op==OP_ALIGN?1:(unsigned)fmax(1,ceil(c->speed_percent)));
+    struct can_frame f[4]; f[0]=piper_mode(c->op==OP_ALIGN||c->arrival_hold?1:(unsigned)fmax(1,ceil(c->speed_percent)));
     return piper_targets(target,f+1)&&can_bus_send(&c->bus,d,c->generation,f,4);
 }
 static bool send_power(struct controller *c,struct can_device *d,bool on)
@@ -365,12 +401,12 @@ void controller_stop(struct controller *c,const char *reason)
         if (c->op==OP_GRIPPER) { piper_gripper(0,.1,false,&f); sent=can_bus_send(&c->bus,d,generation,&f,1)&&sent; }
         latch(c,d->id,reason,reset_pending(c,d->id));
     }
-    c->op=OP_IDLE; c->cycle_stage=0; c->owner[0]=0; c->query=false;
+    c->op=OP_IDLE; c->cycle_stage=0; c->owner[0]=0; c->query=false; c->range_followup=c->arrival_hold=false;
     message(c,"stopped","%s %s",reason,sent?"Stop queued; verify the arm has stopped. This is not a power cut.":"Stop delivery unavailable; physical stop may be needed.");
 }
 static void finish(struct controller *c,struct can_device *d,const char *result,bool clear)
 {
-    c->op=OP_IDLE; c->cycle_stage=0; c->owner[0]=0;
+    c->op=OP_IDLE; c->cycle_stage=0; c->owner[0]=0; c->range_followup=c->arrival_hold=false;
     if (clear&&!clear_latch(c,d->id)) message(c,"blocked","Action completed, but state could not be saved. Motion remains blocked.");
     else message(c,"complete","%s",result);
 }
@@ -466,6 +502,8 @@ static void begin(struct controller *c,struct can_device *d,const char *owner,en
     c->cycle_stage=0;
     c->teach_return_stage=0;
     c->synchronized_pose=false;
+    c->range_followup=false;
+    c->arrival_hold=false; c->arrival_hold_at=0;
     c->following=c->follow_committed=false; c->follow_updated=0; c->follow_sequence=0;
     snprintf(c->owner,sizeof c->owner,"%s",owner);
     memcpy(c->initial,d->feedback.arm[0].deg,sizeof c->initial);
@@ -473,6 +511,7 @@ static void begin(struct controller *c,struct can_device *d,const char *owner,en
 }
 static void cycle_leg(struct controller *c,struct can_device *d,double now)
 {
+    c->arrival_hold=false; c->arrival_hold_at=0;
     for (unsigned i=0;i<6;++i) obstruction_reset(&c->obstruction[i],now);
     memcpy(c->leg_start,d->feedback.arm[0].deg,sizeof c->leg_start);
     memcpy(c->command,c->leg_start,sizeof c->command);
@@ -545,6 +584,17 @@ cJSON *controller_action(struct controller *c,const char *route,const cJSON *bod
         c->heartbeat=now; return reply(status,200,"Control lease renewed.");
     }
     if (c->op!=OP_IDLE) {
+        if (!strcmp(route,"/api/command")&&!strcmp(text_field(body,"action"),"hold")&&c->op==OP_ALIGN&&!strcmp(c->owner,text_field(body,"owner"))) {
+            double request,generation;
+            if (!d||strcmp(d->id,text_field(body,"device_id"))||
+                !numeric(body,"generation",1,UINT32_MAX,&generation)||generation!=c->generation||d->generation!=c->generation||
+                !numeric(body,"request_id",1,UINT32_MAX,&request)||request!=c->request_id)
+                return reply(status,409,"Range-entry cancellation belongs to another controller action or CAN connection.");
+            /* A full measured pose outside its limits cannot be encoded as a
+               legal hold target. Cancel the pending destination with STOP. */
+            controller_stop(c,"Operator cancelled range entry; the pending destination was discarded.");
+            return reply(status,200,c->message);
+        }
         if (!strcmp(route,"/api/command")&&(c->following||c->follow_committed)&&c->op==OP_MOVE&&
             (!strcmp(text_field(body,"action"),"follow-update")||!strcmp(text_field(body,"action"),"follow-commit")||!strcmp(text_field(body,"action"),"follow-end"))) {
             double request,generation,sequence;
@@ -601,6 +651,7 @@ cJSON *controller_action(struct controller *c,const char *route,const cJSON *bod
                 return reply(status,held?200:409,c->message);
             }
             const char *why=health(d,now,false); if (why) return reply(status,409,why);
+            c->arrival_hold=false;
             memcpy(c->target,d->feedback.arm[0].deg,sizeof c->target); memcpy(c->command,c->target,sizeof c->command);
             bool was_cycle=c->op==OP_CYCLE; c->op=OP_MOVE; c->cycle_stage=0;
             c->synchronized_pose=false;
@@ -711,6 +762,9 @@ cJSON *controller_action(struct controller *c,const char *route,const cJSON *bod
                 c->target[i]=fmin(l->max,fmax(l->min,c->target[i]));
         }
         enum operation op=OP_MOVE;
+        bool staged_range=false, zero_destination=!strcmp(action,"move-to-zero");
+        int selected_joint=-1;
+        double requested_target[6], requested_speed=0, requested_percent=0;
         c->speed=3; c->tolerance=.2;
         double ceiling=1e9;
         for (unsigned i=0;i<6;++i) ceiling=fmin(ceiling,d->feedback.limit[i].speed*180/3.141592653589793);
@@ -738,16 +792,24 @@ cJSON *controller_action(struct controller *c,const char *route,const cJSON *bod
             op=OP_CYCLE; c->speed=3; c->tolerance=.2;
         } else if (!strcmp(action,"follow-start")) {
             /* Begin at fresh measurements. No queued target is replayed on entry. */
+        } else if (!strcmp(action,"move-to-zero")) {
+            memset(c->target,0,sizeof c->target);
         } else if (!strcmp(action,"pose")) {
             const cJSON *angles=field(body,"degrees");
             if (!cJSON_IsArray(angles)||cJSON_GetArraySize(angles)!=6) return reply(status,400,"degrees must contain six finite angles.");
-            for (unsigned i=0;i<6;++i) { cJSON *n=cJSON_GetArrayItem(angles,(int)i); if (!cJSON_IsNumber(n)||!isfinite(n->valuedouble)) return reply(status,400,"Every angle must be finite."); c->target[i]=n->valuedouble; }
+            zero_destination=true;
+            for (unsigned i=0;i<6;++i) { cJSON *n=cJSON_GetArrayItem(angles,(int)i); if (!cJSON_IsNumber(n)||!isfinite(n->valuedouble)) return reply(status,400,"Every angle must be finite."); c->target[i]=n->valuedouble; if (c->target[i]!=0) zero_destination=false; }
         } else if (!strcmp(action,"joint")||!strcmp(action,"jog")||!strcmp(action,"zero")) {
             double joint;
             if (!numeric(body,"joint",1,6,&joint)||floor(joint)!=joint) return reply(status,400,"joint must be 1–6.");
             unsigned index=(unsigned)joint-1;
+            selected_joint=(int)index;
             double degrees=0;
             if (strcmp(action,"zero")&&!numeric(body,"degrees",!strcmp(action,"jog")?-5:-360,!strcmp(action,"jog")?5:360,&degrees)) return reply(status,400,"Enter a finite angle (jog increments are limited to ±5°).");
+            /* An inward jog starts from the nearest legal boundary, as it
+               already does for sub-tolerance encoder drift. It cannot request
+               another invalid negative/outward pose. */
+            if (!strcmp(action,"jog")) c->target[index]=fmin(d->feedback.limit[index].max,fmax(d->feedback.limit[index].min,c->target[index]));
             c->target[index]=!strcmp(action,"jog")?c->target[index]+degrees:degrees;
         } else if (!strcmp(action,"gripper")) {
             if (!d->feedback.gripper_seen||!piper_recent(d->feedback.gripper_at,now)||d->feedback.gripper_fault) return reply(status,409,"Fresh, fault-free gripper feedback is required.");
@@ -763,19 +825,38 @@ cJSON *controller_action(struct controller *c,const char *route,const cJSON *bod
             c->gripper_command=d->feedback.gripper_mm; op=OP_GRIPPER;
         } else return reply(status,400,"Unknown control action.");
         if (op!=OP_ENABLE&&!enabled(d,true,0)) return reply(status,409,"Enable all six arm motors first so the unselected joints remain supported.");
-        if ((op==OP_MOVE||op==OP_CYCLE)&&range_distance(d)>0) return reply(status,409,"A joint rests outside its command range. Enable motors, then use Move into range before starting a move.");
+        double correction=range_distance(d);
+        if ((op==OP_MOVE||op==OP_CYCLE)&&correction>0) {
+            bool inward_joint=selected_joint>=0&&outside_range_count(d)==1&&joint_outside_range(d,(unsigned)selected_joint);
+            if (op!=OP_MOVE||(!zero_destination&&!inward_joint)) return reply(status,409,range_reason(c,d));
+            if (correction>3) return reply(status,409,"Range entry requires more than 3 degrees of correction. Inspect the physical pose and calibration before moving.");
+            staged_range=true;
+        }
         if ((op==OP_MOVE||op==OP_ALIGN||op==OP_CYCLE)&&!valid_target(c,d,c->target)) return reply(status,400,c->error);
         if (percentage&&c->speed_percent==0&&(op==OP_MOVE||op==OP_CYCLE)) return reply(status,409,"Speed is 0%; choose a nonzero speed before moving. This setting applies to the next move, not an active stop.");
         /* Alignment and the optional scripted cycle retain their explicit rates. */
         if (!percentage||op==OP_ALIGN||op==OP_CYCLE) c->speed_percent=fmin(100,100*c->speed/ceiling);
         if (op==OP_CYCLE&&!valid_target(c,d,d->feedback.arm[0].deg)) return reply(status,400,c->error);
         for (unsigned i=0;i<6;++i) if (c->speed>d->feedback.limit[i].speed*180/3.141592653589793) return reply(status,400,"Requested speed exceeds a controller-reported joint speed limit.");
+        if (staged_range) {
+            memcpy(requested_target,c->target,sizeof requested_target);
+            requested_speed=c->speed; requested_percent=c->speed_percent;
+            for (unsigned i=0;i<6;++i) c->target[i]=joint_outside_range(d,i)?range_target(d,i):
+                fmin(d->feedback.limit[i].max,fmax(d->feedback.limit[i].min,d->feedback.arm[0].deg[i]));
+            if (!valid_target(c,d,c->target)) return reply(status,400,c->error);
+            op=OP_ALIGN; c->speed=ceiling/100; c->speed_percent=1;
+        }
         if (!latch(c,d->id,"Control action interrupted before verified completion",false)) return reply(status,500,"Could not persist action intent; no command sent.");
         begin(c,d,owner,op,now);
+        if (staged_range) {
+            c->range_followup=true; memcpy(c->range_followup_target,requested_target,sizeof requested_target);
+            c->range_followup_speed=requested_speed; c->range_followup_percent=requested_percent;
+        }
         if (!strcmp(action,"follow-start")) { c->following=true; c->follow_updated=now; }
         if (op==OP_CYCLE) { c->cycle_stage=1; cycle_leg(c,d,now); }
-        if (op==OP_MOVE&&!strcmp(action,"pose")&&yes(body,"synchronized")) { c->synchronized_pose=true; cycle_leg(c,d,now); }
+        if (op==OP_MOVE&&(zero_destination||(!strcmp(action,"pose")&&yes(body,"synchronized")))) { c->synchronized_pose=true; cycle_leg(c,d,now); }
         message(c,op==OP_ENABLE?"enabling":op==OP_GRIPPER?"gripper":op==OP_ALIGN?"aligning":op==OP_CYCLE?"raising":"moving","%s",op==OP_ENABLE?"Enabling motor drivers only; no position target is sent.":op==OP_ALIGN?"Moving 0.5 degrees inside the command range at 1% controller speed (maximum correction 3 degrees).":op==OP_CYCLE?"Raising to upright at up to 3 degrees/second. The measured starting pose is saved for return.":"Executing target with a live control lease and feedback checks.");
+        if (staged_range) message(c,"aligning","Explicit destination accepted. First correcting bounded range overrun at 1%% controller speed; then moving to the requested target under the same live lease.");
     }
     cJSON *result=reply(status,202,c->message); num(result,"request_id",c->request_id); return result;
 }
@@ -934,7 +1015,10 @@ void controller_tick(struct controller *c,double now)
     double error=0;
     if (c->op==OP_MOVE||c->op==OP_ALIGN||c->op==OP_CYCLE) {
         if (!valid_target(c,d,c->target)) { controller_stop(c,c->error); return; }
-        if (c->op==OP_CYCLE||c->synchronized_pose) {
+        if (c->arrival_hold&&(!valid_target(c,d,c->arrival_hold_pose)||now-c->arrival_hold_at>2)) {
+            controller_stop(c,"Measured arrival hold did not verify stable fresh feedback within two seconds."); return;
+        }
+        if (!c->arrival_hold&&(c->op==OP_CYCLE||c->synchronized_pose)) {
             if (c->op==OP_CYCLE&&!valid_target(c,d,c->initial)) { controller_stop(c,"The saved return pose no longer satisfies joint limits."); return; }
             double fraction=c->leg_span>0?fmin(1,c->leg_fraction+c->speed*dt/c->leg_span):1;
             for (unsigned i=0;i<6;++i) {
@@ -948,7 +1032,9 @@ void controller_tick(struct controller *c,double now)
         }
         for (unsigned i=0;i<6;++i) {
             if (fabs(c->command[i]-s->deg[i])>3) { controller_stop(c,"Measured joint deviated more than 3 degrees from the commanded path."); return; }
-            if (c->op==OP_CYCLE||c->synchronized_pose) {
+            if (c->arrival_hold) {
+                c->command[i]=c->arrival_hold_pose[i];
+            } else if (c->op==OP_CYCLE||c->synchronized_pose) {
                 c->command[i]=c->leg_start[i]+(c->target[i]-c->leg_start[i])*c->leg_fraction;
             } else if (c->op==OP_ALIGN) {
                 /* An out-of-range intermediate target is not valid. Entry is
@@ -1001,15 +1087,52 @@ void controller_tick(struct controller *c,double now)
         final_command=fabs(c->gripper_command-c->gripper_target)<.0005;
         post_target=d->feedback.gripper_at>c->final_sent_at&&d->feedback.gripper_enabled;
     } else for (unsigned i=0;i<6;++i) {
-        final_command=final_command&&fabs(c->command[i]-c->target[i])<.0005;
+        final_command=final_command&&(c->arrival_hold||fabs(c->command[i]-c->target[i])<.0005);
         post_target=post_target&&s->joint_at[i]>c->final_sent_at;
     }
     if (final_command&&!c->final_sent_at) { c->final_sent_at=now; post_target=false; }
     if (!final_command) c->final_sent_at=0;
-    if (c->final_sent_at&&post_target&&s->status_at>c->final_sent_at&&error<=(c->op==OP_GRIPPER?.5:c->tolerance)&&s->motion_status==0) {
+    bool independent_arrival=(c->op==OP_MOVE||c->op==OP_ALIGN)&&measured_stationary(d,now,c->final_sent_at);
+    double measured_hold[6];
+    for (unsigned i=0;i<6&&independent_arrival;++i) {
+        struct piper_limit *l=&d->feedback.limit[i];
+        if (s->deg[i]<l->min-limit_feedback_slop_deg||s->deg[i]>l->max+limit_feedback_slop_deg) independent_arrival=false;
+        measured_hold[i]=fmin(l->max,fmax(l->min,s->deg[i]));
+        if (c->arrival_hold&&fabs(s->deg[i]-c->arrival_hold_pose[i])>fmax(.03,fmin(c->tolerance,.1))) independent_arrival=false;
+    }
+    bool arrival_ack=c->arrival_hold?independent_arrival&&(s->motion_status==0||s->motion_status==1):
+        s->motion_status==0||(s->motion_status==1&&independent_arrival);
+    if (c->final_sent_at&&post_target&&s->status_at>c->final_sent_at&&error<=(c->op==OP_GRIPPER?.5:c->tolerance)&&arrival_ack) {
         if (!c->settled_at) c->settled_at=now;
         if (now-c->settled_at>=.4) {
-            if (c->op==OP_CYCLE&&c->cycle_stage==1) {
+            /* One packet that remains younger than 500ms is not evidence of a
+               full settling interval. Busy-bit fallback and its hold must be
+               covered by new encoder/status/velocity samples at the endpoint. */
+            if ((c->arrival_hold||s->motion_status==1)&&!measured_through(d,c->settled_at+.4)) return;
+            if (s->motion_status==1&&!c->arrival_hold) {
+                /* Some MCUs retain busy for a sub-resolution residual already
+                   inside the operator's tolerance. Independent fresh encoder
+                   stillness is required first; then remove the old demand by
+                   sending a legal measured hold and verify new feedback. */
+                if (!valid_target(c,d,measured_hold)) { controller_stop(c,c->error); return; }
+                memcpy(c->arrival_hold_pose,measured_hold,sizeof measured_hold);
+                c->arrival_hold=true; c->arrival_hold_at=now;
+                memcpy(c->command,measured_hold,sizeof measured_hold);
+                if (!send_pose(c,d,measured_hold)) { controller_stop(c,"Measured arrival hold could not be transmitted."); return; }
+                c->final_sent_at=now; c->settled_at=0;
+                message(c,"settling","Inside requested tolerance; verifying a stationary measured hold because the MCU still reports busy.");
+                return;
+            }
+            if (c->op==OP_ALIGN&&c->range_followup) {
+                if (range_distance(d)>0||!valid_target(c,d,c->range_followup_target)) {
+                    controller_stop(c,"Range entry did not verify a legal pose for the pending destination; that destination was discarded."); return;
+                }
+                memcpy(c->target,c->range_followup_target,sizeof c->target);
+                c->range_followup=false; c->op=OP_MOVE; c->synchronized_pose=true;
+                c->speed=c->range_followup_speed; c->speed_percent=c->range_followup_percent;
+                cycle_leg(c,d,now);
+                message(c,"moving","Range entry verified. Moving to the explicitly requested destination; Stop movement cancels it.");
+            } else if (c->op==OP_CYCLE&&c->cycle_stage==1) {
                 c->cycle_stage=2; c->pause_until=now+2;
                 message(c,"upright","Upright reached. Pausing for two seconds before returning.");
             } else if (c->op==OP_CYCLE&&c->cycle_stage==2) {
@@ -1017,7 +1140,7 @@ void controller_tick(struct controller *c,double now)
                     memcpy(c->target,c->initial,sizeof c->target); c->cycle_stage=3; cycle_leg(c,d,now);
                     message(c,"returning","Returning to the saved starting pose.");
                 }
-            } else finish(c,d,c->op==OP_CYCLE?"Complete movement finished: upright and back to the starting pose within 0.2 degrees. Motors remain enabled.":c->op==OP_GRIPPER?"Gripper opening reached within 0.5 mm; gripper remains enabled.":"Joint target reached within the selected tolerance; motors remain enabled.",true);
+            } else finish(c,d,c->op==OP_CYCLE?"Complete movement finished: upright and back to the starting pose within 0.2 degrees. Motors remain enabled.":c->op==OP_GRIPPER?"Gripper opening reached within 0.5 mm; gripper remains enabled.":c->arrival_hold?"Joint target reached within the selected tolerance; fresh stationary measured hold verified despite retained MCU busy. Motors remain enabled.":"Joint target reached within the selected tolerance; motors remain enabled.",true);
         }
     } else { c->settled_at=0; if (c->op==OP_CYCLE&&c->cycle_stage==2) c->pause_until=now+2; }
 }
@@ -1037,6 +1160,9 @@ cJSON *controller_state(struct controller *c,const char *token)
     num(motion,"teaching_return_stage",c->op==OP_TEACH_RETURN?c->teach_return_stage:0);
     num(motion,"elapsed_s",c->op!=OP_IDLE?now-c->started:0); put(root,"motion",motion);
     str(motion,"sequence_stage",c->op==OP_CYCLE?(c->cycle_stage==1?"raising":c->cycle_stage==2?"upright":"returning"):"");
+    if (c->range_followup) str(motion,"sequence_stage","range-entry-before-destination");
+    flag(motion,"range_destination_pending",c->range_followup);
+    flag(motion,"verifying_arrival_hold",c->arrival_hold);
     cJSON *return_pose=cJSON_CreateArray();
     if (c->op==OP_CYCLE) for (unsigned i=0;i<6;++i) cJSON_AddItemToArray(return_pose,cJSON_CreateNumber(c->initial[i]));
     put(motion,"return_degrees",return_pose);
@@ -1054,7 +1180,25 @@ cJSON *controller_state(struct controller *c,const char *token)
         bool fresh=piper_fresh(s,now); flag(j,"fresh",fresh); if (fresh) ++connected;
         bool in_action=c->op!=OP_IDLE&&!strcmp(d->id,c->selected);
         const char *why=in_action?"Control action in progress.":controller_blocker(c,d,now); str(j,"blocker",why?why:""); flag(j,"recovery_required",blocked(c,d->id)&&!in_action);
-        num(j,"range_entry_deg",range_distance(d));
+        double range_correction=range_distance(d);
+        unsigned outside_count=outside_range_count(d);
+        num(j,"range_entry_deg",range_correction);
+        const char *range_blocker=why;
+        if (!range_blocker&&strcmp(d->id,c->selected)) range_blocker="Activate this robot's assigned CAN adapter before controlling it.";
+        if (!range_blocker&&c->query) range_blocker="Wait for the information query to complete.";
+        if (!range_blocker&&!enabled(d,true,0)) range_blocker="Enable all six arm motors before position control.";
+        if (!range_blocker&&(!d->stationary_since||now-d->stationary_since<.3)) range_blocker="Wait for stationary feedback before starting a new move.";
+        bool zero_legal=true;
+        for (unsigned i=0;i<6;++i) if (!f->limit[i].seen||f->limit[i].min>0||f->limit[i].max<0) zero_legal=false;
+        cJSON *range=cJSON_CreateObject();
+        flag(range,"required",isfinite(range_correction)&&range_correction>0);
+        num(range,"correction_deg",range_correction); num(range,"maximum_correction_deg",3);
+        str(range,"action","move-to-zero");
+        flag(range,"can_move_to_zero",!range_blocker&&isfinite(range_correction)&&range_correction<=3&&zero_legal);
+        str(range,"reason",range_blocker?range_blocker:!isfinite(range_correction)?"Read current joint limits first.":range_correction>3?
+            "Range entry requires more than 3 degrees of correction. Inspect the pose and calibration.":!zero_legal?"Zero is outside a reported joint command range.":
+            range_correction>0?range_reason(c,d):"");
+        put(j,"range_recovery",range);
         cJSON *r=record(c,d->id); str(j,"stop_reason",yes(r,"blocked")?text_field(r,"reason"):text_field(legacy_stop(c,d->id),"reason"));
         put(j,"last_fault",field(r,"last_fault")?cJSON_Duplicate(field(r,"last_fault"),true):cJSON_CreateNull());
         put(j,"stop_event",field(r,"stop_event")?cJSON_Duplicate(field(r,"stop_event"),true):cJSON_CreateNull());
@@ -1096,6 +1240,14 @@ cJSON *controller_state(struct controller *c,const char *token)
             num(joint,"current_a",m->high_seen&&piper_recent(m->high_at,now)?m->current:NAN); num(joint,"velocity_rad_s",m->high_seen&&piper_recent(m->high_at,now)?m->velocity:NAN);
             num(joint,"min_deg",l->seen?l->min:NAN); num(joint,"max_deg",l->seen?l->max:NAN); num(joint,"max_speed_rad_s",l->seen?l->speed:NAN);
             num(joint,"range_entry_target_deg",l->seen&&s->joint_seen[i]?range_target(d,i):NAN);
+            bool outside=joint_outside_range(d,i);
+            bool can_move=!range_blocker&&isfinite(range_correction)&&(range_correction==0||(outside_count==1&&outside&&range_correction<=3));
+            flag(joint,"outside_command_range",outside);
+            flag(joint,"can_move",can_move);
+            flag(joint,"can_move_inward",can_move&&(s->deg[i]<l->min||s->deg[i]>l->max));
+            flag(joint,"can_move_negative",can_move&&s->deg[i]>l->min);
+            flag(joint,"can_move_positive",can_move&&s->deg[i]<l->max);
+            str(joint,"motion_blocker",can_move?"":range_blocker?range_blocker:range_reason(c,d));
             flag(joint,"limits_fresh",configuration_current(d,l->seen,l->at,now)); cJSON_AddItemToArray(joints,joint);
             num(joint,"limits_age_s",l->seen?now-l->at:NAN);
             struct piper_acceleration *a=&f->acceleration[i];

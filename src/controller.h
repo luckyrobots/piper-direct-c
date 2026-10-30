@@ -19,6 +19,10 @@ struct controller {
     uint8_t gripper_max_mm;
     bool gripper_entry;
     bool synchronized_pose;
+    bool range_followup;
+    double range_followup_target[6], range_followup_speed, range_followup_percent;
+    bool arrival_hold;
+    double arrival_hold_at, arrival_hold_pose[6];
     bool following, follow_committed;
     double follow_updated;
     unsigned follow_sequence;

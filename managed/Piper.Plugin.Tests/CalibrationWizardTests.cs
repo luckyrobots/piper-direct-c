@@ -1,0 +1,91 @@
+using System.Text.Json;
+using LuckyRobots.Piper.Plugin;
+
+public static class CalibrationWizardTests
+{
+    public static void Run(Action<bool, string> check)
+    {
+        void Reject(Action action, string description)
+        {
+            try { action(); } catch (InvalidOperationException) { check(true, description); return; }
+            check(false, description);
+        }
+        var draft = CalibrationWizardFlow.New("robot-a");
+        check(draft.Step == CalibrationWizardStep.Prepare && !draft.OperatorSaysTcpMatches, "A new wizard skipped preparation or invented point verification");
+        foreach (string missing in new[] { "width", "depth", "sceney", "floory", "tableheight", "left", "back", "height", "square", "column", "row" })
+            check(!draft.Answers.ContainsKey(missing), "A new user received a fabricated measurement: " + missing);
+        Reject(() => CalibrationWizardFlow.Number(draft, "tableheight", 1, 3000), "Unknown physical tabletop height silently defaulted to750mm");
+        var next = CalibrationWizardFlow.Advance(draft);
+        check(next.Step == CalibrationWizardStep.ContactPoint && next.Epoch > draft.Epoch, "Prepare did not lead to one physical-point question");
+        check(!CalibrationWizardFlow.Accepts(next, "robot-a", draft.Epoch), "Delayed previous-step event remained authorized");
+        check(!CalibrationWizardFlow.Accepts(next, "robot-b", next.Epoch), "A wizard event crossed robot profiles");
+        check(CalibrationWizardFlow.Accepts(next, "robot-a", next.Epoch), "Current profile/step event was rejected");
+        next = CalibrationWizardFlow.Advance(next);
+        check(next.Step == CalibrationWizardStep.ModelPoint && !next.OperatorSaysTcpMatches, "Selecting a physical midpoint claimed model correspondence");
+        var back = CalibrationWizardFlow.Back(next);
+        check(back.Step == CalibrationWizardStep.ContactPoint && back.Epoch > next.Epoch, "Previous question did not invalidate delayed inputs");
+        var expected = new[] { CalibrationWizardStep.DeskFrame, CalibrationWizardStep.SceneSurfaceY, CalibrationWizardStep.SceneFloorOrigin, CalibrationWizardStep.DeskWidth, CalibrationWizardStep.DeskDepth,
+            CalibrationWizardStep.TabletopHeight, CalibrationWizardStep.Precision, CalibrationWizardStep.Method, CalibrationWizardStep.PointIntro,
+            CalibrationWizardStep.PointLeft, CalibrationWizardStep.PointBack, CalibrationWizardStep.PointHeight, CalibrationWizardStep.HandGuide, CalibrationWizardStep.Capture };
+        foreach (var step in expected) { next = CalibrationWizardFlow.Advance(next); check(next.Step == step, "Manual wizard question order is wrong at " + step); }
+        Reject(() => CalibrationWizardFlow.Advance(next), "Continue implicitly captured a point or applied a fit");
+        var oldAnswers = new Dictionary<string, string>(next.Answers) { ["left"] = "200", ["back"] = "300", ["height"] = "0", ["cross"] = "explicit choice" };
+        next = next with { Answers = oldAnswers };
+        var point = CalibrationWizardFlow.NextPoint(next, 1, 0);
+        check(point.Step == CalibrationWizardStep.PointIntro && point.Answers["role"] == "training", "The first capture skipped remaining training locations");
+        check(!point.Answers.ContainsKey("left") && !point.Answers.ContainsKey("back") && !point.Answers.ContainsKey("height"), "The next point reused the previous location/height as new evidence");
+        check(next.Answers["left"] == "200", "Advancing a point mutated the prior saved answers");
+        point = CalibrationWizardFlow.NextPoint(next, 4, 0);
+        check(point.Answers["role"] == "validation" && point.Step == CalibrationWizardStep.PointIntro, "Four training captures did not require a NEW held-out point");
+        point = CalibrationWizardFlow.NextPoint(next, 4, 1);
+        check(point.Step == CalibrationWizardStep.Review && point.History.Length == 0, "A validation capture did not go to explicit review");
+        Reject(() => CalibrationWizardFlow.Advance(point), "Review Continue implicitly applied scene placement");
+        var grid = draft with { Step = CalibrationWizardStep.Method, Answers = new(draft.Answers) { ["method"] = "grid intersections" } };
+        var gridSteps = new[] { CalibrationWizardStep.GridSquare, CalibrationWizardStep.GridOriginLeft, CalibrationWizardStep.GridOriginBack,
+            CalibrationWizardStep.PointIntro, CalibrationWizardStep.GridColumn, CalibrationWizardStep.GridRow, CalibrationWizardStep.PointHeight,
+            CalibrationWizardStep.HandGuide, CalibrationWizardStep.Capture };
+        foreach (var step in gridSteps) { grid = CalibrationWizardFlow.Advance(grid); check(grid.Step == step, "Grid wizard question order is wrong at " + step); }
+        foreach (string invalid in new[] { "", "NaN", "Infinity", "-1", "3001" })
+        {
+            var bad = draft with { Answers = new(draft.Answers) { ["tableheight"] = invalid } };
+            Reject(() => CalibrationWizardFlow.Number(bad, "tableheight", 1, 3000), "Invalid/unknown physical height was accepted: " + invalid);
+        }
+        var measured = draft with { Answers = new(draft.Answers) { ["tableheight"] = "755.5", ["column"] = "1.5" } };
+        check(CalibrationWizardFlow.Number(measured, "tableheight", 1, 3000) == 755.5, "Measured physical height was not preserved exactly");
+        Reject(() => CalibrationWizardFlow.Number(measured, "column", 0, 200, true), "A square-centre fraction was treated as an integer intersection");
+        var genericDesk = draft with { Answers = new(draft.Answers) { ["sceney"] = "800", ["floory"] = "0", ["tableheight"] = "800" } };
+        check(CalibrationWizardFlow.SceneSurface(genericDesk, 800) == 800, "A generic800mm scene tabletop required editing private JSON");
+        CalibrationWizardFlow.ValidateTabletopHeight(genericDesk, 1);
+        check(CalibrationWizardFlow.RelativeTabletopHeight(genericDesk) == 800, "Matching floor origins changed relative tabletop height");
+        var offsetFloor = genericDesk with { Answers = new(genericDesk.Answers) { ["sceney"] = "1800", ["floory"] = "1000" } };
+        CalibrationWizardFlow.ValidateTabletopHeight(offsetFloor, 1);
+        check(CalibrationWizardFlow.RelativeTabletopHeight(offsetFloor) == 800, "An explicit world-floor offset was ignored");
+        Reject(() => CalibrationWizardFlow.SceneSurface(genericDesk, 750), "A mismatched model base silently floated to a ruler-derived scene height");
+        Reject(() => CalibrationWizardFlow.ValidateTabletopHeight(genericDesk with { Answers = new(genericDesk.Answers) { ["tableheight"] = "750" } }, 10), "Physical/scene height mismatch was silently fitted away");
+        Reject(() => CalibrationWizardFlow.SceneSurface(draft), "An unknown scene surface silently defaulted to750mm");
+        Reject(() => CalibrationWizardFlow.RelativeTabletopHeight(genericDesk with { Answers = new(draft.Answers) { ["sceney"] = "800" } }), "Unknown world-floor origin silently defaulted tozero");
+        var stored = JsonSerializer.Deserialize<CalibrationWizardDraft>(JsonSerializer.Serialize(measured))!;
+        CalibrationWizardFlow.ValidateDraft(stored, "robot-a");
+        check(stored.Answers["tableheight"] == "755.5" && !stored.OperatorSaysTcpMatches, "Draft persistence invented defaults or promoted model verification");
+        Reject(() => CalibrationWizardFlow.ValidateDraft(stored, "robot-b"), "A restored draft crossed robot identities");
+        Reject(() => CalibrationWizardFlow.ValidateDraft(stored with { ReportFile = "../another-profile/report.json" }, "robot-a"), "A draft report path escaped its per-robot settings folder");
+        Reject(() => CalibrationWizardFlow.ValidateDraft(stored with { ReportFile = "settings.json" }, "robot-a"), "A draft could overwrite settings with a report evidence sidecar");
+        Reject(() => CalibrationWizardFlow.ValidateDraft(stored with { Epoch = long.MaxValue }, "robot-a"), "A malicious saved epoch could wrap into a repeated step ID");
+        var measurement = new CalibrationMeasurement(LeftMm: 200, BackMm: 300, HeightMm: 0);
+        var savedSample = new CalibrationSample("training1", new(0, .75, 0), new(0, .75, 0), [0, 0, 0, 0, 0, 0], 1, false, measurement, "pose");
+        check(CalibrationWizardFlow.AlreadyRecorded(next, savedSample), "Interrupted post-capture UI did not recognize its already saved observation");
+        check(!CalibrationWizardFlow.AlreadyRecorded(next, savedSample with { HeldOut = true }), "A previous training sample was mistaken for new validation");
+        check(!CalibrationWizardFlow.AlreadyRecorded(next, savedSample with { Measurement = measurement with { LeftMm = 250 } }), "A different measured point was silently marked captured on resume");
+        var live = new CalibrationIdentity("robot-a", "can-a", 3, "backend-a", "scene-a", "model-root-a", "asset-a", "revision-a");
+        var marker = new WizardHighlightScope(live.ProfileId, live.DeviceId, live.Generation, live.BackendSessionFingerprint, live.SceneId, live.RobotId, live.ModelAssetId, live.ModelRevision, "grasp_site");
+        check(marker.Matches(live, "grasp_site", "asset-a", "revision-a", true, true), "A matching fresh read-only marker context was rejected");
+        foreach (var changed in new[] { live with { ProfileId = "robot-b" }, live with { DeviceId = "can-b" }, live with { Generation = 4 }, live with { BackendSessionFingerprint = "backend-b" }, live with { SceneId = "scene-b" }, live with { RobotId = "root-b" } })
+            check(!marker.Matches(changed, "grasp_site", "asset-a", "revision-a", true, true), "A temporary marker crossed robot/backend/subscription identity");
+        check(!marker.Matches(live, "grasp_site", "asset-a", "revision-b", true, true), "A marker renewed against changed compiled geometry");
+        check(!marker.Matches(live, "another_site", "asset-a", "revision-a", true, true), "A marker silently followed a changed selected site");
+        check(!marker.Matches(live, "grasp_site", "asset-a", "revision-a", false, true) && !marker.Matches(live, "grasp_site", "asset-a", "revision-a", true, false), "A marker renewed after leaving calibration or stale robot feedback");
+        var clear = marker.Request(false);
+        check(clear["entityId"]!.GetValue<string>() == "model-root-a" && clear["sceneId"]!.GetValue<string>() == "scene-a" && clear["expectedModelRevision"]!.GetValue<string>() == "revision-a" && !clear["visible"]!.GetValue<bool>(), "Clearing substituted a newly selected root instead of the pinned marker context");
+        check(marker.Request(true)["durationSeconds"]!.GetValue<int>() == 30, "Temporary marker lost its bounded native expiry");
+    }
+}
