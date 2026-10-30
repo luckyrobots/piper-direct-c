@@ -128,6 +128,7 @@ public sealed partial class PipersPlugin : ILuckyPlugin
                     }
                     if (Stopwatch.GetElapsedTime(lastUi).TotalMilliseconds < 100) continue;
                     lastUi = Stopwatch.GetTimestamp();
+                    RetryLinkedPikaMonitor();
                     if (lastCommand != 0 && next["motion"]?["request_id"]?.GetValue<long>() == lastCommand)
                     {
                         message = next["message"]?.GetValue<string>() ?? message;
@@ -241,6 +242,7 @@ public sealed partial class PipersPlugin : ILuckyPlugin
 
     public async Task HandleEventAsync(UiEvent input, CancellationToken cancellation)
     {
+        if (UnscopeEvent(input.WidgetId).Length > 0) await CancelPikaMonitorAttempt();
         if (teachingResetBusy)
         {
             string pending = UnscopeEvent(input.WidgetId);
@@ -362,7 +364,7 @@ public sealed partial class PipersPlugin : ILuckyPlugin
                     await engine.RequestAsync("robot.subscribe", new JsonObject { ["sceneId"] = next.SceneId, ["entityId"] = next.EntityId }, cancellation);
                     await Save(cancellation);
                       link = next; linkCommandsEnabled = Device()["recovery_required"]?.GetValue<bool>() != true;
-                      await MonitorLinkedPika(cancellation);
+                      RetryLinkedPikaMonitor();
                       message = "Measured pose linked. Start Teleoperate to drag joints; release finishes the target. Calibration is not verified.";
                       await Render(cancellation);
                 }
@@ -452,6 +454,7 @@ public sealed partial class PipersPlugin : ILuckyPlugin
         {
             await Call("/api/pika/connect", new JsonObject { ["owner"] = owner, ["take_over"] = true }, cancellation);
             pikaOwned = pikaMonitoring = true;
+            pikaMonitorStatus = "Pika control session active.";
             long started = Stopwatch.GetTimestamp();
             while (state?["pika"]?["fresh"]?.GetValue<bool>() != true)
             {
@@ -500,12 +503,12 @@ public sealed partial class PipersPlugin : ILuckyPlugin
         for (int i = 1; i <= 6; i++)
             robotControls.Add(Widget.Row("joint." + i, Widget.Label($"joint.{i}.value", $"J{i} · —") with { Width = 190, Height = 28 }, Widget.Button($"joint.{i}.minus", "−") with { Width = 32 }, Widget.Slider($"joint.{i}.target", 0, -180, 180, .1) with { Enabled = false }, Widget.Button($"joint.{i}.plus", "+") with { Width = 32 }, Widget.Button($"joint.{i}.zero", "Zero") with { Width = 52 }));
         robotControls.Add(Widget.Button("zero.all", "All joints to zero"));
-        robotControls.Add(Widget.Label("incident", ""));
-        robotControls.Add(Widget.Label("recovery.next", ""));
-        robotControls.Add(Widget.Row("recovery", Widget.Button("recovery.run", "Clear & support arm — recover")) with { Visible = false });
         // A focused check remains usable without relying on nested native-panel
         // scrolling. Visibility changes only; acquisition and measured linking run on.
         widgets.Add(Widget.Column("robot.controls", robotControls.ToArray()) with { Visible = !alignmentOpen });
+        widgets.Add(Widget.Label("incident", ""));
+        widgets.Add(Widget.Label("recovery.next", ""));
+        widgets.Add(Widget.Row("recovery", Widget.Button("recovery.run", "Clear & support arm — recover")) with { Visible = false });
         return engine.PublishViewAsync(Panel, Widget.Row("workspace", ScopeRobotWidget(RobotSidebar()), ScopeRobotWidget(Widget.Column("controls", widgets.ToArray()))), cancellation);
     }
 
@@ -619,6 +622,7 @@ public sealed partial class PipersPlugin : ILuckyPlugin
 
     public async ValueTask DisposeAsync()
     {
+        await StopPikaMonitorRetries();
         await StopResetAssistedOnDispose();
         using (var saveTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(1)))
         {
