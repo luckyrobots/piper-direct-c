@@ -24,10 +24,12 @@ async function until(condition, timeout = 7000) {
 }
 async function launch() {
   const executable = process.env.PIPER_TEST_EXE || './build/piper-control';
-  server = spawn(executable, ['--simulate', '--port', String(port), '--state-dir', directory], { stdio: ['ignore', 'ignore', 'pipe'] });
+  server = spawn(executable, ['--simulate', '--port', String(port), '--state-dir', directory], { stdio: ['ignore', 'pipe', 'pipe'] });
+  server.stdout.on('data', b => { logs += b; });
   server.stderr.on('data', b => { logs += b; });
-  for (let i = 0; i < 100; i++) { try { await refresh(); return; } catch { if (server.exitCode !== null) throw Error(logs); await sleep(30); } }
-  throw Error('Server failed to start.');
+  const deadline = Date.now() + 15000;
+  while (Date.now() < deadline) { try { await refresh(); return; } catch { if (server.exitCode !== null) throw Error(logs); await sleep(60); } }
+  throw Error(`Server failed to start within 15 seconds:\n${logs}`);
 }
 async function stopServer(signal = 'SIGTERM') { if (!server || server.exitCode !== null) return; const exited = new Promise(resolve => server.once('exit', resolve)); server.kill(signal); await exited; }
 async function startAction(values) {

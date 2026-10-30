@@ -37,8 +37,11 @@ jobs:
           $package = Join-Path $sdk 'LuckyEngine.PluginSdk.0.1.0.nupkg'
           Invoke-WebRequest -Uri 'https://github.com/luckyrobots/luckyengine-plugins/releases/download/sdk-v0.1.0/LuckyEngine.PluginSdk.0.1.0.nupkg' -OutFile $package
           if ((Get-FileHash -LiteralPath $package -Algorithm SHA256).Hash -ne '106A9B3877AB8079541D7BFB9D49394B06965977CA35A002C339BBF37430DD0F') { throw 'Unexpected public SDK package digest' }
+          $config = Join-Path $sdk 'NuGet.Config'
+          $localSource = [Security.SecurityElement]::Escape($sdk)
+          [IO.File]::WriteAllText($config, "<configuration><packageSources><clear/><add key=`"PublicPluginSdk`" value=`"$localSource`"/><add key=`"nuget.org`" value=`"https://api.nuget.org/v3/index.json`"/></packageSources></configuration>")
           foreach ($project in @('Piper.Plugin.Tests','Piper.Pika.Tests')) {
-            dotnet restore "managed/$project" --source $sdk --source https://api.nuget.org/v3/index.json
+            dotnet restore "managed/$project" --configfile $config
             if ($LASTEXITCODE) { throw "Restore failed: $project" }
           }
       - name: Managed protocol and plugin fixtures
