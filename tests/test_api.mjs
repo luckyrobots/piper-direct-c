@@ -23,10 +23,13 @@ async function until(condition, timeout = 7000) {
   assert.fail(`Timed out: ${JSON.stringify(state)}`);
 }
 async function launch() {
-  server = spawn('./build/piper-control', ['--simulate', '--port', String(port), '--state-dir', directory], { stdio: ['ignore', 'ignore', 'pipe'] });
+  const executable = process.env.PIPER_TEST_EXE || './build/piper-control';
+  server = spawn(executable, ['--simulate', '--port', String(port), '--state-dir', directory], { stdio: ['ignore', 'pipe', 'pipe'] });
+  server.stdout.on('data', b => { logs += b; });
   server.stderr.on('data', b => { logs += b; });
-  for (let i = 0; i < 100; i++) { try { await refresh(); return; } catch { if (server.exitCode !== null) throw Error(logs); await sleep(30); } }
-  throw Error('Server failed to start.');
+  const deadline = Date.now() + 15000;
+  while (Date.now() < deadline) { try { await refresh(); return; } catch { if (server.exitCode !== null) throw Error(logs); await sleep(60); } }
+  throw Error(`Server failed to start within 15 seconds:\n${logs}`);
 }
 async function stopServer(signal = 'SIGTERM') { if (!server || server.exitCode !== null) return; const exited = new Promise(resolve => server.once('exit', resolve)); server.kill(signal); await exited; }
 async function startAction(values) {
@@ -53,6 +56,16 @@ try {
   await post('/api/camera', { enabled: false });
   await refresh(); assert.equal(selected().tx_frames, 0);
   assert.equal((await fetch(base + '/')).status, 200);
+  const pikaAsset = await fetch(base + '/pika.mjs');
+  assert.equal(pikaAsset.status, 200);
+  assert.match(pikaAsset.headers.get('content-security-policy'), /media-src 'self' blob:/);
+  assert.match(await pikaAsset.text(), /navigator.serial.requestPort/);
+  assert.equal((await fetch(base + '/pika_remote.mjs')).status, 200);
+  if (state.backend?.startsWith('dotnet-')) {
+    assert.equal(state.pika.configured, false);
+    await post('/api/pika/connect', { owner: owner }, 409); // Simulation cannot open real serial hardware.
+    assert.equal((await (await fetch(base + '/api/pika/state')).json()).connected, false);
+  }
   const spec = await (await fetch(base + '/api/openapi.json')).json(); assert.equal(spec.openapi, '3.1.0');
   await post('/api/command', { action: 'joint', joint: 1, degrees: 5 }, 409);
   await post('/api/stop', {}, 403, { 'X-Piper-Token': 'wrong' });
@@ -68,7 +81,7 @@ try {
   await post('/api/command', { action: 'joint', joint: 1, degrees: 5 }, 409);
   const beforeEnableTx = selected().tx_frames;
   await action({ action: 'enable' }); assert(selected().joints.every(j => j.enabled));
-  assert.equal(selected().tx_frames - beforeEnableTx, 12); // Two sets of driver power commands only.
+  assert.equal(selected().tx_frames - beforeEnableTx, 6); // Fresh simulator feedback needs one power command per driver.
   assert.equal(selected().status.control, 0); // Enable does not command MoveJ or a pose.
   const cycleStart = selected().joints.map(j => j.actual_deg);
   await startAction({ action: 'cycle' });

@@ -4,7 +4,14 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#ifdef _WIN32
+struct can_frame { uint32_t can_id; uint8_t len, pad[3]; uint8_t data[8]; };
+#define CAN_ERR_FLAG 0x20000000u
+#define CAN_EFF_FLAG 0x80000000u
+#define CAN_RTR_FLAG 0x40000000u
+#else
 #include <linux/can.h>
+#endif
 
 #define PIPER_FRESH_SECONDS 0.35
 
@@ -20,6 +27,7 @@ struct piper_motor {
     bool seen, high_seen, enabled;
     uint8_t fault;
     double at, high_at, voltage, temperature, current, velocity;
+    int32_t position_raw;
 };
 struct piper_limit { bool seen; double min, max, speed, at; };
 struct piper_acceleration { bool seen; double max, at; };

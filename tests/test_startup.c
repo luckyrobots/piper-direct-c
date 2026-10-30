@@ -7,6 +7,8 @@
 #include <string.h>
 #include <unistd.h>
 
+static bool slow_first_enable=true;
+
 static void tick(struct controller *c)
 {
     usleep(10000);
@@ -23,17 +25,41 @@ static void action(struct controller *c,const char *name,int expected)
     cJSON_AddStringToObject(j,"device_id",d->id); cJSON_AddNumberToObject(j,"generation",d->generation);
     cJSON_AddStringToObject(j,"owner","startup-regression-client"); cJSON_AddStringToObject(j,"action",name);
     cJSON_AddBoolToObject(j,"standalone",true); cJSON_AddBoolToObject(j,"supported",true); cJSON_AddBoolToObject(j,"clear",true);
+    /* A previous completion persists its recovery record synchronously. A slow
+       fsync/CI scheduling pause can age the last simulated frame before the
+       next healthy action. Poll genuine simulator frames rather than extending
+       the controller freshness guard or stamping old readings as current.
+       Rejection cases retain their deliberately injected fault/stale feedback. */
+    if (expected==202&&!piper_fresh(&d->feedback.arm[0],piper_now())) {
+        for (unsigned poll=0;poll<100&&!piper_fresh(&d->feedback.arm[0],piper_now());++poll) tick(c);
+        assert(piper_fresh(&d->feedback.arm[0],piper_now()));
+        /* A real status gap invalidates static information too. Re-read it
+           through the normal read-only query path before the next command. */
+        if (!*d->feedback.version) {
+            int query_status; cJSON *query=controller_action(c,"/api/query",j,&query_status);
+            assert(query_status==202); cJSON_Delete(query);
+            for (unsigned poll=0;poll<600&&c->query;++poll) tick(c);
+            assert(!c->query&&piper_fresh(&d->feedback.arm[0],piper_now()));
+        }
+    }
     int status; cJSON *r=controller_action(c,"/api/command",j,&status);
     if (status!=expected) { char *s=cJSON_Print(r); fprintf(stderr,"%s: %s\n",name,s); free(s); }
     assert(status==expected); cJSON_Delete(r); cJSON_Delete(j);
     if (expected==202) {
         unsigned ticks=0;
-        while (c->op!=OP_IDLE&&ticks++<400) {
+        while (c->op!=OP_IDLE&&ticks++<1000) {
             if (!strcmp(name,"reset")) d->feedback.arm[0].arm_status=ticks<20?2:0;
+            uint64_t previous_tx=d->tx;
             tick(c);
+            if (!strcmp(name,"enable")) {
+                assert(d->tx-previous_tx<=1); // Same-ID power commands are paced, never burst.
+                if (c->enable_count<3) c->bus.sim_enabled&=~1u; // First driver misses two wake-up requests.
+                if (slow_first_enable&&piper_now()-c->started<3.2) c->bus.sim_enabled&=~1u;
+            }
             if (!strcmp(name,"reset")&&ticks<20) assert(c->op==OP_RESET);
         }
         assert(c->op==OP_IDLE); assert(!strcmp(c->phase,"complete"));
+        if (!strcmp(name,"enable")) slow_first_enable=false;
     }
 }
 static bool recovery(struct controller *c)
@@ -57,11 +83,31 @@ int main(void)
     uint64_t tx=d->tx;
     d->feedback.arm[0].motion_status=1; // Old target not reached is not current movement.
     action(&c,"enable",202);
-    assert(d->tx==tx+12); assert(c.bus.sim_enabled==63);
+    assert(d->tx>tx+6); assert(c.bus.sim_enabled==63);
     assert(d->feedback.arm[0].control==0); // No mode/pose command was sent.
     for (unsigned i=0;i<6;++i) assert(fabs(d->feedback.arm[0].deg[i]-rest[i])<.001);
     action(&c,"align",202);
     assert(fabs(d->feedback.arm[0].deg[1]-.5)<.001);
+    controller_stop(&c,"Interrupted client fixture.");
+    action(&c,"verify-current",409); // An actual stop/fault cannot be acknowledged away.
+    d->feedback.arm[0].arm_status=0; settle(&c);
+    d->feedback.motor[0].fault=1; action(&c,"verify-current",409); d->feedback.motor[0].fault=0;
+    d->feedback.motor[0].enabled=false; action(&c,"verify-current",409); d->feedback.motor[0].enabled=true;
+    tx=d->tx; action(&c,"verify-current",200);
+    assert(!recovery(&c) && d->tx==tx && c.bus.sim_enabled==63);
+    // Real transport feedback must agree with independently reported motor
+    // encoder positions before an old software stop can be acknowledged.
+    bool was_simulated=d->simulated; int old_fd=d->fd;
+    d->simulated=false; d->fd=9;
+    for (unsigned i=0;i<6;++i) {
+        d->feedback.motor[i].high_seen=true; d->feedback.motor[i].high_at=piper_now();
+        d->feedback.motor[i].position_raw=(int32_t)lrint(d->feedback.arm[0].deg[i]*1000*3.141592653589793/180);
+    }
+    action(&c,"verify-current",200);
+    d->feedback.motor[4].position_raw+=1000; action(&c,"verify-current",409);
+    d->feedback.motor[4].position_raw-=1000;
+    d->feedback.motor[4].high_at=piper_now()-1; action(&c,"verify-current",409);
+    assert(d->tx==tx); d->simulated=was_simulated; d->fd=old_fd;
     for (unsigned i=0;i<6;++i) if (i!=1) assert(fabs(d->feedback.arm[0].deg[i]-rest[i])<.001);
     assert(d->feedback.arm[0].control==1);
     action(&c,"disable",202); assert(!recovery(&c));
@@ -85,7 +131,8 @@ int main(void)
     cJSON *fault=cJSON_GetObjectItem(r,"last_fault");
     assert(cJSON_GetObjectItem(fault,"arm_status")->valueint==5);
     assert(cJSON_GetObjectItem(fault,"error")->valueint==63);
-    c.query=true; c.query_generation=d->generation; c.query_start=piper_now()-4;
+    // Expire the five-second information query while preserving the fault record.
+    c.query=true; c.query_generation=d->generation; c.query_start=piper_now()-6;
     controller_tick(&c,piper_now());
     assert(!c.query && !strcmp(c.phase,"blocked"));
     assert(strstr(c.message,"Joint-drive communication fixture."));

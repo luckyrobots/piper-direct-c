@@ -2,8 +2,9 @@
 #define PIPER_CONTROLLER_H
 #include "canbus.h"
 #include "cJSON.h"
+#include "obstruction.h"
 
-enum operation { OP_IDLE, OP_ENABLE, OP_MOVE, OP_ALIGN, OP_CYCLE, OP_GRIPPER, OP_DISABLE, OP_RESET };
+enum operation { OP_IDLE, OP_ENABLE, OP_MOVE, OP_ALIGN, OP_CYCLE, OP_GRIPPER, OP_DISABLE, OP_RESET, OP_TEACH_RETURN };
 struct controller {
     struct can_bus bus;
     char selected[160], message[256], phase[32], error[256];
@@ -18,11 +19,23 @@ struct controller {
     uint8_t gripper_max_mm;
     bool gripper_entry;
     bool synchronized_pose;
+    bool range_followup;
+    double range_followup_target[6], range_followup_speed, range_followup_percent;
+    bool arrival_hold;
+    double arrival_hold_at, arrival_hold_pose[6];
+    bool following, follow_committed;
+    double follow_updated;
+    unsigned follow_sequence;
     unsigned cycle_stage;
+    unsigned teach_return_stage;
     double leg_start[6], leg_span, leg_fraction, pause_until;
     bool query, disable_keeps_recovery;
     unsigned query_joint, query_generation;
     double query_start, query_next;
+    double auto_reconnect_at, auto_query_at;
+    struct obstruction_watch obstruction[6];
+    unsigned obstruction_joint;
+    double speed_percent;
 };
 bool controller_init(struct controller *c,bool simulated,const char *directory,const char *legacy);
 void controller_close(struct controller *c);

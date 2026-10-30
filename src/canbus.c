@@ -1,6 +1,8 @@
 #define _GNU_SOURCE
 #include "canbus.h"
+#include <math.h>
 #include <errno.h>
+#ifndef _WIN32
 #include <linux/can/raw.h>
 #include <linux/can/error.h>
 #include <linux/can/netlink.h>
@@ -8,12 +10,19 @@
 #include <poll.h>
 #include <math.h>
 #include <net/if_arp.h>
+#endif
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifndef _WIN32
 #include <sys/socket.h>
+#endif
 #include <time.h>
 #include <unistd.h>
+
+#ifdef _WIN32
+#include "canbus_windows.inc"
+#else
 
 double piper_now(void)
 {
@@ -95,6 +104,7 @@ static void identity(struct can_device *d,const char *name)
         char *slash=strrchr(path,'/'); if (!slash||slash==path) break; *slash=0;
     }
 }
+#endif
 void can_bus_init(struct can_bus *b,bool simulated)
 {
     memset(b,0,sizeof *b); b->simulated=simulated;
@@ -114,6 +124,9 @@ void can_bus_init(struct can_bus *b,bool simulated)
 void can_bus_scan(struct can_bus *b)
 {
     if (b->simulated) return;
+#ifdef _WIN32
+    windows_scan(b);
+#else
     for (unsigned i=0;i<CANBUS_MAX;++i) b->devices[i].present=false;
     struct if_nameindex *names=if_nameindex(); if (!names) return;
     for (struct if_nameindex *p=names;p->if_index;++p) {
@@ -148,12 +161,23 @@ void can_bus_scan(struct can_bus *b)
     if_freenameindex(names);
     for (unsigned i=0;i<CANBUS_MAX;++i) if (b->devices[i].id[0]&&!b->devices[i].present)
         lost(&b->devices[i],"USB adapter missing");
+#endif
+}
+void can_bus_invalidate_configuration(struct can_device *d,double now)
+{
+    struct piper_feedback *feedback=&d->feedback;
+    d->configuration_since=now;
+    feedback->firmware_len=0; feedback->version[0]=0;
+    feedback->hardware[0]=0; feedback->build[0]=0;
+    memset(feedback->limit,0,sizeof feedback->limit);
+    memset(feedback->acceleration,0,sizeof feedback->acceleration);
+    feedback->gripper_config_seen=false;
 }
 void can_bus_ingest(struct can_device *d,const struct can_frame *f,bool local,double now)
 {
     if (f->can_id&CAN_ERR_FLAG) {
         ++d->errors;
-        if (f->can_id&CAN_ERR_BUSOFF) lost(d,"CAN bus-off; inspect connection before reopening");
+        if (f->can_id&0x40) lost(d,"CAN bus-off; inspect connection before reopening");
         return;
     }
     if (local) {
@@ -163,6 +187,12 @@ void can_bus_ingest(struct can_device *d,const struct can_frame *f,bool local,do
         }
         return;
     }
+    /* An arm power cycle/CAN interruption may leave USB open. Invalidate
+       static settings when its status stream resumes after a gap, before
+       the new live feedback could make the previous settings usable. */
+    if (f->can_id==0x2a1 && f->len==8 && d->feedback.arm[0].status_seen &&
+        !piper_recent(d->feedback.arm[0].status_at,now))
+        can_bus_invalidate_configuration(d,now);
     ++d->rx; d->last_rx=now;
     piper_decode(&d->feedback,f->can_id,f->data,f->len,now);
     if (piper_fresh(&d->feedback.arm[0],now) && now-d->frame_at>=.04) {
@@ -181,12 +211,13 @@ static void simulation(struct can_bus *b,double now)
     struct can_frame frames[3]; double angles[6]; bool reached=true;
     for (unsigned i=0;i<6;++i) {
         double current=f->arm[0].deg[i],error=b->sim_target[i]-current;
-        angles[i]=current+((b->sim_enabled&(1u<<i))?copysign(fmin(fabs(error),8*dt),error):0);
+        bool teaching=f->arm[0].control==2||f->arm[0].teach==1||f->arm[0].teach==3||f->arm[0].teach==4||f->arm[0].teach==5||f->arm[0].teach==7;
+        angles[i]=current+((b->sim_enabled&(1u<<i))&&f->arm[0].control==1&&!teaching?copysign(fmin(fabs(error),8*dt),error):0);
         if (fabs(b->sim_target[i]-angles[i])>.02) reached=false;
     }
     piper_targets(angles,frames);
     for (unsigned i=0;i<3;++i) { frames[i].can_id=0x2a5+i; can_bus_ingest(d,&frames[i],false,now); }
-    struct can_frame status={.can_id=0x2a1,.len=8,.data={f->arm[0].control,f->arm[0].arm_status,1,0,reached?0:1}};
+    struct can_frame status={.can_id=0x2a1,.len=8,.data={f->arm[0].control,f->arm[0].arm_status,1,f->arm[0].teach,reached?0:1}};
     can_bus_ingest(d,&status,false,now);
     for (unsigned i=0;i<6;++i) {
         struct can_frame motor={.can_id=0x261+i,.len=8,.data={0,240,0,28,27,(b->sim_enabled&(1u<<i))?0x40:0}};
@@ -204,6 +235,9 @@ static void simulation(struct can_bus *b,double now)
 void can_bus_receive(struct can_bus *b,double now)
 {
     if (b->simulated) { simulation(b,now); return; }
+#ifdef _WIN32
+    windows_receive(b,now);
+#else
     for (unsigned i=0;i<CANBUS_MAX;++i) {
         struct can_device *d=&b->devices[i]; if (d->fd<0) continue;
         for (unsigned budget=0;budget<512;++budget) {
@@ -216,11 +250,15 @@ void can_bus_receive(struct can_bus *b,double now)
             if (d->fd<0) break;
         }
     }
+#endif
 }
 bool can_bus_send(struct can_bus *b,struct can_device *d,unsigned generation,const struct can_frame *frames,size_t count)
 {
     if (!d||!d->present||!d->up||d->generation!=generation) return false;
-    if (!b->simulated && (d->fd<0||if_nametoindex(d->name)!=d->index)) return false;
+    if (!b->simulated && d->fd<0) return false;
+#ifndef _WIN32
+    if (!b->simulated && if_nametoindex(d->name)!=d->index) return false;
+#endif
     /* Validate the complete batch before sending any part of it. No arbitrary
        CAN writer, parameter writes, MIT gains or calibration writes exist. */
     for (size_t i=0;i<count;++i) {
@@ -229,7 +267,13 @@ bool can_bus_send(struct can_bus *b,struct can_device *d,unsigned generation,con
         bool allowed=f->can_id>=0x155&&f->can_id<=0x157;
         unsigned tail=0;
         if (f->can_id==0x150) { allowed=f->data[0]==1||f->data[0]==2; tail=1; }
-        if (f->can_id==0x151) { allowed=f->data[0]==1&&f->data[1]==1&&f->data[2]>=1&&f->data[2]<=10; tail=3; }
+        if (f->can_id==0x151) {
+            /* Only the documented standby packet is added for zero-pose teach
+               handoff. ctrl_mode=2, MIT and arbitrary mode writes stay blocked. */
+            allowed=(f->data[0]==1&&f->data[1]==1&&f->data[2]>=1&&f->data[2]<=100)||
+                (f->data[0]==0&&f->data[1]==1&&f->data[2]==1);
+            tail=3;
+        }
         if (f->can_id==0x471) { allowed=f->data[0]>=1&&f->data[0]<=6&&(f->data[1]==1||f->data[1]==2); tail=2; }
         if (f->can_id==0x472) { allowed=f->data[0]>=1&&f->data[0]<=6&&(f->data[1]==1||f->data[1]==2); tail=2; }
         if (f->can_id==0x4af) { allowed=f->data[0]==1; tail=1; }
@@ -242,7 +286,7 @@ bool can_bus_send(struct can_bus *b,struct can_device *d,unsigned generation,con
             unsigned effort=((unsigned)f->data[4]<<8)|f->data[5];
             bool known=d->feedback.gripper_config_seen&&(d->feedback.gripper_max_mm==70||d->feedback.gripper_max_mm==100);
             double age=piper_now()-d->feedback.gripper_config_at;
-            bool configured=known&&age>=0&&age<=60&&width<=d->feedback.gripper_max_mm*1000u;
+            bool configured=known&&age>=0&&d->feedback.gripper_config_at>=d->configuration_since&&width<=d->feedback.gripper_max_mm*1000u;
             /* A zero-target disable remains available even without a configuration reply. */
             allowed=(configured||(f->data[6]==0&&width==0))&&effort>=20&&effort<=500&&f->data[6]<=1&&f->data[7]==0;
         }
@@ -253,9 +297,13 @@ bool can_bus_send(struct can_bus *b,struct can_device *d,unsigned generation,con
         const struct can_frame *f=&frames[i];
         if (f->len!=8 || f->can_id>0x7ff) return false;
         if (!b->simulated) {
+#ifdef _WIN32
+            if (!windows_send(d,f)) return false;
+#else
             if (send(d->fd,f,sizeof *f,MSG_DONTWAIT)!=(ssize_t)sizeof *f) {
                 snprintf(d->problem,sizeof d->problem,"CAN send failed: %s",strerror(errno)); return false;
             }
+#endif
         } else {
             if (f->can_id>=0x155&&f->can_id<=0x157) {
                 struct piper_feedback decoded={0}; struct can_frame copy=*f;

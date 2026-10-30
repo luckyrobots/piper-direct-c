@@ -36,6 +36,10 @@ static void parse_firmware(struct piper_feedback *s)
                     snprintf(s->build,sizeof s->build,"20%02u-%02u-%02u",yy,mm,dd);
                     *date = '\0';
                 }
+                unsigned major,minor,patch; char end;
+                if (sscanf(s->version,"S-V%u.%u-%u%c",&major,&minor,&patch,&end)!=3) {
+                    s->version[0]='\0'; s->build[0]='\0';
+                }
             }
         }
     }
@@ -97,7 +101,9 @@ bool piper_decode(struct piper_feedback *state, uint32_t id,
     if (id >= 0x251 && id <= 0x256) {
         struct piper_motor *m = &state->motor[id-0x251];
         m->high_seen=true; m->high_at=now; m->current=signed16(data+2)/1000.0;
-        m->velocity=signed16(data)/1000.0; return true;
+        m->velocity=signed16(data)/1000.0;
+        uint32_t raw=((uint32_t)data[4]<<24)|((uint32_t)data[5]<<16)|((uint32_t)data[6]<<8)|data[7];
+        m->position_raw=(int32_t)raw; return true;
     }
     if (id == 0x2a8) {
         state->gripper_mm=signed_millidegrees(data); state->gripper_effort=signed16(data+4)/1000.0;
@@ -178,6 +184,8 @@ bool piper_supported(const struct piper_feedback *s)
 {
     unsigned major,minor,patch; char end;
     if (strcmp(s->hardware,"H-V1.2-1") || sscanf(s->version,"S-V%u.%u-%u%c",&major,&minor,&patch,&end)!=3) return false;
-    /* Explicit position-protocol family, not a claim about unreviewed later firmware. */
-    return major==1 && ((minor==6 && patch>=3 && patch<=9) || (minor==7 && patch<=9) || (minor==8 && patch<=9));
+    /* V3 retains MOVE J, 0x155-157 targets and width-mode gripper commands.
+       Reviewed against AgileX SDK b847e539; MIT/angle mode is not used here.
+       Explicit revisions only: unknown later firmware remains read-only. */
+    return major==1 && ((minor==6 && patch>=3 && patch<=9) || (minor==7 && patch<=9) || (minor==8 && patch<=9) || (minor==9 && patch<=1));
 }

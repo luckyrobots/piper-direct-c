@@ -1,0 +1,27 @@
+schema: 1
+api: 1
+id: luckyrobots.pipers
+name: Pipers
+version: 0.1.0-preview.1
+publisher: Lucky Robots
+readme: docs/lucky-engine-plugin.md
+capabilities:
+  - scene.robots
+  - scene.pose.write
+  - network.loopback
+  - camera.capture
+entrypoints:
+  windows-x64: LuckyRobots.Pipers.exe
+  linux-x64: LuckyRobots.Pipers
+panels:
+  - id: luckyrobots.pipers.controls
+    title: Plugin:Pipers
+workspaces:
+  - id: luckyrobots.pipers.workspace
+    name: Pipers
+    icon: robot
+    panel: luckyrobots.pipers.controls
+    panelRatio: 0.52
+# Release tooling writes verified download URLs and SHA-256 digests here.
+# Source checkouts and locally built packages intentionally have no remote release claim.
+packages: {}

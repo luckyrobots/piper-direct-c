@@ -1,0 +1,30 @@
+{
+  "version": 1,
+  "dependencies": {
+    "net9.0": {
+      "OpenCvSharp5": {
+        "type": "Direct",
+        "requested": "[5.0.0.20261018, )",
+        "resolved": "5.0.0.20261018",
+        "contentHash": "AVRSdqht1PRr9QfQjVzd6CM4o4IxHS5VeT94ZEEKdMHSQIx7U+VR0O3OzCxRROirJlmH6oz+MMw0SUBxKEN3Qw=="
+      },
+      "OpenCvSharp5.runtime.win": {
+        "type": "Direct",
+        "requested": "[5.0.0.20261018, )",
+        "resolved": "5.0.0.20261018",
+        "contentHash": "WwyIbPJqlDwejKehYHS2xh3AxU4tnMm/S8obqGvTs0vR8e/1EFTU9Wk9c4H1s4GLUk6QI6FmcMoaxqwc1bYGSQ=="
+      },
+      "Intel.RealSense": {
+        "type": "Project"
+      }
+    },
+    "net9.0/win-x64": {
+      "OpenCvSharp5.runtime.win": {
+        "type": "Direct",
+        "requested": "[5.0.0.20261018, )",
+        "resolved": "5.0.0.20261018",
+        "contentHash": "WwyIbPJqlDwejKehYHS2xh3AxU4tnMm/S8obqGvTs0vR8e/1EFTU9Wk9c4H1s4GLUk6QI6FmcMoaxqwc1bYGSQ=="
+      }
+    }
+  }
+}
