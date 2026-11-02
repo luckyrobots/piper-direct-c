@@ -74,6 +74,7 @@ public sealed record CalibrationFit(bool CanApply, string Reason, CalibrationPla
 /// <summary>Rigid world-Y yaw/XZ translation only. Never fits joint zero, scale, tilt or tool offset.</summary>
 public static class CalibrationSolver
 {
+    public const double ReferenceDuplicateDistanceMetres = .001;
     public static CalibrationPoint Rotate(CalibrationPoint point, double yaw) =>
         new(Math.Cos(yaw) * point.X + Math.Sin(yaw) * point.Z, point.Y, -Math.Sin(yaw) * point.X + Math.Cos(yaw) * point.Z);
 
@@ -86,8 +87,8 @@ public static class CalibrationSolver
         var heldOut = samples.Where(s => s.HeldOut).ToArray();
         CalibrationFit Reject(string reason) => new(false, reason, original, 0, 0, 0, 0, 0, []);
         if (training.Length < 4) return Reject("Capture at least four training points spread across the reachable desk, then a separate validation point.");
-        if (training.Where((p, i) => training.Take(i).Any(q => p.MeasuredWorld.PlanarDistance(q.MeasuredWorld) < .02)).Any())
-            return Reject("Training needs four distinct desk locations at least 2 cm apart; repeated readings at one point are not extra geometric constraints.");
+        if (training.Where((p, i) => training.Take(i).Any(q => p.MeasuredWorld.PlanarDistance(q.MeasuredWorld) < ReferenceDuplicateDistanceMetres)).Any())
+            return Reject("The same desk location was recorded twice (within 1 mm). Use four distinct reference marks; close marks are allowed when the full set has enough spread.");
         if (!Spread(training.Select(s => s.MeasuredWorld).ToArray()) || !Spread(training.Select(s => s.SceneWorld).ToArray()))
             return Reject("Training points are too close or nearly collinear. Spread them at least 10 cm in two desk directions; use a rectangle rather than one line.");
         double sx = training.Average(s => s.SceneWorld.X), sz = training.Average(s => s.SceneWorld.Z);

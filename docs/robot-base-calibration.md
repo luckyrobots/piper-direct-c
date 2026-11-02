@@ -18,7 +18,7 @@ Dependent controls unlock as these checks are completed. The page shows the next
 
 ## Enter and capture the five marks
 
-Draw four reachable crosses on the bare tabletop. Spread them across both desk directions, rather than along one line; the set needs at least 100 mm of overall spread in both directions. Reference marks must be at least **20 mm apart**. Reserve a fifth cross at least **50 mm from every reference mark** for the independent Check. An existing measured centre cross is suitable for that final check.
+Draw four reachable crosses on the bare tabletop. Spread them across both desk directions, rather than along one line; the set needs at least 100 mm of overall spread in both directions. Closely spaced reference marks are allowed; only duplicate locations within **1 mm** are blocked. The full reference set must still have enough spread to constrain the alignment. Reserve a fifth cross at least **50 mm from every reference mark** for the independent Check. An existing measured centre cross is suitable for that final check.
 
 Enter all five pairs in the sheet's **BACK mm / LEFT mm** columns. For example, a physical annotation of `20 / 69.7 cm` means **BACK 200 / LEFT 697 mm**. All contacts in this sheet are on the bare desk, so their height is **0 mm**; do not hover above the mark. Duplicate or overlapping entries show an inline row error before capture.
 

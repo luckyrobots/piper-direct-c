@@ -213,8 +213,8 @@ public sealed partial class PipersPlugin
             if (calibrationSamples.Count >= 24) throw new InvalidOperationException("Use at most 24 points per calibration. Start a new check for more points.");
             ReadCalibrationInputs(false);
             var measured = calibrationMeasurement.World(calibrationDesk);
-            if (calibrationSamples.Any(s => s.MeasuredWorld.Distance(measured) < .02))
-                throw new InvalidOperationException("That desk location was already sampled. Choose a different point at least 2 cm away.");
+            if (calibrationSamples.Any(s => s.MeasuredWorld.Distance(measured) < CalibrationSolver.ReferenceDuplicateDistanceMetres))
+                throw new InvalidOperationException("That desk location was already sampled (within 1 mm). Choose a distinct physical mark.");
             var capture = await ReadCalibrationPose(session, calibrationOriginal, true, cancellation);
             bool heldOut = action == "validate";
             if (heldOut && calibrationSamples.Count(s => !s.HeldOut) < 4) throw new InvalidOperationException("Capture at least four training points before the independent validation point.");

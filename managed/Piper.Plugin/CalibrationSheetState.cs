@@ -48,8 +48,8 @@ public sealed partial class PipersPlugin
         if (SheetPoint(row) is not { } point) return "Enter BACK and LEFT distances for this cross, within the desk edges (mm).";
         // Reject duplicates before the operator spends time touching them.
         for (int previous = 0; previous < row; previous++)
-            if (SheetPoint(previous) is { } other && point.PlanarDistance(other) < (row == 4 ? .05 : .02))
-                return row == 4 ? "Use a check cross at least 50 mm from every reference point." : $"This overlaps {SheetPointName(previous)}. Use a different cross at least 20 mm away.";
+            if (SheetPoint(previous) is { } other && point.PlanarDistance(other) < (row == 4 ? .05 : CalibrationSolver.ReferenceDuplicateDistanceMetres))
+                return row == 4 ? "Use a check cross at least 50 mm from every reference point." : $"This overlaps {SheetPointName(previous)} (within 1 mm). Use a distinct physical cross.";
         if (row < 4 && WizardCross() is { } cross)
         {
             double left = CalibrationWizardFlow.Number(Wizard, $"p{row}left", 0, 10000), back = CalibrationWizardFlow.Number(Wizard, $"p{row}back", 0, 10000);

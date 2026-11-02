@@ -38,6 +38,27 @@ public static class CalibrationTests
         check(!CalibrationSolver.Fit(desk, original, reused).CanApply, "A training point was accepted as independent validation");
         var duplicate = samples.ToArray(); duplicate[3] = duplicate[0];
         check(!CalibrationSolver.Fit(desk, original, duplicate).CanApply, "Duplicate training points inflated geometric evidence");
+        // Nearby references remain legitimate observations when the full set
+        // spans both desk axes; duplicate and held-out checks stay independent.
+        var closeReferences = new[]
+        {
+            Sample(new(-.003, .75, -.15), 1), Sample(new(.1, .75, .1), 2),
+            Sample(new(.2, .75, -.23), 3), Sample(new(.1, .75, .09), 4),
+            Sample(new(.203, .75, 0), 5, true)
+        };
+        check(CalibrationSolver.Fit(desk, original, closeReferences).CanApply,
+            "A geometrically well-spread reference set containing distinct points 10 mm apart was rejected");
+        var subMillimetreDuplicate = closeReferences.ToArray();
+        subMillimetreDuplicate[3] = Sample(new(.1, .75, .1005), 4);
+        check(!CalibrationSolver.Fit(desk, original, subMillimetreDuplicate).CanApply,
+            "A sub-millimetre repeated reference was counted as distinct geometric evidence");
+        var nearbyCheck = samples.ToArray();
+        nearbyCheck[4] = Sample(new(samples[0].SceneWorld.X + .049, .75, samples[0].SceneWorld.Z), 5, true);
+        var nearbyCheckFit = CalibrationSolver.Fit(desk, original, nearbyCheck);
+        check(!nearbyCheckFit.CanApply && nearbyCheckFit.Reason.Contains("5 cm"),
+            "Relaxing reference spacing also relaxed the independent check's 50 mm clearance");
+        check(new CalibrationPoint(0, 0, 0).PlanarDistance(new(.01, 0, .1)) > .1,
+            "Reference distance uses one coordinate instead of both tabletop coordinates");
         var line = Enumerable.Range(0, 5).Select(i => Sample(new(i * .07, .75, 0), i, i == 4)).ToArray();
         check(!CalibrationSolver.Fit(desk, original, line).CanApply, "Collinear desk points yielded an actionable yaw fit");
         var tiny = samples.Select(s => s with { SceneWorld = new(s.SceneWorld.X / 10, .75, s.SceneWorld.Z / 10), MeasuredWorld = Transform(new(s.SceneWorld.X / 10, .75, s.SceneWorld.Z / 10)) }).ToArray();

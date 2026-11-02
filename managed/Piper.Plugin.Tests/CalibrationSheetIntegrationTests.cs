@@ -21,7 +21,7 @@ internal static class CalibrationSheetIntegrationTests
         var preferences = RobotProfileRouting.Normalize(new Preferences(Robots: [new("piper-1", "Fixture", "can-a", RobotId: "fixture-robot")], ActiveRobotId: "piper-1"));
         Set("preferences", preferences);
         var root = CalibrationPlacement.At(new(.1, .75, -.2), 0);
-        (double Left, double Back)[] marks = [(500.0, 200.0), (800.0, 200.0), (800.0, 500.0), (500.0, 500.0), (650.0, 350.0)];
+        (double Left, double Back)[] marks = [(697.0, 200.0), (800.0, 450.0), (900.0, 120.0), (800.0, 440.0), (903.0, 350.0)];
         int point = 0;
         var device = new JsonObject
         {
@@ -118,9 +118,10 @@ internal static class CalibrationSheetIntegrationTests
             check(!CaptureEnabled(0) && Status(".sheet.next").Contains("cannot be 0"), "Precision zero silently disabled Capture instead of showing its actionable repair");
             await Event("precision.default");
             check(Get<CalibrationWizardDraft>("calibrationWizard").Answers["precision"] == "5" && CaptureEnabled(0), "Use ±5 mm did not repair the accuracy gate immediately");
-            await Event("field.p3back", "200"); await Event("field.p3left", "800");
+            await Event("field.p3back", "450"); await Event("field.p3left", "800");
             check(Status(".sheet.row.status.3").Contains("overlaps P2"), "Duplicate reference measurement was not explained beside its row before hand guiding");
-            await Event("field.p3back", "500"); await Event("field.p3left", "500");
+            await Event("field.p3back", "440"); await Event("field.p3left", "800");
+            check(!Status(".sheet.row.status.3").Contains("overlaps"), "P4 at BACK 440 / LEFT 800 was rejected merely because P2 is BACK 450 / LEFT 800");
             var validDraft = Get<CalibrationWizardDraft>("calibrationWizard");
             Set("calibrationWizard", validDraft with { ModelRevision = "changed-revision" });
             Fresh(); await Invoke("Update", CancellationToken.None);
@@ -140,6 +141,7 @@ internal static class CalibrationSheetIntegrationTests
                 int before = Get<List<CalibrationSample>>("calibrationSamples").Count;
                 string captureId = Walk(view!).Single(w => w["id"]!.GetValue<string>().EndsWith(".sheet.capture." + point, StringComparison.Ordinal))["id"]!.GetValue<string>();
                 check(patches?[captureId]?["enabled"]?.GetValue<bool>() == true, $"Actual UI never enabled capture for valid point {point + 1}");
+                if (point == 3) check(CaptureEnabled(3), "The real UI event flow could not capture a distinct reference 10 mm from an earlier reference");
                 await Event("capture." + point);
                 check(Get<List<CalibrationSample>>("calibrationSamples").Count == before + 1, $"Real row event failed to save point {point + 1}");
             }
