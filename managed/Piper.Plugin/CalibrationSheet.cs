@@ -104,6 +104,10 @@ public sealed partial class PipersPlugin
         }
         if (action == "tool.show")
         {
+            // Leave the legacy edge step before showing a tool marker. Otherwise
+            // background edge renewal immediately replaces it and clears its proof.
+            if (Wizard.Step != CalibrationWizardStep.ModelPoint)
+                calibrationWizard = Wizard with { Step = CalibrationWizardStep.ModelPoint, Epoch = Wizard.Epoch + 1 };
             if (calibrationIdentity is not null) await ShowWizardHighlight(cancellation);
             else
             {
@@ -118,6 +122,7 @@ public sealed partial class PipersPlugin
             if (wizardHighlightScope is not { } marker || !WizardHighlightCurrent(marker)) throw new InvalidOperationException("Show the jaw-tip marker first, then compare it with the real midpoint.");
             calibrationWizard = Wizard with { OperatorSaysTcpMatches = true };
             Wizard.Answers["physicalpoint"] = "operator confirmed midpoint between both jaw tips";
+            wizardMessage = "Jaw tips confirmed. Next, confirm that the robot base rests on the tabletop.";
         }
         else if (action == "surface")
         {

@@ -75,7 +75,7 @@ public sealed partial class PipersPlugin
             entered = await wizardHighlightGate.WaitAsync(0, cancellation);
             if (!entered) return;
             await MaintainSheetMarks(cancellation);
-            if (WizardReferenceStep) { await MaintainWizardReferenceWithinGate(cancellation); return; }
+            if (WizardReferenceStep && wizardHighlightScope is null) { await MaintainWizardReferenceWithinGate(cancellation); return; }
             if (wizardReferenceHighlightScope is { } reference)
             {
                 wizardReferenceHighlightScope = null; wizardReferenceAcknowledgedAt = 0;
