@@ -13,7 +13,7 @@ public sealed partial class PipersPlugin
         Interlocked.Increment(ref workspaceViewEpoch);
         Widget body = workspacePage switch
         {
-            "calibration" => GuidedCalibrationControls(),
+            "calibration" => CalibrationSheetControls(),
             "settings" => SettingsPage(),
             "recording" => RecordingPage(),
             "camera" => CameraDetailPage(),

@@ -62,96 +62,6 @@ public sealed partial class PipersPlugin
 
     private Widget WizardButton(string action, string text) => Widget.Button(WizardId(action), text) with
     { Appearance = action is "next" or "capture" or "apply" ? "primary" : action is "back" or "new" or "open" ? "quiet" : "default", Padding = 8 };
-    private Widget GuidedCalibrationControls()
-    {
-        LoadWizard();
-        var step = Wizard.Step;
-        var children = new List<Widget>
-        {
-            Widget.Row("wizard.header", Widget.Label("wizard.title", "Calibrate " + ActiveProfile.Name) with { Appearance = "heading" }, Widget.Button("workspace.controls@wizard", "Back to robot controls") with { Width = 190, Appearance = "quiet" }),
-            Widget.Label("wizard.progress", $"{WizardTrainingCount}/4 reference points + {WizardValidationCount}/1 check point · {WizardStepName()}") with { Height = 30, Appearance = "muted" },
-            Widget.Row("wizard.prompt", Widget.Label("wizard.question", WizardPrompt()) with { Height = 60, Appearance = "heading" },
-                WizardButton("help", "(i)") with { Width = 32, Padding = 4, Appearance = "quiet", Hint = WizardQuestion() }),
-        };
-        if (step is CalibrationWizardStep.HandGuide or CalibrationWizardStep.Capture)
-            children.Add(Widget.Label("wizard.capture.essentials", step == CalibrationWizardStep.HandGuide
-                ? "Press the arm button once: solid green means hand guiding. Support the arm as needed. Move the jaw-tip midpoint to your chosen spot and hold still for 0.4 seconds."
-                : "Keep the light solid green and support the arm as needed. Hold still for 0.4 seconds, then Capture. This records the position; it does not move or power the arm.") with { Height = 64 });
-        string? input = CalibrationWizardFlow.Input(step);
-        if (step == CalibrationWizardStep.Prepare)
-            children.Add(link is null ? Widget.Button("link", "Link robot") with { Appearance = "primary", Hint = "Shows measured real-joint positions in the simulation. This does not enable motors or send a movement command." } : Widget.Label("wizard.linked", "Linked. Moving the real arm by hand should move its simulated copy."));
-        if (input is not null && step != CalibrationWizardStep.SceneSurfaceY)
-        {
-            if (step == CalibrationWizardStep.ModelPoint) children.Add(Widget.Label("wizard.input.label", "Model point name (advanced)") with { Appearance = "muted" });
-            children.Add(new Widget("input", WizardId("answer")) { Text = Wizard.Answers.GetValueOrDefault(input, ""), Hint = input == "tool" ? "Exact case-sensitive model site name. Use Show selected point, or choose the discovered jaw-tip reference below." : input is "column" or "row" ? "Enter the whole-number line index, starting at 0." : "Enter your measurement in millimetres. For example, 1 cm = 10 mm. Blank means unknown." });
-        }
-        if (step is CalibrationWizardStep.DeskFrame or CalibrationWizardStep.DeskBack)
-        {
-            children.Add(Widget.Label("wizard.desk.orientation", "Stand at the front long edge of the real desk. LEFT is the short edge on your left. BACK is the long edge furthest from you. Compare the pointer in the simulation with the real edge you will measure from.") with { Height = 84 });
-            children.Add(WizardButton("edge.show", step == CalibrationWizardStep.DeskFrame ? "Show LEFT edge" : "Show BACK edge"));
-            children.Add(Widget.Label("wizard.edge.status", WizardReferenceShown() ? "Pointer shown. Confirm only if it marks the matching desk edge." : "Waiting for the simulation pointer. Confirmation stays unavailable until it is shown.") with { Height = 48 });
-        }
-        if (step == CalibrationWizardStep.ContactPoint)
-        {
-            children.Add(Widget.Label("wizard.contact.diagram", "left jaw tip o-----+-----o right jaw tip\n                  measured midpoint") with { Height = 42, Appearance = "numeric" });
-            children.Add(WizardButton("contact", Wizard.Answers.ContainsKey("physicalpoint") ? "Jaw-tip midpoint selected" : "Use midpoint between jaw tips"));
-        }
-        if (step == CalibrationWizardStep.ModelPoint)
-        {
-            children.Add(WizardButton("model.show", "Show selected point") with { Hint = "Reads the exact selected model site and shows its temporary marker. This does not move hardware or verify physical correspondence." });
-            if (wizardDiscoveredSites.Count(name => name == "calibration_jaw_tips") == 1)
-                children.Add(WizardButton("model.jawtips", "Show midpoint between jaw tips") with { Hint = "Uses the discovered model's calibration_jaw_tips site. Compare the temporary marker with the physical midpoint; software does not verify correspondence." });
-            children.Add(Widget.Label("wizard.model.point", wizardModelPoint) with { Height = 50, Hint = wizardModelPointDetails });
-        }
-        if (step == CalibrationWizardStep.TabletopHeight)
-            children.Add(Widget.Label("wizard.height.scene", $"Confirmed scene surface Y: {calibrationDesk.SurfaceY * 1000:F0} mm. Scene floor reference: {Wizard.Answers.GetValueOrDefault("floory", "unknown")} mm. Physical ruler height remains separate; no scene object moves.") with { Height = 42 });
-        if (step == CalibrationWizardStep.SceneSurfaceY)
-            children.Add(WizardButton("scene.root", "Use this tabletop reference") with { Hint = "Confirm the simulated base is on the simulated tabletop. This reads its validated metric world-Y reference; it does not move any scene object or use a physical floor measurement." });
-        if (step == CalibrationWizardStep.SceneFloorOrigin)
-            children.Add(WizardButton("floor.zero", "My scene floor and physical floor origin both use Y=0"));
-        if (step == CalibrationWizardStep.Method)
-            children.Add(new Widget("dropdown", WizardId("method")) { Options = ["Measure from desk edges", "Aligned grid mat intersections"], Value = Wizard.Answers.GetValueOrDefault("method") == "grid intersections" ? 1 : 0 });
-        if (step == CalibrationWizardStep.PointIntro)
-        {
-            if (WizardValidation && WizardCross() is { } cross)
-                children.Add(WizardButton("cross", "Use saved desk cross") with { Hint = $"Verify this profile's cross: {cross.RightMm:F0} mm from the RIGHT edge and {cross.BackMm:F0} mm from the BACK edge. The following questions show its saved edge measurements for you to check." });
-            children.Add(Widget.Label("wizard.point.role", WizardValidation ? "Choose a NEW spot at least 5 cm from every reference point. This checks the result; it is not used to calculate the alignment." :
-                "Choose four different spots across the desk, not along one line. Spread them at least 10 cm apart overall in both directions. Save the desk cross for the final check.") with { Height = 70 });
-        }
-        if (step == CalibrationWizardStep.Capture)
-        {
-            children.Add(Widget.Label("wizard.measurement", WizardMeasurementSummary()) with { Height = 48 });
-            children.Add(WizardButton("capture", WizardValidation ? "Capture check point" : "Capture reference point"));
-        }
-        if (step is CalibrationWizardStep.Review or CalibrationWizardStep.Complete)
-        {
-            children.Add(Widget.Label("wizard.review", WizardReviewSummary()) with { Height = 116, Hint = CalibrationPreview() });
-            children.Add(Widget.Row("wizard.review.actions", WizardButton("fit", "Calculate alignment"), WizardButton("apply", "Apply to simulation"), WizardButton("rollback", "Undo alignment")));
-            children.Add(Widget.Row("wizard.more.actions", WizardButton("add.training", "Add reference point"), WizardButton("add.validation", "Add check point"), WizardButton("open", "Open saved report")));
-        }
-        if (step == CalibrationWizardStep.InspectSaved)
-            children.Add(Widget.Row("wizard.inspect.actions", WizardButton("inspect", "Check scene placement (read-only)"), WizardButton("open", "Open saved report")));
-        if (calibrationArchiveConfirmation)
-            children.Add(Widget.Column("wizard.archive", Widget.Label("wizard.archive.warning", "Keep the saved report and archive its pending/applied rollback context? This does not undo or repeat a scene write.") with { Height = 44 },
-                Widget.Row("wizard.archive.actions", WizardButton("archive", "Keep report & start new questions"), WizardButton("archive.cancel", "Cancel"))));
-        children.Add(Widget.Row("wizard.navigation", WizardButton("back", "Previous question"), WizardButton("next", WizardNextLabel()), WizardButton("new", "Start over / edit setup")));
-        children.Add(Widget.Label("wizard.status", wizardMessage.Length > 0 ? wizardMessage : robotCalibrationStatus) with { Height = 58 });
-        var help = new List<Widget> { Widget.Column("wizard.camera.header", Widget.Label("wizard.camera.title", "Camera view"),
-            new Widget("dropdown", WizardId("camera")) { Options = ["Shared bench", "Pika gripper", "D405 camera (current view)"], Value = Array.IndexOf(new[] { "bench", "gripper", "depth" }, Wizard.HelpCamera) }) };
-        help.Add(new Widget("image", "wizard.camera.image") { ImageId = CameraImageId(Wizard.HelpCamera), Height = 180, Visible = CameraFrameReady(Wizard.HelpCamera) });
-        help.Add(Widget.Row("wizard.camera.caption", Widget.Label("wizard.camera.note", "Live preview") with { Appearance = "muted" },
-            WizardButton("help", "(i)") with { Id = WizardId("camera.help"), Width = 32, Padding = 4, Appearance = "quiet",
-                Hint = "Existing JPEG preview only. It does not measure distance or prove physical/model point correspondence. This page reuses the selected running camera; it does not open another capture." }));
-        if (step is >= CalibrationWizardStep.DeskFrame and <= CalibrationWizardStep.GridRow or CalibrationWizardStep.DeskBack)
-        {
-            help.Add(Widget.Label("wizard.desk.title", "Desk seen from above") with { Appearance = "heading" });
-            help.Add(Widget.Label("wizard.desk.diagram", "        BACK (far edge)\n     +------------------+\n     |        |         |\nLEFT |        | back    | RIGHT\n     |--left--P         |\n     |                  |\n     +------------------+\n       FRONT (you here)") with { Height = 174, Appearance = "numeric", Hint = "P is the spot you measure. Measure straight in from LEFT and BACK, parallel to the desk edges. Advanced: the scene desk is centred on X/Z=0; left is -X, back is -Z, width follows X, depth follows Z. A translated or rotated scene desk must be fixed separately." });
-            help.Add(Widget.Label("wizard.desk.caption", "P = your chosen spot. Measure from LEFT and BACK. Height is above the tabletop, not above the floor.") with { Height = 62 });
-        }
-        return Widget.Row("wizard.page", Widget.Column("wizard.body", children.ToArray()) with { Padding = 16, Spacing = 12, Appearance = "panel" },
-            Widget.Column("wizard.help", help.ToArray()) with { Width = 320, Padding = 12, Spacing = 8, Appearance = "panel" }) with { Spacing = 14 };
-    }
-
     private string WizardQuestion() => Wizard.Step switch
     {
         CalibrationWizardStep.Prepare => "Choose the real robot and its matching simulated copy, then click Link robot here. Check that both show the same pose. This page reads positions only; it never enables, resets or moves the real arm.",
@@ -290,6 +200,7 @@ public sealed partial class PipersPlugin
         string[] parts = action.Split('.', 2);
         if (!calibrationOpen || parts.Length != 2 || !long.TryParse(parts[0], out long epoch) || !CalibrationWizardFlow.Accepts(Wizard, ActiveProfile.Id, epoch)) return;
         action = parts[1];
+        if (action.StartsWith("sheet.", StringComparison.Ordinal)) { await CalibrationSheetEvent(action[6..], value, cancellation); return; }
         if (action is "help" or "camera.help") return; // Tooltip only; never advances or edits the draft.
         if (action == "answer")
         {
@@ -486,6 +397,7 @@ public sealed partial class PipersPlugin
     private void AddWizardPatches(Dictionary<string, JsonObject> patches, JsonObject? device)
     {
         if (!calibrationOpen || calibrationWizard is null || wizardProfile != ActiveProfile.Id) return;
+        AddCalibrationSheetPatches(patches, device);
         patches["wizard.status"] = new() { ["text"] = wizardMessage.Length > 0 ? wizardMessage : robotCalibrationStatus };
         bool captureReady = device is not null && TeachingState.Inspect(device).HandGuiding && device["status"]?["stationary_s"]?.GetValue<double>() is >= .4;
         bool sameScope = calibrationIdentity is null || link is not null && calibrationIdentity == CurrentCalibrationIdentity();

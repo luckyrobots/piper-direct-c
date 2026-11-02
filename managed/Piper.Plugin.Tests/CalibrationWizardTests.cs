@@ -179,6 +179,14 @@ public static class CalibrationWizardTests
             "Hidden-overlay guidance was lost behind a generic marker failure");
         const System.Reflection.BindingFlags hidden = System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic;
         var copyPlugin = new PipersPlugin();
+        var sheetDraft = draft with { Answers = new(draft.Answers) { ["left"] = "697", ["back"] = "200", ["height"] = "75" } };
+        typeof(PipersPlugin).GetField("calibrationWizard", hidden)!.SetValue(copyPlugin, sheetDraft);
+        typeof(PipersPlugin).GetMethod("LoadSheetRows", hidden)!.Invoke(copyPlugin, null);
+        check(sheetDraft.Answers["p0left"] == "697" && sheetDraft.Answers["p0back"] == "200" && !sheetDraft.Answers.ContainsKey("p0height"), "Sheet migration lost current XY measurements or carried hover height into desk-contact rows");
+        foreach (int row in Enumerable.Range(0, 5)) foreach (string axis in new[] { "left", "back" }) sheetDraft.Answers[$"p{row}{axis}"] = (100 + row * 100).ToString();
+        CalibrationWizardFlow.ValidateDraft(sheetDraft, "robot-a");
+        var roundTrip = JsonSerializer.Deserialize<CalibrationWizardDraft>(JsonSerializer.Serialize(sheetDraft))!;
+        check(Enumerable.Range(0, 5).All(row => new[] { "left", "back" }.All(axis => roundTrip.Answers[$"p{row}{axis}"] == sheetDraft.Answers[$"p{row}{axis}"])), "Batch point inputs did not survive draft serialization");
         foreach (CalibrationWizardStep step in Enum.GetValues<CalibrationWizardStep>())
         {
             typeof(PipersPlugin).GetField("calibrationWizard", hidden)!.SetValue(copyPlugin, draft with { Step = step });

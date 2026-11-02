@@ -1,5 +1,9 @@
 # Calibrate a PiPER base against measured desk points
 
+The Calibration tab is one measurement sheet, not a Next/Back wizard. Enter all four reference marks and the independent check mark at once, in **BACK / LEFT millimetres** order. All five rows stay visible. Touch each mark with the midpoint between both jaw tips at tabletop height (0 mm), hold still in physical hand-guiding mode, and Capture its row. The optional **Move arm to this mark** button shows instructions only and never sends a target. Rows are recorded in order; captured measurements are fixed and saved with the report. Old unrecorded XY entries migrate, but an old hover height is not reused. Existing reports with raised/grid points are retained and require a new tabletop session rather than silently converting measurements.
+
+Desk dimensions, precision, model-point confirmation, LEFT/BACK pointers, tabletop reference, camera help, Calculate, Apply, Undo and report actions are on the same page. Captures retain the existing model/root/connection, stationary-feedback, physical-reference and independent-validation checks. Apply still changes the scene only.
+
 Use **Calibrate robot · desk measurements** in the native Pipers panel. This is a passive, per-robot setup step: the operator moves the real arm using its physical teach button, and the linked scene continues to display measured joints. The wizard never enables, resets, homes, replays or sends a joint target to the physical arm.
 
 The feature fits the scene robot's **base yaw and horizontal position**. It keeps the base on the confirmed scene tabletop reference. It does not change encoder zeros, joint signs, tool offsets, model scale, base tilt or camera calibration. A successful desk check is not a claim of pixel alignment, synchronized exposure or perfectly accurate datasets.

@@ -122,6 +122,13 @@ internal static class WorkspaceViewTests
             string label = page + "/" + category + "/" + camera;
             check(ids.Distinct(StringComparer.Ordinal).Count() == ids.Length, "Duplicate widget IDs in rendered " + label);
             check(ids.Length <= 2048 && Depth(rendered!) <= 24, "Rendered view exceeds public SDK limits: " + label);
+            if (page == "calibration")
+            {
+                check(Enumerable.Range(0, 5).All(row => ids.Any(id => id.EndsWith("sheet.capture." + row, StringComparison.Ordinal))), "The calibration sheet hides uncaptured rows behind navigation");
+                check(Enumerable.Range(0, 5).All(row => new[] { "left", "back" }.All(axis => ids.Any(id => id.EndsWith($"sheet.field.p{row}{axis}", StringComparison.Ordinal)))), "All five measurement pairs must be editable on one page");
+                check(!ids.Any(id => id.Contains("wizard.navigation", StringComparison.Ordinal) || id.Contains(".wizard.", StringComparison.Ordinal) && (id.EndsWith(".back", StringComparison.Ordinal) || id.EndsWith(".next", StringComparison.Ordinal))), "The single-page calibration retained Next/Back questions");
+                check(nodes.Any(n => n["text"]?.GetValue<string>()?.Contains("height is 0 mm", StringComparison.Ordinal) == true), "Desk contact instructions require hovering instead of touching the mark");
+            }
             check(ids.Count(id => id == "robot.piper-1.stop") == 1, "Persistent profile-bound STOP is missing/duplicated: " + label);
             long current = Get<long>("workspaceViewEpoch");
             check(ids.All(id => WorkspaceEventScope.Unwrap(current, "piper-1", id).Length > 0), "Rendered widget escaped its current view/profile scope: " + label);

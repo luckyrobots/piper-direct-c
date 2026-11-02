@@ -148,7 +148,7 @@ public static class CalibrationWizardFlow
     public static void ValidateDraft(CalibrationWizardDraft draft, string profileId)
     {
         if (draft.Schema is not (1 or 2) || draft.ProfileId != profileId || !Enum.IsDefined(draft.Step) || draft.Epoch < 1 || draft.Epoch >= long.MaxValue - 100 || draft.Answers is null ||
-            draft.Answers.Count > 32 || draft.Answers.Any(p => p.Key.Length > 32 || p.Value is null || p.Value.Length > 512) ||
+            draft.Answers.Count > 64 || draft.Answers.Any(p => p.Key.Length > 32 || p.Value is null || p.Value.Length > 512) ||
             draft.History is null || draft.History.Length > 24 || draft.History.Any(s => !Enum.IsDefined(s)) ||
             draft.HelpCamera is not ("bench" or "gripper" or "depth") || Path.GetFileName(draft.ReportFile) != draft.ReportFile ||
             draft.ReportFile.Length > 160 || draft.ReportFile.Length > 0 && !draft.ReportFile.EndsWith("-calibration.json", StringComparison.Ordinal))

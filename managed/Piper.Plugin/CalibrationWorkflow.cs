@@ -76,7 +76,7 @@ public sealed partial class PipersPlugin
             : "A saved base-calibration report is available. Start a new check to verify the current hardware, scene and contact point.";
     }
 
-    private Widget CalibrationControls() => GuidedCalibrationControls();
+    private Widget CalibrationControls() => CalibrationSheetControls();
 
     private double CalibrationValue(string key)
     {
