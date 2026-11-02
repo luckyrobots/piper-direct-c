@@ -191,7 +191,9 @@ public sealed partial class PipersPlugin
         catch (Exception error) when (error is not OperationCanceledException)
         {
             wizardMessage = error.Message;
-            await Render(cancellation); await Update(cancellation);
+            // Sheet validation errors must not destroy the active input view.
+            if (!action.Contains(".sheet.", StringComparison.Ordinal)) await Render(cancellation);
+            await Update(cancellation);
             throw;
         }
     }
@@ -332,7 +334,9 @@ public sealed partial class PipersPlugin
             sites.Length != 1 || sites[0]?["unit"]?.GetValue<string>() != "m" || sites[0]?["position"] is not JsonArray { Count: 3 } xyz ||
             xyz.Any(v => v is null || !double.IsFinite(v.GetValue<double>())) || pose["modelAssetId"]?.GetValue<string>() is not { Length: > 0 } asset || pose["modelRevision"]?.GetValue<string>() is not { Length: > 0 } revision)
             throw new InvalidOperationException("The current model does not expose one exact named metric site. Select/fix the correct model point before continuing.");
-        calibrationWizard = Wizard with { ModelAssetId = asset, ModelRevision = revision, OperatorSaysTcpMatches = false };
+        bool samePoint = Wizard.ModelAssetId == asset && Wizard.ModelRevision == revision &&
+            (wizardHighlightScope is null || wizardHighlightScope.SiteName == name);
+        calibrationWizard = Wizard with { ModelAssetId = asset, ModelRevision = revision, OperatorSaysTcpMatches = samePoint && Wizard.OperatorSaysTcpMatches };
         Wizard.Answers["observedrooty"] = CalibrationNumber(CalibrationPlacement.Read(pose["rootPlacement"]).Position.Y * 1000);
         var coordinates = sites[0]!["position"]!.AsArray().Select(v => v!.GetValue<double>() * 1000).ToArray();
         wizardModelPoint = "Look for the marker between the simulated jaw tips, then compare it with the real jaw-tip midpoint.";

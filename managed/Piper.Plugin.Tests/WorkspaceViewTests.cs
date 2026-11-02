@@ -127,7 +127,7 @@ internal static class WorkspaceViewTests
                 check(Enumerable.Range(0, 5).All(row => ids.Any(id => id.EndsWith("sheet.capture." + row, StringComparison.Ordinal))), "The calibration sheet hides uncaptured rows behind navigation");
                 check(Enumerable.Range(0, 5).All(row => new[] { "left", "back" }.All(axis => ids.Any(id => id.EndsWith($"sheet.field.p{row}{axis}", StringComparison.Ordinal)))), "All five measurement pairs must be editable on one page");
                 check(!ids.Any(id => id.Contains("wizard.navigation", StringComparison.Ordinal) || id.Contains(".wizard.", StringComparison.Ordinal) && (id.EndsWith(".back", StringComparison.Ordinal) || id.EndsWith(".next", StringComparison.Ordinal))), "The single-page calibration retained Next/Back questions");
-                check(nodes.Any(n => n["text"]?.GetValue<string>()?.Contains("height is 0 mm", StringComparison.Ordinal) == true), "Desk contact instructions require hovering instead of touching the mark");
+                check(nodes.Any(n => n["text"]?.GetValue<string>()?.Contains("height = 0 mm", StringComparison.Ordinal) == true) && !ids.Any(id => id.EndsWith(".sheet.field.height", StringComparison.Ordinal)), "Desk contact calibration must describe tabletop contact and expose no hover-height input");
                 check(nodes.Where(n => n["type"]?.GetValue<string>() == "input").All(n => n["commitOnly"]?.GetValue<bool>() == false), "Calibration measurements wait for blur/Enter instead of publishing edits live");
             }
             check(ids.Count(id => id == "robot.piper-1.stop") == 1, "Persistent profile-bound STOP is missing/duplicated: " + label);
