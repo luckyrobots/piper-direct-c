@@ -1,3 +1,4 @@
+using System.Text.Json.Nodes;
 using System.Text.Json;
 using LuckyRobots.Piper.Plugin;
 
@@ -191,6 +192,34 @@ public static class CalibrationWizardTests
         CalibrationWizardFlow.ValidateDraft(sheetDraft, "robot-a");
         var roundTrip = JsonSerializer.Deserialize<CalibrationWizardDraft>(JsonSerializer.Serialize(sheetDraft))!;
         check(Enumerable.Range(0, 5).All(row => new[] { "left", "back" }.All(axis => roundTrip.Answers[$"p{row}{axis}"] == sheetDraft.Answers[$"p{row}{axis}"])), "Batch point inputs did not survive draft serialization");
+        var gatedDraft = sheetDraft with { Answers = new(sheetDraft.Answers), OperatorSaysTcpMatches = false };
+        gatedDraft.Answers.Remove("leftedgeconfirmed"); gatedDraft.Answers.Remove("frame"); gatedDraft.Answers.Remove("sceneconfirmed");
+        typeof(PipersPlugin).GetField("calibrationWizard", hidden)!.SetValue(copyPlugin, gatedDraft);
+        Dictionary<string, JsonObject> GatePatches()
+        {
+            var patches = new Dictionary<string, JsonObject>();
+            typeof(PipersPlugin).GetMethod("AddCalibrationSheetPatches", hidden)!.Invoke(copyPlugin, new object?[] { patches, null });
+            return patches;
+        }
+        string SheetKey(string action) => (string)typeof(PipersPlugin).GetMethod("SheetId", hidden)!.Invoke(copyPlugin, new object[] { action })!;
+        var gated = GatePatches();
+        check(!gated[SheetKey("back.show")]["enabled"]!.GetValue<bool>() && !gated[SheetKey("tool.show")]["enabled"]!.GetValue<bool>(), "Dependent calibration controls unlocked before LEFT confirmation");
+        gatedDraft.Answers["leftedgeconfirmed"] = "proof";
+        gated = GatePatches();
+        check(gated[SheetKey("back.show")]["enabled"]!.GetValue<bool>() && !gated[SheetKey("tool.show")]["enabled"]!.GetValue<bool>(), "LEFT did not unlock only the next setup stage");
+        gatedDraft.Answers["frame"] = "proof";
+        gated = GatePatches();
+        check(gated[SheetKey("tool.show")]["enabled"]!.GetValue<bool>() && !gated[SheetKey("surface")]["enabled"]!.GetValue<bool>(), "BACK did not unlock the jaw-tip stage");
+        gatedDraft = gatedDraft with { OperatorSaysTcpMatches = true };
+        typeof(PipersPlugin).GetField("calibrationWizard", hidden)!.SetValue(copyPlugin, gatedDraft);
+        gatedDraft.Answers["physicalpoint"] = "confirmed";
+        gatedDraft.Answers["sceneconfirmed"] = "confirmed";
+        gatedDraft.Answers["precision"] = "0";
+        gated = GatePatches();
+        check(gated["sheet.next"]["text"]!.GetValue<string>().Contains("Zero is not valid") && !gated[SheetKey("capture.0")]["enabled"]!.GetValue<bool>(), "Invalid precision did not explain why Capture remains locked");
+        gatedDraft.Answers["precision"] = "5";
+        gated = GatePatches();
+        check(gated["sheet.next"]["text"]!.GetValue<string>().Contains("live robot feedback"), "Missing robot feedback had no visible capture blocker");
         foreach (CalibrationWizardStep step in Enum.GetValues<CalibrationWizardStep>())
         {
             typeof(PipersPlugin).GetField("calibrationWizard", hidden)!.SetValue(copyPlugin, draft with { Step = step });

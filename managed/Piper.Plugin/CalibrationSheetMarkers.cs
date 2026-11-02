@@ -45,7 +45,7 @@ public sealed partial class PipersPlugin
         {
             double width = CalibrationWizardFlow.Number(Wizard, "width", 100, 10000), depth = CalibrationWizardFlow.Number(Wizard, "depth", 100, 10000);
             double left = CalibrationWizardFlow.Number(Wizard, $"p{row}left", 0, width), back = CalibrationWizardFlow.Number(Wizard, $"p{row}back", 0, depth);
-            return new(left / 1000 - width / 2000, CalibrationWizardFlow.SceneSurface(Wizard) / 1000 + .003, back / 1000 - depth / 2000);
+            return new(left / 1000 - width / 2000, CalibrationWizardFlow.SceneSurface(Wizard) / 1000, back / 1000 - depth / 2000);
         }
         catch (InvalidOperationException) { return null; }
     }

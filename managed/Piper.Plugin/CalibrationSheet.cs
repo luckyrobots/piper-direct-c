@@ -49,6 +49,7 @@ public sealed partial class PipersPlugin
             Widget.Row("sheet.tool", SheetButton("tool.show", "Show jaw-tip marker"), SheetButton("tool.confirm", "Marker matches jaw tips"),
                 SheetButton("surface", "Base rests on tabletop")),
             Widget.Label("sheet.tool.info", wizardModelPoint) with { Height = 34, Hint = wizardModelPointDetails },
+            Widget.Label("sheet.next", "Complete the setup above to unlock capture.") with { Height = 48 },
             Widget.Label("sheet.setup", $"Jaw tips: {(Wizard.OperatorSaysTcpMatches ? "confirmed" : "show and confirm marker")} · LEFT: {(Wizard.Answers.ContainsKey("leftedgeconfirmed") ? "confirmed" : "confirm marker")} · BACK: {(Wizard.Answers.ContainsKey("frame") ? "confirmed" : "confirm marker")}. Fixed edges do not change with your seating position.") with { Height = 45 },
             Widget.Row("sheet.preview", SheetButton("marks.show", "Show all marks"), Widget.Label("sheet.markers", sheetMarkerStatus) with { Height = 42 }),
             Widget.Label("sheet.action.feedback", wizardMessage) with { Height = 50 },
@@ -66,7 +67,7 @@ public sealed partial class PipersPlugin
                 SheetInput($"p{row}left", "Distance from fixed LEFT edge, in mm. cm × 10.", sample is null, sample is null ? null : CalibrationNumber(sample.Measurement.LeftMm)),
                 SheetButton("move." + row, sample is null ? "Show " + (row == 4 ? "CHECK" : "P" + (row + 1)) + " in viewport" : "Recorded ✓",
                     "Highlights and frames this measured mark. Move the physical arm by hand to touch it; this button does not command hardware.") with { Width = 180, Enabled = sample is null },
-                SheetButton("capture." + row, "Capture") with { Width = 88, Enabled = sample is null }));
+                SheetButton("capture." + row, "Capture") with { Width = 88, Enabled = false }));
         }
         body.Add(Widget.Label("sheet.check.help", "Final check: use your existing centre cross. It tests the alignment and is NOT used to calculate it. All distances are mm; e.g. 20 / 69.7 cm → BACK 200 / LEFT 697.") with { Height = 47 });
         if (!SheetContactCompatible) body.Add(Widget.Label("sheet.legacy", "This saved report contains raised or grid points. Keep the report and start New calibration for tabletop-touch points; old measurements are not converted.") with { Height = 55 });
@@ -174,11 +175,43 @@ public sealed partial class PipersPlugin
         patches["sheet.save"] = new() { ["text"] = sheetSaveStatus };
         patches["sheet.markers"] = new() { ["text"] = sheetMarkerStatus };
         patches["sheet.action.feedback"] = new() { ["text"] = wizardMessage };
-        bool ready = device is not null && TeachingState.Inspect(device).HandGuiding && device["status"]?["stationary_s"]?.GetValue<double>() is >= .4 &&
-            Wizard.OperatorSaysTcpMatches && Wizard.Answers.ContainsKey("physicalpoint") && Wizard.Answers.ContainsKey("frame") && Wizard.Answers.ContainsKey("sceneconfirmed") &&
-            SheetContactCompatible && !calibrationPlacementUnverified && calibrationApplied is null && (calibrationIdentity is null || link is not null && calibrationIdentity == CurrentCalibrationIdentity());
+        bool left = Wizard.Answers.ContainsKey("leftedgeconfirmed"), back = left && Wizard.Answers.ContainsKey("frame");
+        bool tool = back && Wizard.OperatorSaysTcpMatches && Wizard.Answers.ContainsKey("physicalpoint");
+        bool surface = tool && Wizard.Answers.ContainsKey("sceneconfirmed");
+        void Step(string action, string text, bool enabled) => patches[SheetId(action)] = new() { ["text"] = text, ["enabled"] = enabled };
+        Step("left.confirm", left ? "LEFT confirmed" : "Confirm LEFT", !left);
+        Step("back.show", "Show BACK", left);
+        Step("back.confirm", back ? "BACK confirmed" : "Confirm BACK", left && !back);
+        Step("tool.show", "Show jaw-tip marker", back);
+        Step("tool.confirm", tool ? "Jaw tips confirmed" : "Marker matches jaw tips", back && !tool);
+        Step("surface", surface ? "Tabletop confirmed" : "Base rests on tabletop", tool && !surface);
+        string blocker = !left ? "1. Show LEFT and confirm that it marks the correct desk edge."
+            : !back ? "2. Show BACK and confirm that it marks the correct desk edge."
+            : !tool ? "3. Show the jaw-tip marker, then click Marker matches jaw tips if it is correctly placed."
+            : !surface ? "4. Confirm that the simulated robot base rests on the tabletop." : "";
+        if (blocker.Length == 0)
+        {
+            try { _ = CalibrationWizardFlow.Number(Wizard, "precision", 1, 10); }
+            catch (InvalidOperationException) { blocker = "Enter measurement precision between 1 and 10 mm above (for example, 5 mm). Zero is not valid."; }
+        }
+        if (blocker.Length == 0) blocker = device is null || device["fresh"]?.GetValue<bool>() != true ? "Waiting for live robot feedback."
+            : !TeachingState.Inspect(device).HandGuiding ? "Single-click the physical teach button for solid-green hand guiding. Touch the next cross by hand."
+            : device["status"]?["stationary_s"]?.GetValue<double>() is not >= .4 ? "Hold the jaw-tip midpoint still on the cross for 0.4 seconds."
+            : !SheetContactCompatible ? "Start a new tabletop calibration; the saved report uses another reference type."
+            : calibrationPlacementUnverified ? "Check the saved placement before capturing new points."
+            : calibrationApplied is not null ? "Alignment already applied. Start a new calibration to record again."
+            : calibrationIdentity is not null && (link is null || calibrationIdentity != CurrentCalibrationIdentity()) ? "Robot connection changed. Start a new calibration." : "";
+        bool ready = blocker.Length == 0;
+        patches["sheet.next"] = new() { ["text"] = ready ? "Ready: gently touch the next cross with the jaw-tip midpoint, then Capture its row." : blocker };
+        patches["sheet.setup"] = new() { ["text"] = $"LEFT: {(left ? "confirmed" : "pending")} / BACK: {(back ? "confirmed" : "pending")} / Jaw tips: {(tool ? "confirmed" : "pending")} / Tabletop: {(surface ? "confirmed" : "pending")}" };
         for (int row = 0; row < 5; row++)
-            patches[SheetId("capture." + row)] = new() { ["enabled"] = ready && SheetPoint(row) is not null && SheetSample(row) is null && (row == 4 ? WizardTrainingCount >= 4 : row == WizardTrainingCount) };
+        {
+            bool next = row == 4 ? WizardTrainingCount >= 4 : row == WizardTrainingCount;
+            string reason = SheetSample(row) is not null ? "Already captured." : !next ? "Capture the preceding reference rows first."
+                : SheetPoint(row) is null ? "Enter this row's BACK and LEFT distances within the desk edges." : blocker;
+            patches[SheetId("capture." + row)] = new() { ["enabled"] = ready && reason.Length == 0, ["hint"] = reason.Length > 0 ? reason : "Touch this cross, hold still, then capture." };
+            patches[SheetId("move." + row)] = new() { ["enabled"] = back && SheetPoint(row) is not null && SheetSample(row) is null };
+        }
         patches[SheetId("fit")] = new() { ["enabled"] = SheetContactCompatible && WizardTrainingCount >= 4 && WizardValidationCount >= 1 && !calibrationPlacementUnverified };
         patches[SheetId("apply")] = new() { ["enabled"] = ready && calibrationFit?.CanApply == true };
         patches[SheetId("rollback")] = new() { ["enabled"] = calibrationApplied is not null && !calibrationPlacementUnverified };
