@@ -173,6 +173,7 @@ public sealed partial class PipersPlugin
         string temporary = WizardDraftPath + ".tmp";
         await File.WriteAllTextAsync(temporary, JsonSerializer.Serialize(Wizard, PluginProtocol.Json), cancellation);
         File.Move(temporary, WizardDraftPath, true);
+        sheetSaveStatus = "Saved locally · measurements restore next session.";
         if (calibrationIdentity is not null && calibrationPath.Length > 0)
         {
             var evidence = new { report = Path.GetFileName(calibrationPath), Wizard.ProfileId, Wizard.Answers,

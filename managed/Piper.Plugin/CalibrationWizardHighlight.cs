@@ -74,6 +74,7 @@ public sealed partial class PipersPlugin
             if (cancellation.IsCancellationRequested) return;
             entered = await wizardHighlightGate.WaitAsync(0, cancellation);
             if (!entered) return;
+            await MaintainSheetMarks(cancellation);
             if (WizardReferenceStep) { await MaintainWizardReferenceWithinGate(cancellation); return; }
             if (wizardReferenceHighlightScope is { } reference)
             {
@@ -104,8 +105,10 @@ public sealed partial class PipersPlugin
     {
         var scope = Interlocked.Exchange(ref wizardHighlightScope, null);
         var reference = Interlocked.Exchange(ref wizardReferenceHighlightScope, null);
+        bool clearSheet = sheetMarkersPublished;
+        sheetMarkersPublished = false;
         wizardReferenceAcknowledgedAt = 0;
-        if (scope is null && reference is null) return;
+        if (scope is null && reference is null && !clearSheet) return;
         bool entered = false;
         try
         {
@@ -114,6 +117,9 @@ public sealed partial class PipersPlugin
             if (wizardHighlightScope is not null || wizardReferenceHighlightScope is not null) return; // A newer marker owns this process now.
             try
             {
+                if (clearSheet)
+                    for (int row = 0; row < 5; row++)
+                        await engine.RequestAsync("robot.highlightReference", new JsonObject { ["visible"] = false, ["markerId"] = "desk-point-" + row }, cancellation);
                 if (reference is not null) await RequestWizardReference(reference, false, cancellation);
                 else if (scope is not null) await RequestWizardHighlight(scope, false, cancellation);
             }

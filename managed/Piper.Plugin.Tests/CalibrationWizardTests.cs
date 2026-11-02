@@ -122,6 +122,10 @@ public static class CalibrationWizardTests
         var edgeRoot = CalibrationPlacement.At(new(.1, .8, -.2), .2);
         var leftEdge = WizardReferenceHighlightScope.Create(live, edgeDraft, edgeRoot);
         check(leftEdge.Point.Distance(new(-.7, .803, 0)) < 1e-12 && leftEdge.Label == "LEFT desk edge", "LEFT pointer did not mark the measured desk's short-edge midpoint just above its confirmed surface");
+        var previewAnswers = new Dictionary<string, string>(edgeDraft.Answers);
+        previewAnswers.Remove("sceneconfirmed"); previewAnswers["sheetreferencepreview"] = "read-only preview";
+        var previewDraft = edgeDraft with { Answers = previewAnswers };
+        check(WizardReferenceHighlightScope.Create(live, previewDraft, edgeRoot).Point == leftEdge.Point && !previewDraft.Answers.ContainsKey("sceneconfirmed"), "A visual edge preview required or invented physical tabletop confirmation");
         var backDraft = edgeDraft with { Step = CalibrationWizardStep.DeskBack, Epoch = edgeDraft.Epoch + 1 };
         var backEdge = WizardReferenceHighlightScope.Create(live, backDraft, edgeRoot);
         check(backEdge.Point.Distance(new(0, .803, -.35)) < 1e-12 && backEdge.Label == "BACK desk edge", "BACK pointer did not mark the measured far long edge");

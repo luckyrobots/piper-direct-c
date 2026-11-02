@@ -128,6 +128,7 @@ internal static class WorkspaceViewTests
                 check(Enumerable.Range(0, 5).All(row => new[] { "left", "back" }.All(axis => ids.Any(id => id.EndsWith($"sheet.field.p{row}{axis}", StringComparison.Ordinal)))), "All five measurement pairs must be editable on one page");
                 check(!ids.Any(id => id.Contains("wizard.navigation", StringComparison.Ordinal) || id.Contains(".wizard.", StringComparison.Ordinal) && (id.EndsWith(".back", StringComparison.Ordinal) || id.EndsWith(".next", StringComparison.Ordinal))), "The single-page calibration retained Next/Back questions");
                 check(nodes.Any(n => n["text"]?.GetValue<string>()?.Contains("height is 0 mm", StringComparison.Ordinal) == true), "Desk contact instructions require hovering instead of touching the mark");
+                check(nodes.Where(n => n["type"]?.GetValue<string>() == "input").All(n => n["commitOnly"]?.GetValue<bool>() == false), "Calibration measurements wait for blur/Enter instead of publishing edits live");
             }
             check(ids.Count(id => id == "robot.piper-1.stop") == 1, "Persistent profile-bound STOP is missing/duplicated: " + label);
             long current = Get<long>("workspaceViewEpoch");
@@ -156,6 +157,21 @@ internal static class WorkspaceViewTests
                 Set("calibrationArchiveConfirmation", step == CalibrationWizardStep.InspectSaved);
                 await CheckView("calibration");
             }
+
+            // Exercise the actual edit/save/reload path without starting any
+            // hardware, camera, backend or editor workers.
+            var savedDraft = CalibrationWizardFlow.New("piper-1", 77);
+            Set("calibrationWizard", savedDraft);
+            await Invoke("WizardEvent", "77.sheet.field.p0back", JsonSerializer.SerializeToElement("200"), CancellationToken.None);
+            await Invoke("WizardEvent", "77.sheet.field.p0left", JsonSerializer.SerializeToElement("697"), CancellationToken.None);
+            var freshPlugin = new PipersPlugin();
+            typeof(PipersPlugin).GetField("preferences", flags)!.SetValue(freshPlugin, prefs);
+            typeof(PipersPlugin).GetField("engine", flags)!.SetValue(freshPlugin, context);
+            typeof(PipersPlugin).GetMethod("LoadWizard", flags)!.Invoke(freshPlugin, null);
+            var restoredDraft = (CalibrationWizardDraft)typeof(PipersPlugin).GetField("calibrationWizard", flags)!.GetValue(freshPlugin)!;
+            check(restoredDraft.Answers["p0back"] == "200" && restoredDraft.Answers["p0left"] == "697", "Real calibration field events did not survive a fresh plugin session");
+            check(Get<string>("sheetSaveStatus").StartsWith("Saved locally", StringComparison.Ordinal), "Successful disk save was not reported to the user");
+            ((Grpc.Net.Client.GrpcChannel)typeof(PipersPlugin).GetField("channel", flags)!.GetValue(freshPlugin)!).Dispose();
 
             // Navigation must leave measured tracking intact but discard a live
             // target gesture and its approval before its controls disappear.
@@ -204,7 +220,7 @@ internal static class WorkspaceViewTests
         finally
         {
             Get<Grpc.Net.Client.GrpcChannel>("channel").Dispose();
-            Directory.Delete(folder);
+            Directory.Delete(folder, true);
         }
     }
 

@@ -14,7 +14,7 @@ public sealed record WizardReferenceHighlightScope(CalibrationIdentity Identity,
     public static WizardReferenceHighlightScope Create(CalibrationIdentity identity, CalibrationWizardDraft draft, CalibrationPlacement rootPlacement)
     {
         if (draft.Step is not (CalibrationWizardStep.DeskFrame or CalibrationWizardStep.DeskBack) ||
-            !draft.Answers.ContainsKey("sceneconfirmed") || string.IsNullOrWhiteSpace(draft.ModelAssetId) || string.IsNullOrWhiteSpace(draft.ModelRevision) || identity.ProfileId != draft.ProfileId ||
+            !(draft.Answers.ContainsKey("sceneconfirmed") || draft.Answers.ContainsKey("sheetreferencepreview")) || string.IsNullOrWhiteSpace(draft.ModelAssetId) || string.IsNullOrWhiteSpace(draft.ModelRevision) || identity.ProfileId != draft.ProfileId ||
             identity.ModelAssetId != draft.ModelAssetId || identity.ModelRevision != draft.ModelRevision)
             throw new InvalidOperationException("First confirm the simulated tabletop and the jaw-tip marker on this robot.");
         double width = CalibrationWizardFlow.Number(draft, "width", 100, 10000);
@@ -122,7 +122,7 @@ public sealed partial class PipersPlugin
             pinnedRoot = CalibrationPlacement.Read(JsonNode.Parse(savedRoot));
         else if (wizardReferenceHighlightScope is { } previous && previous.Epoch == epoch && previous.Step == Wizard.Step)
             pinnedRoot = previous.RootPlacement;
-        else if (Wizard.Step == CalibrationWizardStep.DeskBack)
+        else if (Wizard.Step == CalibrationWizardStep.DeskBack && !Wizard.Answers.ContainsKey("sheetreferencepreview"))
             throw new InvalidOperationException("Go back and confirm the LEFT edge first. Both edges must use the same simulated robot placement.");
         if (!pinnedRoot.Same(currentRoot))
             throw new InvalidOperationException("The simulated robot was moved after these desk questions began. Start new questions and compare both edges again; the pointer will not follow a changed placement silently.");
