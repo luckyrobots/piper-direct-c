@@ -69,7 +69,7 @@ public sealed partial class PipersPlugin
                 continue;
             }
             string label = row == 4 ? "CHECK" : "P" + (row + 1);
-            label += $" · BACK {Wizard.Answers[$"p{row}back"]} / LEFT {Wizard.Answers[$"p{row}left"]} mm";
+            if (row == SheetSelectedRow) label += " - SELECTED";
             bool frame = row == frameRow || frameAll && row == first;
             var scope = new WizardReferenceHighlightScope(identity, epoch, Wizard.Step,
                 CalibrationWizardFlow.Number(Wizard, "width", 100, 10000), CalibrationWizardFlow.Number(Wizard, "depth", 100, 10000),

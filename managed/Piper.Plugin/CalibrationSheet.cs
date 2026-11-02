@@ -153,6 +153,7 @@ public sealed partial class PipersPlugin
             if (action.StartsWith("move.", StringComparison.Ordinal))
             {
                 Wizard.Answers["sheetselected"] = row.ToString();
+                sheetMarkersDirty = true;
                 await PublishSheetMarks(cancellation, frameRow: row);
                 wizardMessage = $"{(row == 4 ? "CHECK" : "P" + (row + 1))} is highlighted in the viewport. In solid-green hand guiding, gently touch this physical cross with the jaw-tip midpoint, hold still, then Capture its row. The preview does not move the real arm.";
             }

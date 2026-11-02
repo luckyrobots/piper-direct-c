@@ -16,7 +16,7 @@ over loopback gRPC (8766), alongside the existing web dashboard (8765).
 - Bench/Lumina, Pika gripper and D405 preview tiles with preserved aspect ratio.
 - Camera, speed, jog and tolerance settings retained between editor sessions.
 - Hand-guided teaching detection, a verified standby/CAN return at physical zero,
-  and a step-by-step per-robot desk calibration wizard. See
+  and a single-page per-robot desk calibration sheet. See
   [teaching and alignment](teaching-alignment.md).
 - Explicit recovery controls for controller stops; existing backend obstruction
   detection and motion leases remain authoritative.
@@ -37,11 +37,15 @@ remain tied to the same robot across page changes. One explicit workspace-clear
 prompt precedes enabling controls. Reset/recovery support requirements remain
 visible when they apply.
 
-Calibration asks one question or measurement at a time, preserves drafts per
-robot, and uses the existing solver, fresh-pose guards and scene-only Apply/
-Rollback transactions. Physical ruler height and the explicitly confirmed scene
-surface/floor frame are separate evidence. Four training points and an independent
-validation point are required. Existing visual observations remain in Diagnostics.
+Calibration shows all four reference points and the independent Check together.
+Enter BACK/LEFT measurements in millimetres; edits save as you type and restore
+next session. Confirm the desk edges, model jaw-tip point and tabletop, then
+**Select P1**, physically hand-guide the jaw-tip midpoint onto its cross, hold
+still and **Capture P1**. Repeat P2–P4 and Check. Selection only frames the
+viewport. The page shows captured counts and inline blockers, including duplicate
+marks and invalid measurement accuracy (1–10 mm; **Use ±5 mm** is available).
+Passive preview actions preserve usable controls rather than rebuilding the
+sheet. Fresh-pose guards and scene-only Apply/Undo remain authoritative.
 See [the calibration guide](robot-base-calibration.md). JPEG previews help with
 framing and contact; they are not a metric depth query or proof of camera alignment.
 The Recording view reports setup requirements; it does not claim synchronized
