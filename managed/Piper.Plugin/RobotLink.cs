@@ -29,7 +29,7 @@ public sealed class RobotLink
         }
     }
 
-    public JsonObject Feedback(JsonObject device, JsonObject? pika = null, bool pikaMatchesProfile = false)
+    public JsonObject Feedback(JsonObject device, JsonObject? pika = null, bool pikaMatchesProfile = false, double? pikaClosedDisplayReference = null)
     {
         ValidateDevice(device, false);
         var measured = device["joints"]!.AsArray();
@@ -41,7 +41,7 @@ public sealed class RobotLink
             if (!double.IsFinite(degrees)) throw new InvalidOperationException("Joint feedback is unavailable.");
             values[JointNames[i]] = degrees * Math.PI / 180;
         }
-        gripper.AddFeedback(values, pika, pikaMatchesProfile);
+        gripper.AddFeedback(values, pika, pikaMatchesProfile, pikaClosedDisplayReference);
         return new JsonObject { ["sceneId"] = SceneId, ["entityId"] = EntityId, ["joints"] = values };
     }
 

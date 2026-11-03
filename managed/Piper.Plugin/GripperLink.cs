@@ -28,7 +28,7 @@ public sealed class GripperLink
         if (mappingError is not null) Status = mappingError;
     }
 
-    public void AddFeedback(JsonObject joints, JsonObject? pika, bool matchesProfile)
+    public void AddFeedback(JsonObject joints, JsonObject? pika, bool matchesProfile, double? closedDisplayReference = null)
     {
         ErrorMm = null;
         if (mappingError is not null) { Status = mappingError; return; }
@@ -37,9 +37,11 @@ public sealed class GripperLink
             Status = "Scene gripper unchanged: no Pika matching this robot profile.";
             return;
         }
-        if (!TryMeasuredOpening(pika, out double width))
+        if (!TryMeasuredOpening(pika, out double width, closedDisplayReference))
         {
-            Status = "Scene gripper unchanged: waiting for fresh valid Pika motor position.";
+            Status = ClosedDisplayReferenceNeeded(pika) && closedDisplayReference is null
+                ? "Scene gripper unchanged: closed display reference needed. With the physical jaws closed, use Settings → Robot → Gripper display reference."
+                : "Scene gripper unchanged: waiting for fresh valid Pika motor position.";
             return;
         }
         if (width > maximumMm)
@@ -53,23 +55,41 @@ public sealed class GripperLink
         double closingTravelMetres = (maximumMm - width) / 2000;
         joints["joint7"] = firstSign * closingTravelMetres;
         joints["joint8"] = -firstSign * closingTravelMetres;
-        Status = $"Scene gripper linked · measured {width:F1} mm / model {maximumMm:F1} mm";
+        Status = $"Scene gripper linked · measured {width:F1} mm / model {maximumMm:F1} mm" +
+            (closedDisplayReference.HasValue ? $" · display reference {closedDisplayReference.Value:F5} rad (full travel unverified)" : "");
     }
 
     // Measured encoder noise around the closed stop is not negative jaw
     // separation. This changes feedback presentation only, never motor targets.
-    public static bool TryMeasuredOpening(JsonObject? pika, out double width)
+    public static bool TryMeasuredOpening(JsonObject? pika, out double width, double? closedDisplayReference = null)
     {
         width = double.NaN;
-        if (pika?["fresh"] is not JsonValue fresh || !fresh.TryGetValue<bool>(out bool current) || !current ||
-            pika["telemetry"]?["motor"]?["Position"] is not JsonValue motor || !motor.TryGetValue<double>(out double angle) ||
-            !double.IsFinite(angle) || (!PikaProtocol.ValidAngle(angle) && (angle >= 0 || angle < MinimumFeedbackAngle)))
+        if (!TryRawAngle(pika, out double angle)) return false;
+        if (closedDisplayReference is double reference)
+        {
+            if (!double.IsFinite(reference) || Math.Abs(reference) > .15 ||
+                Math.Abs(PikaProtocol.Width(reference)) > PikaClosedDisplayReference.MaximumNominalOffsetMm) return false;
+            angle -= reference;
+        }
+        if (!PikaProtocol.ValidAngle(angle) && (angle >= 0 || angle < MinimumFeedbackAngle))
             return false;
         width = PikaProtocol.Width(angle);
         // Closed encoder noise is not a negative opening. Only this bounded
         // near-zero feedback allowance is saturated; model mismatch is rejected.
         if (width >= -ClosedNoiseToleranceMm && width < 0) width = 0;
         return double.IsFinite(width) && width >= 0;
+    }
+
+    public static bool ClosedDisplayReferenceNeeded(JsonObject? pika) => TryRawAngle(pika, out double angle) &&
+        angle < 0 && Math.Abs(angle) <= .15 && PikaProtocol.Width(angle) < -ClosedNoiseToleranceMm &&
+        PikaProtocol.Width(angle) >= -PikaClosedDisplayReference.MaximumNominalOffsetMm;
+
+    private static bool TryRawAngle(JsonObject? pika, out double angle)
+    {
+        angle = double.NaN;
+        return pika?["connected"]?.GetValue<bool>() != false &&
+            pika?["fresh"] is JsonValue fresh && fresh.TryGetValue<bool>(out bool current) && current &&
+            pika["telemetry"]?["motor"]?["Position"] is JsonValue motor && motor.TryGetValue<double>(out angle) && double.IsFinite(angle);
     }
 
     public void Verify(JsonObject requested, JsonArray pose)

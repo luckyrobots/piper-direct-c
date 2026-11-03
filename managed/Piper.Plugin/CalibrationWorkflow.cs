@@ -35,7 +35,7 @@ public sealed partial class PipersPlugin
     {
         if (calibrationProfile == ActiveProfile.Id) return;
         calibrationProfile = ActiveProfile.Id;
-        calibrationIdentity = null; calibrationOriginal = calibrationApplied = null; calibrationFit = null; calibrationSamples.Clear(); calibrationTcpConfirmed = calibrationPlacementUnverified = calibrationArchiveConfirmation = false;
+        calibrationIdentity = null; calibrationOriginal = calibrationApplied = null; calibrationFit = null; calibrationReevaluation = null; calibrationSamples.Clear(); calibrationTcpConfirmed = calibrationPlacementUnverified = calibrationArchiveConfirmation = false;
         calibrationDesk = new(); calibrationMeasurement = new();
         string path = Path.Combine(RobotCalibrationDirectory, "settings.json");
         try
@@ -57,6 +57,7 @@ public sealed partial class PipersPlugin
                 CalibrationSavedState.Recover(report, ActiveProfile.Id) is { } saved)
             {
                 calibrationIdentity = report.Identity; calibrationOriginal = report.OriginalPlacement; calibrationApplied = report.AppliedPlacement; calibrationFit = report.Fit;
+                calibrationReevaluation = report.ModelReevaluation;
                 calibrationSamples.AddRange(report.Samples); calibrationDesk = report.Desk; calibrationMeasurement = report.Samples.LastOrDefault()?.Measurement ?? calibrationMeasurement;
                 calibrationPlacementUnverified = saved.RequiresInspection;
                 restored = "Saved pending/applied scene placement restored, CURRENT STATE UNVERIFIED. Use Check scene placement (read-only); no write, rollback or replay resumes automatically. Changed connections keep old fit writes blocked. New / edit settings explicitly archives this rollback context.";
@@ -169,7 +170,7 @@ public sealed partial class PipersPlugin
             { calibrationArchiveConfirmation = true; await Render(cancellation); return; }
             if (action == "archive" && !calibrationArchiveConfirmation) throw new InvalidOperationException("Review the saved-placement archive warning first.");
             await SaveCalibration(cancellation);
-            calibrationIdentity = null; calibrationOriginal = calibrationApplied = null; calibrationFit = null; calibrationSamples.Clear(); calibrationTcpConfirmed = calibrationPlacementUnverified = calibrationArchiveConfirmation = false;
+            calibrationIdentity = null; calibrationOriginal = calibrationApplied = null; calibrationFit = null; calibrationReevaluation = null; calibrationSamples.Clear(); calibrationTcpConfirmed = calibrationPlacementUnverified = calibrationArchiveConfirmation = false;
             robotCalibrationStatus = "Previous report preserved. Edit desk/TCP settings if needed, then Start calibration while hand guiding.";
             await Render(cancellation); return;
         }
@@ -279,7 +280,7 @@ public sealed partial class PipersPlugin
         if (calibrationFit is not { } fit || calibrationOriginal is not { } original) return "No fit yet · scene base unchanged.";
         var p = fit.ProposedPlacement.Position; var old = original.Position;
         return $"Scene base ({old.X:F3}, {old.Y:F3}, {old.Z:F3}) → ({p.X:F3}, {p.Y:F3}, {p.Z:F3}) m; yaw {original.YawRadians * 180 / Math.PI:F2}° → {fit.ProposedPlacement.YawRadians * 180 / Math.PI:F2}°.\n" +
-            $"Base-centre distances: left {(old.X + calibrationDesk.Width / 2) * 1000:F0} → {(p.X + calibrationDesk.Width / 2) * 1000:F0} mm; back {(old.Z + calibrationDesk.Depth / 2) * 1000:F0} → {(p.Z + calibrationDesk.Depth / 2) * 1000:F0} mm. Recheck outer mounting clearances separately.\n" +
+            $"J1 rotation-axis distances: left {(old.X + calibrationDesk.Width / 2) * 1000:F0} → {(p.X + calibrationDesk.Width / 2) * 1000:F0} mm; back {(old.Z + calibrationDesk.Depth / 2) * 1000:F0} → {(p.Z + calibrationDesk.Depth / 2) * 1000:F0} mm. Recheck outer mounting clearances separately.\n" +
             $"Training RMS {fit.TrainingRmsMm:F1} mm / max {fit.TrainingMaxMm:F1} mm; validation max {fit.ValidationMaxMm:F1} mm; height RMS {fit.VerticalRmsMm:F1} mm. Precision entered ±{calibrationDesk.PrecisionMm:F0} mm.\n" +
             string.Join(" · ", fit.Residuals.TakeLast(4).Select(r => $"{r.Name}: {r.TotalMm:F1} mm"));
     }
@@ -288,7 +289,8 @@ public sealed partial class PipersPlugin
         Directory.CreateDirectory(RobotCalibrationDirectory);
         await File.WriteAllTextAsync(Path.Combine(RobotCalibrationDirectory, "settings.json"), JsonSerializer.Serialize(new CalibrationPreferences(calibrationDesk, calibrationMeasurement), PluginProtocol.Json), cancellation);
         if (calibrationIdentity is null || calibrationOriginal is null || calibrationPath.Length == 0) return;
-        var report = new CalibrationReport(1, calibrationIdentity, calibrationDesk, calibrationOriginal, calibrationSamples.ToArray(), calibrationFit, calibrationApplied, calibrationPlacementUnverified, DateTimeOffset.UtcNow);
+        var report = new CalibrationReport(1, calibrationIdentity, calibrationDesk, calibrationOriginal, calibrationSamples.ToArray(), calibrationFit, calibrationApplied, calibrationPlacementUnverified, DateTimeOffset.UtcNow,
+            ModelReevaluation: calibrationReevaluation);
         string temporary = calibrationPath + ".tmp";
         await File.WriteAllTextAsync(temporary, JsonSerializer.Serialize(report, PluginProtocol.Json), cancellation);
         File.Move(temporary, calibrationPath, true);

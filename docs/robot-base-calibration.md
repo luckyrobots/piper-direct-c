@@ -80,6 +80,20 @@ An interrupted placement response or a restored applied placement requires **Che
 
 For a new desk, contact point, model or incompatible connection, choose **New calibration**. Existing reports remain on disk; pending/applied rollback context requires explicit archiving. Returning from physical hand guiding is a separate supported teaching flow in **Controls**. Finishing calibration does not home or replay the arm.
 
+### Re-evaluate a corrected model without repeating physical captures
+
+When the same model asset receives a source correction, the panel offers **Re-evaluate saved poses**. Keep the same robot connection, original base placement, desk and named physical contact point. An applied or unverified alignment must be undone and checked first. A different robot, model asset, connection or contact point requires a new calibration.
+
+Reopening the editor can assign the loaded scene a new session UUID. The same explicit action can rebind saved observations to that new scene session, including when the model revision itself is unchanged. This is allowed only for the same robot entity UUID, profile, CAN device/generation, backend session, model asset, original base placement and named contact point. The old and new scene UUIDs are recorded in the report and audit. Ordinary Capture and Apply retain their strict scene-identity checks; they do not silently resume an old session.
+
+This explicit action sends each saved set of six arm angles to the engine's read-only `robot.evaluate` API. The engine evaluates the named contact site in private kinematic data; the live simulated pose and real arm remain unchanged. The API must confirm that this site depends on exactly those six saved arm joints. A site that also depends on an unrecorded finger joint cannot be recomputed by borrowing its current position.
+
+The complete original report, operator confirmations and each engine evaluation receipt are retained under `model-reevaluations/`. Only the derived scene points and model revision are replaced. Ruler measurements, physical angles, acquisition times, original pose fingerprints and the independent Check role remain intact. The report's `modelReevaluation` field identifies this derivation; it does not describe a fresh physical capture.
+
+The old alignment fit is discarded. Reconfirm LEFT, BACK, the jaw-tip marker and that the unchanged base rests on the desk, then choose **Calculate alignment**. Apply remains subject to the same reference and independent-check errors. Re-evaluation does not fit encoder offsets or change thresholds to make a result pass.
+
+The reported base location refers to the **rotation axis of the bottom joint (J1)**, projected onto the desk. This is not necessarily the geometric centre of an asymmetric mounting plate; measure mounting-edge clearances separately.
+
 ## Capture and fit checks
 
 Captures require healthy, fresh six-joint/controller feedback, physical hand guiding, a stationary pose, matching simulated joints within 0.01°, and an engine pose read completed within 500 ms. Live motion, stale connection/model/root evidence and invalid measurements are rejected. The UI reports the blocking condition rather than leaving the operator to infer it from a disabled button.

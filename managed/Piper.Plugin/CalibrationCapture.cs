@@ -64,7 +64,8 @@ public sealed record CalibrationCapture(CalibrationPoint ToolWorld, CalibrationP
 public sealed record CalibrationReport(int Schema, CalibrationIdentity Identity, CalibrationDesk Desk, CalibrationPlacement OriginalPlacement,
     CalibrationSample[] Samples, CalibrationFit? Fit, CalibrationPlacement? AppliedPlacement, bool PlacementUnverified, DateTimeOffset UpdatedAt,
     string Evidence = "Operator edge/grid measurements, measured joint feedback and model forward kinematics. Fits base world-Y yaw/XZ translation only; no encoder/joint/TCP/scale changes. Camera calibration and exposure synchronization are unverified.",
-    string CoordinateFrame = "Engine world Y-up, metres. Desk centre X=0/Z=0; left=-X, back=-Z. Heights above measured desk surface.", string ClockDomain = "host-utc-receipt (not exposure time)");
+    string CoordinateFrame = "Engine world Y-up, metres. Desk centre X=0/Z=0; left=-X, back=-Z. Heights above measured desk surface.", string ClockDomain = "host-utc-receipt (not exposure time)",
+    CalibrationModelReevaluation? ModelReevaluation = null);
 
 /// <summary>Restores rollback evidence, never permission to repeat an interrupted write.</summary>
 public sealed record CalibrationSavedState(CalibrationReport Report, bool RequiresInspection)

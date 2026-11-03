@@ -300,7 +300,8 @@ public sealed partial class PipersPlugin
         try
         {
             if (device["recovery_required"]?.GetValue<bool>() == true) linkCommandsEnabled = false;
-            var requested = linked.Feedback(device, receipt.State["pika"] as JsonObject, PikaMatchesProfile());
+            var requested = linked.Feedback(device, receipt.State["pika"] as JsonObject, PikaMatchesProfile(),
+                PikaDisplayReferenceAngle(receipt.State["pika"] as JsonObject));
             var motion = receipt.State["motion"];
             if (teleoperating && motion?["finishing_target"]?.GetValue<bool>() == true && motion["owner"]?.GetValue<string>() == owner)
             {

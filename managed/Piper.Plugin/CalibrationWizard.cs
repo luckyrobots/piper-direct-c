@@ -41,6 +41,7 @@ public sealed partial class PipersPlugin
                     _ = CalibrationSavedState.Recover(report, ActiveProfile.Id);
                     calibrationIdentity = report.Identity; calibrationOriginal = report.OriginalPlacement; calibrationApplied = report.AppliedPlacement;
                     calibrationSamples.Clear(); calibrationSamples.AddRange(report.Samples); calibrationFit = report.Fit; calibrationDesk = report.Desk; calibrationPath = reportPath;
+                    calibrationReevaluation = report.ModelReevaluation;
                     calibrationPlacementUnverified = report.PlacementUnverified || report.AppliedPlacement is not null;
                 }
                 wizardMessage = "Your saved answers and captured points are available. Nothing moves or applies automatically. If the robot connection or model changed, start a new check.";
@@ -59,6 +60,7 @@ public sealed partial class PipersPlugin
             try { calibrationDesk = calibrationDesk with { SurfaceY = CalibrationWizardFlow.Number(Wizard, "sceney", 0, 3000) / 1000 }; }
             catch (InvalidOperationException) { Wizard.Answers.Remove("sceneconfirmed"); }
         }
+        ReconcileReevaluatedWizard();
     }
 
     private Widget WizardButton(string action, string text) => Widget.Button(WizardId(action), text) with
@@ -160,7 +162,7 @@ public sealed partial class PipersPlugin
     {
         if (calibrationFit is not { } fit || calibrationOriginal is not { } original) return "Click Calculate alignment to compare your four reference points with the extra check point. Nothing has been applied yet.";
         var p = fit.ProposedPlacement.Position;
-        return $"Simulated base centre: {(original.Position.X + calibrationDesk.Width / 2) * 1000:F0} → {(p.X + calibrationDesk.Width / 2) * 1000:F0} mm from LEFT; " +
+        return $"Bottom joint (J1) rotation axis: {(original.Position.X + calibrationDesk.Width / 2) * 1000:F0} → {(p.X + calibrationDesk.Width / 2) * 1000:F0} mm from LEFT; " +
             $"{(original.Position.Z + calibrationDesk.Depth / 2) * 1000:F0} → {(p.Z + calibrationDesk.Depth / 2) * 1000:F0} mm from BACK.\n" +
             $"Direction: {original.YawRadians * 180 / Math.PI:F1}° → {fit.ProposedPlacement.YawRadians * 180 / Math.PI:F1}°. Reference point mismatch {fit.TrainingRmsMm:F1} mm; worst {fit.TrainingMaxMm:F1} mm.\n" +
             $"Check point error {fit.ValidationMaxMm:F1} mm; height mismatch {fit.VerticalRmsMm:F1} mm. Your stated precision: ±{calibrationDesk.PrecisionMm:F0} mm. " +

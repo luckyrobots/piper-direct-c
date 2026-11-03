@@ -80,6 +80,7 @@ public sealed partial class PipersPlugin
         body.Add(Widget.Row("sheet.fit.actions", SheetButton("fit", "Calculate alignment") with { Enabled = false },
             SheetButton("apply", "Apply to simulation") with { Enabled = false }, SheetButton("rollback", "Undo alignment") with { Enabled = false }));
         body.Add(Widget.Label("sheet.results", WizardReviewSummary()) with { Height = 90 });
+        body.Add(SheetButton("reevaluate", "Re-evaluate saved poses", "After correcting the same model or reopening the scene, recompute its named point from the saved physical angles. Requires the same robot entity, physical connection and original placement. Keeps the original report; never moves or recaptures the arm.") with { Enabled = false, Visible = false });
         body.Add(Widget.Row("sheet.report.actions", SheetButton("open", "Saved report"), SheetButton("inspect", "Check saved placement"), SheetButton("new", "New calibration")));
         if (calibrationArchiveConfirmation)
             body.Add(Widget.Row("sheet.archive", SheetButton("archive", "Keep old report & start new"), SheetButton("archive.cancel", "Cancel")));
@@ -137,8 +138,10 @@ public sealed partial class PipersPlugin
         }
         else if (action == "surface")
         {
-            if (calibrationIdentity is not null) throw new InvalidOperationException("The tabletop reference is fixed for recorded points.");
+            if (calibrationIdentity is not null && calibrationReevaluation is null) throw new InvalidOperationException("The tabletop reference is fixed for recorded points.");
             var root = await ReadWizardMetricRoot(cancellation);
+            if (calibrationIdentity is not null && (calibrationOriginal is null || !calibrationOriginal.Same(root) || Math.Abs(root.Position.Y - calibrationDesk.SurfaceY) > 1e-6))
+                throw new InvalidOperationException("Reconfirming a corrected model cannot change the saved original placement or tabletop height.");
             Wizard.Answers["observedrooty"] = Wizard.Answers["sceney"] = CalibrationNumber(root.Position.Y * 1000);
             Wizard.Answers["sceneconfirmed"] = "operator confirmed simulated base rests on tabletop";
             calibrationDesk = calibrationDesk with { SurfaceY = root.Position.Y };
@@ -185,10 +188,14 @@ public sealed partial class PipersPlugin
                 wizardMessage = $"Saved {(row == 4 ? "the final check" : "Point " + (row + 1))}. " + (row < 4 ? "Move by hand to the next mark and capture its row." : "Click Calculate alignment to check the result.");
             }
         }
+        else if (action == "reevaluate") await ReevaluateCalibrationModel(cancellation);
         else if (action is "fit" or "apply" or "rollback" or "inspect" or "open" or "new" or "archive" or "archive.cancel")
         {
             if (action is "fit" or "apply" && !SheetContactCompatible) throw new InvalidOperationException("Start a new tabletop calibration before fitting or applying these mixed reference types. The old report is retained.");
+            if (action is "fit" or "apply" && (SavedModelChanged || calibrationReevaluation is not null && SheetSetupBlocker().Length > 0))
+                throw new InvalidOperationException("Re-evaluate the corrected model and reconfirm its LEFT, BACK, jaw tips and desk references before calculating or applying alignment.");
             await CalibrationEvent(action, value, cancellation);
+            if (action == "fit") wizardMessage = calibrationFit?.CanApply == true ? "Alignment calculated. Review the result before Apply to simulation." : calibrationFit?.Reason ?? "Alignment calculation did not return a result.";
             if (action is "new" or "archive" && calibrationIdentity is null) calibrationWizard = CalibrationWizardFlow.New(ActiveProfile.Id, Wizard.Epoch + 1);
         }
         else return;
@@ -218,7 +225,8 @@ public sealed partial class PipersPlugin
         int selected = SheetSelectedRow;
         string next = SheetSetupBlocker();
         if (next.Length == 0) next = SheetCaptureBlocker(selected, device);
-        patches["sheet.next"] = new() { ["text"] = WizardValidationCount > 0 ? "All five points captured. Calculate alignment to check the result."
+        patches["sheet.next"] = new() { ["text"] = SavedModelChanged ? "The simulation model or scene session changed. Re-evaluate saved poses below before calculating or applying alignment."
+            : WizardValidationCount > 0 ? SheetSetupBlocker().Length > 0 ? SheetSetupBlocker() : "All five points captured. Calculate alignment to check the result."
             : $"{SheetPointName(selected)}: " + (next.Length > 0 ? next : "Touch this physical cross with the jaw-tip midpoint. Hold still and click Capture.") };
         for (int row = 0; row < 5; row++)
         {
@@ -237,7 +245,8 @@ public sealed partial class PipersPlugin
                     patches[SheetId($"field.p{row}{axis}")] = new() { ["enabled"] = editing, ["text"] = editing ? Wizard.Answers.GetValueOrDefault($"p{row}{axis}", "") : CalibrationNumber(axis == "left" ? SheetSample(row)!.Measurement.LeftMm : SheetSample(row)!.Measurement.BackMm) };
             Step("move." + row, editing ? "Cancel edit" : captured ? "Edit entry" : row == selected ? "Selected " + SheetPointName(row) : "Select " + SheetPointName(row), captured ? SheetCanCorrect : SheetPoint(row) is not null && link is not null);
         }
-        patches[SheetId("fit")] = new() { ["enabled"] = sheetEditingRow < 0 && SheetContactCompatible && WizardTrainingCount >= 4 && WizardValidationCount >= 1 && !calibrationPlacementUnverified };
+        patches[SheetId("reevaluate")] = new() { ["visible"] = CanCheckUpdatedModel, ["enabled"] = CanCheckUpdatedModel && sheetEditingRow < 0 && CanReevaluateWithLiveScene };
+        patches[SheetId("fit")] = new() { ["enabled"] = !SavedModelChanged && SheetSetupBlocker().Length == 0 && sheetEditingRow < 0 && SheetContactCompatible && WizardTrainingCount >= 4 && WizardValidationCount >= 1 && !calibrationPlacementUnverified };
         patches[SheetId("apply")] = new() { ["enabled"] = sheetEditingRow < 0 && SheetSetupBlocker().Length == 0 && calibrationFit?.CanApply == true && calibrationApplied is null && !calibrationPlacementUnverified };
         patches[SheetId("rollback")] = new() { ["enabled"] = calibrationApplied is not null && !calibrationPlacementUnverified };
         patches["sheet.results"] = new() { ["text"] = WizardReviewSummary() };

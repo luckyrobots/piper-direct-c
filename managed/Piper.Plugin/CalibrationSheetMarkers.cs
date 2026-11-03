@@ -27,7 +27,7 @@ public sealed partial class PipersPlugin
         _ = Device(identity.DeviceId, identity.Generation);
         var root = CalibrationPlacement.Read(pose["rootPlacement"]);
         bool changed = Wizard.ModelAssetId != asset || Wizard.ModelRevision != revision;
-        if (changed && calibrationIdentity is not null) throw new InvalidOperationException("The recorded model changed. Keep the report and start a new calibration.");
+        if (changed && calibrationIdentity is not null) throw new InvalidOperationException("The recorded model changed. Re-evaluate saved poses with the corrected model before confirming its pointers; the original report is retained.");
         if (changed)
         {
             calibrationWizard = Wizard with { ModelAssetId = asset, ModelRevision = revision, OperatorSaysTcpMatches = false };

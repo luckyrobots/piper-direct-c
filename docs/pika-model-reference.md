@@ -11,6 +11,33 @@ not establish a different mesh's physical contact geometry.
 The plugin does not change the real gripper's encoder calibration, firmware,
 joint zeros or mechanical limits when it displays these measurements.
 
+## Match the arm model to the firmware convention
+
+AgileX distinguishes the legacy DH convention from the convention used after
+firmware **S-V1.6-3**. Its reference forward kinematics changes the fixed J2/J3
+angles by **+2 degrees / -2 degrees**, respectively. See the
+[SDK firmware note](https://github.com/agilexrobotics/piper_sdk#3-simple-start)
+and [reference kinematics](https://github.com/agilexrobotics/piper_sdk/blob/master/piper_sdk/kinematics/piper_fk.py).
+
+A legacy simulation model can therefore show the wrong contact height even
+when all six displayed joint readings match the hardware. Use model frames
+that match the arm's firmware; do not change physical encoder zeros or add
+offsets to outgoing hardware targets to compensate for a simulation model.
+Do not apply this correction twice to a model already using the newer frames.
+
+After deliberately correcting a model, **Re-evaluate with current model** in
+Calibration can calculate new simulated contact positions from the saved
+physical joint angles. This uses the engine's read-only `robot.evaluate` API
+and does not replay those angles into the scene or real robot. The original
+report and each evaluation are retained, the old fit is cleared, and the
+visual references must be checked again before calculating alignment.
+
+This is a model correction, not a fit of joint zeros to the measured crosses.
+An independent desk check must still pass. The model's base origin represents
+the bottom joint's rotation axis; it need not be the geometric centre of its
+mounting plate. Compare measurements to that same axis rather than adding half
+an assumed plate width to an outer-edge clearance.
+
 Fresh negative encoder readings within 0.25 mm of the closed stop are displayed
 as zero opening and map to the model's closed endpoints. Larger negative values
 are rejected rather than treated as calibrated measurements. This bounded

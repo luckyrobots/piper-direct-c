@@ -51,7 +51,8 @@ public sealed partial class PipersPlugin
                 Widget.Label("pika.value", "— mm") with { Width = 112, Appearance = "numeric", Hint = "Measured opening. Pika is enabled with the robot." },
                 Widget.Button("pika.minus", "−") with { Width = 32, Hint = "Close by 1 mm" },
                 Widget.Slider("pika.target", 0, 0, 90, .1) with { Enabled = false, Hint = "Absolute gripper opening in millimetres" },
-                Widget.Button("pika.plus", "+") with { Width = 32, Hint = "Open by 1 mm" }, Widget.Button("pika.zero", "Zero") with { Width = 48 }),
+                Widget.Button("pika.plus", "+") with { Width = 32, Hint = "Open by 1 mm" }, Widget.Button("pika.zero", "Zero") with { Width = 48 },
+                Widget.Button("pika.reference.set", "Use current as closed") with { Width = 165, Visible = false }),
             Widget.Row("preferences", PreferenceControl("speed", "Speed", preferences.Speed, 0, 100, 1,
                     "Percentage of reported motor speed limits. The °/s value is the target ceiling, not measured speed."),
                 PreferenceControl("step", "Jog step", preferences.Step, .1, 5, .1,
@@ -106,6 +107,7 @@ public sealed partial class PipersPlugin
                     Field("profiles.pika", "Pika serial device", new Widget("input", "profiles.pika") { Text = ActiveProfile.PikaDevice, Hint = "Stable Linux /dev/serial/by-id path; blank means unassigned." }),
                     Field("profiles.wsl", "WSL distribution", new Widget("input", "profiles.wsl") { Text = ActiveProfile.WslDistribution }) with { Visible = OperatingSystem.IsWindows() },
                     Widget.Label("pika.monitor", pikaMonitorStatus) with { Height = 44 },
+                    PikaReferenceControls(),
                     Widget.Label("profiles.mode", "Switching profiles finishes this session's movement and discards its control permission. Other robot assignments remain intact.") with { Height = 48, Appearance = "muted" }) with { Visible = connectionDetailsOpen })
         };
         Widget Category(string id, string name) => Widget.Button("workspace.settings." + id, name) with { Appearance = settingsCategory == id ? "selected" : "quiet" };

@@ -304,12 +304,14 @@ Check(!alignmentReport.MetricCalibrationValid && !alignmentReport.ExposureSynchr
     "Copied joint angles or operator confirmation were incorrectly promoted to metric/timing calibration");
 Reject(() => checkSession.Observe(observation, true, null), "Finished alignment report accepted new observations");
 GripperLinkTests.Run(Check);
+await PikaDisplayReferenceTests.Run(Check);
 CalibrationTests.Run(Check);
 CalibrationWizardTests.Run(Check);
 WorkspaceViewTests.Run(Check);
 await WorkspaceViewTests.RunRendered(Check);
 await CalibrationSheetIntegrationTests.Run(Check);
 await CalibrationSheetUiTests.Run(Check);
+await CalibrationReevaluationTests.Run(Check);
 var monitorPika = new JsonObject { ["configured"] = true };
 Check(PikaMonitorPolicy.MayConnect(monitorPika, true, "this-reader"), "Unowned configured Pika could not be monitored without enabling it");
 Check(!PikaMonitorPolicy.MayConnect(monitorPika, false, "this-reader"), "Read-only monitoring used another robot's serial assignment");
