@@ -14,6 +14,14 @@ public sealed partial class PipersPlugin
 
     private void LoadSheetRows()
     {
+        // The saved report is authoritative after a correction commits. A crash
+        // before the draft write must not restore old ruler values in markers.
+        for (int row = 0; row < 5; row++)
+            if (row != sheetEditingRow && SheetSample(row) is { } captured)
+            {
+                Wizard.Answers[$"p{row}left"] = CalibrationNumber(captured.Measurement.LeftMm);
+                Wizard.Answers[$"p{row}back"] = CalibrationNumber(captured.Measurement.BackMm);
+            }
         if (Wizard.Answers.ContainsKey("sheetready")) return;
         // Preserve the current unrecorded XY entry, but never migrate a hover
         // height into this explicitly tabletop-contact workflow.

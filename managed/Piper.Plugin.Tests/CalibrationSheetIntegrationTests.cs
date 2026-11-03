@@ -181,6 +181,16 @@ internal static class CalibrationSheetIntegrationTests
             var correctedReport = JsonSerializer.Deserialize<CalibrationReport>(File.ReadAllText(report), PluginProtocol.Json)!;
             check(correctedReport.Samples[1].Measurement.LeftMm == 780 && correctedReport.Fit is null,
                 "Corrected measurement and fit invalidation did not survive report persistence");
+            // Simulate a crash after corrected report commit but before the draft
+            // commit: restored report observations must own captured coordinates.
+            var resumedDraft = Get<CalibrationWizardDraft>("calibrationWizard");
+            resumedDraft.Answers["p1left"] = "800"; resumedDraft.Answers["p1back"] = "499";
+            typeof(PipersPlugin).GetMethod("LoadSheetRows", hidden)!.Invoke(plugin, null);
+            var resumedPoint = (CalibrationPoint?)typeof(PipersPlugin).GetMethod("SheetPoint", hidden)!.Invoke(plugin, [1]);
+            check(resumedDraft.Answers["p1left"] == "780" && resumedDraft.Answers["p1back"] == "450" &&
+                resumedPoint.HasValue && Math.Abs(resumedPoint.Value.X - correctedP2.MeasuredWorld.X) < 1e-12 &&
+                Math.Abs(resumedPoint.Value.Z - correctedP2.MeasuredWorld.Z) < 1e-12,
+                "A stale wizard draft overrode corrected report coordinates or published its old viewport marker after interruption");
             var auditFiles = Directory.GetFiles(folder, "*.json", SearchOption.AllDirectories).Where(path =>
                 path.Contains("measurement-corrections", StringComparison.Ordinal)).ToArray();
             check(auditFiles.Length == 1, "Measurement correction did not retain an audit copy of its prior report");
