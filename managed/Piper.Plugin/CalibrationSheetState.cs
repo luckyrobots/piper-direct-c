@@ -6,6 +6,10 @@ public sealed partial class PipersPlugin
 {
     private static string SheetPointName(int row) => row == 4 ? "Check" : "P" + (row + 1);
     private int SheetSelectedRow => int.TryParse(Wizard.Answers.GetValueOrDefault("sheetselected"), out int row) && row is >= 0 and <= 4 ? row : Math.Min(WizardTrainingCount, 4);
+    // Informational only: reopening a scene does not authorize editing its old
+    // observations. Existing fit/apply/rollback identity guards stay unchanged.
+    private bool SheetAppliedAlignmentMatchesModel => calibrationApplied is not null && calibrationIdentity is { } saved &&
+        AcknowledgedModelRevision == saved.ModelRevision;
 
     private bool SheetEdgeConfirmed(string key)
     {

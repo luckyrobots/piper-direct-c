@@ -226,7 +226,8 @@ public sealed partial class PipersPlugin
         int selected = SheetSelectedRow;
         string next = SheetSetupBlocker();
         if (next.Length == 0) next = SheetCaptureBlocker(selected, device);
-        patches["sheet.next"] = new() { ["text"] = SavedModelChanged ? "The simulation model or scene session changed. Re-evaluate saved poses below before calculating or applying alignment."
+        patches["sheet.next"] = new() { ["text"] = SheetAppliedAlignmentMatchesModel ? "Saved alignment loaded. Use Check jaw height above for new measurements. The original four-point captures are kept; editing that alignment requires its saved-session checks."
+            : SavedModelChanged ? "The simulation model or scene session changed. Re-evaluate saved poses below before calculating or applying alignment."
             : WizardValidationCount > 0 ? SheetSetupBlocker().Length > 0 ? SheetSetupBlocker() : "All five points captured. Calculate alignment to check the result."
             : $"{SheetPointName(selected)}: " + (next.Length > 0 ? next : "Touch this physical cross with the jaw-tip midpoint. Hold still and click Capture.") };
         for (int row = 0; row < 5; row++)

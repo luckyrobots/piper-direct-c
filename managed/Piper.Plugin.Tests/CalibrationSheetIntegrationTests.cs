@@ -225,6 +225,21 @@ internal static class CalibrationSheetIntegrationTests
                 "An applied alignment permitted changing its captured measurement without rollback");
             await Event("inspect");
             check(Get<CalibrationPlacement>("calibrationApplied").Same(root) && calls.Count(c => c == "robot.placement") == 1, "Checking an applied placement repeated a scene write");
+            // Reopening the same compiled model must not tell users to redo an
+            // already applied alignment just to perform independent height checks.
+            var reopenedPose = Pose(); reopenedPose["sceneId"] = "reopened-scene";
+            Set("link", new RobotLink("reopened-scene", savedIdentity.RobotId, reopenedPose["joints"]!.AsArray(), device));
+            Set("acknowledgedScenePose", new JsonObject { ["pose"] = reopenedPose });
+            Fresh(); await Invoke("Update", CancellationToken.None);
+            check(Status(".sheet.next").Contains("Saved alignment loaded") && Status(".sheet.next").Contains("Check jaw height"),
+                "Reopening an applied model gave a misleading re-evaluation prompt instead of the independent height-check guidance");
+            check(!patches![WidgetId(".sheet.fit")]!["enabled"]!.GetValue<bool>() &&
+                !patches[WidgetId(".sheet.apply")]!["enabled"]!.GetValue<bool>() && Get<CalibrationIdentity>("calibrationIdentity") == savedIdentity,
+                "The loaded-alignment message relaxed fit/apply scope or rebound saved observations to a new scene session");
+            reopenedPose["modelRevision"] = "actually-changed-model";
+            Fresh(); await Invoke("Update", CancellationToken.None);
+            check(Status(".sheet.next").Contains("model or scene session changed") && !Status(".sheet.next").Contains("Saved alignment loaded"),
+                "The loaded-alignment message hid a real compiled model revision change");
         }
         finally { Get<Grpc.Net.Client.GrpcChannel>("channel").Dispose(); Directory.Delete(folder, true); }
     }
