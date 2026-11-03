@@ -14,6 +14,18 @@ internal static class CalibrationReevaluationTests
         await SuccessfulReevaluation(check);
         await ReopenedSceneReevaluation(check, "new-model");
         await ReopenedSceneReevaluation(check, "old-model");
+        foreach (string unavailable in new[] { "unsupported-reason", "metric-reason" })
+        {
+            using var fixture = new Fixture { Failure = unavailable };
+            string before = File.ReadAllText(fixture.ReportPath);
+            await fixture.Invoke("Render", CancellationToken.None);
+            await fixture.Event("reevaluate");
+            string displayed = fixture.Patches?["sheet.action.feedback"]?["text"]?.GetValue<string>() ?? "missing patch: " + fixture.Get<string>("wizardMessage");
+            check(displayed.Contains("fixture capability reason"),
+                "The native calibration UI replaced the engine's actionable capability reason with a generic message: " + displayed);
+            check(File.ReadAllText(fixture.ReportPath) == before && fixture.Calls.SequenceEqual(["robot.read"]),
+                "An unsupported capability changed saved captures or attempted evaluation/movement");
+        }
         foreach (string failure in new[] { "revision", "root", "joint", "dependency", "not-read-only", "connection", "read-changed", "unsupported", "scene-switch", "initial-root", "asset" })
         {
             using var fixture = new Fixture { Failure = failure };
@@ -218,6 +230,8 @@ internal static class CalibrationReevaluationTests
             var pose = Pose();
             if (Failure == "read-changed" && reads > 1) pose["modelRevision"] = "third-model";
             if (Failure == "unsupported") pose["kinematicEvaluationSupported"] = false;
+            if (Failure == "unsupported-reason") { pose["kinematicEvaluationSupported"] = false; pose["kinematicEvaluationReason"] = "fixture capability reason: private FK scratch data is unavailable."; }
+            if (Failure == "metric-reason") { pose["metricPlacementSupported"] = false; pose["metricPlacementReason"] = "fixture capability reason: the root is tilted."; }
             if (Failure == "initial-root") pose["rootPlacement"] = CalibrationPlacement.At(new(.2, .75, -.2), 0).Json();
             if (Failure == "asset") pose["modelAssetId"] = "other-asset";
             return pose;
@@ -248,7 +262,11 @@ internal static class CalibrationReevaluationTests
         public T Get<T>(string key) => (T)typeof(PipersPlugin).GetField(key, Hidden)!.GetValue(Plugin)!;
         public Task Invoke(string name, CancellationToken cancellation) => (Task)typeof(PipersPlugin).GetMethod(name, Hidden)!.Invoke(Plugin, [cancellation])!;
         public Task Reevaluate() => Invoke("ReevaluateCalibrationModel", CancellationToken.None);
-        public Task Event(string action) => Plugin.HandleEventAsync(new("luckyrobots.pipers.controls", WidgetId(".sheet." + action), "click", JsonSerializer.SerializeToElement<object?>(null)), CancellationToken.None);
+        public Task Event(string action)
+        {
+            Fresh();
+            return Plugin.HandleEventAsync(new("luckyrobots.pipers.controls", WidgetId(".sheet." + action), "click", JsonSerializer.SerializeToElement<object?>(null)), CancellationToken.None);
+        }
         private void Fresh() => Get<LatestTelemetry>("telemetry").Publish(new(State, "session", 1, Stopwatch.GetTimestamp(), 0));
         public IEnumerable<JsonObject> Widgets(JsonObject? root = null)
         {

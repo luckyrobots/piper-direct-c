@@ -82,8 +82,13 @@ public sealed partial class PipersPlugin
         var live = CurrentCalibrationIdentity();
         RequireReevaluationScope(saved, live, root, originals);
         var model = await ReadReevaluationModel(live, cancellation);
-        if (model["kinematicEvaluationSupported"]?.GetValue<bool>() != true || model["metricPlacementSupported"]?.GetValue<bool>() != true ||
-            model["modelAssetId"]?.GetValue<string>() != saved.ModelAssetId || model["modelRevision"]?.GetValue<string>() is not { Length: > 0 } revision ||
+        if (model["metricPlacementSupported"]?.GetValue<bool>() != true)
+            throw new InvalidOperationException((model["metricPlacementReason"]?.GetValue<string>() is { Length: > 0 } metricReason
+                ? metricReason : "This scene model does not support metric placement.") + " The saved report is unchanged.");
+        if (model["kinematicEvaluationSupported"]?.GetValue<bool>() != true)
+            throw new InvalidOperationException((model["kinematicEvaluationReason"]?.GetValue<string>() is { Length: > 0 } evaluationReason
+                ? evaluationReason : "This engine/model does not support read-only kinematic evaluation.") + " The saved report is unchanged.");
+        if (model["modelAssetId"]?.GetValue<string>() != saved.ModelAssetId || model["modelRevision"]?.GetValue<string>() is not { Length: > 0 } revision ||
             revision == saved.ModelRevision && live.SceneId == saved.SceneId)
             throw new InvalidOperationException("Load the same model in the reopened scene, or a corrected model revision, in an engine that supports read-only kinematic evaluation. The saved report is unchanged.");
         var updated = saved with { SceneId = live.SceneId, ModelRevision = revision };
