@@ -110,3 +110,8 @@ Scene-only `robot.placement` accepts scene/robot IDs, expected model asset/revis
 Read-only `robot.highlightToolSite` and `robot.highlightReference` require the plugin's matching robot subscription and pinned scene/root/model identity. Reference requests include an exact world point/label and expected root placement; the host must echo the requested point, label, framing and root before acknowledgement is accepted. Numbered crosses use separate bounded marker IDs. Manual selection frames the viewport; maintenance does not. Model, connection, dimensions or root changes invalidate the relevant proof.
 
 An older editor or hidden viewport/overlay reports an actionable preview error. Confirmation remains unavailable until a valid pointer is acknowledged. Preview events preserve the current sheet's IDs, so a visual action cannot invalidate the next button that the operator is about to click.
+
+### Correct a mistyped measurement
+
+For a captured row, choose **Edit entry**, correct BACK/LEFT, then **Save entry**. This changes only the ruler coordinates assigned to the already captured pose; it does not move or recapture the arm. The original report is retained under measurement-corrections, the old fit is invalidated, and Calculate alignment must be run again. Cancel edit restores the captured coordinates. Applied or unverified alignments must be undone/verified before correcting entries.
+

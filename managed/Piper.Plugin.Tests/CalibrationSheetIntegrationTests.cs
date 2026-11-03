@@ -151,6 +151,57 @@ internal static class CalibrationSheetIntegrationTests
             check(Get<List<CalibrationSample>>("calibrationSamples").Count(s => s.HeldOut) == 1, "Final check was not kept independent of reference points");
             string report = Get<string>("calibrationPath");
             check(File.Exists(report) && JsonSerializer.Deserialize<CalibrationReport>(File.ReadAllText(report), PluginProtocol.Json)!.Samples.Length == 5, "Complete calibration samples did not survive report persistence");
+            // Correct a ruler entry without reacquiring or rewriting physical evidence.
+            var originalP2 = Get<List<CalibrationSample>>("calibrationSamples")[1];
+            long editPage = Get<long>("workspaceViewEpoch");
+            await Event("move.1"); await Event("field.p1left", "780");
+            check(Get<List<CalibrationSample>>("calibrationSamples")[1] == originalP2 &&
+                Get<CalibrationFit>("calibrationFit") == fit, "Typing a correction changed a captured observation or fit before explicit Save entry");
+            await Event("move.1");
+            check(Get<CalibrationWizardDraft>("calibrationWizard").Answers["p1left"] == "800" &&
+                Get<List<CalibrationSample>>("calibrationSamples")[1] == originalP2, "Cancel edit failed to restore the captured coordinate");
+            check(Get<long>("workspaceViewEpoch") == editPage, "Edit/cancel rebuilt the sheet and invalidated its visible controls");
+            await Event("move.1"); await Event("field.p1left", "-1"); await Event("capture.1");
+            check(Get<List<CalibrationSample>>("calibrationSamples")[1] == originalP2 && Get<CalibrationFit>("calibrationFit") == fit,
+                "An out-of-desk correction replaced the captured observation");
+            await Event("field.p1left", "800"); await Event("field.p1back", "440"); await Event("capture.1");
+            check(Get<List<CalibrationSample>>("calibrationSamples")[1] == originalP2,
+                "A correction duplicating an already captured reference was saved");
+            await Event("field.p1back", "450"); await Event("field.p1left", "780"); await Event("capture.1");
+            var correctedP2 = Get<List<CalibrationSample>>("calibrationSamples")[1];
+            check(correctedP2.Measurement.LeftMm == 780 && correctedP2.Measurement.BackMm == 450 &&
+                Math.Abs(correctedP2.MeasuredWorld.X - (780.0 / 1000 - .7)) < 1e-12,
+                "Save entry failed to update the entered ruler measurement and corresponding world point");
+            check(correctedP2.SceneWorld == originalP2.SceneWorld && correctedP2.JointDegrees.SequenceEqual(originalP2.JointDegrees) &&
+                correctedP2.HostUnixMilliseconds == originalP2.HostUnixMilliseconds && correctedP2.PoseFingerprint == originalP2.PoseFingerprint &&
+                correctedP2.Name == originalP2.Name && correctedP2.HeldOut == originalP2.HeldOut,
+                "Correcting a ruler entry changed measured pose, acquisition time, identity, fingerprint or held-out role");
+            check(Get<CalibrationFit?>("calibrationFit") is null && !patches![WidgetId(".sheet.apply")]!["enabled"]!.GetValue<bool>(),
+                "A stale fit or Apply permission survived a measurement correction");
+            var correctedReport = JsonSerializer.Deserialize<CalibrationReport>(File.ReadAllText(report), PluginProtocol.Json)!;
+            check(correctedReport.Samples[1].Measurement.LeftMm == 780 && correctedReport.Fit is null,
+                "Corrected measurement and fit invalidation did not survive report persistence");
+            var auditFiles = Directory.GetFiles(folder, "*.json", SearchOption.AllDirectories).Where(path =>
+                path.Contains("measurement-corrections", StringComparison.Ordinal)).ToArray();
+            check(auditFiles.Length == 1, "Measurement correction did not retain an audit copy of its prior report");
+            var correctionAudit = JsonNode.Parse(File.ReadAllText(auditFiles.Single()))!;
+            check(correctionAudit["originalSample"]!["measurement"]!["leftMm"]!.GetValue<double>() == 800 &&
+                correctionAudit["correctedMeasurement"]!["leftMm"]!.GetValue<double>() == 780 &&
+                correctionAudit["previousReport"]!["samples"]![1]!["measurement"]!["leftMm"]!.GetValue<double>() == 800,
+                "Correction audit lost the old observation/report or the explicit new entered value");
+            await Event("move.1"); await Event("field.p1left", "800"); await Event("capture.1");
+            await Event("fit"); fit = Get<CalibrationFit>("calibrationFit");
+            check(fit.CanApply && fit.TrainingRmsMm < .001 && fit.ValidationMaxMm < .001 &&
+                Get<List<CalibrationSample>>("calibrationSamples").Count == 5,
+                "Correcting an entered coordinate back to its measured value required recapture or failed to recover the fit");
+            var savedIdentity = Get<CalibrationIdentity>("calibrationIdentity");
+            Set("calibrationIdentity", savedIdentity with { Generation = 999 });
+            await Event("move.1");
+            check(Get<int>("sheetEditingRow") == -1, "A changed robot connection permitted editing an old captured report");
+            Set("calibrationIdentity", savedIdentity); Set("calibrationPlacementUnverified", true);
+            await Event("move.1");
+            check(Get<int>("sheetEditingRow") == -1, "An unverified scene placement permitted captured-measurement editing");
+            Set("calibrationPlacementUnverified", false);
             check(calls.All(c => c is "robot.read" or "robot.highlightReference" or "robot.highlightToolSite" or "robot.teleoperate"), "Calibration attempted a robot/scene mutation before Apply");
             check(root.Same(CalibrationPlacement.At(new(.1, .75, -.2), 0)), "Fit changed the scene before explicit Apply");
             point = marks.Length - 1;
@@ -159,6 +210,9 @@ internal static class CalibrationSheetIntegrationTests
             check(!Get<bool>("calibrationPlacementUnverified") && calls.Count(c => c == "robot.placement") == 1, "Apply remained unverified or repeated its scene write");
             var appliedReport = JsonSerializer.Deserialize<CalibrationReport>(File.ReadAllText(report), PluginProtocol.Json)!;
             check(appliedReport.AppliedPlacement!.Same(root) && !appliedReport.PlacementUnverified && appliedReport.Samples.Length == 5, "Verified placement and all observations did not survive final report persistence");
+            await Event("move.1");
+            check(Get<int>("sheetEditingRow") == -1 && Get<List<CalibrationSample>>("calibrationSamples")[1].Measurement.LeftMm == 800,
+                "An applied alignment permitted changing its captured measurement without rollback");
             await Event("inspect");
             check(Get<CalibrationPlacement>("calibrationApplied").Same(root) && calls.Count(c => c == "robot.placement") == 1, "Checking an applied placement repeated a scene write");
         }

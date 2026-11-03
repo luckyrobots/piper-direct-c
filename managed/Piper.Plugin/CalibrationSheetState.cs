@@ -44,7 +44,7 @@ public sealed partial class PipersPlugin
 
     private string SheetMeasurementBlocker(int row)
     {
-        if (SheetSample(row) is not null) return "";
+        if (SheetSample(row) is not null && sheetEditingRow != row) return "";
         if (SheetPoint(row) is not { } point) return "Enter BACK and LEFT distances for this cross, within the desk edges (mm).";
         // Reject duplicates before the operator spends time touching them.
         for (int previous = 0; previous < row; previous++)

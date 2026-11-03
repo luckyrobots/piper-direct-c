@@ -62,8 +62,8 @@ public sealed partial class PipersPlugin
             string title = row == 4 ? "Check" : "P" + (row + 1);
             body.Add(Widget.Row("sheet.row." + row,
                 Widget.Label("sheet.name." + row, title) with { Width = 65, Height = 32 },
-                SheetInput($"p{row}back", "Distance from the confirmed BACK edge in mm. cm × 10.", sample is null, sample is null ? null : CalibrationNumber(sample.Measurement.BackMm)),
-                SheetInput($"p{row}left", "Distance from the confirmed LEFT edge in mm. cm × 10.", sample is null, sample is null ? null : CalibrationNumber(sample.Measurement.LeftMm)),
+                SheetInput($"p{row}back", "Distance from the confirmed BACK edge in mm. cm × 10.", sample is null || sheetEditingRow == row, sample is null || sheetEditingRow == row ? null : CalibrationNumber(sample.Measurement.BackMm)),
+                SheetInput($"p{row}left", "Distance from the confirmed LEFT edge in mm. cm × 10.", sample is null || sheetEditingRow == row, sample is null || sheetEditingRow == row ? null : CalibrationNumber(sample.Measurement.LeftMm)),
                 SheetButton("move." + row, "Select " + title) with { Width = 120, Enabled = false },
                 SheetButton("capture." + row, "Capture " + title) with { Width = 115, Enabled = false }));
             body.Add(Widget.Label("sheet.row.status." + row, "Checking this point...") with { Height = 42 });
@@ -91,7 +91,7 @@ public sealed partial class PipersPlugin
             bool desk = key is "width" or "depth" or "precision";
             bool point = Enumerable.Range(0, 5).Any(i => key == $"p{i}left" || key == $"p{i}back");
             if (!desk && !point) throw new InvalidOperationException("Unknown measurement field.");
-            if (desk && calibrationIdentity is not null || point && SheetSample(key[1] - '0') is not null)
+            if (desk && calibrationIdentity is not null || point && SheetSample(key[1] - '0') is not null && sheetEditingRow != key[1] - '0')
                 throw new InvalidOperationException("Recorded measurements are fixed. Start a new calibration to change them; the old report is kept.");
             string text = value.GetString() ?? "";
             if (text.Length > 32) throw new InvalidOperationException("Enter a measurement in millimetres.");
@@ -149,7 +149,12 @@ public sealed partial class PipersPlugin
         else if (action.StartsWith("move.", StringComparison.Ordinal) || action.StartsWith("capture.", StringComparison.Ordinal))
         {
             if (!int.TryParse(action.Split('.')[1], out int row) || row is < 0 or > 4) throw new InvalidOperationException("Unknown point.");
-            if (SheetSample(row) is not null) throw new InvalidOperationException("This point is already recorded.");
+            if (SheetSample(row) is not null)
+            {
+                if (action.StartsWith("move.", StringComparison.Ordinal)) await EditSheetMeasurement(row, cancellation);
+                else await SaveSheetMeasurementCorrection(row, cancellation);
+                await Update(cancellation); return;
+            }
             if (action.StartsWith("move.", StringComparison.Ordinal))
             {
                 Wizard.Answers["sheetselected"] = row.ToString();
@@ -212,16 +217,20 @@ public sealed partial class PipersPlugin
             bool captured = SheetSample(row) is not null;
             string reason = SheetCaptureBlocker(row, device);
             string measurementError = SheetMeasurementBlocker(row);
-            string status = captured ? "Captured. This measured pose is saved."
+            bool editing = sheetEditingRow == row;
+            string status = editing ? "Correct the entered distances, then Save entry. The captured arm pose stays unchanged." : captured ? "Captured. This measured pose is saved."
                 : measurementError.Length > 0 ? measurementError
                 : row != selected ? "Select this point to locate its cross in the viewport."
                 : reason.Length > 0 ? reason : "Ready: gently touch this cross, hold still, then Capture.";
             patches["sheet.row.status." + row] = new() { ["text"] = status };
-            patches[SheetId("capture." + row)] = new() { ["text"] = captured ? "Captured" : "Capture " + SheetPointName(row), ["enabled"] = !captured && row == selected && reason.Length == 0, ["hint"] = reason };
-            Step("move." + row, captured ? "Saved" : row == selected ? "Selected " + SheetPointName(row) : "Select " + SheetPointName(row), !captured && SheetPoint(row) is not null && link is not null);
+            patches[SheetId("capture." + row)] = new() { ["text"] = editing ? "Save entry" : captured ? "Captured" : "Capture " + SheetPointName(row), ["enabled"] = editing ? SheetMeasurementBlocker(row).Length == 0 && SheetCanCorrect : !captured && row == selected && reason.Length == 0, ["hint"] = editing ? "Saves corrected ruler measurements; does not recapture or move the arm." : reason };
+            if (captured)
+                foreach (string axis in new[] { "left", "back" })
+                    patches[SheetId($"field.p{row}{axis}")] = new() { ["enabled"] = editing, ["text"] = editing ? Wizard.Answers.GetValueOrDefault($"p{row}{axis}", "") : CalibrationNumber(axis == "left" ? SheetSample(row)!.Measurement.LeftMm : SheetSample(row)!.Measurement.BackMm) };
+            Step("move." + row, editing ? "Cancel edit" : captured ? "Edit entry" : row == selected ? "Selected " + SheetPointName(row) : "Select " + SheetPointName(row), captured ? SheetCanCorrect : SheetPoint(row) is not null && link is not null);
         }
-        patches[SheetId("fit")] = new() { ["enabled"] = SheetContactCompatible && WizardTrainingCount >= 4 && WizardValidationCount >= 1 && !calibrationPlacementUnverified };
-        patches[SheetId("apply")] = new() { ["enabled"] = SheetSetupBlocker().Length == 0 && calibrationFit?.CanApply == true && calibrationApplied is null && !calibrationPlacementUnverified };
+        patches[SheetId("fit")] = new() { ["enabled"] = sheetEditingRow < 0 && SheetContactCompatible && WizardTrainingCount >= 4 && WizardValidationCount >= 1 && !calibrationPlacementUnverified };
+        patches[SheetId("apply")] = new() { ["enabled"] = sheetEditingRow < 0 && SheetSetupBlocker().Length == 0 && calibrationFit?.CanApply == true && calibrationApplied is null && !calibrationPlacementUnverified };
         patches[SheetId("rollback")] = new() { ["enabled"] = calibrationApplied is not null && !calibrationPlacementUnverified };
         patches["sheet.results"] = new() { ["text"] = WizardReviewSummary() };
     }
