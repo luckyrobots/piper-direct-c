@@ -102,6 +102,45 @@ The solver rejects duplicate, clustered or nearly collinear reference sets and a
 
 The saved evidence includes the six measured angles, model FK point, root placement, coordinates, compiled model revision, connection identity, pose fingerprint and residuals. Timestamps are host receipt times, not synchronized camera exposure times.
 
+## Check jaw height at new poses
+
+After applying an alignment, use **Check jaw height** at the top of Calibration.
+This is an independent check, not another four-point calibration:
+
+1. Support the arm and single-click its physical teach button for the solid-green
+   hand-guiding light. Move the closed jaws to a comfortable position above the desk.
+2. Watch the live **jaw height** and the vertical viewport line from the jaw-tip
+   midpoint to the tabletop. The line follows the measured robot, not a commanded
+   destination. Its lower endpoint is directly beneath the jaw, not at the desk cross.
+3. Hold the arm still and choose **Measure this pose**. The displayed prediction is
+   pinned to that pose while you use a tape measure.
+4. Measure vertically from the tabletop to the midpoint where the closed jaw tips
+   meet. Enter millimetres and choose **Save check**. Positive error means your tape
+   measurement is higher than the model predicts; negative means it is lower.
+5. Choose **Check another pose** and repeat at a different height or extension.
+
+Measure the same physical point every time. Do not measure diagonally along the
+arm or to the wrist/camera. If the projection is beyond the desk edge, move the
+jaw back above the tabletop before measuring. A prediction below the desk plane
+is shown as negative, not silently changed to zero.
+
+Live preview works while moving. Recording a comparison requires fresh, healthy,
+stationary measured feedback and the matching scene pose. If you move after pinning
+a pose, return to Live and pin the new pose instead of assigning the old ruler
+measurement to it. Stale feedback or a different model/root invalidates the live
+reading; missing feedback is never displayed as zero height.
+
+Height checks and in-progress ruler text save per robot in `height-checks.json`.
+They preserve the predicted and measured heights, signed error, physical joint
+angles and model/root identities. Reopening the plugin restores the evidence,
+not permission to resume live checking or trust a previous pose automatically.
+These checks never change the saved alignment, joint zeros or tool offset, and
+send no real robot motion, teach, enable or reset command.
+
+Base alignment changes yaw and horizontal position only. Height checks therefore
+test the vertical model/tool reference at new poses; they do not by themselves
+verify horizontal placement, camera calibration or recording timestamps.
+
 ## Saved data
 
 Settings and reports live outside the plugin package under the engine's per-plugin settings directory:
@@ -110,6 +149,7 @@ Settings and reports live outside the plugin package under the engine's per-plug
 calibration/<robot-profile-id>/settings.json
 calibration/<robot-profile-id>/<timestamp>-<id>-calibration.json
 calibration/<robot-profile-id>/wizard-draft.json
+calibration/<robot-profile-id>/height-checks.json
 calibration/<robot-profile-id>/<timestamp>-<id>-wizard-evidence.json
 ```
 

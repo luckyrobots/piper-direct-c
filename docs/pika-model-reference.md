@@ -89,7 +89,8 @@ each other. A model with different meshes or mounting must be measured again.
    meet the reported tolerance. Physical joint-zero errors, wrong link
    geometry or an incorrect tool point require separate correction.
 
-Changing model geometry or a named site changes its source revision. Start a
-new calibration session after a model change; existing samples cannot be
-reused against a different tool model. Keep backups of model files before
-making local edits.
+Changing model geometry or a named site changes its source revision. A different
+physical measuring point or tool model needs a new calibration. For a deliberate
+frame correction to the same model and unchanged physical contact point, use the
+explicit audited **Re-evaluate saved poses** flow described above; never silently
+reuse old simulated coordinates. Keep backups before making local model edits.

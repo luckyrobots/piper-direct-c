@@ -242,6 +242,7 @@ public sealed partial class PipersPlugin
                 {
                     sceneTrackingStatus = "Measured scene paused · waiting for fresh controller feedback";
                     message = telemetryIssue.Length > 0 ? telemetryIssue : "Controller feedback delayed · motion permission cleared; waiting for fresh telemetry";
+                    QueueHeightMaintenance();
                     await Update(cancellation);
                     await Task.Delay(100, cancellation); continue;
                 }
@@ -280,6 +281,7 @@ public sealed partial class PipersPlugin
                 sceneTrackingStatus = "Scene view delayed/unavailable: " + error.Message;
                 Trace.TraceWarning("Measured scene/UI update: {0}", error.Message);
             }
+            QueueHeightMaintenance();
             await Task.Delay(100, cancellation);
         }
     }
@@ -327,6 +329,7 @@ public sealed partial class PipersPlugin
                 linkErrorDegrees = linked.FeedbackError(requested, acknowledgement);
                 acknowledgedScenePose = acknowledgement;
                 acknowledgedSceneAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - (long)age;
+                ObserveHeightFeedback(receipt, device, acknowledgement);
                 sceneTrackingStatus = $"Measured scene live · pose age {age:F0} ms";
                 SampleAlignment(device);
             }

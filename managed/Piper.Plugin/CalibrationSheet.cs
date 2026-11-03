@@ -46,6 +46,7 @@ public sealed partial class PipersPlugin
         {
             Widget.Row("sheet.header", Widget.Label("sheet.title", "Calibrate " + ActiveProfile.Name) with { Appearance = "heading" },
                 Widget.Button("workspace.controls@sheet", "Robot controls")),
+            HeightCheckControls(),
             Widget.Label("sheet.instructions", "Enter the distances for your four physical crosses. Select a point, hand-guide the jaw-tip midpoint onto that cross, then capture it. Selecting a point only moves the viewport.") with { Height = 58 },
             Widget.Label("sheet.next", "Checking calibration setup...") with { Height = 58, Appearance = "heading" },
             Widget.Label("sheet.save", sheetSaveStatus) with { Height = 22, Appearance = "muted" },

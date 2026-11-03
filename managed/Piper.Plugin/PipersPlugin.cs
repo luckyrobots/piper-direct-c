@@ -164,6 +164,11 @@ public sealed partial class PipersPlugin : ILuckyPlugin
             {
                 await WorkspaceEvent(id[10..], cancellation); await Update(cancellation); return;
             }
+            if (id.StartsWith("height.", StringComparison.Ordinal))
+            {
+                if (id != "height.info") await HeightCheckEvent(id[7..], input.Value, cancellation);
+                await Update(cancellation); return;
+            }
             if (id.StartsWith("wizard.", StringComparison.Ordinal))
             {
                 if (!calibrationOpen) throw new InvalidOperationException("Open Calibration before continuing its guided measurements.");
@@ -171,7 +176,8 @@ public sealed partial class PipersPlugin : ILuckyPlugin
             }
             if (id.StartsWith("profiles.", StringComparison.Ordinal))
             {
-                if (calibrationOpen && (id.StartsWith("profiles.select.", StringComparison.Ordinal) || id is "profiles.add" or "profiles.remove")) await ClearWizardHighlight(cancellation);
+                if (calibrationOpen && (id.StartsWith("profiles.select.", StringComparison.Ordinal) || id is "profiles.add" or "profiles.remove"))
+                { await StopHeightCheck(cancellation); await ClearWizardHighlight(cancellation); }
                 await ProfileEvent(id[9..], input.Value, cancellation);
                 if (id.StartsWith("profiles.select.", StringComparison.Ordinal) || id is "profiles.add" or "profiles.remove") { workspacePage = "controls"; calibrationOpen = alignmentOpen = false; }
                 await Render(cancellation); await Update(cancellation); return;
@@ -505,6 +511,7 @@ public sealed partial class PipersPlugin : ILuckyPlugin
         AddTeachingPatches(patches, device);
         AddAlignmentPatches(patches);
         AddCalibrationPatches(patches, device);
+        AddHeightCheckPatches(patches, device);
         AddCameraComparisonPatches(patches);
         AddResetAssistedPatches(patches, device);
         foreach (string action in new[] { "minus", "plus", "zero" }) patches["pika." + action] = new() { ["enabled"] = workspacePage == "controls" && pikaOwned && pika?["fresh"]?.GetValue<bool>() == true && pika["armed"]?.GetValue<bool>() == true && pika["pending"]?.GetValue<bool>() != true };
@@ -517,6 +524,8 @@ public sealed partial class PipersPlugin : ILuckyPlugin
     {
         using (var markerTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(1)))
         {
+            try { await StopHeightCheck(markerTimeout.Token); }
+            catch (Exception error) { Trace.TraceWarning("Height guide shutdown: {0}", error.Message); }
             try { await ClearWizardHighlight(markerTimeout.Token); }
             catch (Exception error) { Trace.TraceWarning("Calibration marker shutdown: {0}", error.Message); }
         }

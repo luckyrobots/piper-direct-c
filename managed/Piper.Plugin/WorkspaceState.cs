@@ -80,6 +80,7 @@ public sealed partial class PipersPlugin
                 PauseSceneFollowing();
             }
             bool nextCalibration = page == "calibration" || page == "camera" && cameraReturnPage == "calibration";
+            if (calibrationOpen && page != "calibration") await StopHeightCheck(cancellation);
             if (calibrationOpen && !nextCalibration) await ClearWizardHighlight(cancellation);
             workspacePage = page;
             calibrationOpen = page == "calibration" || page == "camera" && cameraReturnPage == "calibration";
