@@ -374,7 +374,9 @@ public sealed partial class PipersPlugin
         string reason = error.Message.Replace(group.Backend, "[redacted]", StringComparison.Ordinal).Replace(owner, "[redacted]", StringComparison.Ordinal);
         if (Interlocked.CompareExchange(ref group.FirstFailure, reason, "").Length != 0) return;
         if (ReferenceEquals(Volatile.Read(ref groupSimulation), group))
-        { uiActionError = "Following stopped: " + reason; GroupFollowStatus = "Following stopped · " + reason; GroupFollowDetail = "All selected targets are discarded. The simulation remains paused; restore feedback or fix the reported issue before arming again."; }
+        { uiActionError = "Following stopped: " + reason; GroupFollowStatus = "Following stopped · " + reason;
+            groupFollowFailure = "Following stopped\n" + reason;
+            GroupFollowDetail = "All selected targets are discarded. The simulation remains paused; restore feedback or fix the reported issue before arming again."; }
         Trace.TraceWarning("Grouped following: {0}", reason);
     }
 

@@ -13,6 +13,80 @@ internal static class SimulationFollowingTests
 {
     public static async Task RunGroupFollow(Action<bool, string> check)
     {
+        static async Task WaitFor(Func<bool> condition, string description)
+        {
+            long began = Stopwatch.GetTimestamp();
+            while (!condition())
+            { if (Stopwatch.GetElapsedTime(began).TotalSeconds > 3) throw new InvalidOperationException(description); await Task.Delay(10); }
+        }
+        // Exercise the same pure report used by admission and sidebar patches,
+        // including a nonselected participant rather than only the visible arm.
+        foreach (var (code, change) in new (string, Action<Fixture>)[] {
+            ("approval", f => f.Snapshot["devices"]![1]!["generation"] = 9L),
+            ("teaching", f => { f.Snapshot["devices"]![1]!["status"]!["control"] = 2; f.Snapshot["devices"]![1]!["status"]!["teach_state"] = 1; }),
+            ("teaching-return", f => { f.Snapshot["devices"]![1]!["status"]!["control"] = 2; f.Snapshot["devices"]![1]!["status"]!["teach_state"] = 2; }),
+            ("recovery", f => f.Snapshot["devices"]![1]!["recovery_required"] = true),
+            ("arm-power", f => f.Snapshot["devices"]![1]!["joints"]![5]!["enabled"] = false),
+            ("driver-fault", f => f.Snapshot["devices"]![1]!["joints"]![5]!["fault"] = 1),
+            ("configuration", f => f.Snapshot["devices"]![1]!["joints"]![5]!["acceleration_fresh"] = false),
+            ("configuration", f => f.Snapshot["devices"]![1]!["joints"]![5]!["max_speed_rad_s"] = 0d),
+            ("joint-range", f => f.Snapshot["devices"]![1]!["joints"]![5]!["actual_deg"] = 181d),
+            ("arm-fault", f => f.Snapshot["devices"]![1]!["status"]!["error"] = 1),
+            ("arm-feedback", f => f.Snapshot["devices"]![1]!["status"]!["age_s"] = 1d),
+            ("motion-active", f => f.Snapshot["devices"]![1]!["motion"]!["active"] = true),
+            ("pika-feedback", f => f.Snapshot["pikas"]![1]!["age_s"] = 1d),
+            ("pika-owner", f => f.Snapshot["pikas"]![1]!["owner"] = "another-owner"),
+            ("pika-power", f => f.Snapshot["pikas"]![1]!["enabled"] = false),
+            ("pika-power", f => f.Snapshot["pikas"]![1]!["armed"] = false),
+            ("pika-fault", f => f.Snapshot["pikas"]![1]!["driver_fault"] = true),
+            ("scene-binding", f => f.Get<JsonObject>("scene")["robots"]![0]!["joints"]!.AsArray().RemoveAt(8)),
+        })
+        {
+            await using var invalid = new Fixture(); invalid.ConfigureGroup(); change(invalid); invalid.Refresh();
+            var report = invalid.Preparation();
+            check(!report.Ready && report.Issues.Any(i => i.ProfileId == "piper-2" && i.RobotName == "Second" && i.Code == code),
+                "Group preparation hid a nonselected robot's named " + code + " blocker");
+        }
+        await using (var blocked = new Fixture())
+        {
+            blocked.ConfigureGroup(); blocked.UseUiDispatcher();
+            var arm = blocked.Snapshot["devices"]![0]!;
+            arm["status"]!["control"] = 2; arm["status"]!["teach_state"] = 2;
+            blocked.Snapshot["pikas"]![0]!["enabled"] = false;
+            blocked.Refresh();
+            check(blocked.SidebarStatus().Contains("First: Use Resume controls") && blocked.SidebarStatus().Contains("Pika gripper"),
+                "The sidebar claimed the selected group was ready while its first arm and Pika were not");
+            await blocked.Click("group.follow.toggle");
+            await WaitFor(() => blocked.Get<string>("groupFollowFailure").Length > 0, "The public Follow event did not publish its setup failure");
+            check(!blocked.GroupActive && blocked.SidebarStatus().Contains("Follow not armed") && blocked.SidebarStatus().Contains("First: Use Resume controls") &&
+                blocked.SidebarStatus().Contains("Pika gripper") && blocked.Rpc.Requests.IsEmpty && !blocked.EngineRequests.Any(r => r.Action == "arm-next-play"),
+                "A public Follow click hid setup failure, armed an unready group or emitted a hardware command");
+            arm["status"]!["control"] = 1; arm["status"]!["teach_state"] = 0; blocked.Snapshot["pikas"]![0]!["enabled"] = true; blocked.Refresh();
+            check(blocked.SidebarStatus().Contains("Follow not armed"), "Telemetry erased the retained setup error before an explicit retry");
+            await blocked.Click("group.follow.toggle");
+            await WaitFor(() => blocked.GroupStage == "armed" || blocked.EngineRequests.Any(r => r.Action == "arm-next-play"), "The ready retry never reached the engine arm latch");
+            check(blocked.GroupActive && blocked.Mode == "edit" && blocked.EngineRequests.Count(r => r.Action == "arm-next-play") == 1 && blocked.Rpc.Requests.IsEmpty,
+                "Retrying a ready group failed to arm exactly once in Edit or retained a superseded setup failure");
+        }
+        await using (var stopped = new Fixture())
+        {
+            stopped.ConfigureGroup(); stopped.UseUiDispatcher();
+            stopped.Snapshot["devices"]![1]!["status"]!["arm_status"] = 1;
+            stopped.Snapshot["devices"]![1]!["recovery_required"] = true; stopped.Refresh();
+            await stopped.Click("group.follow.toggle");
+            await WaitFor(() => stopped.Get<string>("groupFollowFailure").Length > 0, "The stopped partner's public Follow event did not finish");
+            check(stopped.SidebarStatus().Contains("Second: Open recovery") && stopped.Rpc.Requests.IsEmpty &&
+                stopped.Snapshot["devices"]![1]!["recovery_required"]!.GetValue<bool>() && !stopped.EngineRequests.Any(r => r.Action == "arm-next-play"),
+                "Follow admission cleared a recorded STOP or concealed the stopped partner");
+        }
+        await using (var idle = new Fixture())
+        {
+            idle.ConfigureGroup();
+            idle.Snapshot["devices"]![0]!["status"]!["stationary_s"] = 0d;
+            idle.Snapshot["devices"]![0]!["teaching"] = new JsonObject { ["can_return"] = false };
+            idle.Refresh();
+            check(idle.Preparation().Ready && idle.SidebarFollowEnabled(), "Transient encoder stillness disabled the explicit global Follow action");
+        }
         await using (var armed = new Fixture())
         {
             armed.ConfigureGroup(); armed.UseUiDispatcher();
@@ -30,8 +104,9 @@ internal static class SimulationFollowingTests
             }
             finally { armed.Commands.Release(); }
         }
-        await using var f = new Fixture(); f.ConfigureGroup();
-        await f.GroupEvent("toggle");
+        await using var f = new Fixture(); f.ConfigureGroup(); f.UseUiDispatcher();
+        await f.Click("group.follow.toggle");
+        await WaitFor(() => f.GroupActive && f.EngineRequests.Any(r => r.Action == "arm-next-play"), "The public Follow event never armed its ready group");
         check(f.GroupActive && f.Mode == "edit" && f.Rpc.Requests.IsEmpty &&
             f.EngineRequests.Count(r => r.Action == "arm-next-play") == 1 && !f.EngineRequests.Any(r => r.Action == "prepare-start"),
             "The global arm button entered Play or moved hardware before the user pressed Play");
@@ -66,11 +141,15 @@ internal static class SimulationFollowingTests
         f.Snapshot["devices"]![1]!["status"]!["pose_stationary_s"] = 0d; f.TerminalFrame = true; f.Refresh();
         await Task.Delay(250);
         check(!f.EngineRequests.Any(r => r.Action == "ack-episode"), "The shared episode advanced while the second physical arm was not settled");
-        f.FocusGroupSecond();
+        await f.Click("profiles.select.piper-2");
+        await WaitFor(() => f.Get<Preferences>("preferences").ActiveRobotId == "piper-2", "The public profile-selection event was not processed");
         int before = f.Rpc.Requests.Count(r => r.Body["action"]?.GetValue<string>() == "follow-update");
         await Until(() => f.Rpc.Requests.Count(r => r.Body["action"]?.GetValue<string>() == "follow-update") > before + 2, "Changing the viewed profile stopped group publication");
         check(f.Rpc.Requests.Where(r => r.Body["action"]?.GetValue<string>() == "follow-update").TakeLast(8).Select(r => r.Body["device_id"]!.GetValue<string>()).Distinct().Count() == 2,
             "Changing profile focus redirected both targets to the visible arm");
+        check(f.Get<Preferences>("preferences").ActiveRobotId == "piper-2" && f.GroupActive &&
+            f.EngineRequests.Count(r => r.Action == "arm-next-play") == 1 && f.Rpc.Requests.Count(r => r.Body["action"]?.GetValue<string>() == "follow-start") == 2,
+            "The public profile-selection event changed group ownership or restarted either physical follower");
         f.Snapshot["devices"]![1]!["status"]!["pose_stationary_s"] = 10d; f.Refresh();
         await Until(() => f.EngineRequests.Any(r => r.Action == "ack-episode"), "All-lane arrival never released its shared episode");
         check(f.EngineRequests.Count(r => r.Action == "ack-episode") == 1, "The same whole episode was acknowledged separately per arm");
@@ -1069,6 +1148,11 @@ internal static class SimulationFollowingTests
         public string GroupStage => Get<object?>("groupSimulation")?.GetType().GetField("Stage")!.GetValue(Get<object?>("groupSimulation")) as string ?? "";
         public async Task GroupEvent(string action)
         { await (Task)typeof(PipersPlugin).GetMethod("GroupFollowEvent", Fields)!.Invoke(plugin, [action, CancellationToken.None])!; }
+        public FollowPreparationReport Preparation() => (FollowPreparationReport)typeof(PipersPlugin).GetMethod("GroupPreparation", Fields)!
+            .Invoke(plugin, [null, null, null])!;
+        public string SidebarStatus() => Sidebar().Children!.Single(w => w.Id == "group.follow.status").Text!;
+        public bool SidebarFollowEnabled() => Sidebar().Children!.Single(w => w.Id == "group.follow.toggle").Enabled != false;
+        private Widget Sidebar() => (Widget)typeof(PipersPlugin).GetMethod("GroupFollowControls", Fields)!.Invoke(plugin, null)!;
         public Task ClickSidebarGroupStop()
         {
             var sidebar = (Widget)typeof(PipersPlugin).GetMethod("GroupFollowControls", Fields)!.Invoke(plugin, null)!;
@@ -1085,6 +1169,7 @@ internal static class SimulationFollowingTests
             var profiles = new[] { new RobotProfile("piper-1", "First", "can-a", Speed: 10, RobotId: "robot-a", PikaDevice: "/dev/pika-a", FollowSimulationSelected: true),
                 new RobotProfile("piper-2", "Second", "can-b", Speed: 10, RobotId: "robot-a", PikaDevice: "/dev/pika-b", RobotJointPrefix: "piper3_", FollowSimulationSelected: true) };
             Set("preferences", RobotProfileRouting.Normalize(new Preferences(Robots: profiles, ActiveRobotId: "piper-1")));
+            Get<JsonObject>("scene")["robots"]![0]!["joints"] = GroupPose()["joints"]!.DeepClone();
             Snapshot["multi_device_lanes_supported"] = true;
             var second = (JsonObject)Snapshot["devices"]![0]!.DeepClone(); second["id"] = "can-b"; second["generation"] = 8L;
             Snapshot["devices"]!.AsArray().Add(second);

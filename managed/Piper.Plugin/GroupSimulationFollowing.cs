@@ -74,70 +74,80 @@ public sealed partial class PipersPlugin
         if (GroupFollowActive)
         { CancelGroupSimulationFollowingInput("Stopping all selected followers · holding"); await StopGroupSimulationFollowing(cancellation); return; }
         if (action == "cancel") return;
-        if (Volatile.Read(ref simulationSession) is not null || teleoperating || followRequest != 0 || calibrationOpen ||
-            handGuideRecovery is not null || teachingResetBusy || recoveryHomeBusy || PikaTeachingRecording)
-            throw new InvalidOperationException("Finish the current control or calibration action before arming grouped following.");
-        var profiles = SelectedFollowProfiles();
-        if (profiles.Length == 0) throw new InvalidOperationException("Select at least one robot's follower checkbox.");
-        if (profiles.Length > 8 || profiles.Select(p => p.Id).Distinct().Count() != profiles.Length ||
-            profiles.Select(p => p.CanDeviceId).Distinct().Count() != profiles.Length ||
-            profiles.Select(p => p.PikaDevice + "\n" + p.WslDistribution).Distinct().Count() != profiles.Length ||
-            profiles.Select(p => p.RobotId + "\n" + p.RobotJointPrefix).Distinct().Count() != profiles.Length)
-            throw new InvalidOperationException("Each selected follower needs its own CAN adapter, Pika and distinct scene-arm binding.");
-        var receipt = telemetry.Latest ?? throw new InvalidOperationException("Waiting for controller feedback.");
-        if (receipt.State["multi_device_lanes_supported"]?.GetValue<bool>() != true)
-            throw new InvalidOperationException("Update the backend to use independent robot control lanes.");
-        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellation);
-        deadline.CancelAfter(1500);
-        var capabilities = await engine.RequestAsync("host.info", cancellation: deadline.Token);
-        if (!capabilities.TryGetProperty("robotRuntimeTracksSupported", out var tracks) || !tracks.GetBoolean())
-            throw new InvalidOperationException("Update Lucky Engine to use atomic multi-robot frame tracks.");
-        var discovered = JsonNode.Parse((await engine.RequestAsync("scene.robots", cancellation: deadline.Token)).GetRawText())!.AsObject();
-        string sceneId = discovered["sceneId"]?.GetValue<string>() ?? "";
-        var lanes = new List<GroupLane>();
-        string entity = profiles[0].RobotId;
-        if (sceneId.Length == 0 || entity.Length == 0 || profiles.Any(p => p.RobotId != entity))
-            throw new InvalidOperationException("Selected followers must belong to distinct arms in the same compiled scene world.");
-        var model = discovered["robots"]?.AsArray().OfType<JsonObject>().SingleOrDefault(r => r["entityId"]?.GetValue<string>() == entity)
-            ?? throw new InvalidOperationException("The selected scene world is unavailable.");
-        foreach (var profile in profiles)
-        {
-            if (profile.CanDeviceId.Length == 0 || profile.PikaDevice.Length == 0 || !double.IsFinite(profile.Speed) || profile.Speed is <= 0 or > 100)
-                throw new InvalidOperationException(profile.Name + ": assign its devices and a valid speed first.");
-            var device = receipt.State["devices"]!.AsArray().OfType<JsonObject>().Single(d => d["id"]?.GetValue<string>() == profile.CanDeviceId);
-            long generation = device["generation"]!.GetValue<long>();
-            var expected = new ProfileApproval(receipt.BackendToken, profile.CanDeviceId, generation, profile.RobotId, profile.RobotJointPrefix, profile.PikaDevice, profile.WslDistribution);
-            if (!controlApprovals.TryGetValue(profile.Id, out var approval) || approval != expected)
-                throw new InvalidOperationException(profile.Name + ": use Enable robot and confirm its workspace before selecting it as a follower.");
-            var robot = new RobotLink(sceneId, entity, model["joints"]!.AsArray(), device, profile.RobotJointPrefix);
-            var pika = ProfilePikaRouting.Find(receipt.State, profile);
-            lanes.Add(new(profile, robot, approval, GroupClosedReference(profile, pika)));
-        }
-        var group = new GroupSession(receipt.BackendToken, sceneId, entity, model["modelAssetId"]!.GetValue<string>(), model["modelRevision"]!.GetValue<string>(), lanes.ToArray());
-        if (Interlocked.CompareExchange(ref groupSimulation, group, null) is not null) throw new InvalidOperationException("Another grouped follower is still retiring.");
+        groupFollowFailure = "";
         try
         {
-            foreach (var lane in group.Lanes)
+            if (Volatile.Read(ref simulationSession) is not null || teleoperating || followRequest != 0 || calibrationOpen ||
+                handGuideRecovery is not null || teachingResetBusy || recoveryHomeBusy || PikaTeachingRecording)
+                throw new InvalidOperationException("Finish the current control or calibration action before arming grouped following.");
+            var profiles = SelectedFollowProfiles();
+            var preparation = GroupPreparation(profiles);
+            if (!preparation.Ready) throw new InvalidOperationException(preparation.Summary);
+            using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellation);
+            deadline.CancelAfter(1500);
+            var capabilities = await engine.RequestAsync("host.info", cancellation: deadline.Token);
+            if (!capabilities.TryGetProperty("robotRuntimeTracksSupported", out var tracks) || !tracks.GetBoolean())
+                throw new InvalidOperationException("Update Lucky Engine to use atomic multi-robot frame tracks.");
+            var discovered = JsonNode.Parse((await engine.RequestAsync("scene.robots", cancellation: deadline.Token)).GetRawText())!.AsObject();
+            // Discovery is read-only. Recheck the whole group from one current
+            // receipt before installing its immutable lanes or arming the engine.
+            var receipt = telemetry.Latest ?? throw new InvalidOperationException("Waiting for controller feedback.");
+            preparation = GroupPreparation(profiles, receipt, discovered);
+            if (!preparation.Ready) throw new InvalidOperationException(preparation.Summary);
+            string sceneId = discovered["sceneId"]!.GetValue<string>();
+            var lanes = new List<GroupLane>();
+            string entity = profiles[0].RobotId;
+            var model = discovered["robots"]?.AsArray().OfType<JsonObject>().SingleOrDefault(r => r["entityId"]?.GetValue<string>() == entity)
+                ?? throw new InvalidOperationException("The selected scene world is unavailable.");
+            foreach (var profile in profiles)
             {
-                _ = GroupHardware(group, lane);
-                if (GroupReceipt(group, lane).State["motion"]?["active"]?.GetValue<bool>() == true)
-                    throw new InvalidOperationException(lane.Profile.Name + ": finish its current motion before arming the group.");
+                var device = receipt.State["devices"]!.AsArray().OfType<JsonObject>().Single(d => d["id"]?.GetValue<string>() == profile.CanDeviceId);
+                long generation = device["generation"]!.GetValue<long>();
+                var expected = new ProfileApproval(receipt.BackendToken, profile.CanDeviceId, generation, profile.RobotId, profile.RobotJointPrefix, profile.PikaDevice, profile.WslDistribution);
+                if (!controlApprovals.TryGetValue(profile.Id, out var approval) || approval != expected)
+                    throw new InvalidOperationException(profile.Name + ": use Enable robot and confirm its workspace before selecting it as a follower.");
+                var robot = new RobotLink(sceneId, entity, model["joints"]!.AsArray(), device, profile.RobotJointPrefix);
+                var pika = ProfilePikaRouting.Find(receipt.State, profile);
+                lanes.Add(new(profile, robot, approval, GroupClosedReference(profile, pika)));
             }
-            var raw = await GroupEngine(group, "robot.runtime.read", null, cancellation);
-            if (raw["mode"]?.GetValue<string>() != "edit") throw new InvalidOperationException("Stop Play before arming followers.");
-            ValidateSimulationTimeMode(raw);
-            var armed = await GroupEngine(group, "robot.runtime.control", "arm-next-play", cancellation);
-            if (armed["mode"]?.GetValue<string>() != "edit" || armed["startArmedForNextPlay"]?.GetValue<bool>() != true ||
-                armed["prepareId"]?.GetValue<string>() != group.PrepareId)
-                throw new InvalidOperationException("The engine did not acknowledge an unchanged Edit-mode arm-next-play latch.");
-            GroupFollowStatus = $"Armed · {group.Lanes.Length} robot(s) · press Play";
-            GroupFollowDetail = "The editor is still in Edit mode. Your next Play pauses at its first frame, matches every selected robot and gripper, then starts the shared episode.";
-            group.Worker = Task.Run(() => RunGroupSimulation(group));
+            var group = new GroupSession(receipt.BackendToken, sceneId, entity, model["modelAssetId"]!.GetValue<string>(), model["modelRevision"]!.GetValue<string>(), lanes.ToArray());
+            if (Interlocked.CompareExchange(ref groupSimulation, group, null) is not null) throw new InvalidOperationException("Another grouped follower is still retiring.");
+            try
+            {
+                foreach (var lane in group.Lanes)
+                {
+                    _ = GroupHardware(group, lane);
+                    if (GroupReceipt(group, lane).State["motion"]?["active"]?.GetValue<bool>() == true)
+                        throw new InvalidOperationException(lane.Profile.Name + ": finish its current motion before arming the group.");
+                }
+                var raw = await GroupEngine(group, "robot.runtime.read", null, cancellation);
+                if (raw["mode"]?.GetValue<string>() != "edit") throw new InvalidOperationException("Stop Play before arming followers.");
+                ValidateSimulationTimeMode(raw);
+                var armed = await GroupEngine(group, "robot.runtime.control", "arm-next-play", cancellation);
+                if (armed["mode"]?.GetValue<string>() != "edit" || armed["startArmedForNextPlay"]?.GetValue<bool>() != true ||
+                    armed["prepareId"]?.GetValue<string>() != group.PrepareId)
+                    throw new InvalidOperationException("The engine did not acknowledge an unchanged Edit-mode arm-next-play latch.");
+                GroupFollowStatus = $"Armed · {group.Lanes.Length} robot(s) · press Play";
+                GroupFollowDetail = "The editor is still in Edit mode. Your next Play pauses at its first frame, matches every selected robot and gripper, then starts the shared episode.";
+                group.Worker = Task.Run(() => RunGroupSimulation(group));
+            }
+            catch
+            {
+                group.Stop.Cancel(); await ReleaseGroup(group);
+                Interlocked.CompareExchange(ref groupSimulation, null, group); throw;
+            }
         }
-        catch
+        catch (Exception error) when (!cancellation.IsCancellationRequested)
         {
-            group.Stop.Cancel(); await ReleaseGroup(group);
-            Interlocked.CompareExchange(ref groupSimulation, null, group); throw;
+            // This includes failures before a group exists. The sidebar must
+            // retain the actionable setup cause instead of claiming it is ready.
+            string reason = error.Message;
+            foreach (string secret in new[] { token, owner })
+                if (secret.Length > 0) reason = reason.Replace(secret, "[redacted]", StringComparison.Ordinal);
+            groupFollowFailure = "Follow not armed\n" + reason;
+            GroupFollowStatus = "Follow not armed";
+            GroupFollowDetail = reason;
+            throw;
         }
     }
 
