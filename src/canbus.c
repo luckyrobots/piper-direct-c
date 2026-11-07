@@ -1,6 +1,8 @@
 #define _GNU_SOURCE
 #include "canbus.h"
+#include <math.h>
 #include <errno.h>
+#ifndef _WIN32
 #include <linux/can/raw.h>
 #include <linux/can/error.h>
 #include <linux/can/netlink.h>
@@ -8,12 +10,19 @@
 #include <poll.h>
 #include <math.h>
 #include <net/if_arp.h>
+#endif
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifndef _WIN32
 #include <sys/socket.h>
+#endif
 #include <time.h>
 #include <unistd.h>
+
+#ifdef _WIN32
+#include "canbus_windows.inc"
+#else
 
 double piper_now(void)
 {
@@ -95,25 +104,44 @@ static void identity(struct can_device *d,const char *name)
         char *slash=strrchr(path,'/'); if (!slash||slash==path) break; *slash=0;
     }
 }
+#endif
+static double *simulation_targets(struct can_bus *b,struct can_device *d) { return d==&b->devices[0]?b->sim_target:d->sim_target; }
+static double *simulation_gripper(struct can_bus *b,struct can_device *d) { return d==&b->devices[0]?&b->sim_gripper:&d->sim_gripper; }
+static double *simulation_last(struct can_bus *b,struct can_device *d) { return d==&b->devices[0]?&b->sim_last:&d->sim_last; }
+static unsigned *simulation_enabled(struct can_bus *b,struct can_device *d) { return d==&b->devices[0]?&b->sim_enabled:&d->sim_enabled; }
+bool can_bus_init_simulated(struct can_bus *b,unsigned count)
+{
+    if (count<1||count>CANBUS_MAX) return false;
+    memset(b,0,sizeof *b);b->simulated=true;
+    for (unsigned i=0;i<CANBUS_MAX;++i) b->devices[i].fd=-1;
+    for (unsigned i=0;i<count;++i) {
+        struct can_device *d=&b->devices[i];
+        if (!i) snprintf(d->id,sizeof d->id,"simulation:one");
+        else snprintf(d->id,sizeof d->id,"simulation:%u",i+1);
+        snprintf(d->name,sizeof d->name,"sim%u",i);
+        if (!i) snprintf(d->label,sizeof d->label,"Simulated PiPer");
+        else snprintf(d->label,sizeof d->label,"Simulated PiPer %u",i+1);
+        d->present=d->up=d->stable=d->simulated=true;d->generation=++b->sequence;
+        d->bitrate=1000000;d->link_verified=true;
+        const double initial[6]={0,45,-65,0,10,0};
+        memcpy(simulation_targets(b,d),initial,sizeof initial);
+        memcpy(d->feedback.arm[0].deg,initial,sizeof initial);
+        *simulation_gripper(b,d)=25;
+    }
+    return true;
+}
 void can_bus_init(struct can_bus *b,bool simulated)
 {
-    memset(b,0,sizeof *b); b->simulated=simulated;
+    if (simulated) { (void)can_bus_init_simulated(b,1);return; }
+    memset(b,0,sizeof *b);
     for (unsigned i=0;i<CANBUS_MAX;++i) b->devices[i].fd=-1;
-    if (simulated) {
-        struct can_device *d=&b->devices[0];
-        snprintf(d->id,sizeof d->id,"simulation:one"); snprintf(d->name,sizeof d->name,"sim0");
-        snprintf(d->label,sizeof d->label,"Simulated PiPer");
-        d->present=d->up=d->stable=d->simulated=true; d->generation=++b->sequence;
-        d->bitrate=1000000; d->link_verified=true;
-        double initial[6]={0,45,-65,0,10,0};
-        memcpy(b->sim_target,initial,sizeof initial);
-        memcpy(d->feedback.arm[0].deg,initial,sizeof initial);
-        b->sim_gripper=25;
-    }
 }
 void can_bus_scan(struct can_bus *b)
 {
     if (b->simulated) return;
+#ifdef _WIN32
+    windows_scan(b);
+#else
     for (unsigned i=0;i<CANBUS_MAX;++i) b->devices[i].present=false;
     struct if_nameindex *names=if_nameindex(); if (!names) return;
     for (struct if_nameindex *p=names;p->if_index;++p) {
@@ -148,12 +176,116 @@ void can_bus_scan(struct can_bus *b)
     if_freenameindex(names);
     for (unsigned i=0;i<CANBUS_MAX;++i) if (b->devices[i].id[0]&&!b->devices[i].present)
         lost(&b->devices[i],"USB adapter missing");
+#endif
+}
+void can_bus_invalidate_configuration(struct can_device *d,double now)
+{
+    struct piper_feedback *feedback=&d->feedback;
+    d->configuration_since=now;
+    feedback->firmware_len=0; feedback->version[0]=0;
+    feedback->hardware[0]=0; feedback->build[0]=0;
+    memset(feedback->limit,0,sizeof feedback->limit);
+    memset(feedback->acceleration,0,sizeof feedback->acceleration);
+    feedback->gripper_config_seen=false;
+}
+static void update_stationary(struct can_device *d,double now)
+{
+    const struct piper_sample *s=&d->feedback.arm[0];
+    if (!piper_fresh(s,now)) {
+        d->stationary_since=d->pose_stationary_since=0; d->stationary_count=0; d->stationary_sample_at=0;
+        return;
+    }
+    double sample_at=s->joint_at[0];
+    for (unsigned i=0;i<6;++i) {
+        if (!isfinite(s->deg[i])) { d->stationary_since=d->pose_stationary_since=0; d->stationary_count=0; return; }
+        sample_at=fmin(sample_at,s->joint_at[i]);
+    }
+    bool reset=d->stationary_generation!=d->generation||!d->stationary_count||
+        now-d->frame_at>PIPER_FRESH_SECONDS;
+    /* A repeated status/motor packet is not a new six-joint observation. */
+    if (!reset&&(sample_at<=d->stationary_sample_at||now-d->frame_at<.04)) return;
+    if (reset) {
+        d->stationary_count=d->stationary_next=0; d->stationary_generation=d->generation;
+        d->stationary_since=d->pose_stationary_since=0; d->stationary_moving=d->strict_stationary_moving=true;
+        memset(d->stationary_encoder_seen,0,sizeof d->stationary_encoder_seen);
+        memcpy(d->last_angles,s->deg,sizeof d->last_angles);
+    }
+    d->stationary_sample_at=sample_at; d->frame_at=now;
+    memcpy(d->stationary_samples[d->stationary_next],s->deg,sizeof s->deg);
+    for (unsigned i=0;i<6;++i) {
+        const struct piper_motor *m=&d->feedback.motor[i];
+        d->stationary_velocities[d->stationary_next][i]=m->high_seen&&piper_recent(m->high_at,now)?m->velocity:0;
+        d->stationary_encoders[d->stationary_next][i]=m->high_seen&&piper_recent(m->high_at,now)?m->position_raw:NAN;
+    }
+    d->stationary_next=(d->stationary_next+1)%CANBUS_STATIONARY_SAMPLES;
+    if (d->stationary_count<CANBUS_STATIONARY_SAMPLES) ++d->stationary_count;
+    bool quiet=d->stationary_count==CANBUS_STATIONARY_SAMPLES, moving=false, velocity_quiet=true, velocity_moving=false;
+    double filtered[6]={0}, filtered_encoder[6]={0}; unsigned encoder_count[6]={0};
+    unsigned first=d->stationary_count==CANBUS_STATIONARY_SAMPLES?d->stationary_next:0;
+    for (unsigned i=0;i<6;++i) {
+        double minimum=s->deg[i],maximum=s->deg[i],early=0,late=0;
+        double encoder_min=INFINITY,encoder_max=-INFINITY,encoder_early=0,encoder_late=0;
+        unsigned moving_velocities=0; bool invalid_velocity=false;
+        for (unsigned n=0;n<d->stationary_count;++n) {
+            double position=d->stationary_samples[(first+n)%CANBUS_STATIONARY_SAMPLES][i];
+            filtered[i]+=position/d->stationary_count;
+            minimum=fmin(minimum,position); maximum=fmax(maximum,position);
+            if (n<2) early+=position/2;
+            if (n+2>=d->stationary_count) late+=position/2;
+            double velocity=d->stationary_velocities[(first+n)%CANBUS_STATIONARY_SAMPLES][i];
+            if (!isfinite(velocity)) invalid_velocity=true;
+            else if (fabs(velocity)>.01) ++moving_velocities;
+            double encoder=d->stationary_encoders[(first+n)%CANBUS_STATIONARY_SAMPLES][i];
+            if (isfinite(encoder)) {
+                ++encoder_count[i]; filtered_encoder[i]+=encoder;
+                encoder_min=fmin(encoder_min,encoder); encoder_max=fmax(encoder_max,encoder);
+                if (n<2) encoder_early+=encoder/2;
+                if (n+2>=d->stationary_count) encoder_late+=encoder/2;
+            }
+        }
+        /* Entry is stricter than exit. A +/-0.01-degree encoder alternation
+           does not move the controls, but a real 0.01-degree/50 ms ramp fails
+           the window trend and keeps the stationary timer unqualified. */
+        if (maximum-minimum>.05||fabs(late-early)>.025) quiet=false;
+        if (fabs(filtered[i]-d->last_angles[i])>.04||maximum-minimum>.08||fabs(s->deg[i]-d->last_angles[i])>.1) moving=true;
+        /* Corroborate the pose independently: raw encoder positions have a
+           1-milliradian quantum. One-count back-and-forth holding noise is not
+           ongoing motion, but a cumulative encoder displacement is. */
+        if (encoder_count[i]) filtered_encoder[i]/=encoder_count[i];
+        if (!d->simulated) {
+            if (encoder_count[i]!=d->stationary_count||encoder_max-encoder_min>2||fabs(encoder_late-encoder_early)>1) quiet=false;
+            if (encoder_max-encoder_min>3||(d->stationary_encoder_seen[i]&&fabs(filtered_encoder[i]-d->stationary_encoder_anchor[i])>1.5)) moving=true;
+        }
+        /* Ordinary position-control readiness follows the corroborated pose,
+           not the quantized driver's derivative spikes. Preserve a separate
+           stricter dwell for power/reset/teach/arrival admission. */
+        if (moving_velocities) velocity_quiet=false;
+        if (invalid_velocity||moving_velocities>CANBUS_STATIONARY_SAMPLES/2) velocity_moving=true;
+        if (invalid_velocity) { quiet=false; moving=true; }
+    }
+    if (d->stationary_moving||moving) {
+        d->stationary_since=0; d->strict_stationary_moving=true;
+        if (!quiet) {
+            d->pose_stationary_since=0; d->stationary_moving=true;
+            memcpy(d->last_angles,filtered,sizeof filtered);
+        } else {
+            /* Start a new dwell at the first verified quiet window. Never
+               rebase this anchor while quiet: slow drift must accumulate. */
+            d->pose_stationary_since=now; d->stationary_moving=false;
+            memcpy(d->last_angles,filtered,sizeof filtered);
+        }
+        for (unsigned i=0;i<6;++i) if (encoder_count[i]==d->stationary_count) {
+            d->stationary_encoder_anchor[i]=filtered_encoder[i]; d->stationary_encoder_seen[i]=true;
+        }
+    }
+    if (!d->pose_stationary_since||velocity_moving) { d->stationary_since=0; d->strict_stationary_moving=true; }
+    else if (d->strict_stationary_moving&&velocity_quiet) { d->stationary_since=now; d->strict_stationary_moving=false; }
 }
 void can_bus_ingest(struct can_device *d,const struct can_frame *f,bool local,double now)
 {
     if (f->can_id&CAN_ERR_FLAG) {
         ++d->errors;
-        if (f->can_id&CAN_ERR_BUSOFF) lost(d,"CAN bus-off; inspect connection before reopening");
+        if (f->can_id&0x40) lost(d,"CAN bus-off; inspect connection before reopening");
         return;
     }
     if (local) {
@@ -163,38 +295,40 @@ void can_bus_ingest(struct can_device *d,const struct can_frame *f,bool local,do
         }
         return;
     }
+    /* An arm power cycle/CAN interruption may leave USB open. Invalidate
+       static settings when its status stream resumes after a gap, before
+       the new live feedback could make the previous settings usable. */
+    if (f->can_id==0x2a1 && f->len==8 && d->feedback.arm[0].status_seen &&
+        !piper_recent(d->feedback.arm[0].status_at,now))
+        can_bus_invalidate_configuration(d,now);
     ++d->rx; d->last_rx=now;
     piper_decode(&d->feedback,f->can_id,f->data,f->len,now);
-    if (piper_fresh(&d->feedback.arm[0],now) && now-d->frame_at>=.04) {
-        bool moved=!d->stationary_since;
-        for (unsigned i=0;i<6;++i) if (fabs(d->last_angles[i]-d->feedback.arm[0].deg[i])>.03) moved=true;
-        /* Keep a stationary anchor: small changes must accumulate rather than
-           treating a slow-moving joint as stationary on every frame. */
-        if (moved) { d->stationary_since=now; memcpy(d->last_angles,d->feedback.arm[0].deg,sizeof d->last_angles); }
-        d->frame_at=now;
-    }
+    update_stationary(d,now);
 }
-static void simulation(struct can_bus *b,double now)
+static void simulation(struct can_bus *b,struct can_device *d,double now)
 {
-    struct can_device *d=&b->devices[0]; struct piper_feedback *f=&d->feedback;
-    double dt=b->sim_last?fmin(now-b->sim_last,.05):.02; b->sim_last=now;
+    struct piper_feedback *f=&d->feedback;
+    double *targets=simulation_targets(b,d), *last=simulation_last(b,d);
+    unsigned *powered=simulation_enabled(b,d);
+    double dt=(*last)?fmin(now-(*last),.05):.02; (*last)=now;
     struct can_frame frames[3]; double angles[6]; bool reached=true;
     for (unsigned i=0;i<6;++i) {
-        double current=f->arm[0].deg[i],error=b->sim_target[i]-current;
-        angles[i]=current+((b->sim_enabled&(1u<<i))?copysign(fmin(fabs(error),8*dt),error):0);
-        if (fabs(b->sim_target[i]-angles[i])>.02) reached=false;
+        double current=f->arm[0].deg[i],error=targets[i]-current;
+        bool teaching=f->arm[0].control==2||f->arm[0].teach==1||f->arm[0].teach==3||f->arm[0].teach==4||f->arm[0].teach==5||f->arm[0].teach==7;
+        angles[i]=current+(((*powered)&(1u<<i))&&f->arm[0].control==1&&!teaching?copysign(fmin(fabs(error),8*dt),error):0);
+        if (fabs(targets[i]-angles[i])>.02) reached=false;
     }
     piper_targets(angles,frames);
     for (unsigned i=0;i<3;++i) { frames[i].can_id=0x2a5+i; can_bus_ingest(d,&frames[i],false,now); }
-    struct can_frame status={.can_id=0x2a1,.len=8,.data={f->arm[0].control,f->arm[0].arm_status,1,0,reached?0:1}};
+    struct can_frame status={.can_id=0x2a1,.len=8,.data={f->arm[0].control,f->arm[0].arm_status,1,f->arm[0].teach,reached?0:1}};
     can_bus_ingest(d,&status,false,now);
     for (unsigned i=0;i<6;++i) {
-        struct can_frame motor={.can_id=0x261+i,.len=8,.data={0,240,0,28,27,(b->sim_enabled&(1u<<i))?0x40:0}};
+        struct can_frame motor={.can_id=0x261+i,.len=8,.data={0,240,0,28,27,((*powered)&(1u<<i))?0x40:0}};
         can_bus_ingest(d,&motor,false,now);
         struct can_frame high={.can_id=0x251+i,.len=8,.data={0,0,0,120}};
         can_bus_ingest(d,&high,false,now);
     }
-    double delta=b->sim_gripper-f->gripper_mm;
+    double delta=(*simulation_gripper(b,d))-f->gripper_mm;
     struct can_frame gripper;
     /* Feedback can be slightly negative at a mechanical stop; preserve it. */
     uint32_t value=(uint32_t)(int32_t)llround((f->gripper_mm+copysign(fmin(fabs(delta),5*dt),delta))*1000);
@@ -203,7 +337,13 @@ static void simulation(struct can_bus *b,double now)
 }
 void can_bus_receive(struct can_bus *b,double now)
 {
-    if (b->simulated) { simulation(b,now); return; }
+    if (b->simulated) {
+        for (unsigned i=0;i<CANBUS_MAX;++i) if (b->devices[i].simulated) simulation(b,&b->devices[i],now);
+        return;
+    }
+#ifdef _WIN32
+    windows_receive(b,now);
+#else
     for (unsigned i=0;i<CANBUS_MAX;++i) {
         struct can_device *d=&b->devices[i]; if (d->fd<0) continue;
         for (unsigned budget=0;budget<512;++budget) {
@@ -216,11 +356,18 @@ void can_bus_receive(struct can_bus *b,double now)
             if (d->fd<0) break;
         }
     }
+#endif
 }
-bool can_bus_send(struct can_bus *b,struct can_device *d,unsigned generation,const struct can_frame *frames,size_t count)
+void can_bus_record_tx_failure(struct can_device *d,unsigned generation,unsigned frame_index,unsigned batch_count,unsigned can_id,unsigned os_error,int transport_error)
 {
-    if (!d||!d->present||!d->up||d->generation!=generation) return false;
-    if (!b->simulated && (d->fd<0||if_nametoindex(d->name)!=d->index)) return false;
+    d->tx_failure=(struct can_tx_failure){.seen=true,.at=piper_now(),.generation=generation,.frame_index=frame_index,
+        .batch_count=batch_count,.can_id=can_id,.os_error=os_error,.transport_error=transport_error,
+        .rx=d->rx,.tx=d->tx,.local=d->local,.errors=d->errors};
+    snprintf(d->tx_failure.problem,sizeof d->tx_failure.problem,"%s",d->problem);
+}
+bool can_bus_batch_allowed(const struct can_device *d,const struct can_frame *frames,size_t count)
+{
+    if (!d||!frames||count==0) return false;
     /* Validate the complete batch before sending any part of it. No arbitrary
        CAN writer, parameter writes, MIT gains or calibration writes exist. */
     for (size_t i=0;i<count;++i) {
@@ -229,7 +376,20 @@ bool can_bus_send(struct can_bus *b,struct can_device *d,unsigned generation,con
         bool allowed=f->can_id>=0x155&&f->can_id<=0x157;
         unsigned tail=0;
         if (f->can_id==0x150) { allowed=f->data[0]==1||f->data[0]==2; tail=1; }
-        if (f->can_id==0x151) { allowed=f->data[0]==1&&f->data[1]==1&&f->data[2]>=1&&f->data[2]<=10; tail=3; }
+        if (f->can_id==0x151) {
+            /* Ordinary PV/standby behavior is unchanged. The reviewed JS flag
+               is admitted only as the head of a complete ordered position
+               transaction; never as a loose mode/gain/impedance write. */
+            allowed=(f->data[0]==1&&f->data[1]==1&&f->data[2]>=1&&f->data[2]<=100)||
+                (f->data[0]==0&&f->data[1]==1&&f->data[2]==1);
+            tail=3;
+            if (f->data[3]==0xAD) {
+                allowed=f->data[0]==1&&f->data[1]==1&&f->data[2]>=1&&f->data[2]<=100&&
+                    piper_streamed_position_supported(&d->feedback)&&i==0&&count==4&&
+                    frames[1].can_id==0x155&&frames[2].can_id==0x156&&frames[3].can_id==0x157;
+                tail=4;
+            }
+        }
         if (f->can_id==0x471) { allowed=f->data[0]>=1&&f->data[0]<=6&&(f->data[1]==1||f->data[1]==2); tail=2; }
         if (f->can_id==0x472) { allowed=f->data[0]>=1&&f->data[0]<=6&&(f->data[1]==1||f->data[1]==2); tail=2; }
         if (f->can_id==0x4af) { allowed=f->data[0]==1; tail=1; }
@@ -242,36 +402,55 @@ bool can_bus_send(struct can_bus *b,struct can_device *d,unsigned generation,con
             unsigned effort=((unsigned)f->data[4]<<8)|f->data[5];
             bool known=d->feedback.gripper_config_seen&&(d->feedback.gripper_max_mm==70||d->feedback.gripper_max_mm==100);
             double age=piper_now()-d->feedback.gripper_config_at;
-            bool configured=known&&age>=0&&age<=60&&width<=d->feedback.gripper_max_mm*1000u;
+            bool configured=known&&age>=0&&d->feedback.gripper_config_at>=d->configuration_since&&width<=d->feedback.gripper_max_mm*1000u;
             /* A zero-target disable remains available even without a configuration reply. */
             allowed=(configured||(f->data[6]==0&&width==0))&&effort>=20&&effort<=500&&f->data[6]<=1&&f->data[7]==0;
         }
         if (tail) for (unsigned j=tail;j<8;++j) if (f->data[j]) allowed=false;
         if (!allowed) return false;
     }
+    return true;
+}
+bool can_bus_send(struct can_bus *b,struct can_device *d,unsigned generation,const struct can_frame *frames,size_t count)
+{
+    if (!d||!d->present||!d->up||d->generation!=generation) return false;
+    if (!b->simulated && d->fd<0) return false;
+#ifndef _WIN32
+    if (!b->simulated && if_nametoindex(d->name)!=d->index) return false;
+#endif
+    if (!can_bus_batch_allowed(d,frames,count)) return false;
     for (size_t i=0;i<count;++i) {
         const struct can_frame *f=&frames[i];
         if (f->len!=8 || f->can_id>0x7ff) return false;
         if (!b->simulated) {
-            if (send(d->fd,f,sizeof *f,MSG_DONTWAIT)!=(ssize_t)sizeof *f) {
-                snprintf(d->problem,sizeof d->problem,"CAN send failed: %s",strerror(errno)); return false;
+#ifdef _WIN32
+            unsigned os_error=0; int transport_error=0;
+            if (!windows_send(b,d,f,&os_error,&transport_error)) {
+                can_bus_record_tx_failure(d,generation,(unsigned)i+1,(unsigned)count,f->can_id,os_error,transport_error); return false;
             }
+#else
+            if (send(d->fd,f,sizeof *f,MSG_DONTWAIT)!=(ssize_t)sizeof *f) {
+                int error=errno;
+                snprintf(d->problem,sizeof d->problem,"CAN send failed: %s",strerror(error));
+                can_bus_record_tx_failure(d,generation,(unsigned)i+1,(unsigned)count,f->can_id,(unsigned)error,0); return false;
+            }
+#endif
         } else {
             if (f->can_id>=0x155&&f->can_id<=0x157) {
                 struct piper_feedback decoded={0}; struct can_frame copy=*f;
                 copy.can_id=0x2a5+f->can_id-0x155; piper_decode(&decoded,copy.can_id,copy.data,8,piper_now());
-                unsigned j=(f->can_id-0x155)*2; b->sim_target[j]=decoded.arm[0].deg[j]; b->sim_target[j+1]=decoded.arm[0].deg[j+1];
+                unsigned j=(f->can_id-0x155)*2; simulation_targets(b,d)[j]=decoded.arm[0].deg[j]; simulation_targets(b,d)[j+1]=decoded.arm[0].deg[j+1];
             } else if (f->can_id==0x151) d->feedback.arm[0].control=f->data[0];
             else if (f->can_id==0x471 && f->data[0]>=1 && f->data[0]<=6) {
                 unsigned mask=1u<<(f->data[0]-1);
-                if (f->data[1]==2) b->sim_enabled|=mask; else b->sim_enabled&=~mask;
+                if (f->data[1]==2) (*simulation_enabled(b,d))|=mask; else (*simulation_enabled(b,d))&=~mask;
             } else if (f->can_id==0x150) {
-                memcpy(b->sim_target,d->feedback.arm[0].deg,sizeof b->sim_target);
-                if (f->data[0]==2) { b->sim_enabled=0; d->feedback.arm[0].arm_status=0; d->feedback.arm[0].control=0; d->feedback.arm[0].teach=0; }
+                memcpy(simulation_targets(b,d),d->feedback.arm[0].deg,6*sizeof(double));
+                if (f->data[0]==2) { (*simulation_enabled(b,d))=0; d->feedback.arm[0].arm_status=0; d->feedback.arm[0].control=0; d->feedback.arm[0].teach=0; }
                 else d->feedback.arm[0].arm_status=1;
             } else if (f->can_id==0x159) {
                 struct piper_feedback decoded={0}; piper_decode(&decoded,0x2a8,f->data,8,piper_now());
-                b->sim_gripper=decoded.gripper_mm; d->feedback.gripper_enabled=f->data[6]==1;
+                (*simulation_gripper(b,d))=decoded.gripper_mm; d->feedback.gripper_enabled=f->data[6]==1;
             } else if (f->can_id==0x4af) {
                 const char raw[]="H-V1.2-1\0ARM_MC\0S-V1.8-2251014\0";
                 for (size_t off=0;off<sizeof raw;off+=8) piper_decode(&d->feedback,0x4af,(const uint8_t *)raw+off,fmin(8,sizeof raw-off),piper_now());
@@ -280,13 +459,18 @@ bool can_bus_send(struct can_bus *b,struct can_device *d,unsigned generation,con
                 piper_decode(&d->feedback,0x47e,config,8,piper_now());
             } else if (f->can_id==0x472 && f->data[0]>=1 && f->data[0]<=6) {
                 if (f->data[1]==2) {
-                    const uint8_t acc[8]={f->data[0],0x13,0x88};
+                    const uint8_t acc[8]={f->data[0],0x01,0xf4}; /* raw500 reports5 rad/s^2 at .01/unit. */
                     piper_decode(&d->feedback,0x47c,acc,8,piper_now());
                     ++d->tx; continue;
                 }
                 const double limits[6][2]={{-150,150},{0,180},{-170,0},{-100,100},{-70,70},{-180,180}};
                 unsigned j=f->data[0]-1;
-                d->feedback.limit[j]=(struct piper_limit){.seen=true,.min=limits[j][0],.max=limits[j][1],.speed=.3,.at=piper_now()};
+                /* The simulated 1.8-2 firmware uses the modern .01-rad/s
+                   0x473 unit. Its intentional .3-rad/s limit is raw 30. */
+                uint16_t maximum=(uint16_t)(int16_t)llround(limits[j][1]*10),minimum=(uint16_t)(int16_t)llround(limits[j][0]*10);
+                const uint8_t reply[8]={f->data[0],(uint8_t)(maximum>>8),(uint8_t)maximum,
+                    (uint8_t)(minimum>>8),(uint8_t)minimum,0,30,0};
+                piper_decode(&d->feedback,0x473,reply,8,piper_now());
             }
         }
         ++d->tx;
@@ -299,12 +483,33 @@ struct can_device *can_bus_find(struct can_bus *b,const char *id)
     return NULL;
 }
 void can_bus_close(struct can_bus *b) { for (unsigned i=0;i<CANBUS_MAX;++i) if (b->devices[i].fd>=0) lost(&b->devices[i],"Disconnected"); }
-void can_bus_reconnect(struct can_bus *b)
+static void reconnect_device_with_scan(struct can_bus *b,struct can_device *d,void (*scan)(struct can_bus *))
 {
+    if (d) {
+        bool owned=false;
+        for (unsigned i=0;i<CANBUS_MAX;++i) if (d==&b->devices[i]) { owned=true; break; }
+        if (!owned) return;
+    }
     if (b->simulated) {
-        struct can_device *d=&b->devices[0]; double angles[6];
+        if (!d||!d->simulated) return;
+        double angles[6];
         memcpy(angles,d->feedback.arm[0].deg,sizeof angles);
         memset(&d->feedback,0,sizeof d->feedback); memcpy(d->feedback.arm[0].deg,angles,sizeof angles);
         d->generation=++b->sequence; d->stationary_since=0;
-    } else { can_bus_close(b); can_bus_scan(b); }
+    } else {
+        /* Discovery skips existing live handles. Closing just the failed
+           identity prevents a silent peer from repeatedly invalidating every
+           other arm's firmware, limit cache, measured pose and permissions. */
+        if (d) lost(d,"Reconnecting this CAN adapter");
+        scan(b);
+    }
+}
+void can_bus_reconnect_device(struct can_bus *b,struct can_device *d)
+{
+    reconnect_device_with_scan(b,d,can_bus_scan);
+}
+void can_bus_reconnect(struct can_bus *b)
+{
+    if (b->simulated) can_bus_reconnect_device(b,&b->devices[0]);
+    else { can_bus_close(b); can_bus_scan(b); }
 }

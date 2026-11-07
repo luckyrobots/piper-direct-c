@@ -53,12 +53,22 @@ int main(void)
     const uint8_t negative_current[8]={0,0,0xff,0xff,0,0,0,0};
     assert(piper_decode(&state,0x251,negative_current,8,40));
     assert(state.motor[0].current==-.001);
+    const uint8_t negative_position[8]={0,0,0,0,0xff,0xff,0xfc,0x18};
+    assert(piper_decode(&state,0x251,negative_position,8,40));
+    assert(state.motor[0].position_raw==-1000);
     const uint8_t limits[8]={1,0x05,0xdc,0xfa,0x24,0x01,0x2c,0};
     assert(piper_decode(&state,0x473,limits,8,40));
-    assert(state.limit[0].min==-150 && state.limit[0].max==150 && state.limit[0].speed==.3);
-    const uint8_t acceleration[8]={6,0x13,0x88};
+    assert(state.limit[0].min==-150 && state.limit[0].max==150 && state.limit[0].speed_raw==300);
+    assert(!state.limit[0].speed_unit_known && isnan(state.limit[0].speed));
+    const uint8_t acceleration[8]={6,0x01,0xf4}; /* raw500 =5 rad/s^2, unsigned big-endian */
     assert(piper_decode(&state,0x47c,acceleration,8,40));
     assert(state.acceleration[5].seen && state.acceleration[5].max==5 && state.acceleration[5].at==40);
+    const uint8_t maximum_acceleration[8]={1,0xff,0xff};
+    assert(piper_decode(&state,0x47c,maximum_acceleration,8,40));
+    assert(fabs(state.acceleration[0].max-655.35)<1e-10); /* Decode the report, never clamp it to a permitted motion cap. */
+    const uint8_t zero_acceleration[8]={2,0,0};
+    assert(piper_decode(&state,0x47c,zero_acceleration,8,40));
+    assert(state.acceleration[1].seen && state.acceleration[1].max==0);
     uint8_t invalid_acceleration[8]={7,0xff,0xff};
     assert(!piper_decode(&state,0x47c,invalid_acceleration,8,41));
     assert(!piper_decode(&state,0x47c,acceleration,3,41));
@@ -88,6 +98,19 @@ int main(void)
     assert(!piper_supported(&state)); /* unterminated version cannot grant control */
     const uint8_t terminator=0; piper_decode(&state,0x4af,&terminator,1,50);
     assert(piper_supported(&state) && !strcmp(state.version,"S-V1.8-2") && !strcmp(state.build,"2025-10-14"));
+    assert(state.limit[0].speed==3 && state.limit[0].speed_resolution_rad_s==.01 && state.limit[0].at==40);
+    strcpy(state.version,"S-V1.9-0"); assert(piper_supported(&state));
+    strcpy(state.version,"S-V1.9-1"); assert(piper_supported(&state));
+    strcpy(state.version,"S-V1.9-2"); assert(!piper_supported(&state));
+    strcpy(state.version,"S-V2.0-0"); assert(!piper_supported(&state));
+    strcpy(state.version,"S-V1.9-0"); strcpy(state.hardware,"H-V2.0-0"); assert(!piper_supported(&state));
+    struct piper_feedback corrupt={0};
+    const char malformed[]="H-V1.2-1\0S-V112";
+    for (size_t i=0;i<sizeof malformed;i+=8) {
+        size_t n=sizeof malformed-i; if(n>8)n=8;
+        piper_decode(&corrupt,0x4af,(const uint8_t *)malformed+i,n,60);
+    }
+    assert(!*corrupt.version&&!piper_supported(&corrupt));
     puts("Protocol fixtures passed: signs, units, status, freshness, bad frames, separate addresses.");
     return 0;
 }

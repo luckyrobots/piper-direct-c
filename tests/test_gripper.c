@@ -45,7 +45,8 @@ int main(void)
     act(&c,95,false,400);
     struct can_frame frame; assert(piper_gripper(95,.1,true,&frame));
     assert(!can_bus_send(&c.bus,d,d->generation,&frame,1)); /* Independent CAN guard. */
-    d->feedback.gripper_max_mm=100; d->feedback.gripper_config_at=now-61;
+    d->configuration_since=now-.1;
+    d->feedback.gripper_max_mm=100; d->feedback.gripper_config_at=now-.2;
     act(&c,95,false,409); assert(!can_bus_send(&c.bus,d,d->generation,&frame,1));
     d->feedback.gripper_config_at=now;
     act(&c,101,false,400);

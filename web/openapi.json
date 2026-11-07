@@ -3,7 +3,7 @@
   "info": {
     "title": "PiPer Direct C position-control API",
     "version": "1.0.0",
-    "description": "Loopback-only C/SocketCAN controller. No Python or robot SDK. Read /api/state for the per-process token, stable selected device_id and current connection generation. Every POST requires X-Piper-Token and application/json. Accepted actions are asynchronous: poll state and renew the matching owner/request_id lease every 200 ms. Lease expires at 800 ms. Commands never resume automatically after reconnect or restart. A single-joint command sends a six-angle MoveJ pose, holding other joints at their initial measured positions. This API does not bypass the onboard MCU or expose raw torque/MIT/calibration/firmware writes. State includes controller teach_state, fault masks, persisted last_fault and per-joint max_acceleration_rad_s2/acceleration_fresh/acceleration_age_s. New motion and enable require all six acceleration readings within 60 seconds, finite, greater than zero and at most 5 rad/s\u00b2. Queries are read-only and preserve unresolved recovery locks."
+    "description": "Loopback-only C/SocketCAN controller. No Python or robot SDK. Read /api/state for the per-process token, stable selected device_id and current connection generation. Every POST requires X-Piper-Token and application/json. Accepted actions are asynchronous: poll state and renew the matching owner/request_id lease every 200 ms. Lease expires at 800 ms. Commands never resume automatically after reconnect or restart. A single-joint command sends a six-angle MoveJ pose, holding other joints at their initial measured positions. This API does not bypass the onboard MCU or expose raw torque/MIT/calibration/firmware writes. State includes controller teach_state, fault masks, persisted last_fault and per-joint max_acceleration_rad_s2/acceleration_fresh/acceleration_age_s. New motion and enable require valid angle, speed and acceleration limits read on this connection. Static configuration remains valid while the connection is uninterrupted; there is no periodic refresh or 60-second expiry. USB/CAN reconnection, a robot status-stream gap or an explicit information query invalidates the cache. Live position, motor and fault feedback still use the normal short freshness checks. Acceleration limits must be finite, greater than zero and at most 5 rad/s\u00b2. Queries are read-only and preserve unresolved recovery locks. The limits_fresh, acceleration_fresh and gripper configuration_fresh fields mean valid for this connection; their age fields report elapsed time without imposing an expiry. Missing optional standard CAN gripper settings do not block the arm or Pika."
   },
   "servers": [
     {
@@ -278,13 +278,17 @@
     "/api/stop": {
       "post": {
         "summary": "Best-effort software stop on selected arm; persist recovery requirement",
-        "description": "Does not require motion health checks or matching owner. Fast stop can allow damped descent; it is not a power cut or guaranteed hold. Active gripper motion also gets a gripper disable request. Disconnected hardware cannot receive the stop. Inspect physical state before recovery.",
+        "description": "Does not require motion health checks or matching owner. An optional generation must match the selected adapter connection; malformed or stale generations are rejected before sending STOP. Manual callers may omit generation. Fast stop can allow damped descent; it is not a power cut or guaranteed hold. Active gripper motion also gets a gripper disable request. Disconnected hardware cannot receive the stop. Inspect physical state before recovery.",
         "requestBody": {
           "required": true,
           "content": {
             "application/json": {
               "schema": {
-                "type": "object"
+                "type": "object",
+                "properties": {
+                  "device_id": { "type": "string" },
+                  "generation": { "type": "integer", "minimum": 1, "maximum": 4294967295 }
+                }
               }
             }
           }
@@ -292,6 +296,9 @@
         "responses": {
           "200": {
             "description": "Stop attempted; read message and physical state"
+          },
+          "409": {
+            "description": "Adapter identity, optional generation or automatic-stop action no longer matches"
           }
         }
       }
@@ -351,6 +358,7 @@
             "properties": {
               "action": {
                 "type": "string",
+                "description": "teach-return explicitly returns completed physical teaching to CAN. Qualified H-V1.2-1 with S-V1.8-5 through S-V1.8-9 or S-V1.9-0/1 firmware uses a frozen measured-pose hold: confirm button_off, same_pose_confirmed, supported and clear. Fresh healthy joint/motor encoders, current configuration, all six motors already enabled and a stationary pose are required. Three measured position packets seed the hold, then a fresh receive observation precedes CAN MoveJ plus the same six measured angles at 1% speed; completion requires fresh same-pose status, joint and motor acknowledgement. Other supported firmware requires zero_pose_confirmed, all joints within 1 degree of zero and within limits, then acknowledged standby/CAN mode packets. recover-at-pose uses only the qualified measured-pose path to clear a saved software obstruction after the backend observes a new physical hand-guiding-to-off cycle on this device/generation within 120 seconds. Reset-pending, real fault/transport evidence, stale feedback, out-of-range pose or missing cycle reject without transmission. The incident stays latched until the hold is acknowledged and saved. Neither action resets, changes motor power, homes or replays an old target. Both return 202/request_id and require the normal control heartbeat during the bounded handoff. Connection/lease/mode changes cancel; unexpected movement requests protective STOP. device.teaching exposes can_return/return_reason and can_recover_at_pose/recover_at_pose_reason.",
                 "enum": [
                   "enable",
                   "disable",
@@ -364,7 +372,9 @@
                   "verify-reset",
                   "align",
                   "verify-disabled",
-                  "cycle"
+                  "cycle",
+                  "teach-return",
+                  "recover-at-pose"
                 ]
               },
               "owner": {
@@ -387,6 +397,18 @@
               "reset_completed": {
                 "type": "boolean",
                 "description": "Operator confirms manual reset/power-cycle completed"
+              },
+              "button_off": {
+                "type": "boolean",
+                "description": "Required true for teach-return/recover-at-pose: operator confirms the physical teaching button light is off"
+              },
+              "zero_pose_confirmed": {
+                "type": "boolean",
+                "description": "Required true for legacy teach-return only: operator confirms the physical arm is at its manufacturer's zero pose"
+              },
+              "same_pose_confirmed": {
+                "type": "boolean",
+                "description": "Required true for qualified measured-pose teach-return and recover-at-pose: hold the measured current pose stationary with a clear workspace; no previous destination will resume"
               },
               "joint": {
                 "type": "integer",
@@ -441,6 +463,12 @@
               "synchronized": {
                 "type": "boolean",
                 "default": false
+              },
+              "speed_percent": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 100,
+                "description": "Percentage of the slowest fresh reported joint speed limit. Mutually exclusive with legacy speed_deg_s. Zero blocks new joint moves; it does not stop an active move. Alignment and scripted cycle retain explicit rates."
               }
             }
           }

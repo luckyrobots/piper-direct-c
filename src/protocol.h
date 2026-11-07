@@ -4,9 +4,23 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#ifdef _WIN32
+struct can_frame { uint32_t can_id; uint8_t len, pad[3]; uint8_t data[8]; };
+#define CAN_ERR_FLAG 0x20000000u
+#define CAN_EFF_FLAG 0x80000000u
+#define CAN_RTR_FLAG 0x40000000u
+#else
 #include <linux/can.h>
+#endif
 
 #define PIPER_FRESH_SECONDS 0.35
+
+/* Physical JS qualification failed on the supported arm. Shipping builds
+   cannot enable it through JSON, preferences or an environment setting.
+   Only explicitly compiled offline/laboratory fixtures may opt in. */
+#ifndef PIPER_ENABLE_EXPERIMENTAL_STREAMED_POSITION
+#define PIPER_ENABLE_EXPERIMENTAL_STREAMED_POSITION 0
+#endif
 
 struct piper_sample {
     double deg[6], joint_at[6], status_at;
@@ -20,8 +34,14 @@ struct piper_motor {
     bool seen, high_seen, enabled;
     uint8_t fault;
     double at, high_at, voltage, temperature, current, velocity;
+    int32_t position_raw;
 };
-struct piper_limit { bool seen; double min, max, speed, at; };
+struct piper_limit {
+    bool seen, speed_raw_seen, speed_unit_known;
+    uint16_t speed_raw;
+    double min, max, speed, at, speed_resolution_rad_s;
+    char speed_firmware[40];
+};
 struct piper_acceleration { bool seen; double max, at; };
 struct piper_feedback {
     struct piper_sample arm[3];
@@ -44,10 +64,15 @@ bool piper_fresh(const struct piper_sample *state, double now);
 bool piper_recent(double at, double now);
 bool piper_targets(const double degrees[6], struct can_frame frames[3]);
 struct can_frame piper_mode(unsigned speed_percent);
+/* JS position-streaming uses the same 0x155-157 position packets, not the
+   separate 0x15A-15F single-motor impedance protocol. */
+struct can_frame piper_streamed_position_mode(unsigned speed_percent);
 struct can_frame piper_power(unsigned joint, bool enabled);
 struct can_frame piper_stop_frame(void);
 struct can_frame piper_reset_frame(void);
 bool piper_gripper(double mm, double effort_nm, bool enabled, struct can_frame *frame);
 bool piper_supported(const struct piper_feedback *state);
+bool piper_seamless_teach_supported(const struct piper_feedback *state);
+bool piper_streamed_position_supported(const struct piper_feedback *state);
 
 #endif

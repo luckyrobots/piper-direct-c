@@ -1,0 +1,10 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net9.0</TargetFramework>
+    <AssemblyName>Intel.RealSense</AssemblyName>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
+    <NoWarn>SYSLIB0003;SYSLIB0004</NoWarn>
+  </PropertyGroup>
+  <ItemGroup><Compile Include="../../vendor/realsense/Intel.RealSense/**/*.cs" /></ItemGroup>
+</Project>

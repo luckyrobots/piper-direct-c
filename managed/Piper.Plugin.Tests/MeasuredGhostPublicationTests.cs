@@ -1,0 +1,143 @@
+using System.Diagnostics;
+using System.Reflection;
+using System.Text.Json;
+using System.Text.Json.Nodes;
+using LuckyEngine.PluginSdk;
+using LuckyRobots.Piper.Plugin;
+
+internal static class MeasuredGhostPublicationTests
+{
+    public static async Task Run(Action<bool, string> check)
+    {
+        using (var fixture = new Fixture())
+        {
+            var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var released = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            fixture.AfterRead = async count =>
+            {
+                if (count != 1) return;
+                entered.TrySetResult();
+                await released.Task;
+            };
+            var publishing = fixture.Publish();
+            await entered.Task.WaitAsync(TimeSpan.FromSeconds(1));
+            fixture.Fresh(first: 11, second: 22);
+            released.TrySetResult();
+            await publishing;
+            check(fixture.Ghosts.Select(request => request["ghostId"]!.GetValue<string>()).SequenceEqual(new[] { "a", "b" }),
+                "Independent profiles sharing one physics root did not both publish measured ghosts");
+            check(Math.Abs(fixture.Ghosts[0]["joints"]!["joint1"]!.GetValue<double>() - 11 * Math.PI / 180) < 1e-10 &&
+                Math.Abs(fixture.Ghosts[1]["joints"]!["piper3_joint1"]!.GetValue<double>() - 22 * Math.PI / 180) < 1e-10,
+                "Runtime discovery reused an older physical pose instead of the newest same-identity evidence");
+            check(fixture.Ghosts.All(request => request["joints"]!.AsObject().Count == 8) &&
+                fixture.Ghosts[0]["joints"]!.AsObject().All(joint => !joint.Key.StartsWith("piper3_", StringComparison.Ordinal)) &&
+                fixture.Ghosts[1]["joints"]!.AsObject().All(joint => joint.Key.StartsWith("piper3_", StringComparison.Ordinal)),
+                "A measured ghost borrowed the other arm's joints from the shared leader");
+            await fixture.Publish();
+            check(fixture.Ghosts.Skip(2).Select(request => request["ghostId"]!.GetValue<string>()).SequenceEqual(new[] { "b", "a" }),
+                "Repeated ghost publication permanently prioritizes one profile");
+        }
+        using (var fixture = new Fixture())
+        {
+            fixture.AfterRead = count => count == 1 ? Task.FromException(new TimeoutException("Slow first profile")) : Task.CompletedTask;
+            await fixture.Publish();
+            check(fixture.Ghosts.Count == 1 && fixture.Ghosts[0]["ghostId"]!.GetValue<string>() == "b",
+                "One unavailable robot suppressed another robot's healthy measured ghost");
+        }
+        foreach (string changed in new[] { "stale-pika", "generation", "backend", "profile", "hidden", "disposing" })
+        {
+            using var fixture = new Fixture();
+            fixture.AfterRead = count =>
+            {
+                if (count != 1) return Task.CompletedTask;
+                if (changed == "stale-pika") fixture.Fresh(firstPikaAge: .4);
+                if (changed == "generation") fixture.Fresh(firstGeneration: 2);
+                if (changed == "backend") fixture.Fresh(backend: "replacement");
+                if (changed == "profile") fixture.SetPreferences(fixture.Preferences with {
+                    Robots = fixture.Preferences.Robots!.Select(profile => profile.Id == "a" ? profile with { PikaDevice = "/dev/changed" } : profile).ToArray() });
+                if (changed == "hidden") fixture.SetPreferences(fixture.Preferences with { ShowMeasuredGhosts = false });
+                if (changed == "disposing") fixture.Set("passiveMeasuredTrackingStarted", false);
+                return Task.CompletedTask;
+            };
+            await fixture.Publish();
+            check(fixture.Ghosts.All(request => request["ghostId"]!.GetValue<string>() != "a"),
+                "Delayed runtime lookup published a ghost after changed " + changed + " evidence");
+            if (changed is "stale-pika" or "generation" or "profile")
+                check(fixture.Ghosts.Count == 1 && fixture.Ghosts[0]["ghostId"]!.GetValue<string>() == "b",
+                    "One robot's invalid " + changed + " evidence prevented the other measured ghost");
+        }
+    }
+
+    private sealed class Fixture : IDisposable
+    {
+        private const BindingFlags Hidden = BindingFlags.Instance | BindingFlags.NonPublic;
+        private readonly PipersPlugin plugin = new();
+        private readonly string folder = Path.Combine(Path.GetTempPath(), "piper-ghost-" + Guid.NewGuid().ToString("N"));
+        private int reads;
+        public Preferences Preferences { get; private set; }
+        public List<JsonObject> Ghosts { get; } = [];
+        public Func<int, Task>? AfterRead;
+
+        public Fixture()
+        {
+            Preferences = RobotProfileRouting.Normalize(new Preferences(Robots: [
+                new("a", "First", "can-a", RobotId: "compound", PikaDevice: "/dev/a", WslDistribution: "Ubuntu"),
+                new("b", "Second", "can-b", RobotId: "compound", PikaDevice: "/dev/b", WslDistribution: "Ubuntu", RobotJointPrefix: "piper3_")], ActiveRobotId: "a"));
+            SetPreferences(Preferences);
+            Set("passiveMeasuredTrackingStarted", true);
+            Set("measuredGhostSupported", true);
+            Set("ghostVisibilitySupported", true);
+            Set("publishedGhostVisibility", true);
+            Set("token", "backend");
+            var joints = new JsonArray();
+            foreach (string prefix in new[] { "", "piper3_" })
+            {
+                for (int joint = 1; joint <= 6; joint++) joints.Add(new JsonObject { ["name"] = prefix + "joint" + joint, ["unit"] = "rad" });
+                joints.Add(new JsonObject { ["name"] = prefix + "joint7", ["unit"] = "m", ["limited"] = true, ["min"] = -.047, ["max"] = 0.0 });
+                joints.Add(new JsonObject { ["name"] = prefix + "joint8", ["unit"] = "m", ["limited"] = true, ["min"] = 0.0, ["max"] = .047 });
+            }
+            Set("scene", new JsonObject { ["sceneId"] = "source", ["robots"] = new JsonArray(new JsonObject {
+                ["entityId"] = "compound", ["modelAssetId"] = "asset", ["modelRevision"] = "revision", ["joints"] = joints }) });
+            var context = (PluginContext)Activator.CreateInstance(typeof(PluginContext), Hidden, null,
+                [new PluginStart("fixture", folder, folder), (Func<object, CancellationToken, Task>)((_, _) => Task.CompletedTask),
+                    (Func<string, JsonObject, CancellationToken, Task<JsonElement>>)(async (method, arguments, _) =>
+                    {
+                        if (method == "robot.runtime.read")
+                        {
+                            if (AfterRead is not null) await AfterRead(++reads);
+                            return JsonSerializer.SerializeToElement(new { mode = "play", runId = "run" });
+                        }
+                        if (method != "robot.feedback") throw new InvalidOperationException("Unexpected ghost request: " + method);
+                        Ghosts.Add(arguments.DeepClone().AsObject());
+                        return JsonSerializer.SerializeToElement(new { applied = false, renderMode = "ghost" });
+                    })], null)!;
+            Set("engine", context);
+            Fresh();
+        }
+
+        public void Set(string name, object? value) => typeof(PipersPlugin).GetField(name, Hidden)!.SetValue(plugin, value);
+        public void SetPreferences(Preferences value) { Preferences = value; Set("preferences", value); }
+        public Task Publish() => (Task)typeof(PipersPlugin).GetMethod("PublishMeasuredGhosts", Hidden)!.Invoke(plugin, [CancellationToken.None])!;
+
+        public void Fresh(double first = 1, double second = 2, double firstPikaAge = 0, long firstGeneration = 1, string backend = "backend")
+        {
+            JsonObject Arm(string id, double angle, long generation) => new() { ["id"] = id, ["generation"] = generation,
+                ["fresh"] = true, ["status"] = new JsonObject { ["age_s"] = 0.0 },
+                ["joints"] = new JsonArray(Enumerable.Range(1, 6).Select(_ => (JsonNode)new JsonObject {
+                    ["actual_deg"] = angle, ["age_s"] = 0.0, ["fresh"] = true }).ToArray()) };
+            JsonObject Pika(string device, double age) => new() { ["device"] = device, ["distribution"] = "Ubuntu", ["connected"] = true,
+                ["fresh"] = true, ["age_s"] = age, ["telemetry"] = new JsonObject { ["motor"] = new JsonObject { ["Position"] = 0.0 } } };
+            var snapshot = new JsonObject { ["token"] = backend, ["selected"] = "can-a", ["devices"] = new JsonArray(Arm("can-a", first, firstGeneration), Arm("can-b", second, 1)),
+                ["pikas"] = new JsonArray(Pika("/dev/a", firstPikaAge), Pika("/dev/b", 0)) };
+            var latest = (LatestTelemetry)typeof(PipersPlugin).GetField("telemetry", Hidden)!.GetValue(plugin)!;
+            latest.Publish(new(snapshot, backend, 1, Stopwatch.GetTimestamp(), 0));
+        }
+
+        public void Dispose()
+        {
+            foreach (string field in new[] { "channel", "shutdown", "commands", "cameraDiscoveryShutdown" })
+                ((IDisposable)typeof(PipersPlugin).GetField(field, Hidden)!.GetValue(plugin)!).Dispose();
+            if (Directory.Exists(folder)) Directory.Delete(folder, true);
+        }
+    }
+}

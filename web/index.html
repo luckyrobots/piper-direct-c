@@ -1,29 +1,101 @@
 <!doctype html>
+
 <html lang="en">
-<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>PiPer · Direct control</title><link rel="stylesheet" href="/style.css"><script src="/app.js" defer></script></head>
+
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>PiPer · Direct control</title><link rel="stylesheet" href="/style.css"><script src="/app.js" defer></script><script type="module" src="/pika.mjs"></script><script type="module" src="/bench.mjs"></script></head>
+
 <body>
-<header><div class="brand"><span class="brand-mark">P</span><div><h1>PiPer <span>Direct control</span></h1><p>Six joints. One arm. Native C.</p></div></div><div class="header-right"><span id="mode" class="badge">CONNECTING</span><button id="stop" class="stop">STOP <kbd>Esc</kbd></button></div></header>
+
+<dialog id="safety-prompt" aria-labelledby="safety-title"><h2 id="safety-title">Make sure it's safe</h2><p>Give the arm and gripper room to move. Support the arm for motor power changes and use only this controller.</p><div class="row"><button id="safety-cancel">Cancel</button><button id="safety-continue" class="primary">Enable controls</button></div></dialog>
+
+<header><div class="brand"><span class="brand-mark">P</span><div><h1>PiPer <span>Direct control</span></h1><p>Six joints. One arm. Windows &amp; Linux.</p></div></div><div class="header-right"><span id="mode" class="badge">CONNECTING</span><button id="stop" class="stop">STOP <kbd>Esc</kbd></button></div></header>
+
 <div class="shell">
+
 <aside>
+
  <section><h2>Arm connection</h2><label for="device">USB-CAN adapter</label><select id="device"><option>No adapters detected</option></select><p id="connection" class="connection">Connecting to controller…</p><div class="row"><button id="query">Read firmware &amp; limits</button><button id="reconnect" class="icon" title="Reopen CAN sockets" aria-label="Reconnect CAN">↻</button></div><dl class="facts"><dt>Firmware</dt><dd id="firmware">—</dd><dt>Hardware</dt><dd id="hardware">—</dd><dt>Control</dt><dd id="control-state">—</dd><dt>Teaching</dt><dd id="teaching-state">—</dd><dt>CAN received</dt><dd id="rx">—</dd><dt>CAN queued</dt><dd id="tx">—</dd></dl></section>
 
- <section><h2>Before control</h2><label class="check"><input type="checkbox" id="standalone">This is a standalone arm; no other controller is driving it.</label><label class="check"><input type="checkbox" id="clear">The full motion path is clear and I am attending the arm.</label><label class="check"><input type="checkbox" id="supported">The arm is physically supported for motor power changes.</label><div class="row"><button id="enable" class="primary">Enable motors</button><button id="disable">Disable</button></div><p class="hint">Disabling or resetting removes holding torque. Support the arm first.</p></section>
- <section id="camera-panel" class="camera-panel"><div class="camera-heading"><h2>Bench camera</h2><button id="camera-enlarge" aria-expanded="false">Enlarge</button></div><div class="camera-picture"><img id="camera-image" alt="Live Logitech bench view" hidden><span id="camera-empty">Camera is off</span></div><p id="camera-status" role="status">Logitech C930e · local view, no recording or audio.</p><div class="row camera-actions"><button id="camera-start">Start camera</button><button id="camera-stop" disabled>Stop camera</button></div></section>
- <section><h2>Motion settings</h2><div class="settings"><label>Jog step · °<input id="step" type="number" min="0.001" max="5" step="0.1" value="1"></label><label>Speed · °/s<input id="speed" type="number" min="0.1" max="15" step="0.1" value="3"></label><label>Tolerance · °<input id="tolerance" type="number" min="0.05" max="1" step="0.05" value="0.2"></label></div><p class="hint">Angles use the arm’s existing calibration. “Zero” commands 0°; it never rewrites calibration.</p></section>
- <details id="recovery"><summary>Stop recovery</summary><p id="stop-reason">Use only after inspecting and supporting the arm.</p><button id="reset">Reset controller &amp; disable motors</button><label class="check"><input type="checkbox" id="reset-completed">I have completed a reset or power cycle.</label><button id="verify">Verify completed recovery</button><p class="hint">A pending reset is verified before another reset can be sent.</p></details>
+
+
+ <section class="power-controls"><div class="row"><button id="enable" class="primary">Enable robot</button><button id="disable">Disable</button></div></section>
+
+ <section id="camera-panel" class="camera-panel"><div class="camera-heading"><h2>Bench camera</h2><div class="camera-heading-actions"><button id="camera-enlarge" aria-expanded="false">Enlarge</button><button type="button" class="camera-settings-toggle" aria-label="Bench camera settings" aria-expanded="false" aria-controls="bench-camera-settings">⚙</button></div></div><div class="camera-picture"><video id="bench-video" autoplay muted playsinline hidden></video><span id="camera-empty">Camera is off</span></div><p id="camera-status" role="status">Local browser preview · no recording or audio.</p><div id="bench-camera-settings" class="camera-settings" hidden><button id="bench-list">Choose bench camera</button><select id="bench-device" aria-label="Bench camera device"></select><div class="row camera-actions"><button id="camera-start">Start camera</button><button id="camera-stop" disabled>Stop camera</button></div></div></section>
+
+ <section><h2>Motion settings</h2><div class="settings"><label class="jog-step-control">Jog step <span class="setting-info" tabindex="0" role="note" aria-label="Degrees requested per minus or plus click. Joint target sliders select an absolute angle independently of this setting.">ⓘ<span class="setting-tooltip" role="tooltip">Degrees requested per minus or plus click. Joint target sliders select an absolute angle independently of this setting.</span></span> · <output id="step-value" for="step">1°</output><input id="step" type="range" min="0.001" max="5" step="0.001" value="1" aria-label="Jog step in degrees"><span class="setting-endpoints"><span>0.001°</span><span>5°</span></span></label><label class="speed-control">Speed <span class="setting-info" tabindex="0" role="note" aria-label="Percentage of the slowest fresh controller-reported joint speed limit. Applies to the next move. Zero blocks new moves; use STOP to end active movement. The degrees per second shown are the target rate, not a guaranteed measured speed.">ⓘ<span class="setting-tooltip" role="tooltip">Percentage of the slowest fresh controller-reported joint speed limit. Applies to the next move. Zero blocks new moves; use STOP to end active movement. The degrees per second shown are the target rate, not a guaranteed measured speed.</span></span> · <output id="speed-percent">17%</output><input id="speed" type="range" min="0" max="100" step="1" value="17" aria-label="Joint speed percent"><output id="speed-rate">Reading joint limits…</output></label><label class="tolerance-control">Tolerance <span class="setting-info" tabindex="0" role="note" aria-label="Allowed difference between measured angle and target for completing a move. A larger tolerance permits stopping farther from the target; it does not improve physical accuracy or reduce wobble.">ⓘ<span class="setting-tooltip" role="tooltip">Allowed difference between measured angle and target for completing a move. A larger tolerance permits stopping farther from the target; it does not improve physical accuracy or reduce wobble.</span></span> · <output id="tolerance-value" for="tolerance">0.2°</output><input id="tolerance" type="range" min="0.05" max="1" step="0.05" value="0.2" aria-label="Movement tolerance in degrees"><span class="setting-endpoints"><span>0.05°</span><span>1°</span></span></label></div><div class="settings-info">Angle calibration <span class="setting-info" tabindex="0" role="note" aria-label="Angles use the arm’s existing calibration. Zero requests a move to 0 degrees; it never rewrites calibration.">ⓘ<span class="setting-tooltip" role="tooltip">Angles use the arm’s existing calibration. Zero requests a move to 0 degrees; it never rewrites calibration.</span></span></div></section>
+
+ <details id="recovery"><summary>Stop recovery</summary><p id="stop-reason">Use only after inspecting and supporting the arm.</p><button id="reset">Reset controller &amp; disable motors</button><button id="verify">Verify completed recovery</button><p class="hint">A pending reset is verified before another reset can be sent.</p></details>
+
  <a class="api-link" href="/api/openapi.json" target="_blank" rel="noopener">API specification ↗</a>
+
 </aside>
+
 <main>
+
  <div id="simulation" class="simulation" hidden>SIMULATION · No connection to physical hardware</div>
- <div class="workspace-heading"><div><h2>Joint positions</h2><p>Enter an angle or drag a slider, then press Move.</p></div><div class="workspace-actions"><span id="active-joint" class="badge">J1 SELECTED</span><button id="cycle" class="primary">↑ Upright &amp; return</button></div></div>
- <p id="cycle-help" class="cycle-help">One complete movement: upright → pause 2 seconds → return to the starting pose.</p>
+
+ <div class="workspace-heading"><div><h2>Robot controls</h2><p>Live measurements · J6 rotates the tool</p></div><div class="workspace-actions"><button id="zero-all" title="Move all six joints to 0 degrees; does not change calibration.">All joints → 0°</button><span id="active-joint" class="badge">J1 SELECTED</span><button id="cycle" class="primary" hidden>↑ Upright &amp; return</button></div></div>
+
+ <p id="cycle-help" class="cycle-help" hidden>One complete movement: upright → pause 2 seconds → return to the starting pose.</p>
+
  <div class="startup-panel"><div id="blocker" class="notice" role="status">Waiting for the local controller.</div><div class="row"><button id="recover" hidden>Verify motors off</button><button id="align" class="primary" hidden>Move into range</button></div><p id="range-preview" class="hint" hidden></p></div>
+
+ <section class="pika-panel compact-pika" id="pika-row">
+
+  <div class="tool-cameras">
+
+   <section class="tool-camera" id="depth-camera-panel"><div class="tool-camera-heading"><h3>Depth camera · video</h3><div class="camera-heading-actions"><button id="depth-camera-enlarge" aria-expanded="false">Enlarge</button><button type="button" class="camera-settings-toggle" aria-label="Camera settings" aria-expanded="false" aria-controls="depth-camera-settings">⚙</button></div></div><div class="tool-camera-picture"><video id="depth-video" autoplay muted playsinline hidden></video></div><p id="depth-camera-status" role="status">Restoring RealSense camera…</p><div id="depth-camera-settings" class="camera-settings" hidden><div class="row"><button id="depth-camera-list">Choose camera</button><select id="depth-camera-device" aria-label="Depth camera video device"></select><button id="depth-camera-start">Start</button><button id="depth-camera-stop" disabled>Stop</button></div><span class="hint">USB video preview; a metric depth map needs RealSense integration.</span></div></section>
+
+   <section class="tool-camera" id="gripper-camera-panel"><div class="tool-camera-heading"><h3>Gripper camera</h3><div class="camera-heading-actions"><button id="gripper-camera-enlarge" aria-expanded="false">Enlarge</button><button type="button" class="camera-settings-toggle" aria-label="Camera settings" aria-expanded="false" aria-controls="gripper-camera-settings">⚙</button></div></div><div class="tool-camera-picture"><video id="pika-video" autoplay muted playsinline hidden></video></div><p id="pika-camera-status" role="status">Restoring camera…</p><div id="gripper-camera-settings" class="camera-settings" hidden><div class="row"><button id="pika-camera-list">Choose camera</button><select id="pika-camera-device" aria-label="Pika camera"></select><button id="pika-camera-start">Start camera</button><button id="pika-camera-stop" disabled>Stop camera</button></div></div></section>
+
+  </div>
+
+
+
+  <div class="pika-main-row">
+
+   <div class="pika-title"><h3>Pika</h3><span id="pika-status" role="status">Connecting…</span></div>
+
+   <strong id="pika-measured">— mm</strong>
+
+   <div class="pika-power"><span class="hint">Power follows robot</span><button id="pika-enable" hidden disabled>Enable</button><button id="pika-disable" hidden disabled>Disable</button></div>
+
+   <div class="pika-jog"><button id="pika-close" disabled aria-label="Close Pika step">−</button><input id="pika-slider" type="range" min="0" max="90" step="0.1" value="0" disabled aria-label="Pika target opening in millimeters" title="Release to move to opening"><button id="pika-open" disabled aria-label="Open Pika step">+</button><button id="pika-zero" disabled>Zero</button></div>
+
+   <button id="pika-expand" aria-expanded="false" aria-controls="pika-details">Details ▾</button>
+
+  </div>
+
+  <div id="pika-details" hidden>
+
+   <p id="pika-transport-description"></p>
+
+   <div class="row"><button id="pika-connect">Connect</button><button id="pika-disconnect" disabled>Disconnect</button><label>Step<select id="pika-step"><option value="1">1 mm</option><option value="5">5 mm</option></select></label><span id="pika-slider-target">Release slider to move</span></div>
+
+   <details><summary>Raw telemetry</summary><pre id="pika-feedback">No Pika telemetry</pre></details>
+
+  </div>
+
+ </section>
+
  <div id="joints" class="joint-grid"></div>
- <section class="pose-bar"><div><strong>All six joints</strong><p>Move to the six targets shown above.</p></div><div class="row"><button id="copy">Copy measured pose</button><button id="hold">Hold here</button><button id="pose" class="primary">Move pose</button></div></section>
- <section class="gripper-panel"><div><h2>Gripper</h2><p id="gripper-range">Read gripper configuration first</p></div><div class="gripper-readout"><strong id="gripper-actual">—</strong><span>mm measured</span></div><label>Target · mm<input id="width" type="number" min="0" max="100" step="0.1" value="25"></label><label>Effort limit · N·m<input id="gripper-effort" type="number" min="0.02" max="0.5" step="0.01" value="0.1"></label><label><input id="gripper-offset" type="checkbox">Allow opening from a small negative closed reading (up to 2 mm)</label><div class="row"><button id="gripper-close">Close · 0</button><button id="gripper-open">Open</button><button id="gripper-move" class="primary">Move</button></div></section>
+
+ <section id="incident-panel" hidden aria-labelledby="incident-title"><h2 id="incident-title">Movement stopped</h2><p id="incident-reason"></p><p id="incident-evidence"></p><ol><li>Keep clear and support the arm. Clear the obstruction; do not force a trapped joint.</li><li>With the arm supported and stationary, reset the controller below. This can remove holding torque.</li><li>Verify healthy, disabled feedback. Then enable and start with a small move away from the obstruction at low speed.</li></ol><p id="incident-next" role="status"></p><div class="row"><button id="incident-reset">Reset controller · arm supported</button><button id="incident-verify">Verify recovery</button></div><details><summary>Recorded stop evidence</summary><pre id="incident-raw"></pre></details><p class="hint">A position stall indicates possible obstruction, not a measured contact force. Stop is a software request; use the physical stop if motion continues. No automatic retry or return movement.</p></section>
+
+ <details class="advanced-pose"><summary>Pose controls</summary><section class="pose-bar"><div><strong>All six joints</strong><p>Move to the six targets shown above.</p></div><div class="row"><button id="copy">Copy measured pose</button><button id="hold">Hold here</button><button id="pose" class="primary">Move pose</button></div></section></details>
+
+ <details class="can-gripper"><summary>Standard CAN gripper</summary><section class="gripper-panel"><div><h2>Gripper</h2><p id="gripper-range">Read gripper configuration first</p></div><div class="gripper-readout"><strong id="gripper-actual">—</strong><span>mm measured</span></div><label>Target · mm<input id="width" type="number" min="0" max="100" step="0.1" value="25"></label><label>Effort limit · N·m<input id="gripper-effort" type="number" min="0.02" max="0.5" step="0.01" value="0.1"></label><label>Step · mm<input id="gripper-step" type="number" min="0.1" max="5" value="1" step="0.1"></label><div class="row"><button id="gripper-minus">−</button><button id="gripper-plus">+</button><button id="gripper-close">Zero</button><button id="gripper-open">Open</button><button id="gripper-move" class="primary">Move</button></div></section></details>
+
+
+
  <section class="activity"><span id="phase" class="badge">MONITOR</span><p id="message">No motor command is sent on startup.</p></section>
+
  <footer><span>Keys <kbd>1</kbd>–<kbd>6</kbd> select a joint · <kbd>←</kbd> <kbd>→</kbd> jog · <kbd>Esc</kbd> stop</span><span>Feedback tolerance ≠ guaranteed physical accuracy.</span></footer>
+
  <details class="diagnostics"><summary>Connection diagnostics</summary><pre id="diagnostics">Waiting for readings.</pre><p>Queued frames are not delivery acknowledgements. A USB adapter can be detected while no robot data is arriving. STOP is a software request, not a physical emergency stop or guaranteed rigid hold.</p></details>
+
 </main>
+
 </div><div id="toast" role="alert" hidden></div>
+
 </body></html>
