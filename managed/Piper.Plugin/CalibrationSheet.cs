@@ -41,9 +41,9 @@ public sealed partial class PipersPlugin
 
     private Widget CalibrationSheetControls()
     {
-        if (ActiveProfile.RobotJointPrefix.Length > 0)
+        if (CalibrationRootIsShared())
             return Widget.Column("calibration.branch.mount", Widget.Label("calibration.branch.title", ActiveProfile.Name + " · bench placement") with { Appearance = "heading" },
-                Widget.Label("calibration.branch.explanation", "This arm shares a simulation model with another arm. Its mounting position is saved in the scene. Desk alignment editing is unavailable here because it would move both arms; joint linking and camera previews remain available.") with { Height = 92 },
+                Widget.Label("calibration.branch.explanation", "This arm shares a simulation model. Its mounting position is saved in the scene. Desk alignment editing is unavailable here because it would move every arm in the model. Joint linking and camera previews are available.") with { Height = 92 },
                 Widget.Button("workspace.controls@branch", "Back to robot controls"));
         LoadWizard(); LoadSheetRows();
         var body = new List<Widget>
@@ -161,7 +161,7 @@ public sealed partial class PipersPlugin
             await ShowWizardReference(cancellation, frame: action.EndsWith("show", StringComparison.Ordinal));
             if (action.EndsWith("confirm", StringComparison.Ordinal)) ConfirmWizardReference();
         }
-        else if (action == "marks.show") await PublishSheetMarks(cancellation, frameAll: true);
+        else if (action == "marks.show") await ShowSheetMarks(cancellation);
         else if (action.StartsWith("move.", StringComparison.Ordinal) || action.StartsWith("capture.", StringComparison.Ordinal))
         {
             if (!int.TryParse(action.Split('.')[1], out int row) || row is < 0 or > 4) throw new InvalidOperationException("Unknown point.");
@@ -173,9 +173,7 @@ public sealed partial class PipersPlugin
             }
             if (action.StartsWith("move.", StringComparison.Ordinal))
             {
-                Wizard.Answers["sheetselected"] = row.ToString();
-                sheetMarkersDirty = true;
-                await PublishSheetMarks(cancellation, frameRow: row);
+                await ShowSheetMarks(cancellation, frameRow: row);
                 wizardMessage = $"{(row == 4 ? "CHECK" : "P" + (row + 1))} is highlighted in the viewport. In solid-green hand guiding, gently touch this physical cross with the jaw-tip midpoint, hold still, then Capture its row. The preview does not move the real arm.";
             }
             else
@@ -199,7 +197,7 @@ public sealed partial class PipersPlugin
             if (action is "fit" or "apply" && !SheetContactCompatible) throw new InvalidOperationException("Start a new tabletop calibration before fitting or applying these mixed reference types. The old report is retained.");
             if (action is "fit" or "apply" && (SavedModelChanged || calibrationReevaluation is not null && SheetSetupBlocker().Length > 0))
                 throw new InvalidOperationException("Re-evaluate the corrected model and reconfirm its LEFT, BACK, jaw tips and desk references before calculating or applying alignment.");
-            await CalibrationEvent(action, value, cancellation);
+            await CalibrationEvent(action, cancellation);
             if (action == "fit") wizardMessage = calibrationFit?.CanApply == true ? "Alignment calculated. Review the result before Apply to simulation." : calibrationFit?.Reason ?? "Alignment calculation did not return a result.";
             if (action is "new" or "archive" && calibrationIdentity is null) calibrationWizard = CalibrationWizardFlow.New(ActiveProfile.Id, Wizard.Epoch + 1);
         }
@@ -240,12 +238,13 @@ public sealed partial class PipersPlugin
             string reason = SheetCaptureBlocker(row, device);
             string measurementError = SheetMeasurementBlocker(row);
             bool editing = sheetEditingRow == row;
-            string status = editing ? "Correct the entered distances, then Save entry. The captured arm pose stays unchanged." : captured ? "Captured. This measured pose is saved."
+            string editStatus = measurementError.Length > 0 ? measurementError : "Correct the entered distances, then Save entry. The captured arm pose stays unchanged.";
+            string status = editing ? editStatus : captured ? "Captured. This measured pose is saved."
                 : measurementError.Length > 0 ? measurementError
                 : row != selected ? "Select this point to locate its cross in the viewport."
                 : reason.Length > 0 ? reason : "Ready: gently touch this cross, hold still, then Capture.";
             patches["sheet.row.status." + row] = new() { ["text"] = status };
-            patches[SheetId("capture." + row)] = new() { ["text"] = editing ? "Save entry" : captured ? "Captured" : "Capture " + SheetPointName(row), ["enabled"] = editing ? SheetMeasurementBlocker(row).Length == 0 && SheetCanCorrect : !captured && row == selected && reason.Length == 0, ["hint"] = editing ? "Saves corrected ruler measurements; does not recapture or move the arm." : reason };
+            patches[SheetId("capture." + row)] = new() { ["text"] = editing ? "Save entry" : captured ? "Captured" : "Capture " + SheetPointName(row), ["enabled"] = editing ? measurementError.Length == 0 && SheetCanCorrect : !captured && row == selected && reason.Length == 0, ["hint"] = editing ? editStatus : reason };
             if (captured)
                 foreach (string axis in new[] { "left", "back" })
                     patches[SheetId($"field.p{row}{axis}")] = new() { ["enabled"] = editing, ["text"] = editing ? Wizard.Answers.GetValueOrDefault($"p{row}{axis}", "") : CalibrationNumber(axis == "left" ? SheetSample(row)!.Measurement.LeftMm : SheetSample(row)!.Measurement.BackMm) };

@@ -113,75 +113,72 @@ public sealed partial class PipersPlugin
     {
         EnsureIndependentCalibration();
         heightActionError = "";
-        try { await HeightCheckEventCore(action, value, cancellation); }
+        try
+        {
+            LoadWizard(); LoadHeightChecks();
+            if (action == "toggle")
+            {
+                if (heightCheckActive) await StopHeightCheck(cancellation);
+                else
+                {
+                    _ = HeightContext(); RequireCalibrationIdle(); heightCheckActive = true; heightLive = null; heightIssue = heightGuideIssue = "";
+                    Interlocked.Increment(ref heightEpoch);
+                    if (!heightStorageBlocked) heightStatus = "Single-click the physical teach button for solid green, then move the arm by hand. Close the jaws and hold still when ready to measure.";
+                }
+                await Render(cancellation); return;
+            }
+            if (!heightCheckActive) throw new InvalidOperationException("Click Check jaw height first.");
+            if (action == "pin") { heightMeasuredText = ""; await FreezeHeightPose(cancellation); }
+            else if (action == "another")
+            {
+                heightFrozen = null; heightMeasuredText = "";
+                heightStatus = "Live again. Move the arm by hand, then measure another pose.";
+                await SaveHeightChecks(cancellation);
+            }
+            else if (action == "measured")
+            {
+                string text = value.GetString() ?? "";
+                if (text.Length > 32) throw new InvalidOperationException("Enter the height in millimetres.");
+                // A first entry pins a stationary physical pose. Later telemetry can
+                // never silently move the prediction beneath the entered number.
+                if (text.Length > 0 && heightFrozen is null) await FreezeHeightPose(cancellation);
+                heightMeasuredText = text;
+                await SaveHeightChecks(cancellation);
+            }
+            else if (action == "save")
+            {
+                if (heightFrozen is not { } frozen) throw new InvalidOperationException("Hold still and Measure this pose first.");
+                if (HeightFrozenSaved) throw new InvalidOperationException("This check is already saved. Check another pose for a new measurement.");
+                double measured = HeightValidation.ParseMeasurement(heightMeasuredText);
+                if (!HeightValidation.SameHeldPose(frozen, HeightContext(), Device()))
+                    throw new InvalidOperationException("The arm moved after this pose was pinned. Return to that pose, or click Check another pose before measuring again.");
+                var confirmation = await ReadCalibrationPose(frozen.Identity, frozen.Capture.Placement, handGuiding: false, cancellation);
+                if (confirmation.ToolWorld.Distance(frozen.Capture.ToolWorld) > .002)
+                    throw new InvalidOperationException("The jaw moved after this pose was pinned. Check another pose and remeasure it.");
+                if (heightChecks.Length >= HeightValidation.MaximumChecks) throw new InvalidOperationException("This robot already has 256 height checks. The existing file is retained.");
+                var check = new HeightCheck(frozen, measured, DateTimeOffset.UtcNow);
+                var previous = heightChecks;
+                heightChecks = [.. previous, check];
+                try { await SaveHeightChecks(cancellation); }
+                catch { heightChecks = previous; throw; }
+                double errorMm = check.ErrorMm;
+                double absoluteErrorMm = Math.Abs(errorMm);
+                double precisionMm = check.Observation.Desk.PrecisionMm;
+                string direction = errorMm >= 0 ? "higher" : "lower";
+                string verdict = absoluteErrorMm <= precisionMm ? "Within" : "Outside";
+                heightStatus = $"Tape {check.MeasuredMm:0.0} mm · simulation {check.Observation.PredictedMm:0.0} mm · real jaw {absoluteErrorMm:0.0} mm {direction}. " +
+                    $"{verdict} ±{precisionMm:0.#} mm. Saved independently; the alignment was not changed.";
+            }
+            else return;
+            if (action is "pin" or "another")
+                await Patch(new() { ["height.measured"] = new() { ["text"] = heightMeasuredText } }, cancellation);
+            await Update(cancellation);
+        }
         catch (Exception error) when (!cancellation.IsCancellationRequested)
         {
             heightActionError = error is OperationCanceledException ? "The scene reading took too long. Keep the arm still and try again." : error.Message;
             await Update(cancellation);
         }
-    }
-
-    private async Task HeightCheckEventCore(string action, JsonElement value, CancellationToken cancellation)
-    {
-        LoadWizard(); LoadHeightChecks();
-        if (action == "toggle")
-        {
-            if (heightCheckActive) await StopHeightCheck(cancellation);
-            else
-            {
-                _ = HeightContext(); RequireCalibrationIdle(); heightCheckActive = true; heightLive = null; heightIssue = heightGuideIssue = "";
-                Interlocked.Increment(ref heightEpoch);
-                if (!heightStorageBlocked) heightStatus = "Single-click the physical teach button for solid green, then move the arm by hand. Close the jaws and hold still when ready to measure.";
-            }
-            await Render(cancellation); return;
-        }
-        if (!heightCheckActive) throw new InvalidOperationException("Click Check jaw height first.");
-        if (action == "pin") { heightMeasuredText = ""; await FreezeHeightPose(cancellation); }
-        else if (action == "another")
-        {
-            heightFrozen = null; heightMeasuredText = "";
-            heightStatus = "Live again. Move the arm by hand, then measure another pose.";
-            await SaveHeightChecks(cancellation);
-        }
-        else if (action == "measured")
-        {
-            string text = value.GetString() ?? "";
-            if (text.Length > 32) throw new InvalidOperationException("Enter the height in millimetres.");
-            // A first entry pins a stationary physical pose. Later telemetry can
-            // never silently move the prediction beneath the entered number.
-            if (text.Length > 0 && heightFrozen is null) await FreezeHeightPose(cancellation);
-            heightMeasuredText = text;
-            await SaveHeightChecks(cancellation);
-        }
-        else if (action == "save")
-        {
-            if (heightFrozen is not { } frozen) throw new InvalidOperationException("Hold still and Measure this pose first.");
-            if (HeightFrozenSaved) throw new InvalidOperationException("This check is already saved. Check another pose for a new measurement.");
-            double measured = HeightValidation.ParseMeasurement(heightMeasuredText);
-            if (!HeightValidation.SameHeldPose(frozen, HeightContext(), Device()))
-                throw new InvalidOperationException("The arm moved after this pose was pinned. Return to that pose, or click Check another pose before measuring again.");
-            var confirmation = await ReadCalibrationPose(frozen.Identity, frozen.Capture.Placement, handGuiding: false, cancellation);
-            if (confirmation.ToolWorld.Distance(frozen.Capture.ToolWorld) > .002)
-                throw new InvalidOperationException("The jaw moved after this pose was pinned. Check another pose and remeasure it.");
-            if (heightChecks.Length >= HeightValidation.MaximumChecks) throw new InvalidOperationException("This robot already has 256 height checks. The existing file is retained.");
-            var check = new HeightCheck(frozen, measured, DateTimeOffset.UtcNow);
-            var previous = heightChecks;
-            heightChecks = [.. previous, check];
-            try { await SaveHeightChecks(cancellation); }
-            catch { heightChecks = previous; throw; }
-            heightStatus = HeightResult(check) + " Saved independently; the alignment was not changed.";
-        }
-        else return;
-        if (action is "pin" or "another")
-            await Patch(new() { ["height.measured"] = new() { ["text"] = heightMeasuredText } }, cancellation);
-        await Update(cancellation);
-    }
-
-    private static string HeightResult(HeightCheck check)
-    {
-        string direction = check.ErrorMm >= 0 ? "higher" : "lower";
-        string verdict = Math.Abs(check.ErrorMm) <= check.Observation.Desk.PrecisionMm ? "Within" : "Outside";
-        return $"Tape {check.MeasuredMm:0.0} mm · simulation {check.Observation.PredictedMm:0.0} mm · real jaw {Math.Abs(check.ErrorMm):0.0} mm {direction}. {verdict} ±{check.Observation.Desk.PrecisionMm:0.#} mm.";
     }
 
     private Widget HeightCheckControls()

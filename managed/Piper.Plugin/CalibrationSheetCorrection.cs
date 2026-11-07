@@ -42,7 +42,8 @@ public sealed partial class PipersPlugin
             BackMm = CalibrationWizardFlow.Number(Wizard, $"p{row}back", 0, calibrationDesk.Depth * 1000)
         };
         var measured = corrected.World(calibrationDesk);
-        if (calibrationSamples.Any(s => !ReferenceEquals(s, sample) && s.MeasuredWorld.PlanarDistance(measured) < (row == 4 ? .05 : CalibrationSolver.ReferenceDuplicateDistanceMetres)))
+        if (calibrationSamples.Any(s => !ReferenceEquals(s, sample) && s.MeasuredWorld.PlanarDistance(measured) <
+            (sample.HeldOut || s.HeldOut ? CheckSpacingMetres : CalibrationSolver.ReferenceDuplicateDistanceMetres)))
             throw new InvalidOperationException("This correction duplicates another point or places the independent check too close to a reference.");
         if (sample.Measurement == corrected) { sheetEditingRow = -1; await SaveWizard(cancellation); return; }
         // Keep the original report and exact captured evidence before replacing

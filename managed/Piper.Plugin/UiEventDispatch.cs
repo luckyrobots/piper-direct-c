@@ -55,11 +55,15 @@ public sealed class UiEventDispatch : IAsyncDisposable
     public bool Enqueue(UiEvent input, long capturedEpoch)
     {
         ArgumentNullException.ThrowIfNull(input);
+        return Enqueue(input, capturedEpoch, permissionBound(input));
+    }
+
+    internal bool Enqueue(UiEvent input, long capturedEpoch, bool guarded)
+    {
         lock (gate)
         {
             if (closed || stopping.IsCancellationRequested) return false;
         }
-        bool guarded = permissionBound(input);
         // The SDK is free to retire its deserialization document when this call returns.
         UiEvent owned = input with { Value = input.Value.ValueKind == JsonValueKind.Undefined ? default : input.Value.Clone() };
         lock (gate)

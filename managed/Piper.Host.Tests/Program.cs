@@ -9,6 +9,7 @@ using LuckyRobots.Piper.Grpc;
 using LuckyRobots.Piper.Host;
 
 await BackendMaintenanceTests.Run();
+await HostPikaBoundaryTests.Run();
 await MultiRobotHostIntegrationTests.Run();
 
 // Run the actual HTTP/gRPC host with its hardware-disabled simulator. Keep
@@ -41,17 +42,20 @@ try
         try { state = JsonNode.Parse(await http.GetStringAsync("/api/state"))!.AsObject(); break; }
         catch (HttpRequestException) { await Task.Delay(50); }
     }
-    if (state is null || state["simulated"]?.GetValue<bool>() != true || state["motion"]?["active"]?.GetValue<bool>() != false)
+    if (state is null || state["simulated"]?.GetValue<bool>() != true || state["motion"]?["active"]?.GetValue<bool>() != false ||
+        state["backend_process_id"]?.GetValue<int>() != process.Id)
         throw new InvalidOperationException("Shutdown fixture did not start an idle hardware-disabled simulator");
     if (state["pikas"] is not JsonArray { Count: 0 } || state["pika"]?["connected"]?.GetValue<bool>() != false)
         throw new InvalidOperationException("Host did not expose independent gripper sessions without opening hardware.");
     var inventory = JsonNode.Parse(await http.GetStringAsync("/api/pika/devices"));
     if (inventory?["devices"] is not JsonArray { Count: 0 }) throw new InvalidOperationException("Simulated host enumerated physical USB grippers.");
     var grpcClient = new PiperControl.PiperControlClient(channel);
+    await HostControlDispatchTests.Run(http, grpcClient, state, process.Id);
     var metadata = new Metadata { { "x-piper-token", state["token"]!.GetValue<string>() } };
     var inventoryReply = await grpcClient.ExecuteAsync(new ControlRequest { Route = "/api/pika/devices", Json = "{}" }, metadata);
     if (inventoryReply.Status != 200 || JsonNode.Parse(inventoryReply.Json)?["devices"] is not JsonArray { Count: 0 })
         throw new InvalidOperationException("gRPC inventory route differs from HTTP or opened simulated hardware.");
+    await ControlJsonValidationTests.Run(http, grpcClient, state["token"]!.GetValue<string>());
 
     observer = new PiperControl.PiperControlClient(channel).WatchState(new StateRequest());
     using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(5));
@@ -95,9 +99,12 @@ finally
             try
             {
                 var state = JsonNode.Parse(await http.GetStringAsync("/api/state"));
-                using var request = new HttpRequestMessage(HttpMethod.Post, "/api/shutdown") { Content = new StringContent("{}", Encoding.UTF8, "application/json") };
-                request.Headers.Add("X-Piper-Token", state!["token"]!.GetValue<string>());
-                using var response = await http.SendAsync(request);
+                if (state?["simulated"]?.GetValue<bool>() == true && state["backend_process_id"]?.GetValue<int>() == process.Id)
+                {
+                    using var request = new HttpRequestMessage(HttpMethod.Post, "/api/shutdown") { Content = new StringContent("{}", Encoding.UTF8, "application/json") };
+                    request.Headers.Add("X-Piper-Token", state["token"]!.GetValue<string>());
+                    using var response = await http.SendAsync(request);
+                }
             }
             catch (HttpRequestException) { }
         }

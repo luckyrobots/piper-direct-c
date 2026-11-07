@@ -5,28 +5,38 @@ using LuckyEngine.PluginSdk;
 
 namespace LuckyRobots.Piper.Plugin;
 
+internal enum RobotPrimaryAction { None, Enable, Resume, OpenRecovery, OpenStoppedRecovery, StopFollowing }
+
 /// <summary>Telemetry updates numbers; only a meaningful controller transition changes the primary action.</summary>
 public sealed record RobotReadiness(string Label, string Action, bool Enabled, string Detail)
 {
-    public static RobotReadiness Inspect(JsonObject? device, bool approved, bool gripperReady, bool following, bool moving)
+    internal RobotPrimaryAction NextAction { get; init; }
+
+    public static RobotReadiness Inspect(JsonObject? device, bool approved, bool gripperReady, bool following, bool moving) =>
+        Inspect(device, approved, gripperReady, following, moving, measuredLinkReady: true);
+
+    internal static RobotReadiness Inspect(JsonObject? device, bool approved, bool gripperReady, bool following, bool moving, bool measuredLinkReady)
     {
-        if (following) return new("Following simulation", "Stop following", true, "The real robot follows the prepared scene. Stop holds the measured pose.");
-        if (device?["fresh"]?.GetValue<bool>() != true) return new("Waiting for feedback", "Connecting…", false, "Reconnecting automatically; previous movement will not resume.");
+        static RobotReadiness Step(string label, string text, string detail, RobotPrimaryAction action = RobotPrimaryAction.None) =>
+            new(label, text, action != RobotPrimaryAction.None, detail) { NextAction = action };
+        if (following) return Step("Following simulation", "Stop following", "The real robot follows the prepared scene. Stop holds the measured pose.", RobotPrimaryAction.StopFollowing);
+        if (device?["fresh"]?.GetValue<bool>() != true) return Step("Waiting for feedback", "Connecting…", "Reconnecting automatically; previous movement will not resume.");
         bool recoveryRequired = device["recovery_required"]?.GetValue<bool>() == true || device["reset_pending"]?.GetValue<bool>() == true;
         if (recoveryRequired && device["status"]?["arm_status"]?.GetValue<int>() == 1)
-            return new("Stopped", "Recover robot", true, "Controller STOP is latched. Support the arm; use Disable, then the supported reset in Diagnostics. The interrupted target will not replay.");
+            return Step("Stopped", "Recover robot", "Controller STOP is latched. Support the arm; use Disable, then the supported reset in Diagnostics. The interrupted target will not replay.", RobotPrimaryAction.OpenStoppedRecovery);
         var teaching = TeachingState.Inspect(device);
-        if (teaching.HandGuiding) return new("Hand guiding", "Hand guiding active", false, "Move the arm to a clear position. Single-click its button again to finish.");
-        if (teaching.Active) return new("Onboard playback", "Playback active", false, "The physical controller owns this movement.");
+        if (teaching.HandGuiding) return Step("Hand guiding", "Hand guiding active", "Move the arm to a clear position. Single-click its button again to finish.");
+        if (teaching.Active) return Step("Onboard playback", "Playback active", "The physical controller owns this movement.");
         if (recoveryRequired)
-            return new("Stopped", "Recover robot", true, device["blocker"]?.GetValue<string>() ?? "Move the arm to a safe pose using its physical hand-guide button.");
+            return Step("Stopped", "Recover robot", device["blocker"]?.GetValue<string>() ?? "Move the arm to a safe pose using its physical hand-guide button.", RobotPrimaryAction.OpenRecovery);
         // Stillness is an admission condition, not a rapidly changing click
         // target. The explicit action waits boundedly for native eligibility.
-        if (teaching.ReturnRequired) return new(teaching.Phase == "ended" ? "Hand guiding off" : "Controller needs attention",
-            "Resume controls", teaching.Phase == "ended" || teaching.CanReturn, teaching.NextStep);
+        if (teaching.ReturnRequired) return Step(teaching.Phase == "ended" ? "Hand guiding off" : "Controller needs attention",
+            "Resume controls", teaching.NextStep, teaching.Phase == "ended" || teaching.CanReturn ? RobotPrimaryAction.Resume : RobotPrimaryAction.None);
         var power = RobotPowerState.Inspect(device);
-        if (!power.EnabledCount.HasValue) return new("Waiting for motor feedback", "Connecting…", false, "Waiting for fresh feedback from all six motors.");
-        if (moving) return new("Movement in progress", "Moving…", false, "Stop movement remains available.");
+        if (!power.EnabledCount.HasValue) return Step("Waiting for motor feedback", "Connecting…", "Waiting for fresh feedback from all six motors.");
+        if (moving) return Step("Movement in progress", "Moving…", "Stop movement remains available.");
+        bool needsConnection = !power.AllEnabled || !approved || !gripperReady || !measuredLinkReady;
         string blocker = device["blocker"]?.GetValue<string>() ?? "";
         if (blocker.Length > 0)
         {
@@ -37,20 +47,19 @@ public sealed record RobotReadiness(string Label, string Action, bool Enabled, s
                 // The selected backend refreshes this information read-only.
                 // Initial Enable must remain reachable; native admission still
                 // refuses motor/target commands until its query completes.
-                bool initialConnection = !power.AllEnabled || !approved || !gripperReady;
-                return new("Reading robot settings", initialConnection ? "Enable robot" : "Reading robot settings…", initialConnection,
-                    blocker + " Settings refresh automatically for the selected robot; following waits until they are verified.");
+                return Step("Reading robot settings", needsConnection ? "Enable robot" : "Reading robot settings…",
+                    blocker + " Settings refresh automatically for the selected robot; following waits until they are verified.",
+                    needsConnection ? RobotPrimaryAction.Enable : RobotPrimaryAction.None);
             }
-            return new("Controller needs attention", "Controls unavailable", false, blocker);
+            return Step("Controller needs attention", "Controls unavailable", blocker);
         }
-        if (!power.AllEnabled || !approved || !gripperReady) return new(power.AllEnabled ? "Enabled · finish connection" : "Disabled", "Enable robot", true, "One action connects the assigned arm and gripper and restores holding control.");
-        return new("Ready · arm and gripper enabled", "Enabled", false, "Select this robot's Follow simulation checkbox, then use Follow simulation in the left sidebar.");
+        if (needsConnection) return Step(power.AllEnabled ? "Enabled · finish connection" : "Disabled", "Enable robot", "One action connects the assigned arm and gripper and restores holding control.", RobotPrimaryAction.Enable);
+        return Step("Ready · arm and gripper enabled", "Enabled", "Select this robot's Follow simulation checkbox, then use Follow simulation in the left sidebar.");
     }
 }
 
 public sealed partial class PipersPlugin
 {
-    private bool followAfterEnable;
     private bool primaryActionBusy;
     private bool resumeControlsBusy;
     private string primaryActionStatus = "", primaryActionId = "";
@@ -62,7 +71,10 @@ public sealed partial class PipersPlugin
     private RobotReadiness Readiness(JsonObject? device) => RobotReadiness.Inspect(device, approved,
         ActiveProfile.PikaDevice.Length == 0 || PikaMatchesProfile() && pikaOwned && state?["pika"]?["fresh"]?.GetValue<bool>() == true &&
             state["pika"]?["enabled"]?.GetValue<bool>() == true && state["pika"]?["armed"]?.GetValue<bool>() == true,
-        Volatile.Read(ref simulationSession) is not null || GroupFollowIncludes(ActiveProfile.Id), state?["motion"]?["active"]?.GetValue<bool>() == true);
+        GroupFollowIncludes(ActiveProfile.Id), state?["motion"]?["active"]?.GetValue<bool>() == true,
+        measuredLinkReady: ActiveProfile.RobotId.Length == 0 || link is not null);
+
+    private bool PrimaryActionAvailable => !switchingProfile && CurrentRecovery is null && !GroupFollowActive;
 
     private Task PrimaryRobotAction(CancellationToken cancellation) => RunPrimaryAction(RunPrimaryRobotAction, cancellation);
 
@@ -97,46 +109,58 @@ public sealed partial class PipersPlugin
 
     private async Task RunPrimaryRobotAction(CancellationToken cancellation)
     {
-        var device = Device();
-        if (device["status"]?["arm_status"]?.GetValue<int>() == 1 &&
-            (device["recovery_required"]?.GetValue<bool>() == true || device["reset_pending"]?.GetValue<bool>() == true))
+        if (!PrimaryActionAvailable) { message = "Wait for the current robot action to finish."; return; }
+        long epoch = CommandAuthority.Epoch;
+        var profile = ActiveProfile;
+        string backend = token;
+        var device = Device(expectedToken: backend);
+        var readiness = Readiness(device);
+        switch (readiness.NextAction)
         {
-            BeginHandGuideRecovery(device);
-            handGuideRecoveryMessage = RecoveryWorkspaceState.Inspect(device, state?["motion"]?["active"]?.GetValue<bool>() == true, recoveryInProgress).NextStep;
-            message = handGuideRecoveryMessage;
-            return;
+            case RobotPrimaryAction.OpenStoppedRecovery:
+                BeginHandGuideRecovery(device);
+                message = handGuideRecoveryMessage = RecoveryCardState(device).NextStep;
+                break;
+            case RobotPrimaryAction.OpenRecovery:
+                BeginHandGuideRecovery(device);
+                break;
+            case RobotPrimaryAction.Resume:
+                await ResumeControls(cancellation);
+                break;
+            case RobotPrimaryAction.Enable:
+                var scope = ControlScope(profile, backend, device);
+                if (!approved)
+                {
+                    if (!CommandAuthority.TryOpenConfirmation(epoch, profile.Id, scope))
+                        throw new InvalidOperationException("Control permission changed. Click Enable robot to confirm the current connection.");
+                    await Render(cancellation);
+                }
+                else await CompleteRobotEnable(epoch, scope, cancellation);
+                break;
+            case RobotPrimaryAction.StopFollowing:
+                await StopGroupSimulationFollowing("Operator stopped the follower group", cancellation);
+                break;
+            default:
+                message = readiness.Detail;
+                break;
         }
-        var mode = TeachingState.Inspect(device);
-        if (mode.HandGuiding || mode.Active) { message = Readiness(device).Detail; return; }
-        if (device["recovery_required"]?.GetValue<bool>() == true || device["reset_pending"]?.GetValue<bool>() == true)
-        { BeginHandGuideRecovery(device); return; }
-        if (mode.ReturnRequired)
-        {
-            await ResumeControls(cancellation);
-            return;
-        }
-        // The action must match its label. Finishing a gripper connection under
-        // "Enable robot" must not start matching a simulation destination.
-        followAfterEnable = false;
-        if (!approved)
-        {
-            await Patch(new() { ["safety"] = new() { ["visible"] = true } }, cancellation);
-            return;
-        }
-        await CompleteRobotEnable(cancellation);
     }
 
-    private async Task CompleteRobotEnable(CancellationToken cancellation)
+    private async Task CompleteRobotEnable(long expectedPermission, FollowControlApproval scope, CancellationToken cancellation)
     {
         await PrimaryActionProgress("enable", "Verifying arm and gripper control…", cancellation);
-        await Enable(cancellation);
+        var device = Device(scope.Device, scope.Generation, scope.Backend);
+        if (scope != ControlScope(ActiveProfile, scope.Backend, device))
+            throw new InvalidOperationException("Robot assignments changed during Enable. Confirm the current connection.");
+        await Enable(cancellation, expectedDeviceId: scope.Device, expectedGeneration: scope.Generation,
+            expectedToken: scope.Backend, expectedPermissionEpoch: expectedPermission);
         if (link is null)
         {
             await PrimaryActionProgress("link-scene", "Matching measured feedback to the selected scene robot…", cancellation);
+            if (expectedPermission != CommandAuthority.Epoch) throw new InvalidOperationException("The previous Enable action was retired.");
             await StartMeasuredLink(automatic: false, cancellation);
         }
-        RememberControlApproval();
-        followAfterEnable = false;
+        RememberControlApproval(expectedPermission);
         message = "Ready · arm and gripper enabled. Select follower robots, then use Follow simulation in the left sidebar.";
     }
 
@@ -165,7 +189,7 @@ public sealed partial class PipersPlugin
             var receipt = new { id = primaryActionId, stage, atUtc = DateTimeOffset.UtcNow,
                 profileId = ActiveProfile.Id, robotId = ActiveProfile.RobotId, jointPrefix = ActiveProfile.RobotJointPrefix,
                 canDeviceId = ActiveProfile.CanDeviceId, approved, pikaOwned, linked = link is not null,
-                following = SimulationFollowingActive, followAfterEnable, failure,
+                following = SimulationFollowingActive, followAfterEnable = false, failure,
                 pikaFeedbackAgeMilliseconds = double.IsFinite(pikaAge) ? (double?)pikaAge : null,
                 pikaDevice = pika?["device"]?.GetValue<string>(), pikaPending = pika?["pending"]?.GetValue<bool>(),
                 pikaSpeed = pika?["telemetry"]?["motor"]?["Speed"]?.GetValue<double>() };
@@ -187,29 +211,30 @@ public sealed partial class PipersPlugin
         bool controls = workspacePage == "controls";
         bool controllerStopped = device?["status"]?["arm_status"]?.GetValue<int>() == 1;
         bool canReleasePower = controllerStopped || !TeachingState.Inspect(device).Active;
-        patches["workspace.connection"] = new() { ["text"] = resumeControlsBusy ? "Reconnecting controls" : readiness.Label, ["hint"] = readiness.Detail };
+        bool groupParticipant = GroupFollowIncludes(ActiveProfile.Id);
+        patches["workspace.connection"] = new() {
+            ["text"] = groupParticipant ? GroupFollowStatus : resumeControlsBusy ? "Reconnecting controls" : readiness.Label,
+            ["hint"] = groupParticipant ? GroupFollowDetail : readiness.Detail };
         patches["enable"] = new() { ["text"] = resumeControlsBusy ? "Resuming controls…" : readiness.Action, ["visible"] = controls,
-            ["enabled"] = controls && readiness.Enabled && !primaryActionBusy && !supportedRecoveryBusy && !switchingProfile && !recoveryHomeBusy && !teachingResetBusy,
+            ["enabled"] = controls && readiness.Enabled && !primaryActionBusy && PrimaryActionAvailable,
             ["hint"] = readiness.Detail };
         patches["workspace.primary-action"] = new() { ["text"] = primaryActionStatus, ["visible"] = controls && primaryActionStatus.Length > 0, ["hint"] = primaryActionStatus };
         patches["disable"] = new() { ["visible"] = controls && RobotPowerState.Inspect(device).EnabledCount > 0 && canReleasePower,
             ["enabled"] = controls && device?["fresh"]?.GetValue<bool>() == true && canReleasePower && !switchingProfile,
             ["hint"] = "Support the arm. Disable cancels pending plugin actions, stops following, then removes motor holding torque. It does not home or replay." };
-        bool currentRecoveryGuide = RecoveryGuideMatches(device);
-        bool currentSupportedRecovery = supportedRecoveryBusy && currentRecoveryGuide;
-        patches["workspace.incident"] = new() { ["visible"] = controls && (readiness.Label == "Stopped" || currentRecoveryGuide) };
-        var recoveryView = RecoveryWorkspaceState.Inspect(device, state?["motion"]?["active"]?.GetValue<bool>() == true, recoveryInProgress || currentSupportedRecovery);
+        bool currentRecoveryGuide = RecoveryGuideFor(device);
+        patches["workspace.incident"] = new() { ["visible"] = controls && RecoveryPanelVisible(device) };
+        var recoveryView = RecoveryCardState(device);
         string recoveryCause = supportedRecoveryStop?["reason"]?.GetValue<string>() is { Length: > 0 } original && currentRecoveryGuide ? "Recovery after: " + original : recoveryView.Cause;
         patches["incident"] = new() { ["text"] = recoveryCause, ["hint"] = recoveryCause };
         patches["recovery.next"] = new() { ["text"] = recoveryView.NextStep, ["hint"] = recoveryView.NextStep };
         patches["recovery.requirements"] = new() { ["text"] = recoveryView.Requirements, ["visible"] = recoveryView.Requirements.Length > 0, ["hint"] = recoveryView.Requirements };
         patches["recovery.feedback"] = new() { ["text"] = currentRecoveryGuide ? handGuideRecoveryMessage : "", ["visible"] = currentRecoveryGuide && handGuideRecoveryMessage.Length > 0, ["hint"] = currentRecoveryGuide ? handGuideRecoveryMessage : "" };
-        patches["recovery.card.run"] = new() { ["text"] = recoveryView.ActionText, ["enabled"] = recoveryView.CanAct && !switchingProfile && !recoveryHomeBusy && !teachingResetBusy && !SimulationFollowingActive, ["hint"] = recoveryView.NextStep };
+        patches["recovery.card.run"] = new() { ["text"] = recoveryView.ActionText, ["enabled"] = RecoveryCardCanRun(recoveryView), ["hint"] = recoveryView.NextStep };
         patches["teaching"] = new() { ["visible"] = !controllerStopped && teaching.BlocksTargets || PikaTeachingControlsVisible };
-        patches["simulation.follow"] = new() { ["visible"] = SimulationFollowingActive };
         patches["teleoperate.toggle"]!["text"] = teleoperating ? "Finish dragging" : "Drag joints";
         patches["profiles.inventory"] = new() { ["text"] = pikaInventoryMessage };
-        patches["recovery.guide.cancel"] = new() { ["visible"] = currentRecoveryGuide };
+        patches["recovery.guide.cancel"] = new() { ["visible"] = currentRecoveryGuide || CurrentRecovery is not null };
     }
 
     private Widget SettingsRobotPicker(string target) => Widget.Row("global.context." + target,
@@ -220,7 +245,7 @@ public sealed partial class PipersPlugin
     {
         try
         {
-            var reply = await Call("/api/pika/devices", new() { ["pika_distribution"] = ActiveProfile.WslDistribution }, cancellation);
+            var reply = await Call("/api/pika/devices", new() { ["pika_distribution"] = ActiveProfile.PikaDistribution }, cancellation);
             pikaDevices = reply["devices"]?.AsArray().OfType<JsonObject>().Select(d => (JsonObject)d.DeepClone()).ToArray() ?? [];
             pikaInventoryMessage = pikaDevices.Length == 0 ? "No Pika detected. Connect its USB cable; discovery retries automatically." : $"{pikaDevices.Length} grippers detected · assignments are saved automatically";
         }
@@ -241,6 +266,12 @@ public sealed partial class PipersPlugin
             string[] canChoices = ["Unassigned", ..knownCanIds.Select(CanFriendlyName)];
             var devices = PikaChoices(profile);
             var armChoices = settingsRobotChoices[profile.Id];
+            string[] pikaChoices = ["Unassigned", .. devices.Select(device =>
+            {
+                string bus = device["bus_id"]?.GetValue<string>() ?? "";
+                string label = bus.Length > 0 ? "Pika · USB " + bus : device["name"]?.GetValue<string>() ?? "Saved Pika";
+                return label + (device["available"]?.GetValue<bool>() == true ? " · connected" : " · setup needed");
+            })];
             // Stack labeled fields rather than requiring a wide device grid.
             // With no fixed field width, native columns use the available pane.
             rows.Add(Widget.Column(id + ".row",
@@ -249,7 +280,7 @@ public sealed partial class PipersPlugin
                 Widget.Column(id + ".can.field", Widget.Label(id + ".can.caption", "Arm connection") with { Height = 20 },
                     new Widget("dropdown", id + ".can") { Height = 30, Options = canChoices, Value = Array.IndexOf(knownCanIds, profile.CanDeviceId) + 1 }) with { Spacing = 2 },
                 Widget.Column(id + ".pika.field", Widget.Label(id + ".pika.caption", "Gripper connection") with { Height = 20 },
-                    new Widget("dropdown", id + ".pika") { Height = 30, Options = new[] { "Unassigned" }.Concat(devices.Select(d => PikaFriendlyName(d))).ToArray(),
+                    new Widget("dropdown", id + ".pika") { Height = 30, Options = pikaChoices,
                         Value = Array.FindIndex(devices, d => d["device"]?.GetValue<string>() == profile.PikaDevice || d["aliases"]?.AsArray().Any(a => a?.GetValue<string>() == profile.PikaDevice) == true) + 1 }) with { Spacing = 2 },
                 Widget.Column(id + ".scene.field", Widget.Label(id + ".scene.caption", "Simulation arm") with { Height = 20 },
                     new Widget("dropdown", id + ".scene") { Height = 30, Options = new[] { "Unassigned" }.Concat(armChoices.Select(r => r.Name)).ToArray(),
@@ -271,13 +302,6 @@ public sealed partial class PipersPlugin
     {
         var d = state?["devices"]?.AsArray().FirstOrDefault(d => d?["id"]?.GetValue<string>() == id);
         return (d?["name"]?.GetValue<string>() ?? "USB-CAN") + " · …" + id[^Math.Min(3, id.Length)..] + (d?["present"]?.GetValue<bool>() == true ? "" : " (offline)");
-    }
-
-    private static string PikaFriendlyName(JsonObject device)
-    {
-        string bus = device["bus_id"]?.GetValue<string>() ?? "";
-        string label = bus.Length > 0 ? "Pika · USB " + bus : device["name"]?.GetValue<string>() ?? "Saved Pika";
-        return label + (device["available"]?.GetValue<bool>() == true ? " · connected" : " · setup needed");
     }
 
     private JsonObject[] PikaChoices(RobotProfile profile)
@@ -373,6 +397,6 @@ public sealed partial class PipersPlugin
         if (gripper["owner"]?.GetValue<string>() is { Length: > 0 } gripperOwner && gripperOwner != owner)
             throw new InvalidOperationException("Another controller owns this gripper. Finish its session before changing the assignment.");
         if (gripper["owner"]?.GetValue<string>() == owner)
-            await Call("/api/pika/disconnect", new() { ["owner"] = owner, ["pika_device"] = profile.PikaDevice, ["pika_distribution"] = profile.WslDistribution }, cancellation);
+            await Call("/api/pika/disconnect", new() { ["owner"] = owner, ["pika_device"] = profile.PikaDevice, ["pika_distribution"] = profile.PikaDistribution }, cancellation);
     }
 }

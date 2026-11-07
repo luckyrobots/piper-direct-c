@@ -8,7 +8,12 @@ public static class EpisodeReplayPlanner
         ArgumentNullException.ThrowIfNull(artifact);
         RequirePositionCommands(artifact);
         options ??= new();
-        ValidateOptions(options);
+        if (!double.IsFinite(options.MaximumTimeScale) || options.MaximumTimeScale is < 1 or > 10_000 ||
+            !double.IsFinite(options.StartJointToleranceDegrees) || options.StartJointToleranceDegrees is < 0 or > 5 ||
+            !double.IsFinite(options.StartGripperToleranceMm) || options.StartGripperToleranceMm is < 0 or > 5 ||
+            !double.IsFinite(options.InitialCommandJointToleranceDegrees) || options.InitialCommandJointToleranceDegrees is < 0 or > 5 ||
+            !double.IsFinite(options.InitialCommandGripperToleranceMm) || options.InitialCommandGripperToleranceMm is < 0 or > 5)
+            throw new InvalidOperationException("Replay options require finite explicit time-scale and bounded start tolerances (0–5 degrees/mm).");
         ValidateHardware(hardware, artifact.Robot);
         var targets = ReadCommands(artifact);
         ValidateTargets(targets, hardware);
@@ -75,16 +80,6 @@ public static class EpisodeReplayPlanner
         if (!artifact.HasPositionCommands || artifact.CommandTimestampConvention != EpisodeReplayReader.CommandTimestampConvention ||
             artifact.Robot.CommandConvention != EpisodeReplayReader.CommandConvention || artifact.Robot.PositionActuatorProvenance is null)
             throw new InvalidOperationException("Version 1 contains measured observations only and is review-only. Physical planning requires version 2 verified position-actuator commands.");
-    }
-
-    private static void ValidateOptions(EpisodeReplayOptions options)
-    {
-        if (!double.IsFinite(options.MaximumTimeScale) || options.MaximumTimeScale is < 1 or > 10_000 ||
-            !double.IsFinite(options.StartJointToleranceDegrees) || options.StartJointToleranceDegrees is < 0 or > 5 ||
-            !double.IsFinite(options.StartGripperToleranceMm) || options.StartGripperToleranceMm is < 0 or > 5 ||
-            !double.IsFinite(options.InitialCommandJointToleranceDegrees) || options.InitialCommandJointToleranceDegrees is < 0 or > 5 ||
-            !double.IsFinite(options.InitialCommandGripperToleranceMm) || options.InitialCommandGripperToleranceMm is < 0 or > 5)
-            throw new InvalidOperationException("Replay options require finite explicit time-scale and bounded start tolerances (0–5 degrees/mm).");
     }
 
     private static void ValidateHardware(EpisodeReplayHardware hardware, EpisodeReplayRobot robot)

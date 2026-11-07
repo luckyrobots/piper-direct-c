@@ -98,11 +98,11 @@ public sealed partial class PipersPlugin
         catch (OperationCanceledException) when (cancellation.IsCancellationRequested) { }
     }
 
-    private async Task RefreshCameraDeviceInventory(CancellationToken cancellation)
+    private async Task<bool> ApplyCameraDeviceInventory(CancellationToken cancellation)
     {
-        QueueCameraDeviceRefresh(cancellation);
         var inventory = Interlocked.Exchange(ref pendingCameraDeviceInventory, null);
-        if (inventory is null) return;
+        if (inventory is null) return false;
+        cancellation.ThrowIfCancellationRequested();
         string previous = JsonSerializer.Serialize(cameraDeviceChoices, PluginProtocol.Json) + JsonSerializer.Serialize(depthDeviceChoices, PluginProtocol.Json);
         if (inventory.Color is { } colorInventory) cameraDeviceChoices = CameraDeviceChoices.Merge(cameraDeviceChoices, colorInventory);
         if (inventory.Depth is { } depthInventory)
@@ -126,23 +126,13 @@ public sealed partial class PipersPlugin
             await Save(cancellation);
         if (oldGripper != CameraSettings("gripper").Device || oldBench != CameraSettings("bench").Device)
         {
+            cancellation.ThrowIfCancellationRequested();
             if (oldGripper != CameraSettings("gripper").Device) await RestartCamera("gripper");
+            cancellation.ThrowIfCancellationRequested();
             if (oldBench != CameraSettings("bench").Device) await RestartCamera("bench");
         }
         string current = JsonSerializer.Serialize(cameraDeviceChoices, PluginProtocol.Json) + JsonSerializer.Serialize(depthDeviceChoices, PluginProtocol.Json);
-        if (current != previous && workspacePage == "settings") await Render(cancellation);
+        return current != previous;
     }
 
-    private Widget CameraDeviceInput(string id, CameraPreferences settings) => cameraDeviceChoices.Length > 0
-        ? new Widget("dropdown", "camera." + id + ".device") { Options = new[] { "Choose camera" }.Concat(cameraDeviceChoices.Select(choice => choice.Label)).ToArray(),
-            Value = CameraDeviceChoices.Index(cameraDeviceChoices, settings.Device), Hint = "Selections use stable device identities. Duplicate camera names are separated by their USB connection." }
-        : new Widget("input", "camera." + id + ".device") { Text = settings.Device, Hint = cameraDeviceDiscoveryStatus };
-
-    private Widget DepthCameraInput() => depthDeviceChoices.Length > 0
-        ? new Widget("dropdown", "camera.depth.serial") { Options = new[] { "Automatic · one D405 only" }.Concat(depthDeviceChoices.Select(choice => choice.Label)).ToArray(),
-            Value = CameraDeviceChoices.Index(depthDeviceChoices, preferences.DepthSerial), Hint = "Choose this robot's D405. Its factory serial is retained across sessions." }
-        : new Widget("input", "camera.depth.serial") { Text = preferences.DepthSerial, Hint = cameraDeviceDiscoveryStatus };
-
-    private string ResolveCameraDeviceValue(string id, JsonElement value) => CameraDeviceChoices.Resolve(cameraDeviceChoices, value, CameraSettings(id).Device);
-    private string ResolveDepthSerialValue(JsonElement value) => CameraDeviceChoices.Resolve(depthDeviceChoices, value, "");
 }

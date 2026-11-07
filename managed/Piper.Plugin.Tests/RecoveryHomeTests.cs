@@ -181,7 +181,7 @@ internal static class RecoveryHomeTests
         }
         check(WorkspaceCommandPolicy.RequiresControls("recovery.home") && CalibrationCommandGuard.Blocks("recovery.home", true),
             "Recovery home bypassed Controls/calibration command policy");
-        check(WorkspaceCommandPolicy.RequiresControls("recovery.home.incident") && CalibrationCommandGuard.Blocks("recovery.home.incident", true),
+        check(WorkspaceCommandPolicy.RequiresControls("recovery.home") && CalibrationCommandGuard.Blocks("recovery.home", true),
             "The primary incident recovery alias bypassed the same Controls/calibration policy");
         await RecoveryHomeUiTests.Run(check);
     }

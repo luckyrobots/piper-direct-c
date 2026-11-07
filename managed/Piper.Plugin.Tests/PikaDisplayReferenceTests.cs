@@ -167,7 +167,14 @@ internal static class PikaDisplayReferenceTests
             check(feedback[^1]["joints"]!.AsObject().Count == 6, "A saved reference was applied to another gripper assignment");
             pika["device"] = DevicePath; pika["fresh"] = false; Fresh(); await Invoke("PublishMeasuredScene", CancellationToken.None);
             check(feedback[^1]["joints"]!.AsObject().Count == 6, "Stale feedback moved the scene fingers using a saved reference");
-            pika["fresh"] = true; pika["armed"] = true; pika["enabled"] = true; Set("pikaOwned", true);
+            pika["fresh"] = true; pika["armed"] = true; pika["enabled"] = true; pika["owner"] = Get<string>("owner"); Set("pikaOwned", true);
+            await Event("pika.target", 40);
+            check(rpc.Requests.Count == 0, "A held gripper could accept a manual target after robot approval was revoked");
+            Set("approved", true);
+            device["recovery_required"] = true;
+            await Event("pika.plus");
+            check(rpc.Requests.Count == 0, "A gripper target bypassed arm recovery");
+            device["recovery_required"] = false;
             await Event("pika.plus"); await Event("pika.target", 40);
             check(rpc.Requests.Count == 2 && rpc.Requests.All(r => r.Route == "/api/pika/position") &&
                 Math.Abs(JsonNode.Parse(rpc.Requests[0].Json)!["value"]!.GetValue<double>() - PikaProtocol.Angle(1)) < 1e-12 &&

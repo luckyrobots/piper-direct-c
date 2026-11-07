@@ -79,11 +79,53 @@ internal static class WorkspacePublicationTests
         var first = serial.Render();
         await entered.Task.WaitAsync(TimeSpan.FromSeconds(2));
         var second = serial.Render();
+        using (var cancelled = new CancellationTokenSource())
+        {
+            var navigation = serial.Navigate("settings.cameras.depth", cancelled.Token);
+            cancelled.Cancel();
+            bool retired = false;
+            try { await navigation; } catch (OperationCanceledException) { retired = true; }
+            check(retired && serial.Get<string>("workspacePage") == "controls" && serial.Get<string>("settingsCategory") == "robot" &&
+                serial.Get<string>("settingsCamera") == "bench", "Cancelled navigation committed a destination before entering the view publication gate");
+        }
         check(serialCalls == 1 && serial.Epoch == serialInitial, "Concurrent renders published out of order or committed an in-flight candidate");
         release.TrySetResult();
         await Task.WhenAll(first, second).WaitAsync(TimeSpan.FromSeconds(3));
         check(maximumInFlight == 1 && serialCalls == 2 && serial.Epoch == serialInitial + 2 && Epoch(serial.LastRoot!) == serial.Epoch,
             "Serialized publications did not finish with the last confirmed tree and epoch together");
+
+        var updating = new Fixture();
+        await updating.Render();
+        string oldStatus = updating.Wire("workspace.action-error");
+        var patchEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var patchRelease = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var sent = new List<IReadOnlyDictionary<string, JsonObject>>();
+        updating.PublishPatch = async (widgets, ct) =>
+        {
+            sent.Add(widgets);
+            if (sent.Count == 1)
+            {
+                patchEntered.TrySetResult();
+                await patchRelease.Task.WaitAsync(ct);
+            }
+        };
+        updating.Set("uiActionError", "Old profile");
+        var activePatch = updating.Update();
+        await patchEntered.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        var queuedPatch = updating.Update();
+        updating.Set("preferences", RobotProfileRouting.Normalize(new Preferences(Robots: [new("two", "Piper 2")], ActiveRobotId: "two")));
+        updating.Set("workspacePage", "recording");
+        var replacement = updating.Render();
+        check(!replacement.IsCompleted && sent.Count == 1, "A full view overtook an in-flight patch");
+        patchRelease.TrySetResult();
+        await Task.WhenAll(activePatch, queuedPatch, replacement).WaitAsync(TimeSpan.FromSeconds(3));
+        check(sent.Count == 1 && sent[0][oldStatus]["text"]?.GetValue<string>() == "Old profile",
+            "A queued patch from the old profile/view was sent after its scope changed");
+        updating.Set("uiActionError", "New profile");
+        await updating.Update();
+        check(sent.Count == 2 && !sent[1].ContainsKey(oldStatus) &&
+            sent[1][updating.Wire("workspace.action-error")]["text"]?.GetValue<string>() == "New profile",
+            "A fresh update did not use the confirmed replacement view");
 
         static long Epoch(Widget root) => long.Parse(root.Id.Split('.')[1], System.Globalization.CultureInfo.InvariantCulture);
     }
@@ -93,6 +135,7 @@ internal static class WorkspacePublicationTests
         private const BindingFlags Flags = BindingFlags.Instance | BindingFlags.NonPublic;
         private readonly PipersPlugin plugin = new();
         public Func<Widget, CancellationToken, Task> Publish = (_, _) => Task.CompletedTask;
+        public Func<IReadOnlyDictionary<string, JsonObject>, CancellationToken, Task> PublishPatch = (_, _) => Task.CompletedTask;
         public Widget? LastRoot;
         public Fixture()
         {
@@ -101,8 +144,14 @@ internal static class WorkspacePublicationTests
                 [new PluginStart("fixture", Path.GetTempPath(), Path.GetTempPath()),
                     (Func<object, CancellationToken, Task>)(async (message, ct) =>
                     {
-                        LastRoot = (Widget)message.GetType().GetProperty("root")!.GetValue(message)!;
-                        await Publish(LastRoot, ct);
+                        if (message.GetType().GetProperty("root")?.GetValue(message) is Widget root)
+                        {
+                            LastRoot = root;
+                            await Publish(root, ct);
+                        }
+                        else if (message.GetType().GetProperty("widgets")?.GetValue(message) is IReadOnlyDictionary<string, JsonObject> widgets)
+                            await PublishPatch(widgets, ct);
+                        else throw new InvalidOperationException("Unexpected fixture publication");
                     }),
                     (Func<string, JsonObject, CancellationToken, Task<JsonElement>>)((_, _, _) => throw new InvalidOperationException("Unexpected engine request"))], null)!;
             Set("engine", context);
@@ -113,5 +162,7 @@ internal static class WorkspacePublicationTests
         public string Wire(string id) => WorkspaceEventScope.Wrap(Epoch, RobotProfileRouting.Active(Get<Preferences>("preferences")).Id, id);
         public string Unscope(string id) => (string)typeof(PipersPlugin).GetMethod("UnscopeEvent", Flags)!.Invoke(plugin, [id])!;
         public Task Render(CancellationToken ct = default) => (Task)typeof(PipersPlugin).GetMethod("Render", Flags)!.Invoke(plugin, [ct])!;
+        public Task Navigate(string action, CancellationToken ct) => (Task)typeof(PipersPlugin).GetMethod("WorkspaceEvent", Flags)!.Invoke(plugin, [action, ct])!;
+        public Task Update() => (Task)typeof(PipersPlugin).GetMethod("Update", Flags)!.Invoke(plugin, [CancellationToken.None])!;
     }
 }

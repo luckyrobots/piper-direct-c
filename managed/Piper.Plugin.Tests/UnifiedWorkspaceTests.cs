@@ -13,10 +13,14 @@ internal static class UnifiedWorkspaceTests
         {
             device["joints"]![5]!["actual_deg"] = jitter;
             var ready = RobotReadiness.Inspect(device, true, true, false, false);
-            check(ready.Action == "Enabled" && !ready.Enabled && ready.Label.StartsWith("Ready"), "Readout noise changed the enabled-state primary indicator");
+            check(ready is { Action: "Enabled", NextAction: RobotPrimaryAction.None, Enabled: false } && ready.Label.StartsWith("Ready"),
+                "Readout noise changed the enabled-state primary indicator");
         }
-        check(RobotReadiness.Inspect(device, false, true, false, false).Action == "Enable robot", "A powered arm exposed a separate Use controls permission action");
+        check(RobotReadiness.Inspect(device, false, true, false, false) is { Action: "Enable robot", NextAction: RobotPrimaryAction.Enable },
+            "A powered arm exposed a separate Use controls permission action");
         check(RobotReadiness.Inspect(device, true, false, false, false).Action == "Enable robot", "A missing gripper session required a separate enable button");
+        check(RobotReadiness.Inspect(device, true, true, false, false, measuredLinkReady: false) is
+            { Action: "Enable robot", NextAction: RobotPrimaryAction.Enable }, "A powered arm could not complete its measured scene link");
         foreach (string blocker in new[] { "Firmware has not been read on this connection. Click Read firmware & limits.",
             "Reading joint limits for this connection.", "Reading acceleration limits for this connection." })
         {
@@ -53,7 +57,8 @@ internal static class UnifiedWorkspaceTests
                 "Strict raw-speed dwell fluctuations changed a healthy stable-pose primary action");
         }
         device["recovery_required"] = true; device["status"]!["control"] = 2;
-        check(RobotReadiness.Inspect(device, false, true, false, false) is { Action: "Recover robot", Enabled: true, Label: "Stopped" }, "Completed teaching hid the recovery action behind disabled Return to CAN");
+        check(RobotReadiness.Inspect(device, false, true, false, false) is { Action: "Recover robot", NextAction: RobotPrimaryAction.OpenRecovery, Label: "Stopped" },
+            "Completed teaching hid the recovery action behind disabled Return to CAN");
         device["status"]!["teach_state"] = 1;
         check(RobotReadiness.Inspect(device, false, true, false, false).Label == "Hand guiding", "A software stop hid the physical hand-guiding mode");
         device["status"]!["control"] = 0; device["status"]!["arm_status"] = 1;
@@ -65,7 +70,7 @@ internal static class UnifiedWorkspaceTests
             check(stoppedTeaching is { Phase: "stopped", Active: false, ReturnRequired: false, CanReturn: false, BlocksTargets: true } &&
                 stoppedTeaching.NextStep.Contains("reset", StringComparison.OrdinalIgnoreCase),
                 "Latched STOP was presented as healthy hand guiding/playback from its residual teach byte");
-            check(RobotReadiness.Inspect(device, false, true, false, false) is { Label: "Stopped", Action: "Recover robot", Enabled: true } stopped &&
+            check(RobotReadiness.Inspect(device, false, true, false, false) is { Label: "Stopped", Action: "Recover robot", NextAction: RobotPrimaryAction.OpenStoppedRecovery } stopped &&
                 stopped.Detail.Contains("reset", StringComparison.OrdinalIgnoreCase),
                 "Residual teaching hid the recorded STOP recovery action");
         }

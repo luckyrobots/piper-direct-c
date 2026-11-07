@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Reflection;
 using System.Text.Json;
@@ -63,11 +64,58 @@ internal static class PikaDisabledEvidenceTests
             check(result["ok"]?.GetValue<bool>() == true && result["state"]?.GetValue<string>() == "disabled" &&
                 after["last_motor_request"]?.GetValue<string>() == "verified-disable" && after["power_uncertain"]?.GetValue<bool>() == false,
                 "Already-disabled service hold wrote/reserved new motor power instead of returning its verified state");
+            foreach (string value in new[] { "", ",\"value\":null", ",\"value\":\"0.5\"", ",\"value\":1e1000" })
+            {
+                using var malformedPosition = JsonDocument.Parse("{\"owner\":" + JsonSerializer.Serialize(owner) + value + "}");
+                bool rejected = false;
+                try { await service.ExecuteAsync("position", malformedPosition.RootElement, default); }
+                catch (ArgumentException error) when (error.Message == "Pika position requires a finite numeric value.") { rejected = true; }
+                check(rejected, "Malformed Pika position did not return the actionable input rejection: " + value);
+            }
+            bool foreignRejected = false;
+            try { await service.ExecuteAsync("position", JsonSerializer.SerializeToElement(new { owner = Guid.NewGuid() }), default); }
+            catch (InvalidOperationException error) when (error.Message.Contains("does not own", StringComparison.Ordinal)) { foreignRejected = true; }
+            check(foreignRejected && service.Snapshot()["post_request_feedback_verified"]?.GetValue<bool>() == true &&
+                service.Snapshot()["power_uncertain"]?.GetValue<bool>() == false,
+                "Malformed Pika positions bypassed ownership or changed verified motor evidence");
         }
         finally
         {
             Set("process", null); Set("owner", null); Set("connected", false); Set("sessionPowerRequested", false); Set("unresolvedOwner", null);
             await service.DisposeAsync();
         }
+
+        // Reproduce a parsed message reaching publication after its agent was
+        // detached. No child process, pipe or serial transport is opened.
+        await using var fenced = new PikaProcessService("/dev/pika-fixture", "never-launched");
+        using var previous = new Process();
+        using var replacement = new Process();
+        var processField = typeof(PikaProcessService).GetField("process", fields)!;
+        var publish = typeof(PikaProcessService).GetMethod("PublishAgentMessage", fields)!;
+        var requests = (ConcurrentDictionary<string, TaskCompletionSource<JsonElement>>)
+            typeof(PikaProcessService).GetField("pending", fields)!.GetValue(fenced)!;
+        var request = new TaskCompletionSource<JsonElement>(TaskCreationOptions.RunContinuationsAsynchronously);
+        requests["new"] = request;
+        var oldReady = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var newReady = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        processField.SetValue(fenced, replacement);
+        try
+        {
+            bool Publish(Process process, TaskCompletionSource ready, string json)
+            {
+                using var message = JsonDocument.Parse(json);
+                return (bool)publish.Invoke(fenced, [process, ready, message.RootElement])!;
+            }
+            check(!Publish(previous, oldReady, """{"type":"ready"}""") && !oldReady.Task.IsCompleted &&
+                !Publish(previous, oldReady, """{"type":"state","fresh":true,"age_s":0,"enabled":true}""") &&
+                !Publish(previous, oldReady, """{"type":"ack","id":"new","ok":false}""") && !request.Task.IsCompleted &&
+                fenced.Snapshot()["connected"]?.GetValue<bool>() == false && fenced.Snapshot()["enabled"] is null,
+                "Detached agent published readiness, stale power feedback, or an acknowledgement into its replacement");
+            check(Publish(replacement, newReady, """{"type":"ready"}""") && newReady.Task.IsCompletedSuccessfully &&
+                Publish(replacement, newReady, """{"type":"ack","id":"new","ok":true}""") &&
+                request.Task.IsCompletedSuccessfully && request.Task.Result.GetProperty("ok").GetBoolean(),
+                "Replacement agent readiness or acknowledgement was dropped");
+        }
+        finally { processField.SetValue(fenced, null); }
     }
 }

@@ -29,9 +29,9 @@ internal static class MultiRobotHostIntegrationTests
         JsonObject? state = null; string token = "";
         var requests = new Dictionary<string, long>(); var generations = new Dictionary<string, long>();
         async Task<JsonObject> Read() => JsonNode.Parse(await http.GetStringAsync("/api/state"))!.AsObject();
-        async Task<(int Status, JsonObject Body)> Send(string route, JsonObject body, bool grpc = false)
+        async Task<(int Status, JsonObject Body)> Send(string route, JsonObject body, bool grpc = false, string? requestOwner = null)
         {
-            body["owner"] = owner;
+            body["owner"] = requestOwner ?? owner;
             if (grpc) { var r = await client.ExecuteAsync(new ControlRequest { Route = route, Json = body.ToJsonString() }, new Metadata { { "x-piper-token", token } }); return (r.Status, JsonNode.Parse(r.Json)!.AsObject()); }
             using var message = new HttpRequestMessage(HttpMethod.Post, route) { Content = new StringContent(body.ToJsonString(), Encoding.UTF8, "application/json") };
             message.Headers.Add("X-Piper-Token", token); using var reply = await http.SendAsync(message);
@@ -62,10 +62,23 @@ internal static class MultiRobotHostIntegrationTests
                 if (process.HasExited) throw new Exception("Two-device host exited during startup");
                 try { state = await Read(); } catch (HttpRequestException) { await Task.Delay(50); }
             }
-            if (state?["simulated"]?.GetValue<bool>() != true || state["devices"] is not JsonArray { Count: 2 } devices ||
+            if (state?["simulated"]?.GetValue<bool>() != true || state["backend_process_id"]?.GetValue<int>() != process.Id ||
+                state["devices"] is not JsonArray { Count: 2 } devices ||
                 state["multi_device_lanes_supported"]?.GetValue<bool>() != true) throw new Exception("Host did not expose two independent simulated lanes");
+            var grpcState = JsonNode.Parse((await client.GetStateAsync(new(), deadline: DateTime.UtcNow.AddSeconds(3))).Json);
+            if (grpcState?["simulated"]?.GetValue<bool>() != true || grpcState["backend_process_id"]?.GetValue<int>() != process.Id)
+                throw new Exception("gRPC endpoint is not the two-lane simulator fixture");
             token = state["token"]!.GetValue<string>();
             foreach (var d in devices.OfType<JsonObject>()) generations.Add(d["id"]!.GetValue<string>(), d["generation"]!.GetValue<long>());
+            string foreign = Guid.NewGuid().ToString();
+            foreach (bool grpc in new[] { false, true })
+            {
+                var denied = await Send("/api/select", Identity("simulation:2"), grpc, foreign);
+                if (denied.Status != 409 || denied.Body["error"]?.GetValue<string>() != LuckyRobots.Piper.SessionOwnerGuard.Denied ||
+                    (grpc ? denied.Body.ContainsKey("ok") : denied.Body["ok"]?.GetValue<bool>() != false))
+                    throw new Exception("A foreign caller acquired a lane or an adapter changed its owner-error response");
+            }
+            if (!JsonNode.DeepEquals((await Read())["selected"], state["selected"])) throw new Exception("Denied owner changed the selected lane");
             foreach (string id in generations.Keys) {
                 var result = await Send("/api/query", Identity(id), id == "simulation:2");
                 if (result.Status != 202) throw new Exception("Device query rejected: " + result.Body);

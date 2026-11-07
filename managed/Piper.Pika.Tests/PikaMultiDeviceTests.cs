@@ -1,3 +1,4 @@
+using System.Reflection;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using LuckyRobots.Piper.Pika;
@@ -113,6 +114,33 @@ internal static class PikaMultiDeviceTests
         int actionsBefore = stopAgents.Values.Sum(s => s.Actions.Count);
         check((await stopRegistry.HoldOwnedAsync(ownerB, default))["ok"]!.GetValue<bool>() && stopAgents.Values.Sum(s => s.Actions.Count) == actionsBefore,
             "Global hold changed another owner's grippers");
+        var uncertain = new PikaProcessService(a, "never-launched", "Ubuntu");
+        typeof(PikaProcessService).GetField("unresolvedOwner", BindingFlags.Instance | BindingFlags.NonPublic)!.SetValue(uncertain, ownerA);
+        var independent = new Session(b, "Ubuntu") { Owner = ownerA };
+        await using var uncertainRegistry = new PikaSessionRegistry(a, "unused", "Ubuntu", discovery: discovery,
+            factory: (path, _) => path == a ? uncertain : independent);
+        foreach (string path in new[] { a, b })
+            await uncertainRegistry.ExecuteAsync("configure", JsonSerializer.SerializeToElement(new { owner = ownerA, pika_device = path, device = path }), default);
+        var uncertainStop = await uncertainRegistry.HoldOwnedAsync(ownerA, default);
+        check(uncertain.Snapshot()["owner"] is null && uncertainStop["ok"]?.GetValue<bool>() == false &&
+            uncertainStop["message"]?.GetValue<string>().Contains(a, StringComparison.Ordinal) == true &&
+            uncertainStop["sessions"] is JsonArray { Count: 2 } && independent.Actions.SequenceEqual(["hold"]),
+            "An unresolved owned gripper was silently omitted, or prevented another gripper from holding");
+
+        var connecting = new Session(a, "Ubuntu")
+        {
+            ConnectEntered = new(TaskCreationOptions.RunContinuationsAsynchronously),
+            PendingConnect = new(TaskCreationOptions.RunContinuationsAsynchronously)
+        };
+        await using var defaultRegistry = new PikaSessionRegistry(a, "unused", "Ubuntu", discovery: discovery, factory: (_, _) => connecting);
+        var connectingTask = defaultRegistry.ExecuteAsync("connect", JsonSerializer.SerializeToElement(new { owner = ownerA }), default);
+        await connecting.ConnectEntered.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        var clearing = defaultRegistry.ExecuteAsync("configure", JsonSerializer.SerializeToElement(new { owner = ownerA, device = "" }), default);
+        try { check(!clearing.IsCompleted, "Legacy assignment cleared while its connection was in flight"); }
+        finally { connecting.PendingConnect.TrySetResult(); }
+        await connectingTask;
+        await Reject(() => clearing, "Pending clear did not recheck current ownership after connect completed");
+        check(defaultRegistry.Snapshot()["device"]?.GetValue<string>() == a, "Rejected concurrent clear changed the default device");
         Console.WriteLine("Pika multi-device tests passed: independent owners/commands/ACKs/evidence, alias binding, USBIP inventory, all-owned holds and failed-channel isolation.");
 
         async Task Reject(Func<Task> operation, string message)
@@ -173,6 +201,7 @@ internal static class PikaMultiDeviceTests
         public string? Owner;
         public List<string> Actions = [];
         public TaskCompletionSource? PendingHeartbeat;
+        public TaskCompletionSource? ConnectEntered, PendingConnect;
         public bool FailHold;
         public JsonObject State = new() { ["device"] = path, ["distribution"] = distribution, ["connected"] = false,
             ["enabled"] = false, ["power_uncertain"] = false, ["fresh"] = true };
@@ -188,7 +217,12 @@ internal static class PikaMultiDeviceTests
             if (Owner is not null && Owner != owner) throw new InvalidOperationException("Another owner.");
             Actions.Add(action);
             if (action == "hold" && FailHold) throw new IOException("Fixture USB hold failure");
-            if (action == "connect") { Owner = owner; State["connected"] = true; }
+            if (action == "connect")
+            {
+                ConnectEntered?.TrySetResult();
+                if (PendingConnect is { } connecting) await connecting.Task.WaitAsync(cancellation);
+                Owner = owner; State["connected"] = true;
+            }
             if (action == "heartbeat" && PendingHeartbeat is { } pending) await pending.Task.WaitAsync(cancellation);
             if (action == "enable") State["enabled"] = true;
             if (action == "disable") { State["enabled"] = false; State["power_uncertain"] = false; }

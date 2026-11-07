@@ -147,7 +147,6 @@ public sealed partial class PipersPlugin
         }
         InvalidateReevaluationSetup(revision);
         wizardMessage = "Saved poses re-evaluated in the current scene and model; all physical angles, measurements and capture times are preserved. Reconfirm LEFT, BACK, jaw tips and the desk, then Calculate alignment. Nothing has moved or been applied.";
-        robotCalibrationStatus = wizardMessage;
         await SaveWizard(cancellation);
     }
 }

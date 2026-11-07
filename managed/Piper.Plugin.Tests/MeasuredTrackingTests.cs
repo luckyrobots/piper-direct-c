@@ -49,7 +49,7 @@ internal static class MeasuredTrackingTests
             check(f.Requests.Select(r => r.Method).SequenceEqual(new[] { "scene.robots", "robot.feedback", "robot.subscribe" }),
                 "Passive linking did not validate/apply/ack/subscribe in order during hand-guiding");
             check(f.Get<RobotLink?>("link") is { EntityId: "robot-a", DeviceId: "can-a", Generation: 7 } &&
-                !f.Get<bool>("approved") && !f.Get<bool>("linkCommandsEnabled") && !f.Get<bool>("teleoperating") && f.Get<long>("lease") == 0,
+                !f.Get<bool>("approved") && !f.Get<bool>("linkCommandsEnabled") && !f.Get<bool>("teleoperating") && f.Authority.Current.Lease is null,
                 "Passive measured linking granted control, teleoperation or a previous motion lease");
             var feedback = f.Requests.Single(r => r.Method == "robot.feedback").Body;
             check(feedback["joints"]?["joint7"]?.GetValue<double>() is double jaw && Math.Abs(jaw + .047) < 1e-8,
@@ -101,7 +101,7 @@ internal static class MeasuredTrackingTests
                 if (changed == "backend") { f.Snapshot["token"] = "backend-b"; f.Set("token", "backend-b"); }
                 if (changed == "generation") f.Snapshot["devices"]![0]!["generation"] = 8L;
                 if (changed == "profile") f.SetPreferences(f.Profile with { Id = "other-profile" });
-                if (changed == "permission") f.Set("targetPermissionEpoch", 10L);
+                if (changed == "permission") f.Authority.Revoke();
                 if (changed == "disposing") f.Set("passiveMeasuredTrackingStarted", false);
                 f.Fresh();
             };
@@ -173,6 +173,7 @@ internal static class MeasuredTrackingTests
         public SemaphoreSlim Commands => Get<SemaphoreSlim>("commands");
         public void Set(string name, object? value) => typeof(PipersPlugin).GetField(name, Flags)!.SetValue(plugin, value);
         public T Get<T>(string name) => (T)typeof(PipersPlugin).GetField(name, Flags)!.GetValue(plugin)!;
+        public RobotCommandAuthority Authority => plugin.CommandAuthority;
         public Task Invoke(string name, params object[] arguments) => (Task)typeof(PipersPlugin).GetMethod(name, Flags)!.Invoke(plugin, arguments)!;
         public void InvokeVoid(string name) => typeof(PipersPlugin).GetMethod(name, Flags)!.Invoke(plugin, null);
         public Task Restore() => Invoke("RestoreMeasuredTracking", CancellationToken.None);

@@ -59,6 +59,15 @@ public static class GroupSimulationLaneTelemetry
 {
     public static TelemetryReceipt Project(TelemetryReceipt receipt, RobotProfile profile, long generation)
     {
+        var (device, motion, pika) = Resolve(receipt, profile, generation);
+        var state = new JsonObject { ["token"] = receipt.BackendToken, ["selected"] = profile.CanDeviceId,
+            ["devices"] = new JsonArray(device.DeepClone()), ["motion"] = motion.DeepClone(), ["pika"] = pika.DeepClone(),
+            ["backend_process_id"] = receipt.State["backend_process_id"]?.DeepClone() };
+        return receipt with { State = state };
+    }
+
+    internal static (JsonObject Device, JsonObject Motion, JsonObject Pika) Resolve(TelemetryReceipt receipt, RobotProfile profile, long generation)
+    {
         var matches = receipt.State["devices"]?.AsArray().OfType<JsonObject>().Where(d => d["id"]?.GetValue<string>() == profile.CanDeviceId).ToArray();
         if (matches is not { Length: 1 } || matches[0]["generation"]?.GetValue<long>() != generation)
             throw new InvalidOperationException(profile.Name + ": the assigned CAN connection changed.");
@@ -66,11 +75,10 @@ public static class GroupSimulationLaneTelemetry
         if (device["motion"] is not JsonObject motion || motion["device_id"]?.GetValue<string>() != profile.CanDeviceId ||
             motion["generation"]?.GetValue<long>() != generation)
             throw new InvalidOperationException(profile.Name + ": per-device motion evidence is unavailable; update the backend.");
-        var pika = ProfilePikaRouting.Find(receipt.State, profile)
-            ?? throw new InvalidOperationException(profile.Name + ": its assigned Pika is unavailable.");
-        var state = new JsonObject { ["token"] = receipt.BackendToken, ["selected"] = profile.CanDeviceId,
-            ["devices"] = new JsonArray(device.DeepClone()), ["motion"] = motion.DeepClone(), ["pika"] = pika.DeepClone(),
-            ["backend_process_id"] = receipt.State["backend_process_id"]?.DeepClone() };
-        return receipt with { State = state };
+        JsonObject? pika;
+        try { pika = ProfilePikaRouting.Find(receipt.State, profile); }
+        catch (InvalidOperationException error) { throw new InvalidOperationException(profile.Name + ": its assigned Pika identity is ambiguous.", error); }
+        if (pika is null) throw new InvalidOperationException(profile.Name + ": its assigned Pika is unavailable.");
+        return (device, motion, pika);
     }
 }

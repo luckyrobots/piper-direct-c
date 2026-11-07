@@ -24,6 +24,12 @@ if (args is ["--primary-ui"])
     Console.WriteLine($"Passed {checks} primary workspace action checks.");
     return;
 }
+if (args is ["--unified-follow"])
+{
+    await SimulationFollowingTests.RunUnifiedFollowing(Check);
+    Console.WriteLine($"Passed {checks} unified simulation characterization checks.");
+    return;
+}
 if (args is ["--group-follow"])
 {
     GroupSimulationFollowingTests.Run(Check);
@@ -36,8 +42,8 @@ if (args is ["--endpoint-stationary"])
 {
     SimulationEndpointStationaryTests.Run(Check);
     OrderedSimulationExecutionTests.Run(Check);
-    await SimulationFollowingTests.RunOrderedProtocol(Check);
-    await SimulationFollowingTests.RunFailureHeader(Check);
+    await SimulationFollowingTests.RunGroupFollow(Check);
+    await SimulationFollowingTests.RunUnifiedFollowing(Check);
     Console.WriteLine($"Passed {checks} endpoint stationarity and failure presentation checks.");
     return;
 }
@@ -151,6 +157,7 @@ var reusedSlot = RobotProfileRouting.Normalize(twoProfiles with { Robots = [twoP
 Check(reusedSlot.Robots!.All(p => p.CameraSlot is >= 0 and < RobotProfileRouting.MaximumProfiles) && reusedSlot.Robots!.Select(p => p.CameraSlot).Distinct().Count() == 2, "Deleted profile's camera slot was not bounded/reusable");
 var lensProfile = JsonNode.Parse("""{"schema":1,"device":"camera-a","width":640,"height":480,"model":"kannala-brandt","fx":250,"fy":251,"cx":317,"cy":238,"coefficients":[0.01,-0.001,0,0]}""")!.AsObject();
 SimulationCameraRoutingTests.Run(Check);
+await CameraPreviewSlotsTests.Run(Check);
 Check(CameraProfile.Matches(lensProfile, "camera-a", 640, 480, false), "Valid fisheye profile rejected");
 Check(!CameraProfile.Matches(lensProfile, "camera-b", 640, 480, false), "Lens calibration leaked to another camera");
 Check(!CameraProfile.Matches(lensProfile, "camera-a", 1280, 720, false), "Calibration accepted at wrong resolution");
@@ -447,11 +454,11 @@ SimulationFollowNativeReferenceTests.Run(Check);
 OrderedSimulationExecutionTests.Run(Check);
 GroupSimulationFollowingTests.Run(Check);
 await SimulationFollowingTests.RunGroupFollow(Check);
+await SimulationFollowingTests.RunUnifiedFollowing(Check);
 SimulationEndpointStationaryTests.Run(Check);
 OrderedPhysicalContactTests.Run(Check);
 OrderedMissedGraspTests.Run(Check);
 OrderedContactLossTests.Run(Check);
-await SimulationFollowingTests.Run(Check);
 await NativeAdmissionTests.Run(Check);
 var resetGapDevice = new JsonObject { ["id"] = "reset-arm", ["generation"] = 7L, ["present"] = true, ["up"] = true, ["fresh"] = false };
 var resetGapSnapshot = new JsonObject { ["selected"] = "reset-arm", ["devices"] = new JsonArray(resetGapDevice) };

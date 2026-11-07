@@ -59,7 +59,7 @@ public sealed partial class PipersPlugin
 
     private async Task FollowViewport(JsonObject input, CancellationToken cancellation)
     {
-        long permissionEpoch = Interlocked.Read(ref targetPermissionEpoch);
+        long permissionEpoch = CommandAuthority.Epoch;
         long sceneEpoch = Interlocked.Read(ref scenePermissionEpoch);
         string expectedToken = linkBackendToken;
         try
@@ -78,17 +78,17 @@ public sealed partial class PipersPlugin
                 message = "Movement stopped · holding measured pose";
                 return;
             }
-            if (permissionEpoch != Interlocked.Read(ref targetPermissionEpoch) || sceneEpoch != Interlocked.Read(ref scenePermissionEpoch) || !ReferenceEquals(link, linked))
+            if (permissionEpoch != CommandAuthority.Epoch || sceneEpoch != Interlocked.Read(ref scenePermissionEpoch) || !ReferenceEquals(link, linked))
                 throw new InvalidOperationException("The previous gesture was discarded after a connection or scene change; start a new drag.");
             double[] target = linked.Target(input, Device(linked.DeviceId, linked.Generation, expectedToken));
             if (phase == "begin")
             {
                 followJoint = input["editedJoint"]!.GetValue<string>();
-                await Command("follow-start", null, cancellation);
-                followRequest = lease;
+                var acknowledgement = await Command("follow-start", null, cancellation);
+                followRequest = acknowledgement["request_id"]?.GetValue<long>() ?? 0;
             }
             if (followRequest == 0) throw new InvalidOperationException("Following expired. Start a new drag.");
-            if (permissionEpoch != Interlocked.Read(ref targetPermissionEpoch) || sceneEpoch != Interlocked.Read(ref scenePermissionEpoch) || !ReferenceEquals(link, linked))
+            if (permissionEpoch != CommandAuthority.Epoch || sceneEpoch != Interlocked.Read(ref scenePermissionEpoch) || !ReferenceEquals(link, linked))
                 throw new InvalidOperationException("The previous gesture is no longer authorized; start a new drag.");
             await Call("/api/command", new JsonObject {
                 ["action"] = phase == "commit" ? "follow-commit" : "follow-update", ["request_id"] = followRequest, ["owner"] = owner,

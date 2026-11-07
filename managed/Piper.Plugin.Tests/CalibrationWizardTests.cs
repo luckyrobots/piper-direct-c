@@ -16,23 +16,12 @@ public static class CalibrationWizardTests
         foreach (string missing in new[] { "width", "depth", "sceney", "floory", "tableheight", "left", "back", "height", "square", "column", "row" })
             check(!draft.Answers.ContainsKey(missing), "A new user received a fabricated measurement: " + missing);
         Reject(() => CalibrationWizardFlow.Number(draft, "tableheight", 1, 3000), "Unknown physical tabletop height silently defaulted to750mm");
-        var next = CalibrationWizardFlow.Advance(draft);
-        check(next.Step == CalibrationWizardStep.ContactPoint && next.Epoch > draft.Epoch, "Prepare did not lead to one physical-point question");
-        check(!CalibrationWizardFlow.Accepts(next, "robot-a", draft.Epoch), "Delayed previous-step event remained authorized");
-        check(!CalibrationWizardFlow.Accepts(next, "robot-b", next.Epoch), "A wizard event crossed robot profiles");
-        check(CalibrationWizardFlow.Accepts(next, "robot-a", next.Epoch), "Current profile/step event was rejected");
-        next = CalibrationWizardFlow.Advance(next);
-        check(next.Step == CalibrationWizardStep.ModelPoint && !next.OperatorSaysTcpMatches, "Selecting a physical midpoint claimed model correspondence");
-        var back = CalibrationWizardFlow.Back(next);
-        check(back.Step == CalibrationWizardStep.ContactPoint && back.Epoch > next.Epoch, "Previous question did not invalidate delayed inputs");
-        var expected = new[] { CalibrationWizardStep.SceneSurfaceY, CalibrationWizardStep.DeskWidth, CalibrationWizardStep.DeskDepth, CalibrationWizardStep.DeskFrame, CalibrationWizardStep.DeskBack,
-            CalibrationWizardStep.Precision, CalibrationWizardStep.Method, CalibrationWizardStep.PointIntro,
-            CalibrationWizardStep.PointLeft, CalibrationWizardStep.PointBack, CalibrationWizardStep.PointHeight, CalibrationWizardStep.HandGuide, CalibrationWizardStep.Capture };
-        foreach (var step in expected) { next = CalibrationWizardFlow.Advance(next); check(next.Step == step, "Manual wizard question order is wrong at " + step); }
-        Reject(() => CalibrationWizardFlow.Advance(next), "Continue implicitly captured a point or applied a fit");
-        var oldAnswers = new Dictionary<string, string>(next.Answers) { ["left"] = "200", ["back"] = "300", ["height"] = "0", ["cross"] = "explicit choice" };
-        next = next with { Answers = oldAnswers };
+        var next = draft with { Step = CalibrationWizardStep.Capture,
+            Answers = new(draft.Answers) { ["left"] = "200", ["back"] = "300", ["height"] = "0", ["cross"] = "explicit choice" } };
         var point = CalibrationWizardFlow.NextPoint(next, 1, 0);
+        check(!CalibrationWizardFlow.Accepts(point, "robot-a", draft.Epoch), "Delayed event from before capture remained authorized");
+        check(!CalibrationWizardFlow.Accepts(point, "robot-b", point.Epoch), "A calibration event crossed robot profiles");
+        check(CalibrationWizardFlow.Accepts(point, "robot-a", point.Epoch), "A current calibration event was rejected");
         check(point.Step == CalibrationWizardStep.PointIntro && point.Answers["role"] == "training", "The first capture skipped remaining training locations");
         check(!point.Answers.ContainsKey("left") && !point.Answers.ContainsKey("back") && !point.Answers.ContainsKey("height"), "The next point reused the previous location/height as new evidence");
         check(next.Answers["left"] == "200", "Advancing a point mutated the prior saved answers");
@@ -40,12 +29,6 @@ public static class CalibrationWizardTests
         check(point.Answers["role"] == "validation" && point.Step == CalibrationWizardStep.PointIntro, "Four training captures did not require a NEW held-out point");
         point = CalibrationWizardFlow.NextPoint(next, 4, 1);
         check(point.Step == CalibrationWizardStep.Review && point.History.Length == 0, "A validation capture did not go to explicit review");
-        Reject(() => CalibrationWizardFlow.Advance(point), "Review Continue implicitly applied scene placement");
-        var grid = draft with { Step = CalibrationWizardStep.Method, Answers = new(draft.Answers) { ["method"] = "grid intersections" } };
-        var gridSteps = new[] { CalibrationWizardStep.GridSquare, CalibrationWizardStep.GridOriginLeft, CalibrationWizardStep.GridOriginBack,
-            CalibrationWizardStep.PointIntro, CalibrationWizardStep.GridColumn, CalibrationWizardStep.GridRow, CalibrationWizardStep.PointHeight,
-            CalibrationWizardStep.HandGuide, CalibrationWizardStep.Capture };
-        foreach (var step in gridSteps) { grid = CalibrationWizardFlow.Advance(grid); check(grid.Step == step, "Grid wizard question order is wrong at " + step); }
         foreach (string invalid in new[] { "", "NaN", "Infinity", "-1", "3001" })
         {
             var bad = draft with { Answers = new(draft.Answers) { ["tableheight"] = invalid } };
@@ -192,16 +175,5 @@ public static class CalibrationWizardTests
         CalibrationWizardFlow.ValidateDraft(sheetDraft, "robot-a");
         var roundTrip = JsonSerializer.Deserialize<CalibrationWizardDraft>(JsonSerializer.Serialize(sheetDraft))!;
         check(Enumerable.Range(0, 5).All(row => new[] { "left", "back" }.All(axis => roundTrip.Answers[$"p{row}{axis}"] == sheetDraft.Answers[$"p{row}{axis}"])), "Batch point inputs did not survive draft serialization");
-        // Setup/capture gating is exercised with actual rendered events and
-        // genuine identity-bound edge proofs in CalibrationSheetIntegrationTests.
-        foreach (CalibrationWizardStep step in Enum.GetValues<CalibrationWizardStep>())
-        {
-            typeof(PipersPlugin).GetField("calibrationWizard", hidden)!.SetValue(copyPlugin, draft with { Step = step });
-            string prompt = (string)typeof(PipersPlugin).GetMethod("WizardPrompt", hidden)!.Invoke(copyPlugin, null)!;
-            string progress = (string)typeof(PipersPlugin).GetMethod("WizardStepName", hidden)!.Invoke(copyPlugin, null)!;
-            check(prompt.Length is > 0 and <= 110 && !new[] { "training", "validation", "coordinate frame", "TCP", "FK", "sceneY", "metric base" }.Any(word => prompt.Contains(word, StringComparison.OrdinalIgnoreCase)),
-                "Primary wizard instruction became long or required unexplained robotics terminology: " + step);
-            check(progress != step.ToString() && !progress.Contains("DeskFrame", StringComparison.Ordinal), "Raw enum names appeared in the user-facing wizard progress");
-        }
     }
 }

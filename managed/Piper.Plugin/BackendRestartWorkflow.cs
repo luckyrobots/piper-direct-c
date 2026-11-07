@@ -45,8 +45,7 @@ public sealed partial class PipersPlugin
         // gesture is cancelled. Plugin shutdown still cancels any owned relaunch.
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(shutdown.Token);
         deadline.CancelAfter(TimeSpan.FromSeconds(25));
-        ForgetControlApproval();
-        DisarmTelemetryTargets("Backend restart accepted; previous targets discarded", clearLink: true);
+        DisarmTelemetryTargets("Backend restart accepted; previous targets discarded", clearLink: true, forgetApproval: ActiveProfile.Id);
         pikaOwned = pikaMonitoring = false;
         backendStatus = "Restart accepted · reconnecting automatically. Previous movement will not resume.";
         await Update(deadline.Token);

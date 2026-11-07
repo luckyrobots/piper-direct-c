@@ -6,6 +6,7 @@ internal static class GroupSimulationFollowingTests
 {
     public static void Run(Action<bool, string> check)
     {
+        FollowLaneTelemetryTests.Run(check);
         void Reject(Action action, string reason)
         { try { action(); } catch (InvalidOperationException) { check(true, reason); return; } check(false, reason); }
         JsonObject Frame() => new() { ["cursor"] = "1", ["simulationTimeNs"] = "0", ["mujocoTimeSeconds"] = 0d,

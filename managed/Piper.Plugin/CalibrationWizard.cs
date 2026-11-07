@@ -63,75 +63,6 @@ public sealed partial class PipersPlugin
         ReconcileReevaluatedWizard();
     }
 
-    private Widget WizardButton(string action, string text) => Widget.Button(WizardId(action), text) with
-    { Appearance = action is "next" or "capture" or "apply" ? "primary" : action is "back" or "new" or "open" ? "quiet" : "default", Padding = 8 };
-    private string WizardQuestion() => Wizard.Step switch
-    {
-        CalibrationWizardStep.Prepare => "Choose the real robot and its matching simulated copy, then click Link robot here. Check that both show the same pose. This page reads positions only; it never enables, resets or moves the real arm.",
-        CalibrationWizardStep.ContactPoint => "Which physical point will you measure at every location? Use the midpoint between BOTH jaw tips, not one tilted fingertip or the camera lens. Software has not verified its matching model site.",
-        CalibrationWizardStep.ModelPoint => "What exact named model point represents the physical midpoint? Read its coordinates and inspect the temporary scene marker, then report correspondence. A grasp centre may be behind the jaw tips; a name or marker alone does not verify the physical TCP.",
-        CalibrationWizardStep.DeskFrame => "Stand at the front long edge of your real desk, facing across it. The LEFT edge is the short edge on your left. The pointer marks the simulated LEFT edge. Confirm only if these are the corresponding edges. Advanced: this scene desk is centred at X/Z=0; its left edge is X=-width/2. A differently placed or rotated simulated desk must be corrected first.",
-        CalibrationWizardStep.DeskBack => "Keep standing at the same front long edge. BACK means the far long edge, furthest from you. The pointer marks the simulated BACK edge. Confirm only if it matches the real edge you will measure from. Advanced: this scene's back edge is Z=-depth/2.",
-        CalibrationWizardStep.SceneSurfaceY => "Check that the simulated base is on the simulated tabletop, then use that reference. The validated model root supplies the technical world-Y value; this reads a scene reference without moving anything. Physical floor/table height is irrelevant to tabletop-relative contact measurements.",
-        CalibrationWizardStep.SceneFloorOrigin => "Optional legacy office-height audit only: enter a known scene-world floor reference if you want to preserve it. This value is not required or used for tabletop capture, fitting or Apply.",
-        CalibrationWizardStep.DeskWidth => "What is the full tabletop width, from left edge to right edge, in millimetres? Enter your measured value.",
-        CalibrationWizardStep.DeskDepth => "What is the full tabletop depth, from back edge to front edge, in millimetres? Enter your measured value.",
-        CalibrationWizardStep.TabletopHeight => "Optional legacy office-height audit only: physical tabletop height remains unknown unless measured and entered. It is visual-office metadata, not a tabletop-calibration requirement or capture gate.",
-        CalibrationWizardStep.Precision => "Enter how much your ruler or hand placement could be off, in millimetres, from 1 to 10. For example, enter 5 if you can place and measure a point only to about 5 mm. The result is rejected when the recorded points disagree too much; this number is not a guarantee of accuracy.",
-        CalibrationWizardStep.Method => "How will you locate each point: measure its distance from the desk edges, or use numbered intersections on a grid mat? No object is required.",
-        CalibrationWizardStep.GridSquare => "What is the grid square size in millimetres? Verify with a ruler. Secure the mat flat and parallel to the desk edges; rotated grids are not supported.",
-        CalibrationWizardStep.GridOriginLeft => "How far is grid intersection (column 0, row 0) from the desk's LEFT edge, in millimetres? Columns must increase toward the right.",
-        CalibrationWizardStep.GridOriginBack => "How far is grid intersection (column 0, row 0) from the desk's BACK edge, in millimetres? Rows must increase toward the front.",
-        CalibrationWizardStep.PointIntro => WizardValidation ? "Choose a new check point that you have not captured before, at least 5 cm away from each reference point. It checks the alignment without helping calculate it. You may use your saved desk cross after verifying its measurements." : $"Choose reference point {WizardTrainingCount + 1} of four: a spot where you can position and measure the midpoint between the jaw tips. Use spots spread across both desk directions, not one line. Keep the desk cross for the final check.",
-        CalibrationWizardStep.PointLeft => "At this point, what is the distance from the physical desk's LEFT edge to the defined contact point, in millimetres?",
-        CalibrationWizardStep.PointBack => "At this point, what is the distance from the physical desk's BACK edge to the same defined contact point, in millimetres?",
-        CalibrationWizardStep.PointHeight => "How high is that contact point above the tabletop, in millimetres? Enter 0 only if it is actually on the bare desk. Include grid-mat thickness; do not assume zero.",
-        CalibrationWizardStep.GridColumn => "Which numbered grid intersection COLUMN is this point? Use a whole number from column 0 at the measured origin; not a square centre.",
-        CalibrationWizardStep.GridRow => "Which numbered grid intersection ROW is this point? Use a whole number from row 0 at the measured origin; not a square centre.",
-        CalibrationWizardStep.HandGuide => "Single-click the arm's physical button for solid green hand guiding. Bring the defined midpoint to your measured location by hand. Keep support as needed and hold still at least 0.4 seconds. The scene should follow measured joints.",
-        CalibrationWizardStep.Capture => "Ready to record this one point? Check the entered measurements and both views. Capture is an explicit action, requires fresh healthy stationary hand guiding, and never moves the arm.",
-        CalibrationWizardStep.Review => "Click Calculate alignment, then compare the errors with your measurement precision. All four reference points and the separate check point must pass. Apply changes only where the simulated robot sits and faces; it sends no movement command to the real robot. The detailed report keeps every measurement and error.",
-        CalibrationWizardStep.Complete => "The simulated robot's placement was saved; the real arm was not commanded. A successful desk check does not verify camera alignment, the exact physical measuring point, or synchronized recording. Those need separate checks.",
-        _ => "A saved scene write/applied placement needs read-only inspection. No Apply, rollback or motion resumes automatically after a restart."
-    };
-    private string WizardPrompt() => Wizard.Step switch
-    {
-        CalibrationWizardStep.Prepare => "Link this real robot with its simulated copy.",
-        CalibrationWizardStep.ContactPoint => "Which physical point will you measure?",
-        CalibrationWizardStep.ModelPoint => "Check the point between the simulated jaw tips.",
-        CalibrationWizardStep.DeskFrame => "Is the pointer on the LEFT edge you will measure from?",
-        CalibrationWizardStep.DeskBack => "Is the pointer on the BACK edge you will measure from?",
-        CalibrationWizardStep.SceneSurfaceY => "Is the simulated robot base resting on the tabletop?",
-        CalibrationWizardStep.SceneFloorOrigin => "Optional: enter your saved floor reference, or continue.",
-        CalibrationWizardStep.DeskWidth => "Measure LEFT to RIGHT across the desk. Enter millimetres.",
-        CalibrationWizardStep.DeskDepth => "Measure BACK to FRONT across the desk. Enter millimetres.",
-        CalibrationWizardStep.TabletopHeight => "Optional: enter the desk's height above the floor, in mm.",
-        CalibrationWizardStep.Precision => "How many millimetres could your measurements be off?",
-        CalibrationWizardStep.Method => "Will you use edge measurements or a grid mat?",
-        CalibrationWizardStep.GridSquare => "What is the verified grid-square size in millimetres?",
-        CalibrationWizardStep.GridOriginLeft => "Measure LEFT edge to grid line 0. Enter millimetres.",
-        CalibrationWizardStep.GridOriginBack => "Measure BACK edge to grid line 0. Enter millimetres.",
-        CalibrationWizardStep.PointIntro => WizardValidation ? "Choose one new spot to check the alignment." : $"Choose spot {WizardTrainingCount + 1} of 4 on your desk.",
-        CalibrationWizardStep.PointLeft => "Measure LEFT edge to this spot. Enter millimetres.",
-        CalibrationWizardStep.PointBack => "Measure BACK edge to this spot. Enter millimetres.",
-        CalibrationWizardStep.PointHeight => "How many millimetres is the jaw-tip midpoint above the tabletop?",
-        CalibrationWizardStep.GridColumn => "Which numbered grid column contains this intersection?",
-        CalibrationWizardStep.GridRow => "Which numbered grid row contains this intersection?",
-        CalibrationWizardStep.HandGuide => "Move the jaw-tip midpoint to your measured spot by hand.",
-        CalibrationWizardStep.Capture => "Check the measurements below, then capture this position.",
-        CalibrationWizardStep.Review => "Check the errors before applying the simulated alignment.",
-        CalibrationWizardStep.Complete => "Simulation alignment saved. The real arm was not moved.",
-        _ => "Inspect the saved scene placement before continuing."
-    };
-    private string WizardNextLabel() => Wizard.Step switch
-    {
-        CalibrationWizardStep.ModelPoint => "Marker matches jaw tips",
-        CalibrationWizardStep.DeskFrame => "This is my LEFT edge",
-        CalibrationWizardStep.DeskBack => "This is my BACK edge",
-        CalibrationWizardStep.SceneSurfaceY => "The base is on the tabletop",
-        CalibrationWizardStep.HandGuide => "I am holding it still",
-        _ => "Continue"
-    };
     private (double LeftMm, double RightMm, double BackMm)? WizardCross()
     {
         var reference = ActiveProfile.Alignment;
@@ -141,22 +72,6 @@ public sealed partial class PipersPlugin
         double left = width / 2 + reference.X * 1000, back = depth / 2 + reference.Z * 1000;
         return left >= 0 && left <= width && back >= 0 && back <= depth ? (left, width - left, back) : null;
     }
-    private string WizardMeasurementSummary() => $"{(WizardValidation ? "Check point" : "Reference point")} · " +
-        (Wizard.Answers.GetValueOrDefault("method") == "grid intersections" ? $"grid ({Wizard.Answers.GetValueOrDefault("column", "?")}, {Wizard.Answers.GetValueOrDefault("row", "?")})" :
-            $"left {Wizard.Answers.GetValueOrDefault("left", "?")} / back {Wizard.Answers.GetValueOrDefault("back", "?")} mm") +
-        $" · jaw-tip midpoint above tabletop {Wizard.Answers.GetValueOrDefault("height", "?")} mm.";
-
-    private string WizardStepName() => Wizard.Step switch
-    {
-        CalibrationWizardStep.Prepare => "Connect robot", CalibrationWizardStep.ContactPoint => "Choose measuring point", CalibrationWizardStep.ModelPoint => "Compare jaw tips",
-        CalibrationWizardStep.DeskFrame => "Choose LEFT edge", CalibrationWizardStep.DeskBack => "Choose BACK edge", CalibrationWizardStep.SceneSurfaceY => "Check simulated tabletop",
-        CalibrationWizardStep.SceneFloorOrigin or CalibrationWizardStep.TabletopHeight => "Optional office measurements", CalibrationWizardStep.DeskWidth or CalibrationWizardStep.DeskDepth => "Measure desk",
-        CalibrationWizardStep.Precision => "Measurement accuracy", CalibrationWizardStep.Method => "Choose ruler or mat",
-        CalibrationWizardStep.GridSquare or CalibrationWizardStep.GridOriginLeft or CalibrationWizardStep.GridOriginBack => "Set up grid mat",
-        CalibrationWizardStep.PointIntro or CalibrationWizardStep.PointLeft or CalibrationWizardStep.PointBack or CalibrationWizardStep.PointHeight or CalibrationWizardStep.GridColumn or CalibrationWizardStep.GridRow => WizardValidation ? "Measure check point" : "Measure reference point",
-        CalibrationWizardStep.HandGuide => "Move arm by hand", CalibrationWizardStep.Capture => "Record one position", CalibrationWizardStep.Review => "Review alignment",
-        CalibrationWizardStep.Complete => "Alignment saved", _ => "Check saved alignment"
-    };
 
     private string WizardReviewSummary()
     {
@@ -193,7 +108,22 @@ public sealed partial class PipersPlugin
     private async Task WizardEvent(string action, JsonElement value, CancellationToken cancellation)
     {
         EnsureIndependentCalibration();
-        try { await WizardEventCore(action, value, cancellation); }
+        try
+        {
+            LoadWizard();
+            string[] parts = action.Split('.', 2);
+            if (!calibrationOpen || parts.Length != 2 || !long.TryParse(parts[0], out long epoch) ||
+                !CalibrationWizardFlow.Accepts(Wizard, ActiveProfile.Id, epoch))
+                return;
+            if (parts[1].StartsWith("sheet.", StringComparison.Ordinal))
+                await CalibrationSheetEvent(parts[1][6..], value, cancellation);
+            else if (parts[1] == "camera")
+            {
+                calibrationWizard = Wizard with { HelpCamera = new[] { "bench", "gripper", "depth" }[Math.Clamp(value.GetInt32(), 0, 2)] };
+                await SaveWizard(cancellation);
+                await Render(cancellation);
+            }
+        }
         catch (Exception error) when (error is not OperationCanceledException)
         {
             wizardMessage = error.Message;
@@ -203,130 +133,7 @@ public sealed partial class PipersPlugin
             throw;
         }
     }
-    private async Task WizardEventCore(string action, JsonElement value, CancellationToken cancellation)
-    {
-        LoadWizard();
-        string[] parts = action.Split('.', 2);
-        if (!calibrationOpen || parts.Length != 2 || !long.TryParse(parts[0], out long epoch) || !CalibrationWizardFlow.Accepts(Wizard, ActiveProfile.Id, epoch)) return;
-        action = parts[1];
-        if (action.StartsWith("sheet.", StringComparison.Ordinal)) { await CalibrationSheetEvent(action[6..], value, cancellation); return; }
-        if (action is "help" or "camera.help") return; // Tooltip only; never advances or edits the draft.
-        if (action == "answer")
-        {
-            string key = CalibrationWizardFlow.Input(Wizard.Step) ?? throw new InvalidOperationException("This question has no editable answer.");
-            var answers = new Dictionary<string, string>(Wizard.Answers, StringComparer.Ordinal) { [key] = value.GetString() ?? "" };
-            if (answers[key].Length > 512) throw new InvalidOperationException("That answer is too long.");
-            calibrationWizard = Wizard with { Answers = answers, OperatorSaysTcpMatches = key == "tool" ? false : Wizard.OperatorSaysTcpMatches,
-                ModelAssetId = key == "tool" ? "" : Wizard.ModelAssetId, ModelRevision = key == "tool" ? "" : Wizard.ModelRevision };
-            if (key == "tool") { wizardModelPoint = "Point name changed. Read/inspect the named model point again; correspondence is not verified."; Wizard.Answers.Remove("observedrooty"); Wizard.Answers.Remove("sceneconfirmed"); }
-            if (key == "sceney") Wizard.Answers.Remove("sceneconfirmed");
-            if (key is "sceney" or "width" or "depth" or "tool") { Wizard.Answers.Remove("leftedgeconfirmed"); Wizard.Answers.Remove("frame"); Wizard.Answers.Remove("edgeroot"); wizardReferenceAcknowledgedAt = 0; }
-            if (key == "floory") Wizard.Answers.Remove("floorconfirmed");
-            await SaveWizard(cancellation); return;
-        }
-        if (action == "camera") { calibrationWizard = Wizard with { HelpCamera = new[] { "bench", "gripper", "depth" }[Math.Clamp(value.GetInt32(), 0, 2)] }; await SaveWizard(cancellation); await Render(cancellation); return; }
-        wizardMessage = "";
-        if (action == "back") calibrationWizard = CalibrationWizardFlow.Back(Wizard);
-        else if (action == "contact" && Wizard.Step == CalibrationWizardStep.ContactPoint)
-            Wizard.Answers["physicalpoint"] = "midpoint between both jaw tips (operator selected; model correspondence unverified)";
-        else if (action == "method" && Wizard.Step == CalibrationWizardStep.Method)
-            Wizard.Answers["method"] = value.GetInt32() == 1 ? "grid intersections" : "edge measurements";
-        else if (action == "model.show" && Wizard.Step == CalibrationWizardStep.ModelPoint)
-            await ShowWizardModelPoint(cancellation);
-        else if (action == "edge.show" && WizardReferenceStep)
-            await ShowWizardReference(cancellation);
-        else if (action == "model.jawtips" && Wizard.Step == CalibrationWizardStep.ModelPoint && wizardDiscoveredSites.Count(name => name == "calibration_jaw_tips") == 1)
-        {
-            Wizard.Answers["tool"] = "calibration_jaw_tips";
-            calibrationWizard = Wizard with { OperatorSaysTcpMatches = false, ModelAssetId = "", ModelRevision = "" };
-            await ShowWizardModelPoint(cancellation);
-        }
-        else if (action == "scene.root" && Wizard.Step == CalibrationWizardStep.SceneSurfaceY)
-        {
-            var root = await ReadWizardMetricRoot(cancellation);
-            Wizard.Answers["observedrooty"] = Wizard.Answers["sceney"] = CalibrationNumber(root.Position.Y * 1000);
-            Wizard.Answers["baseontabletop"] = "operator states the metric base rests on the scene tabletop";
-            Wizard.Answers.Remove("leftedgeconfirmed"); Wizard.Answers.Remove("frame"); Wizard.Answers.Remove("edgeroot"); wizardReferenceAcknowledgedAt = 0;
-        }
-        else if (action == "floor.zero" && Wizard.Step == CalibrationWizardStep.SceneFloorOrigin)
-            Wizard.Answers["floory"] = "0";
-        else if (action == "next")
-        {
-            // Re-acknowledge the exact pointer at confirmation time. The host
-            // rejects a changed model/subscription even before first capture.
-            if (WizardReferenceStep) await ShowWizardReference(cancellation, frame: false);
-            ValidateWizardQuestion(); calibrationWizard = CalibrationWizardFlow.Advance(Wizard);
-        }
-        else if (action == "cross" && Wizard.Step == CalibrationWizardStep.PointIntro && WizardValidation && WizardCross() is { } cross)
-        { Wizard.Answers["method"] = "edge measurements"; Wizard.Answers["left"] = CalibrationNumber(cross.LeftMm); Wizard.Answers["back"] = CalibrationNumber(cross.BackMm); Wizard.Answers["cross"] = "operator chose saved profile cross; verify measured coordinates"; }
-        else if (action == "capture" && Wizard.Step == CalibrationWizardStep.Capture)
-            await CaptureWizardPoint(cancellation);
-        else if (action is "fit" or "apply" or "rollback" && Wizard.Step is CalibrationWizardStep.Review or CalibrationWizardStep.Complete)
-        {
-            await CalibrationEvent(action, value, cancellation);
-            if (action == "apply") calibrationWizard = Wizard with { Step = CalibrationWizardStep.Complete, Epoch = Wizard.Epoch + 1, History = [] };
-        }
-        else if (action == "inspect" && Wizard.Step == CalibrationWizardStep.InspectSaved)
-        { await CalibrationEvent("inspect", value, cancellation); calibrationWizard = Wizard with { Step = CalibrationWizardStep.Review, Epoch = Wizard.Epoch + 1, History = [] }; }
-        else if (action == "open") await CalibrationEvent("open", value, cancellation);
-        else if (action is "new" or "archive" or "archive.cancel")
-        {
-            await CalibrationEvent(action, value, cancellation);
-            if (calibrationIdentity is null) calibrationWizard = CalibrationWizardFlow.New(ActiveProfile.Id, Wizard.Epoch + 1);
-        }
-        else if (action is "add.training" or "add.validation" && Wizard.Step is CalibrationWizardStep.Review or CalibrationWizardStep.Complete)
-        {
-            if (calibrationApplied is not null || calibrationPlacementUnverified) throw new InvalidOperationException("Roll back or archive the applied placement before collecting another point.");
-            calibrationWizard = CalibrationWizardFlow.NextPoint(Wizard, 0, 0);
-            Wizard.Answers["role"] = action == "add.training" ? "training" : "validation";
-        }
-        else return;
-        await SaveWizard(cancellation);
-        if (WizardReferenceStep && action is ("next" or "back")) await ShowWizardReference(cancellation);
-        await Render(cancellation); await Update(cancellation);
-    }
 
-    private void ValidateWizardQuestion()
-    {
-        switch (Wizard.Step)
-        {
-            case CalibrationWizardStep.Prepare:
-                _ = Device(); var current = CurrentCalibrationIdentity();
-                if (calibrationIdentity is not null && calibrationIdentity != current) throw new InvalidOperationException("The saved observation connection changed. Archive the old report and start new questions; old samples will not be reused."); break;
-            case CalibrationWizardStep.ContactPoint:
-                if (!Wizard.Answers.ContainsKey("physicalpoint")) throw new InvalidOperationException("Select the physical midpoint you will measure before continuing."); break;
-            case CalibrationWizardStep.ModelPoint:
-                if (Wizard.ModelAssetId.Length == 0 || Wizard.ModelRevision.Length == 0) throw new InvalidOperationException("Inspect the exact named model point first. Software cannot infer that it is the physical midpoint.");
-                calibrationWizard = Wizard with { OperatorSaysTcpMatches = true }; break;
-            case CalibrationWizardStep.DeskFrame:
-            case CalibrationWizardStep.DeskBack: ConfirmWizardReference(); break;
-            case CalibrationWizardStep.SceneSurfaceY:
-                if (calibrationIdentity is not null) throw new InvalidOperationException("Start over before changing a captured session's scene reference.");
-                double sceneY = CalibrationWizardFlow.SceneSurface(Wizard, Wizard.Answers.ContainsKey("observedrooty") ? CalibrationWizardFlow.Number(Wizard, "observedrooty", 0, 3000) : null);
-                calibrationDesk = calibrationDesk with { SurfaceY = sceneY / 1000 };
-                Wizard.Answers["sceneconfirmed"] = "operator explicitly confirmed scene surface reference; no scene transform changed"; break;
-            case CalibrationWizardStep.SceneFloorOrigin:
-                if (Wizard.Answers.TryGetValue("floory", out var optionalFloor) && !string.IsNullOrWhiteSpace(optionalFloor))
-                { _ = CalibrationWizardFlow.Number(Wizard, "floory", -10000, 10000); Wizard.Answers["floorconfirmed"] = "operator supplied optional office floor reference; not used for tabletop fit"; } break;
-            case CalibrationWizardStep.DeskWidth: _ = CalibrationWizardFlow.Number(Wizard, "width", 100, 10000); break;
-            case CalibrationWizardStep.DeskDepth: _ = CalibrationWizardFlow.Number(Wizard, "depth", 100, 10000); break;
-            case CalibrationWizardStep.TabletopHeight:
-                if (Wizard.Answers.TryGetValue("tableheight", out var optionalHeight) && !string.IsNullOrWhiteSpace(optionalHeight))
-                    _ = CalibrationWizardFlow.Number(Wizard, "tableheight", 1, 3000); break;
-            case CalibrationWizardStep.Precision:
-                _ = CalibrationWizardFlow.Number(Wizard, "precision", 1, 10); break;
-            case CalibrationWizardStep.GridSquare: _ = CalibrationWizardFlow.Number(Wizard, "square", 5, 500); break;
-            case CalibrationWizardStep.GridOriginLeft: _ = CalibrationWizardFlow.Number(Wizard, "originleft", 0, CalibrationWizardFlow.Number(Wizard, "width", 100, 10000)); break;
-            case CalibrationWizardStep.GridOriginBack: _ = CalibrationWizardFlow.Number(Wizard, "originback", 0, CalibrationWizardFlow.Number(Wizard, "depth", 100, 10000)); break;
-            case CalibrationWizardStep.PointLeft: _ = CalibrationWizardFlow.Number(Wizard, "left", 0, CalibrationWizardFlow.Number(Wizard, "width", 100, 10000)); break;
-            case CalibrationWizardStep.PointBack: _ = CalibrationWizardFlow.Number(Wizard, "back", 0, CalibrationWizardFlow.Number(Wizard, "depth", 100, 10000)); break;
-            case CalibrationWizardStep.PointHeight: _ = CalibrationWizardFlow.Number(Wizard, "height", 0, 1000); break;
-            case CalibrationWizardStep.GridColumn: _ = CalibrationWizardFlow.Number(Wizard, "column", 0, 200, true); break;
-            case CalibrationWizardStep.GridRow: _ = CalibrationWizardFlow.Number(Wizard, "row", 0, 200, true); break;
-            case CalibrationWizardStep.HandGuide:
-                var device = Device(); if (!TeachingState.Inspect(device).HandGuiding) throw new InvalidOperationException("Press the physical teach button for solid green hand guiding; no software mode change will be sent."); break;
-        }
-    }
     private async Task ShowWizardModelPoint(CancellationToken cancellation)
     {
         var current = link ?? throw new InvalidOperationException("Link this robot before inspecting a model point.");
@@ -386,44 +193,17 @@ public sealed partial class PipersPlugin
             throw new InvalidOperationException("The LEFT/BACK pointers have not been confirmed for this robot and these desk measurements. Start new questions and compare both desk edges before capturing more points; the saved report is retained.");
         if (Math.Abs(CalibrationWizardFlow.SceneSurface(Wizard) - calibrationDesk.SurfaceY * 1000) > .001)
             throw new InvalidOperationException("The saved scene reference changed. Start new questions before mixing measurements from different scene surfaces.");
-        foreach (string key in new[] { "tool", "width", "depth", "precision", "left", "back", "height", "square", "originleft", "originback", "column", "row" })
-            calibrationInputs[key] = Wizard.Answers.GetValueOrDefault(key, key == "tool" ? "grasp_site" : "0");
-        calibrationInputs["surface"] = CalibrationNumber(calibrationDesk.SurfaceY * 1000);
-        calibrationMode = Wizard.Answers.GetValueOrDefault("method", "edge measurements");
-        ReadCalibrationInputs(calibrationIdentity is null);
-        if (calibrationDesk != tabletop.Desk) throw new InvalidOperationException("The captured session's fixed tabletop settings changed. Start new questions before mixing references.");
-        _ = calibrationMeasurement.World(calibrationDesk);
+        if (calibrationIdentity is null) calibrationDesk = tabletop.Desk;
+        else if (calibrationDesk != tabletop.Desk) throw new InvalidOperationException("The captured session's fixed tabletop settings changed. Start new questions before mixing references.");
+        calibrationMeasurement = tabletop.Measurement;
         if (!WizardValidation && WizardCross() is { } cross && calibrationMeasurement.World(calibrationDesk).PlanarDistance(calibrationDesk.World(cross.LeftMm, cross.BackMm, 0)) < .05)
             throw new InvalidOperationException("Keep the saved profile cross and its nearby5cm for independent validation. Choose a different training location.");
-        calibrationTcpConfirmed = true;
-        if (calibrationIdentity is null) { await CalibrationEvent("start", default, cancellation); await SaveWizard(cancellation); }
+        if (calibrationIdentity is null) { await CalibrationEvent("start", cancellation); await SaveWizard(cancellation); }
         if (Math.Abs(calibrationOriginal!.Position.Y - calibrationDesk.SurfaceY) > .001)
             throw new InvalidOperationException("The current scene root is not on the confirmed scene tabletop Y. Edit/verify scene desk/root setup, then start over; no point or scene transform was applied.");
         if (calibrationIdentity!.ModelAssetId != Wizard.ModelAssetId || calibrationIdentity.ModelRevision != Wizard.ModelRevision)
             throw new InvalidOperationException("The compiled model changed since the point comparison. Start over and identify the point on the current model.");
-        await CalibrationEvent(WizardValidation ? "validate" : "capture", default, cancellation);
+        await CalibrationEvent(WizardValidation ? "validate" : "capture", cancellation);
         calibrationWizard = CalibrationWizardFlow.NextPoint(Wizard, WizardTrainingCount, WizardValidationCount);
-    }
-
-    private void AddWizardPatches(Dictionary<string, JsonObject> patches, JsonObject? device)
-    {
-        if (!calibrationOpen || calibrationWizard is null || wizardProfile != ActiveProfile.Id) return;
-        AddCalibrationSheetPatches(patches, device);
-        patches["wizard.status"] = new() { ["text"] = wizardMessage.Length > 0 ? wizardMessage : robotCalibrationStatus };
-        bool captureReady = device is not null && TeachingState.Inspect(device).HandGuiding && device["status"]?["stationary_s"]?.GetValue<double>() is >= .4;
-        bool sameScope = calibrationIdentity is null || link is not null && calibrationIdentity == CurrentCalibrationIdentity();
-        patches[WizardId("capture")] = new() { ["enabled"] = Wizard.Step == CalibrationWizardStep.Capture && captureReady && sameScope && !calibrationPlacementUnverified };
-        patches[WizardId("next")] = new() { ["enabled"] = Wizard.Step is not (CalibrationWizardStep.Capture or CalibrationWizardStep.Review or CalibrationWizardStep.Complete or CalibrationWizardStep.InspectSaved) };
-        if (WizardReferenceStep)
-        {
-            bool shown = WizardReferenceShown();
-            patches[WizardId("next")] = new() { ["enabled"] = shown };
-            patches["wizard.edge.status"] = new() { ["text"] = shown ? "Pointer shown. Confirm only if it marks the matching desk edge." : "Waiting for the simulation pointer. Use Show edge to retry; confirmation stays unavailable." };
-        }
-        patches[WizardId("back")] = new() { ["enabled"] = Wizard.History.Length > 0 };
-        patches[WizardId("fit")] = new() { ["enabled"] = WizardTrainingCount >= 4 && !calibrationPlacementUnverified };
-        patches[WizardId("apply")] = new() { ["enabled"] = captureReady && sameScope && calibrationFit?.CanApply == true && calibrationApplied is null && !calibrationPlacementUnverified };
-        patches[WizardId("rollback")] = new() { ["enabled"] = sameScope && calibrationApplied is not null && !calibrationPlacementUnverified };
-        patches["wizard.camera.image"] = new() { ["visible"] = CameraFrameReady(Wizard.HelpCamera) };
     }
 }

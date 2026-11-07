@@ -8,7 +8,6 @@ public sealed partial class PipersPlugin
     private bool sheetMarkersDirty = true;
     private long sheetMarkersAt;
     private bool sheetMarkersPublished;
-    private string sheetMarkerStatus = "Enter distances to place numbered marks in the viewport.";
     private string sheetSaveStatus = "Measurements save automatically as you type.";
 
     // Reading a visual reference must not fabricate any physical confirmation.
@@ -50,13 +49,26 @@ public sealed partial class PipersPlugin
         catch (InvalidOperationException) { return null; }
     }
 
-    private async Task PublishSheetMarks(CancellationToken cancellation, int frameRow = -1, bool frameAll = false)
+    private async Task ShowSheetMarks(CancellationToken cancellation, int frameRow = -1)
+    {
+        await wizardHighlightGate.WaitAsync(cancellation);
+        try { await PublishSheetMarksWithinGate(cancellation, frameRow, frameAll: frameRow < 0); }
+        finally { wizardHighlightGate.Release(); }
+    }
+
+    private async Task PublishSheetMarksWithinGate(CancellationToken cancellation, int frameRow = -1, bool frameAll = false)
     {
         var root = await ReadSheetReference(cancellation);
         var identity = WizardReferenceIdentity();
         long epoch = Wizard.Epoch;
         var points = Enumerable.Range(0, 5).Select(SheetPoint).ToArray();
         if (frameRow >= 0 && points[frameRow] is null) throw new InvalidOperationException("Enter this row's BACK and LEFT distances first, in millimetres within the desk edges.");
+        if (frameRow >= 0)
+        {
+            Wizard.Answers["sheetselected"] = frameRow.ToString();
+            sheetMarkersDirty = true;
+        }
+        int selected = SheetSelectedRow;
         var all = new JsonArray(points.Where(p => p.HasValue).Select(p => (JsonNode)p!.Value.Json()).ToArray());
         int first = Array.FindIndex(points, p => p is not null);
         for (int row = 0; row < 5; row++)
@@ -69,7 +81,7 @@ public sealed partial class PipersPlugin
                 continue;
             }
             string label = row == 4 ? "CHECK" : "P" + (row + 1);
-            if (row == SheetSelectedRow) label += " - SELECTED";
+            if (row == selected) label += " - SELECTED";
             bool frame = row == frameRow || frameAll && row == first;
             var scope = new WizardReferenceHighlightScope(identity, epoch, Wizard.Step,
                 CalibrationWizardFlow.Number(Wizard, "width", 100, 10000), CalibrationWizardFlow.Number(Wizard, "depth", 100, 10000),
@@ -82,7 +94,6 @@ public sealed partial class PipersPlugin
                 throw new InvalidOperationException("Update Lucky Engine: the editor did not acknowledge the numbered desk marker.");
             sheetMarkersPublished = true;
         }
-        sheetMarkerStatus = first < 0 ? "Enter BACK / LEFT distances to show marks." : "Numbered marks shown in the viewport. These are visual guides, not movement commands.";
     }
 
     // Called under the existing nonblocking visual-maintenance gate. Editing
@@ -92,7 +103,7 @@ public sealed partial class PipersPlugin
         if (!calibrationOpen || calibrationWizard is null || !Wizard.Answers.ContainsKey("sheetready") || link is null) return;
         if (!sheetMarkersDirty && Stopwatch.GetElapsedTime(sheetMarkersAt).TotalSeconds < 10) return;
         sheetMarkersDirty = false; sheetMarkersAt = Stopwatch.GetTimestamp();
-        try { await PublishSheetMarks(cancellation, frameAll: !sheetMarkersPublished); }
-        catch (Exception error) when (error is not OperationCanceledException) { sheetMarkerStatus = "Desk marks unavailable: " + error.Message; }
+        try { await PublishSheetMarksWithinGate(cancellation, frameAll: !sheetMarkersPublished); }
+        catch (Exception error) when (error is not OperationCanceledException) { Trace.TraceWarning("Desk marks unavailable: {0}", error.Message); }
     }
 }

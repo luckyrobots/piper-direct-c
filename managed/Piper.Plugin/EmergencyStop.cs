@@ -8,28 +8,27 @@ public sealed partial class PipersPlugin
 {
     // This path deliberately does not wait for the ordinary UI command gate or
     // for editor requests. The backend attempts the two channels independently.
-    private async Task StopImmediately(CancellationToken ignoredCallerCancellation)
+    private async Task StopImmediately(RobotProfile profile, string expectedToken, bool groupActive)
     {
-        var simulation = Volatile.Read(ref simulationSession);
-        bool groupActive = GroupFollowActive;
         CancelGroupSimulationFollowingInput("Operator STOP · follower group discarded");
-        CancelSimulationFollowingInput();
-        string deviceId = ActiveProfile.CanDeviceId, expectedToken = token;
-        bool ownPika = groupActive || PikaMatchesProfile() && state?["pika"]?["owner"]?.GetValue<string>() == owner;
-        if (teachingResetBusy) CancelResetAssisted();
-        CancelRecoveryHome();
+        string deviceId = profile.CanDeviceId;
+        bool ownPika = groupActive;
+        if (!ownPika && state is { } snapshot)
+        {
+            try { ownPika = ProfilePikaRouting.Find(snapshot, profile)?["owner"]?.GetValue<string>() == owner; }
+            catch (InvalidOperationException) { } // Ambiguous Pika evidence cannot block arm STOP.
+        }
+        DisarmTelemetryTargets("Operator STOP; previous actions discarded", clearLink: false, forgetApproval: profile.Id, forgetAllApprovals: groupActive);
         CancelHandGuideRecovery();
-        ForgetControlApproval();
-        DisarmTelemetryTargets("Operator STOP; previous actions discarded", clearLink: false);
         uiEvents?.InvalidateControlEvents();
         recoveryInProgress = false;
         message = "STOP requested · previous targets discarded · verifying hardware";
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(4));
         try
         {
-            if (deviceId.Length == 0) throw new InvalidOperationException("Assign this robot's CAN adapter before sending its STOP.");
+            if (!groupActive && deviceId.Length == 0) throw new InvalidOperationException("Assign this robot's CAN adapter before sending its STOP.");
             var body = new JsonObject { ["owner"] = owner, ["device_id"] = deviceId,
-                ["pika_device"] = ActiveProfile.PikaDevice, ["pika_distribution"] = ActiveProfile.WslDistribution };
+                ["pika_device"] = profile.PikaDevice, ["pika_distribution"] = profile.PikaDistribution };
             if (groupActive) { body.Remove("device_id"); body.Remove("pika_device"); body.Remove("pika_distribution"); }
             ControlReply reply;
             bool legacyCoordinator = false;
@@ -78,15 +77,8 @@ public sealed partial class PipersPlugin
             try { await StopGroupSimulationFollowing("Operator STOP · follower group discarded", timeout.Token); }
             catch (Exception error) { System.Diagnostics.Trace.TraceWarning("Group STOP: {0}", error.Message); }
         }
-        if (simulation is not null)
-        {
-            try { await StopSimulationFollowing(simulation, "Operator STOP · simulation following discarded", timeout.Token); }
-            catch (Exception error) { System.Diagnostics.Trace.TraceWarning("Simulation STOP: {0}", error.Message); }
-        }
         try { await FinishPikaTeaching("Operator STOP", timeout.Token); }
         catch (Exception error) { System.Diagnostics.Trace.TraceWarning("Teaching stop save: {0}", error.Message); }
-        try { await FinishAlignment("Operator STOP", timeout.Token); }
-        catch (Exception error) { System.Diagnostics.Trace.TraceWarning("Alignment stop save: {0}", error.Message); }
         try { await Update(shutdown.Token); }
         catch (Exception error) { System.Diagnostics.Trace.TraceWarning("STOP view: {0}", error.Message); }
     }
