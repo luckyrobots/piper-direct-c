@@ -33,6 +33,9 @@ async function launch() {
 }
 async function stopServer(signal = 'SIGTERM') { if (!server || server.exitCode !== null) return; const exited = new Promise(resolve => server.once('exit', resolve)); server.kill(signal); await exited; }
 async function startAction(values) {
+  // Admission requires an observed quiet pose after the previous operation.
+  // Its completion event may precede the next coherent stationary window.
+  await until(() => selected().status.stationary_s >= .3);
   const result = await post('/api/command', values, 202); lease = result.request_id;
   clearInterval(keepalive);
   keepalive = setInterval(() => { post('/api/heartbeat', { request_id: lease }).catch(() => {}); }, 150);
@@ -43,6 +46,7 @@ async function action(values) {
   await until(() => !state.motion.active);
   clearInterval(keepalive);
   assert.equal(state.phase, 'complete', state.message);
+  await until(() => selected().status.stationary_s >= .3);
 }
 async function query() { await post('/api/query', {}, 202); await until(() => !state.query_active); assert.equal(selected().firmware, 'S-V1.8-2'); }
 try {

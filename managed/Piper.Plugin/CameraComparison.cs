@@ -9,7 +9,69 @@ public sealed partial class PipersPlugin
 {
     private JsonObject? simulationCameras;
 
-    private string[] SimulationCameraNames() => new[] { "Choose simulation counterpart" }.Concat(
+    private long simulationCameraRefreshAttempt;
+    private Task? simulationCameraRefreshWorker;
+    private JsonObject? pendingSimulationCameraDiscovery;
+    private readonly CancellationTokenSource cameraDiscoveryShutdown = new();
+
+    private async Task StopCameraDiscoveryOnDispose()
+    {
+        await cameraDiscoveryShutdown.CancelAsync();
+        var tasks = new[] { simulationCameraRefreshWorker, cameraDeviceDiscoveryWorker }.OfType<Task>().ToArray();
+        try { await Task.WhenAll(tasks); }
+        catch (OperationCanceledException) { }
+        Interlocked.Exchange(ref pendingSimulationCameraDiscovery, null);
+        Interlocked.Exchange(ref pendingCameraDeviceInventory, null);
+        cameraDiscoveryShutdown.Dispose();
+    }
+
+    private async Task RefreshSimulationCameraBindings(CancellationToken cancellation)
+    {
+        QueueSimulationCameraRefresh(cancellation);
+        var discovered = Interlocked.Exchange(ref pendingSimulationCameraDiscovery, null);
+        if (discovered is null || switchingProfile)
+            return;
+        await ApplySimulationCameraDiscovery(discovered, cancellation);
+    }
+
+    private void QueueSimulationCameraRefresh(CancellationToken cancellation)
+    {
+        if (!passiveMeasuredTrackingStarted || cameraDiscoveryShutdown.IsCancellationRequested || switchingProfile || simulationCameraRefreshWorker is { IsCompleted: false } ||
+            simulationCameraRefreshAttempt != 0 && System.Diagnostics.Stopwatch.GetElapsedTime(simulationCameraRefreshAttempt).TotalSeconds < 2)
+            return;
+        simulationCameraRefreshAttempt = System.Diagnostics.Stopwatch.GetTimestamp();
+        simulationCameraRefreshWorker = ReadSimulationCameraDiscovery(cancellation);
+    }
+
+    private async Task ReadSimulationCameraDiscovery(CancellationToken cancellation)
+    {
+        using var lifetime = CancellationTokenSource.CreateLinkedTokenSource(cancellation, cameraDiscoveryShutdown.Token);
+        cancellation = lifetime.Token;
+        try
+        {
+            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellation);
+            timeout.CancelAfter(600);
+            var discovered = JsonNode.Parse((await engine.RequestAsync("scene.cameras", cancellation: timeout.Token)).GetRawText())!.AsObject();
+            Materialize(discovered);
+            if (scene?["sceneId"]?.GetValue<string>() != discovered["sceneId"]?.GetValue<string>())
+            {
+                var robots = JsonNode.Parse((await engine.RequestAsync("scene.robots", cancellation: timeout.Token)).GetRawText())!.AsObject();
+                Materialize(robots);
+                if (robots["sceneId"]?.GetValue<string>() == discovered["sceneId"]?.GetValue<string>())
+                    discovered["robotInventory"] = robots;
+            }
+            Interlocked.Exchange(ref pendingSimulationCameraDiscovery, discovered);
+        }
+        catch (Exception error) when (!cancellation.IsCancellationRequested)
+        {
+            System.Diagnostics.Trace.TraceWarning("Simulation camera discovery delayed: {0}", error.Message);
+        }
+        catch (OperationCanceledException) when (cancellation.IsCancellationRequested)
+        {
+        }
+    }
+
+    private string[] SimulationCameraNames() => new[] { "Automatic counterpart" }.Concat(
         simulationCameras?["cameras"]?.AsArray().Select(c => c?["name"]?.GetValue<string>() ?? "Camera") ?? []).ToArray();
 
     private int SimulationCameraIndex(string id)
@@ -25,18 +87,25 @@ public sealed partial class PipersPlugin
     {
         var discovered = JsonNode.Parse((await engine.RequestAsync("scene.cameras", cancellation: cancellation)).GetRawText())!.AsObject();
         Materialize(discovered);
+        await ApplySimulationCameraDiscovery(discovered, cancellation);
+    }
+
+    private async Task ApplySimulationCameraDiscovery(JsonObject discovered, CancellationToken cancellation)
+    {
         simulationCameras = discovered;
-        string sceneId = simulationCameras["sceneId"]!.GetValue<string>();
+        if (discovered["robotInventory"] is JsonObject robots)
+            scene = robots.DeepClone().AsObject();
         // Entity UUIDs survive scene reload; session scene IDs do not. Refresh
         // every profile's valid camera bindings, including inactive robots.
-        preferences = RobotProfileRouting.RefreshCameraBindings(preferences, sceneId,
-            simulationCameras["cameras"]!.AsArray().Select(c => c!["entityId"]!.GetValue<string>()));
-        await Save(cancellation);
+        string before = JsonSerializer.Serialize(preferences, LuckyEngine.PluginSdk.PluginProtocol.Json);
+        preferences = SimulationCameraRouting.Refresh(preferences, simulationCameras);
+        if (before != JsonSerializer.Serialize(preferences, LuckyEngine.PluginSdk.PluginProtocol.Json))
+            await Save(cancellation);
     }
 
     private async Task CameraComparisonEvent(string camera, string action, JsonElement value, CancellationToken cancellation)
     {
-        if (action == "simrefresh") { await DiscoverSimulationCameras(cancellation); await Render(cancellation); return; }
+        if (action == "simrefresh") { QueueCameraDeviceRefresh(cancellation, force: true); await DiscoverSimulationCameras(cancellation); await Render(cancellation); return; }
         var bindings = new Dictionary<string, SimulationCameraPreferences>(preferences.SimulationCameras ?? []);
         if (action == "simselect")
         {
@@ -56,6 +125,7 @@ public sealed partial class PipersPlugin
         foreach (string id in new[] { "bench", "gripper", "depth" })
         {
             var saved = preferences.SimulationCameras?.GetValueOrDefault(id);
+            bool available = SimulationCameraRouting.IsAvailable(saved, simulationCameras);
             var size = cameraDimensions.GetValueOrDefault(id, (Width: 640, Height: 480));
             cameraCalibration.TryGetValue(id, out var calibration);
             bool metricDepth = D405View.MetricDepth(id, CameraSettings(id));
@@ -68,13 +138,14 @@ public sealed partial class PipersPlugin
             patches[$"camera.{id}.sim"] = new()
             {
                 ["sceneId"] = saved?.SceneId ?? "", ["cameraId"] = saved?.CameraId ?? "",
+                ["visible"] = available,
                 ["overlayImageId"] = saved?.Overlay == true && !metricDepth && CameraFrameReady(id) ? CameraImageId(id) : "",
                 ["captureWidth"] = size.Width, ["captureHeight"] = size.Height, ["blend"] = .5,
                 ["streamKind"] = streamKind, ["lensModel"] = id == "gripper" ? "fisheye" : "pinhole",
                 ["intrinsics"] = matches ? calibration!.DeepClone() : null
             };
-            patches[$"camera.{id}.sim.status"] = new() { ["text"] = saved is null
-                ? "Choose a counterpart using ⚙ → Find simulation cameras"
+            patches[$"camera.{id}.sim.status"] = new() { ["text"] = !available
+                ? "Simulation camera unavailable · choose one in Camera settings"
                 : teleoperating ? "SIM leader pose · not time synchronized with measured camera"
                 : matches ? "Lens profile active · mount alignment / exposure sync unverified"
                 : id == "depth" && !metricDepth && calibration?["model"]?.GetValue<string>() == "realsense-distorted"

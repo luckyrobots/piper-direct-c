@@ -51,6 +51,27 @@ internal static class TelemetryPipelineTests
         check(ackReceipt.HasFreshDevice(ackDevice, ticks) && ackReceipt.IsFresh(At(300)), "Acknowledgement fixture did not isolate source-sample age from wrapper age");
         check(Math.Abs(ackReceipt.DeviceEvidenceAgeMilliseconds(ackDevice, At(300)) - 750) < .001 && !ackReceipt.HasFreshDevice(ackDevice, At(300)),
             "A 450ms source sample plus300ms editor wait was accepted/stamped as a fresh acknowledgement");
+        var pikaState = State();
+        var pika = pikaState["pika"]!.AsObject();
+        pika["connected"] = true; pika["fresh"] = true; pika["age_s"] = .15;
+        var pikaReceipt = new TelemetryReceipt(pikaState, "session-a", 4, ticks, 100);
+        double pikaDeadline = SimulationFollowPolicy.MaximumGripperFeedbackAgeMilliseconds;
+        check(Math.Abs(pikaReceipt.PikaEvidenceAgeMilliseconds(ticks) - 250) < .001 && pikaReceipt.HasFreshPika(ticks, pikaDeadline),
+            "Pika age did not include its source sample age and envelope delay at the 250ms boundary");
+        check(!pikaReceipt.HasFreshPika(At(1), pikaDeadline), "An aged Pika receipt renewed its 250ms evidence window");
+        pika["age_s"] = .3;
+        check(!pikaReceipt.HasFreshPika(ticks, pikaDeadline), "A true Pika fresh flag hid a sample too old for physical following");
+        foreach (JsonNode? invalidAge in new JsonNode?[] { null, JsonValue.Create(-.001), JsonValue.Create(double.NaN), JsonValue.Create(double.PositiveInfinity), JsonValue.Create("0.01") })
+        {
+            pika["age_s"] = invalidAge;
+            check(!pikaReceipt.HasFreshPika(ticks, pikaDeadline), "Missing or invalid Pika source age authorized following");
+        }
+        pika["age_s"] = .001; pika["connected"] = false;
+        check(!pikaReceipt.HasFreshPika(ticks, pikaDeadline), "Disconnected Pika feedback authorized following");
+        pika["connected"] = true; pika["fresh"] = false;
+        check(!pikaReceipt.HasFreshPika(ticks, pikaDeadline), "A false Pika fresh flag authorized following");
+        pika["fresh"] = true;
+        check(!(pikaReceipt with { Connected = false }).HasFreshPika(ticks, pikaDeadline), "A disconnected telemetry envelope authorized Pika following");
         check(!Prepare(State(), 2, utc - 501_000, "host-utc", utc, ticks, out _), "A queued old frame was stamped fresh on arrival");
         check(ReferenceEquals(inbox.Latest, first), "Rejecting an aged frame replaced the last verified receipt");
         check(!Prepare(State(), 2, utc + 101_000, "host-utc", utc, ticks, out _), "An unbounded future source clock passed freshness checks");
@@ -179,7 +200,7 @@ internal static class TelemetryPipelineTests
             await Until(() => Get<LatestTelemetry>("telemetry").Latest!.BackendToken == "session-b" && Get<LatestTelemetry>("telemetry").Latest!.IsFresh(Stopwatch.GetTimestamp()), "Fixture did not restore fresh input for acknowledgement test");
             rpc.DelayedCommand = new(TaskCreationOptions.RunContinuationsAsynchronously);
             var pending = (Task)typeof(PipersPlugin).GetMethod("Command", flags)!.Invoke(plugin,
-                ["jog", new JsonObject { ["joint"] = 6, ["delta_deg"] = 1.0 }, lifetime.Token, false, false, null, null, null])!;
+                ["jog", new JsonObject { ["joint"] = 6, ["delta_deg"] = 1.0 }, lifetime.Token, false, false, null, null, null, null, null])!;
             await Until(() => rpc.CommandReached.Task.IsCompleted, "Synthetic authorized action did not reach the fake transport");
             typeof(PipersPlugin).GetMethod("DisarmTelemetryTargets", flags)!.Invoke(plugin, ["Fixture telemetry loss", false]);
             rpc.DelayedCommand.SetResult(new ControlReply { Status = 202, Json = "{\"request_id\":99,\"message\":\"accepted\"}" });
@@ -187,6 +208,15 @@ internal static class TelemetryPipelineTests
             try { await pending; } catch (InvalidOperationException) { discarded = true; }
             check(discarded && Get<long>("lease") == 0 && Get<long>("lastCommand") == 0,
                 "A delayed old acknowledgement renewed its discarded operation after telemetry loss");
+            int sentBefore = rpc.Routes.Count;
+            long previousPermission = Get<long>("targetPermissionEpoch") - 1;
+            pending = (Task)typeof(PipersPlugin).GetMethod("Command", flags)!.Invoke(plugin,
+                ["teach-return", new JsonObject { ["button_off"] = true, ["same_pose_confirmed"] = true }, lifetime.Token,
+                    false, true, null, null, null, previousPermission, null])!;
+            discarded = false;
+            try { await pending; } catch (InvalidOperationException) { discarded = true; }
+            check(discarded && rpc.Routes.Count == sentBefore,
+                "A teaching return prepared before a reader-side disarm reached the command transport");
         }
         finally
         {

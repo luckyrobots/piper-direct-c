@@ -44,6 +44,14 @@ Copy-Item -LiteralPath (Join-Path $taskRepo 'docs/workspace-calibration-roadmap.
 Copy-Item -LiteralPath (Join-Path $taskRepo 'docs/teaching-alignment.md') -Destination (Join-Path $taskPackage 'docs') -Force
 Copy-Item -LiteralPath (Join-Path $taskRepo 'docs/robot-base-calibration.md') -Destination (Join-Path $taskPackage 'docs') -Force
 Copy-Item -LiteralPath (Join-Path $taskRepo 'docs/pika-model-reference.md') -Destination (Join-Path $taskPackage 'docs') -Force
+Copy-Item -LiteralPath (Join-Path $taskRepo 'docs/physical-episode-replay.md') -Destination (Join-Path $taskPackage 'docs') -Force
+Copy-Item -LiteralPath (Join-Path $taskRepo 'docs/protocol-acceleration-units.md') -Destination (Join-Path $taskPackage 'docs') -Force
+Copy-Item -LiteralPath (Join-Path $taskRepo 'docs/replay-and-streaming-speed.md') -Destination (Join-Path $taskPackage 'docs') -Force
+Copy-Item -LiteralPath (Join-Path $taskRepo 'docs/multiple-pika-grippers.md') -Destination (Join-Path $taskPackage 'docs') -Force
+Copy-Item -LiteralPath (Join-Path $taskRepo 'docs/simplified-controls.md') -Destination (Join-Path $taskPackage 'docs') -Force
+Copy-Item -LiteralPath (Join-Path $taskRepo 'docs/backend-maintenance.md') -Destination (Join-Path $taskPackage 'docs') -Force
+New-Item -ItemType Directory -Path (Join-Path $taskPackage 'tools') -Force | Out-Null
+Copy-Item -LiteralPath (Join-Path $taskRepo 'tools/Setup-PikaUsb.ps1') -Destination (Join-Path $taskPackage 'tools') -Force
 Copy-Item -LiteralPath (Join-Path $taskRepo 'managed/THIRD-PARTY-NOTICES.txt') -Destination $taskPackage -Force
 Copy-Item -LiteralPath (Join-Path $taskRepo 'vendor/candle') -Destination (Join-Path $taskPackage 'transport-source') -Recurse -Force
 # Include reproducible plugin/controller sources, never local state, captures, credentials or engine code.
@@ -55,7 +63,7 @@ foreach($taskDirectory in @('src','web','vendor/candle')) {
     Get-ChildItem -LiteralPath (Join-Path $taskRepo $taskDirectory) -File | Copy-Item -Destination $taskDestination -Force
 }
 foreach($taskFile in @('cJSON.c','cJSON.h')){Copy-Item -LiteralPath (Join-Path $taskRepo ('vendor/'+$taskFile)) -Destination (Join-Path $taskSource 'vendor') -Force}
-foreach($taskProject in @('Piper.Contracts','Piper.Core','Piper.Host','Piper.Pika','Piper.Pika.Agent','Piper.Pika.Tests','Piper.Plugin','Piper.Plugin.Tests','Piper.Camera','Piper.Camera.Tests','Piper.RealSense')) {
+foreach($taskProject in @('Piper.Contracts','Piper.Core','Piper.Host','Piper.Host.Tests','Piper.Pika','Piper.Pika.Agent','Piper.Pika.Tests','Piper.Plugin','Piper.Plugin.Tests','Piper.Camera','Piper.Camera.Tests','Piper.RealSense')) {
     foreach($taskFile in Get-ChildItem -LiteralPath (Join-Path $taskRepo ('managed/'+$taskProject)) -File -Recurse | Where-Object {$_.FullName -notmatch '[\\/](bin|obj)[\\/]' -and $_.Extension -in @('.cs','.csproj','.proto','.svg','.json')}) {
         $taskRelative=$taskFile.FullName.Substring($taskRepo.Length+1)
         $taskDestination=Join-Path $taskSource $taskRelative
@@ -71,15 +79,15 @@ Copy-Item -LiteralPath (Join-Path $taskRepo 'vendor/realsense'),(Join-Path $task
 Copy-Item -LiteralPath (Join-Path $taskRepo 'vendor/plugin-sdk') -Destination (Join-Path $taskSource 'vendor') -Recurse -Force
 Copy-Item -LiteralPath (Join-Path $taskRepo 'NuGet.Config') -Destination $taskSource -Force
 New-Item -ItemType Directory -Path (Join-Path $taskSource 'tools'),(Join-Path $taskSource 'docs') -Force | Out-Null
-foreach($taskFile in @('Build-EnginePlugin.ps1','Prepare-CameraRuntime.ps1','build-windows.ps1','build-native-linux.sh')){Copy-Item -LiteralPath (Join-Path $taskRepo ('tools/'+$taskFile)) -Destination (Join-Path $taskSource 'tools') -Force}
+foreach($taskFile in @('Build-EnginePlugin.ps1','Prepare-CameraRuntime.ps1','build-windows.ps1','build-native-linux.sh','Setup-PikaUsb.ps1')){Copy-Item -LiteralPath (Join-Path $taskRepo ('tools/'+$taskFile)) -Destination (Join-Path $taskSource 'tools') -Force}
 Copy-Item -LiteralPath (Join-Path $taskRepo 'lucky-plugin.yaml') -Destination $taskSource -Force
 Copy-Item -LiteralPath (Join-Path $taskRepo 'Makefile') -Destination $taskSource -Force
-$taskTrackedTests = & git -C $taskRepo ls-files tests
-if($LASTEXITCODE){throw 'Could not enumerate tracked test sources'}
-foreach($taskTest in $taskTrackedTests) {
-    $taskDestination=Join-Path $taskSource $taskTest
+$taskTestSources = Get-ChildItem -LiteralPath (Join-Path $taskRepo 'tests') -File -Recurse | Where-Object { $_.Extension -in @('.c','.h','.py','.sh','.ps1','.csv','.mjs') }
+foreach($taskTest in $taskTestSources) {
+    $taskRelativeTest=$taskTest.FullName.Substring($taskRepo.Length+1)
+    $taskDestination=Join-Path $taskSource $taskRelativeTest
     New-Item -ItemType Directory -Path (Split-Path $taskDestination -Parent) -Force | Out-Null
-    Copy-Item -LiteralPath (Join-Path $taskRepo $taskTest) -Destination $taskDestination -Force
+    Copy-Item -LiteralPath $taskTest.FullName -Destination $taskDestination -Force
 }
 Copy-Item -LiteralPath (Join-Path $taskRepo 'README.md') -Destination $taskSource -Force
 Copy-Item -LiteralPath (Join-Path $taskRepo 'managed/README.md') -Destination (Join-Path $taskSource 'managed') -Force
@@ -88,6 +96,12 @@ Copy-Item -LiteralPath (Join-Path $taskRepo 'docs/workspace-calibration-roadmap.
 Copy-Item -LiteralPath (Join-Path $taskRepo 'docs/teaching-alignment.md') -Destination (Join-Path $taskSource 'docs') -Force
 Copy-Item -LiteralPath (Join-Path $taskRepo 'docs/robot-base-calibration.md') -Destination (Join-Path $taskSource 'docs') -Force
 Copy-Item -LiteralPath (Join-Path $taskRepo 'docs/pika-model-reference.md') -Destination (Join-Path $taskSource 'docs') -Force
+Copy-Item -LiteralPath (Join-Path $taskRepo 'docs/physical-episode-replay.md') -Destination (Join-Path $taskSource 'docs') -Force
+Copy-Item -LiteralPath (Join-Path $taskRepo 'docs/protocol-acceleration-units.md') -Destination (Join-Path $taskSource 'docs') -Force
+Copy-Item -LiteralPath (Join-Path $taskRepo 'docs/replay-and-streaming-speed.md') -Destination (Join-Path $taskSource 'docs') -Force
+Copy-Item -LiteralPath (Join-Path $taskRepo 'docs/multiple-pika-grippers.md') -Destination (Join-Path $taskSource 'docs') -Force
+Copy-Item -LiteralPath (Join-Path $taskRepo 'docs/simplified-controls.md') -Destination (Join-Path $taskSource 'docs') -Force
+Copy-Item -LiteralPath (Join-Path $taskRepo 'docs/backend-maintenance.md') -Destination (Join-Path $taskSource 'docs') -Force
 Copy-Item -LiteralPath (Join-Path $taskRepo 'managed/THIRD-PARTY-NOTICES.txt') -Destination (Join-Path $taskSource 'managed') -Force
 $taskArchive=Join-Path $taskRepo ('build/Pipers-0.1.0-preview.1-'+$Runtime+'.zip')
 Add-Type -AssemblyName System.IO.Compression

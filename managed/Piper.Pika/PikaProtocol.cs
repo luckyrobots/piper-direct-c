@@ -4,6 +4,13 @@ using System.Text.Json;
 
 namespace LuckyRobots.Piper.Pika;
 
+/// <summary>Display acknowledgement only; it does not grant ownership or motor authority.</summary>
+public readonly record struct PikaPowerFeedback(bool ExpectedEnabled, double RequestedAt)
+{
+    public bool IsConfirmed(bool enabled, double feedbackAt) => enabled == ExpectedEnabled &&
+        double.IsFinite(RequestedAt) && RequestedAt >= 0 && double.IsFinite(feedbackAt) && feedbackAt > RequestedAt;
+}
+
 public static class PikaProtocol
 {
     // Model-derived opening tolerance; not an independent jaw calibration.
@@ -35,65 +42,253 @@ public static class PikaProtocol
     public static bool Telemetry(JsonElement data, out double position, out double speed, out bool enabled)
     {
         position = speed = 0; enabled = false;
-        if (data.ValueKind != JsonValueKind.Object || !data.TryGetProperty("motor", out var motor) || !data.TryGetProperty("motorstatus", out var status) ||
-            motor.ValueKind != JsonValueKind.Object || status.ValueKind != JsonValueKind.Object ||
-            !motor.TryGetProperty("Position", out var p) || !motor.TryGetProperty("Speed", out var s) ||
-            p.ValueKind != JsonValueKind.Number || s.ValueKind != JsonValueKind.Number ||
-            !p.TryGetDouble(out position) || !s.TryGetDouble(out speed) || !double.IsFinite(position) || !double.IsFinite(speed)) return false;
-        if (!status.TryGetProperty("Status", out var state)) return false;
-        string? raw = state.ValueKind == JsonValueKind.String ? state.GetString() : null;
-        if (raw is null || !raw.StartsWith("0x", StringComparison.OrdinalIgnoreCase) ||
-            !int.TryParse(raw.AsSpan(2), System.Globalization.NumberStyles.HexNumber, null, out int bits)) return false;
-        enabled = (bits & 0x40) != 0;
+        if (ValidateTelemetry(data) != "") return false;
+        var motor = data.GetProperty("motor");
+        position = motor.GetProperty("Position").GetDouble(); speed = motor.GetProperty("Speed").GetDouble();
+        PikaDriverStatus.TryRead(data.GetProperty("motorstatus").GetProperty("Status").GetString(), out var driver);
+        enabled = driver!.Enabled;
         return true;
     }
+
+    // Diagnostics classify only known field paths; no telemetry values, unknown
+    // property names or authorization data are copied into rejection messages.
+    public static string TelemetryRejectionPath(JsonElement data) => ValidateTelemetry(data);
+
+    private static string ValidateTelemetry(JsonElement data)
+    {
+        if (data.ValueKind != JsonValueKind.Object) return "$";
+        if (!data.TryGetProperty("motor", out var motor) || motor.ValueKind != JsonValueKind.Object) return "$.motor";
+        if (!data.TryGetProperty("motorstatus", out var status) || status.ValueKind != JsonValueKind.Object) return "$.motorstatus";
+        // Broad wire-plausibility envelopes, NOT operating/enable limits. Raw
+        // faulted encoders may be signed; canonical jaw control still requires
+        // ValidAngle separately. Never repair shifted fields or infer power
+        // from an otherwise corrupt frame. Any rejected packet renews no age.
+        if (!Scalar(motor, "Position", -2 * Math.PI, 2 * Math.PI, required: true)) return "$.motor.Position";
+        if (!Scalar(motor, "Speed", -100, 100, required: true)) return "$.motor.Speed";
+        if (!Scalar(motor, "Current", -100000, 100000, integral: true)) return "$.motor.Current";
+        if (!Scalar(status, "Voltage", 0, 1000)) return "$.motorstatus.Voltage";
+        if (!Scalar(status, "DriverTemp", -1000, 1000, integral: true)) return "$.motorstatus.DriverTemp";
+        if (!Scalar(status, "MotorTemp", -1000, 1000, integral: true)) return "$.motorstatus.MotorTemp";
+        if (!Scalar(status, "BusCurrent", -100000, 100000, integral: true)) return "$.motorstatus.BusCurrent";
+        if (!status.TryGetProperty("Status", out var state) || state.ValueKind != JsonValueKind.String ||
+            !PikaDriverStatus.TryRead(state.GetString(), out var driver)) return "$.motorstatus.Status";
+        // A healthy enabled jaw cannot report an arbitrary signed motor turn.
+        // Preserve the established closed-reference allowance and GripperLink's
+        // 0.25 mm endpoint feedback noise allowance; commands remain 0–90 mm. Fault
+        // and disabled packets retain raw signed readings for diagnosis; a
+        // genuine fault is never hidden merely by its invalid encoder value.
+        if (driver!.Enabled && !driver.HasFault)
+        {
+            double angle = motor.GetProperty("Position").GetDouble(), width = Width(angle);
+            if (angle < -.15 || angle > MaximumAngle || width < -ArrivalToleranceMm || width > 90.25)
+                return "$.motor.Position";
+        }
+        return "";
+    }
+
+    private static bool Scalar(JsonElement obj, string name, double minimum, double maximum, bool required = false, bool integral = false)
+    {
+        // Metadata omitted by older/minimal packets remains optional; a field
+        // that is present must have its real type and a plausible whole value.
+        if (!obj.TryGetProperty(name, out var value)) return !required;
+        return value.ValueKind == JsonValueKind.Number && value.TryGetDouble(out double number) && double.IsFinite(number) &&
+            number >= minimum && number <= maximum && (!integral || Math.Truncate(number) == number);
+    }
 }
+
+public sealed record PikaFramingOverflowSample(int BufferCharacters, int FirstCandidateOffset, int BraceDepth,
+    bool InsideString, bool EscapePending, string DecodedPrefixUtf8Base64, string DecodedSuffixUtf8Base64);
+public sealed record PikaJsonDiagnostics(long CandidateObjects, long AcceptedObjects, long MalformedObjects,
+    long DuplicateKeyObjects, long OverflowResets, IReadOnlyDictionary<string, long> DuplicatePathCounts, string[] LastDuplicatePaths,
+    PikaFramingOverflowSample? FirstOverflowSample, long FramingResyncs, long DiscardedPrefixBytes,
+    long RecoveryCandidates, long RejectedRecoveryCandidates, long FramingCharactersScanned, long SyntaxProofCharacters, int MaximumBufferedCharacters);
 
 /// <summary>Fragmented vendor JSON, including quoted braces and trailing commas.</summary>
 public sealed class PikaJsonStream
 {
-    private readonly StringBuilder buffer = new();
+    public const int MaximumBufferedCharacters = 16384;
+    private const int ProofMaximumDepth = MaximumBufferedCharacters + 4096 + 1;
+    private readonly StringBuilder buffer = new(MaximumBufferedCharacters + 4096);
+    private long candidates, accepted, malformed, duplicateObjects, overflowResets;
+    private long resyncs, discardedBytes, recoveryCandidates, rejectedRecoveryCandidates, scanWork, proofWork;
+    private int maximumBuffered, scanAt, start = -1, depth, recoveryAt;
+    private bool quoted, escape, recoveryMayBeComplete, malformedRecoveryPrefix;
+    private readonly Dictionary<string, long> duplicatePaths = new(StringComparer.Ordinal);
+    private string[] lastDuplicatePaths = [];
+    private PikaFramingOverflowSample? firstOverflowSample;
+    public PikaJsonDiagnostics Diagnostics => new(candidates, accepted, malformed, duplicateObjects, overflowResets,
+        new Dictionary<string, long>(duplicatePaths), (string[])lastDuplicatePaths.Clone(), firstOverflowSample,
+        resyncs, discardedBytes, recoveryCandidates, rejectedRecoveryCandidates, scanWork, proofWork, maximumBuffered);
     public IEnumerable<JsonElement> Push(string text)
     {
-        buffer.Append(text);
-        while (true)
+        for (int offset = 0; offset < text.Length;)
         {
-            int start = -1, end = -1, depth = 0; bool quoted = false, escape = false;
-            for (int i = 0; i < buffer.Length; i++)
+            int amount = Math.Min(4096, text.Length - offset);
+            buffer.Append(text, offset, amount); offset += amount;
+            maximumBuffered = Math.Max(maximumBuffered, buffer.Length);
+            while (true)
             {
-                char c = buffer[i];
-                if (start < 0) { if (c != '{') continue; start = i; }
-                if (quoted) { if (escape) escape = false; else if (c == '\\') escape = true; else if (c == '"') quoted = false; }
-                else if (c == '"') quoted = true;
-                else if (c == '{') depth++;
-                else if (c == '}' && --depth == 0) { end = i + 1; break; }
+                int end = -1;
+                while (scanAt < buffer.Length)
+                {
+                    int i = scanAt++; ++scanWork;
+                    char c = buffer[i];
+                    if (c == '}') recoveryMayBeComplete = true;
+                    if (start < 0) { if (c != '{') continue; start = i; recoveryAt = i + 1; }
+                    if (quoted) { if (escape) escape = false; else if (c == '\\') escape = true; else if (c == '"') quoted = false; }
+                    else if (c == '"') quoted = true;
+                    else if (c == '{') depth++;
+                    else if (c == '}' && --depth == 0) { end = i + 1; break; }
+                }
+                JsonElement? parsed = null;
+                bool syntaxInvalid = false;
+                if (end >= 0)
+                {
+                    ++candidates;
+                    try
+                    {
+                        using var document = JsonDocument.Parse(buffer.ToString(start, end - start), new JsonDocumentOptions { AllowTrailingCommas = true, MaxDepth = 16 });
+                        var paths = new HashSet<string>(StringComparer.Ordinal);
+                        if (UniqueFields(document.RootElement, "$", paths)) { parsed = document.RootElement.Clone(); ++accepted; }
+                        else RecordDuplicates(paths);
+                    }
+                    catch (JsonException) { ++malformed; syntaxInvalid = true; }
+                    // A complete valid generic object (including a duplicate-
+                    // rejected object) always wins over nested motor headers.
+                    if (!syntaxInvalid)
+                    {
+                        Consume(end);
+                        if (parsed is { } value) yield return value;
+                        continue;
+                    }
+                }
+                if (start >= 0 && recoveryMayBeComplete && TryRecover(out var recovered, out int recoveredEnd))
+                { Consume(recoveredEnd); yield return recovered; continue; }
+                if (end >= 0) { Consume(end); continue; }
+                if (buffer.Length > MaximumBufferedCharacters)
+                {
+                    int length = Math.Min(512, buffer.Length);
+                    firstOverflowSample ??= new(buffer.Length, start, depth, quoted, escape,
+                        Convert.ToBase64String(Encoding.UTF8.GetBytes(buffer.ToString(0, length))),
+                        Convert.ToBase64String(Encoding.UTF8.GetBytes(buffer.ToString(buffer.Length - length, length))));
+                    ++overflowResets; Consume(buffer.Length);
+                }
+                break;
             }
-            if (end < 0) { if (buffer.Length > 16384) buffer.Clear(); yield break; }
-            string raw = buffer.ToString(start, end - start); buffer.Remove(0, end);
-            JsonElement? parsed = null;
-            try
-            {
-                using var document = JsonDocument.Parse(raw, new JsonDocumentOptions { AllowTrailingCommas = true, MaxDepth = 16 });
-                // Some vendor packets repeat temperature/status fields. Do not
-                // pick an arbitrary status or publish ambiguous JSON to clients.
-                // Ignore this packet; only a subsequent valid one refreshes age.
-                if (UniqueFields(document.RootElement)) parsed = document.RootElement.Clone();
-            }
-            catch (JsonException) { }
-            if (parsed is { } value) yield return value;
         }
     }
 
-    private static bool UniqueFields(JsonElement element)
+    private void Consume(int count)
     {
+        buffer.Remove(0, count); scanAt = 0; start = -1; depth = recoveryAt = 0; quoted = escape = recoveryMayBeComplete = malformedRecoveryPrefix = false;
+    }
+
+    private void RecordDuplicates(HashSet<string> paths)
+    {
+        ++duplicateObjects; lastDuplicatePaths = paths.Order(StringComparer.Ordinal).ToArray();
+        foreach (string path in paths) duplicatePaths[path] = duplicatePaths.GetValueOrDefault(path) + 1;
+    }
+
+    private bool TryRecover(out JsonElement recovered, out int recoveredEnd)
+    {
+        recovered = default; recoveredEnd = 0; recoveryMayBeComplete = false;
+        string source = buffer.ToString();
+        byte[] bytes = Encoding.UTF8.GetBytes(source);
+        int byteAt = 0, charAt = 0;
+        while (recoveryAt < source.Length)
+        {
+            int candidate = source.IndexOf('{', recoveryAt);
+            if (candidate < 0) { recoveryAt = source.Length; return false; }
+            byteAt += Encoding.UTF8.GetByteCount(source.AsSpan(charAt, candidate - charAt)); charAt = candidate;
+            int first = candidate + 1;
+            while (first < source.Length && source[first] is ' ' or '\t' or '\r' or '\n') ++first;
+            ++recoveryCandidates;
+            if (first == source.Length) { recoveryAt = candidate; return false; }
+            // An object must start with a property name or its closing brace.
+            // This avoids allocating an exception for every brace in garbage.
+            if (source[first] is not ('"' or '}')) { ++proofWork; recoveryAt = candidate + 1; continue; }
+            // The proof depth exceeds every possible nesting in this bounded
+            // buffer. A normal depth-policy rejection is NOT syntax proof.
+            var reader = new Utf8JsonReader(bytes.AsSpan(byteAt), false, new JsonReaderState(new() { AllowTrailingCommas = true, MaxDepth = ProofMaximumDepth }));
+            JsonDocument? complete = null;
+            try
+            {
+                if (!JsonDocument.TryParseValue(ref reader, out complete))
+                {
+                    // An earlier independently extendable object protects its
+                    // nested headers, even while its final brace is missing.
+                    proofWork += source.Length - candidate; recoveryAt = candidate; return false;
+                }
+            }
+            catch (JsonException) { proofWork += Math.Max(1, reader.BytesConsumed); recoveryAt = candidate + 1; continue; }
+            using (complete)
+            {
+                proofWork += reader.BytesConsumed;
+                int end = candidate + Encoding.UTF8.GetCharCount(bytes.AsSpan(byteAt, checked((int)reader.BytesConsumed)));
+                recoveryAt = end; // Never harvest a nested header from a valid wrapper.
+                if (!MotorHeader(source, candidate, out int headerEnd)) continue;
+                if (!malformedRecoveryPrefix) malformedRecoveryPrefix = MalformedPrefix(source.AsSpan(start, headerEnd - start));
+                if (!malformedRecoveryPrefix) continue;
+                try
+                {
+                    using var strict = JsonDocument.Parse(source.AsMemory(candidate, end - candidate), new JsonDocumentOptions { AllowTrailingCommas = true, MaxDepth = 16 });
+                    var paths = new HashSet<string>(StringComparer.Ordinal);
+                    if (!UniqueFields(strict.RootElement, "$", paths)) { ++rejectedRecoveryCandidates; ++candidates; RecordDuplicates(paths); continue; }
+                    if (!PikaProtocol.Telemetry(strict.RootElement, out _, out _, out _)) { ++rejectedRecoveryCandidates; continue; }
+                    recovered = strict.RootElement.Clone(); recoveredEnd = end;
+                    ++resyncs; ++candidates; ++accepted;
+                    discardedBytes += Encoding.UTF8.GetByteCount(source.AsSpan(0, candidate));
+                    return true;
+                }
+                catch (JsonException) { ++rejectedRecoveryCandidates; }
+            }
+        }
+        return false;
+    }
+
+    private bool MalformedPrefix(ReadOnlySpan<char> prefix)
+    {
+        proofWork += prefix.Length;
+        var reader = new Utf8JsonReader(Encoding.UTF8.GetBytes(prefix.ToString()), false,
+            new JsonReaderState(new() { AllowTrailingCommas = true, MaxDepth = ProofMaximumDepth }));
+        try { while (reader.Read()) { } return false; }
+        catch (JsonException) { return true; }
+    }
+
+    private static bool MotorHeader(string source, int start, out int end)
+    {
+        int i = start + 1;
+        while (i < source.Length && source[i] is ' ' or '\t' or '\r' or '\n') ++i;
+        const string name = "\"motor\"";
+        if (i + name.Length > source.Length || !source.AsSpan(i, name.Length).SequenceEqual(name)) { end = 0; return false; }
+        i += name.Length;
+        while (i < source.Length && source[i] is ' ' or '\t' or '\r' or '\n') ++i;
+        end = i + 1; return i < source.Length && source[i] == ':';
+    }
+
+    private static bool UniqueFields(JsonElement element, string path, HashSet<string> duplicates)
+    {
+        bool unique = true;
         if (element.ValueKind == JsonValueKind.Object)
         {
             var names = new HashSet<string>(StringComparer.Ordinal);
             foreach (var property in element.EnumerateObject())
-                if (!names.Add(property.Name) || !UniqueFields(property.Value)) return false;
+            {
+                string next = KnownPath(path, property.Name);
+                if (!names.Add(property.Name)) { unique = false; duplicates.Add(next); }
+                if (!UniqueFields(property.Value, next, duplicates)) unique = false;
+            }
         }
         else if (element.ValueKind == JsonValueKind.Array)
-            foreach (var item in element.EnumerateArray()) if (!UniqueFields(item)) return false;
-        return true;
+            foreach (var item in element.EnumerateArray()) if (!UniqueFields(item, "$.[other]", duplicates)) unique = false;
+        return unique;
     }
+
+    private static string KnownPath(string parent, string name) => (parent, name) switch
+    {
+        ("$", "motor") => "$.motor", ("$", "motorstatus") => "$.motorstatus",
+        ("$.motor", "Position" or "Speed" or "Current") => parent + "." + name,
+        ("$.motorstatus", "Status" or "Voltage" or "DriverTemp" or "MotorTemp" or "BusCurrent") => parent + "." + name,
+        _ => "$.[other]"
+    };
 }

@@ -1,13 +1,28 @@
+using System.Diagnostics;
 using System.Globalization;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 
 namespace LuckyRobots.Piper.Plugin;
 
+public sealed record RobotPowerState(int? EnabledCount)
+{
+    public bool AllEnabled => EnabledCount == 6;
+    public string Label => EnabledCount switch { null => "Power unavailable", 6 => "Enabled", 0 => "Disabled", var count => $"{count}/6 enabled" };
+
+    public static RobotPowerState Inspect(JsonObject? device)
+    {
+        if (device?["fresh"]?.GetValue<bool>() != true || device["joints"] is not JsonArray { Count: 6 } joints ||
+            joints.Any(j => j?["fresh"]?.GetValue<bool>() != true || j["enabled"] is not JsonValue value || !value.TryGetValue<bool>(out _)))
+            return new((int?)null);
+        return new(joints.Count(j => j!["enabled"]!.GetValue<bool>()));
+    }
+}
+
 /// <summary>UI events belong to a particular rendered page and robot; stop remains available across page changes.</summary>
 public static class WorkspaceEventScope
 {
-    private static bool Persistent(string id) => id is "stop" or "motion.hold" or "teaching.reset.abort" || id.StartsWith("engine.", StringComparison.Ordinal);
+    private static bool Persistent(string id) => id is "stop" or "disable" or "recovery.guide.cancel" or "motion.hold" or "simulation.stop" or "teaching.reset.abort" or "group.follow.cancel" || id.StartsWith("engine.", StringComparison.Ordinal);
     public static string Wrap(long epoch, string profileId, string id) => Persistent(id)
         ? RobotProfileRouting.ScopeEvent(profileId, id)
         : "view." + epoch.ToString(CultureInfo.InvariantCulture) + "." + RobotProfileRouting.ScopeEvent(profileId, id);
@@ -29,8 +44,8 @@ public static class WorkspaceEventScope
 
 public static class WorkspaceCommandPolicy
 {
-    public static bool RequiresControls(string id) => id is "enable" or "safety.accept" or "teleoperate.toggle" or "zero.all" or "pika.target" or "pika.minus" or "pika.plus" or "pika.zero" or "engine.robot.target" or "engine.robot.follow" ||
-        id.StartsWith("joint.", StringComparison.Ordinal) || id.StartsWith("teleoperate.joint.", StringComparison.Ordinal);
+    public static bool RequiresControls(string id) => id is "enable" or "safety.accept" or "teleoperate.toggle" or "zero.all" or "recovery.home" or "recovery.home.incident" or "pika.target" or "pika.minus" or "pika.plus" or "pika.zero" or "engine.robot.target" or "engine.robot.follow" ||
+        id.StartsWith("joint.", StringComparison.Ordinal) || id.StartsWith("teleoperate.joint.", StringComparison.Ordinal) || id is "simulation.toggle" or "simulation.match";
 }
 
 public sealed partial class PipersPlugin
@@ -63,31 +78,39 @@ public sealed partial class PipersPlugin
             cameraDetail = selected; page = "camera";
         }
         if (action == "camera-back") page = cameraReturnPage;
-        if (page is not ("controls" or "calibration" or "settings" or "recording" or "camera")) throw new InvalidOperationException("Unknown workspace page.");
-        if (settingsCategory is not ("robot" or "cameras" or "controller" or "diagnostics")) settingsCategory = "robot";
+        if (page is not ("controls" or "calibration" or "settings" or "recording" or "replay" or "camera")) throw new InvalidOperationException("Unknown workspace page.");
+        if (page == "calibration") { page = "settings"; settingsCategory = "bench"; }
+        if (GroupFollowActive && page == "settings" && settingsCategory == "bench")
+            throw new InvalidOperationException("Stop following before opening bench calibration. No follower targets were changed.");
+        if (settingsCategory is not ("robot" or "cameras" or "bench" or "controller" or "diagnostics")) settingsCategory = "robot";
         if (page != workspacePage)
         {
-            // Navigation is explicit. Finish this session's viewport gesture before
-            // hiding its controls, then discard all permission from the old page.
+            bool enteringCalibration = page == "settings" && settingsCategory == "bench";
+            if (enteringCalibration && Volatile.Read(ref simulationSession) is { } simulation)
+                await StopSimulationFollowing(simulation, "Following stopped on leaving Controls", cancellation);
+            // End a viewport gesture when hiding its controls. Browsing settings
+            // does not revoke a healthy robot session or interrupt an episode.
             if (teleoperating || followRequest != 0) await PauseTeleoperation(cancellation);
-            else if (lease != 0 && state?["motion"]?["active"]?.GetValue<bool>() == true && state["motion"]?["owner"]?.GetValue<string>() == owner)
-                await Command("hold", new JsonObject { ["request_id"] = state["motion"]!["request_id"]!.DeepClone() }, cancellation);
-            if (page == "calibration") await MakeCalibrationReadOnly(cancellation);
-            if (page != "controls")
+            if (enteringCalibration)
             {
-                Interlocked.Increment(ref targetPermissionEpoch);
-                approved = linkCommandsEnabled = approvalBeforeTeaching = false;
-                PauseSceneFollowing();
+                await MakeCalibrationReadOnly(cancellation);
             }
-            bool nextCalibration = page == "calibration" || page == "camera" && cameraReturnPage == "calibration";
-            if (calibrationOpen && page != "calibration") await StopHeightCheck(cancellation);
+            bool nextCalibration = enteringCalibration || page == "camera" && cameraReturnPage == "settings" && settingsCategory == "bench";
+            if (calibrationOpen && !nextCalibration) await StopHeightCheck(cancellation);
             if (calibrationOpen && !nextCalibration) await ClearWizardHighlight(cancellation);
             workspacePage = page;
-            calibrationOpen = page == "calibration" || page == "camera" && cameraReturnPage == "calibration";
+            calibrationOpen = nextCalibration;
             alignmentOpen = false;
             teachingReturnConfirmation = false;
         }
-        backendSetupOpen = workspacePage == "settings" && settingsCategory == "controller";
+        // Categories share a page: entering/leaving calibration must still update
+        // the read-only capture scope when no top-level navigation occurred.
+        bool calibrationCategory = workspacePage == "settings" && settingsCategory == "bench";
+        if (calibrationCategory && !calibrationOpen) { await MakeCalibrationReadOnly(cancellation); calibrationOpen = true; }
+        if (!calibrationCategory && workspacePage != "camera" && calibrationOpen) { await StopHeightCheck(cancellation); await ClearWizardHighlight(cancellation); calibrationOpen = false; }
+        backendSetupOpen = workspacePage == "settings" && settingsCategory is "controller" or "diagnostics";
+        if (passiveMeasuredTrackingStarted && workspacePage == "settings" && settingsCategory == "robot" && (pikaInventoryAt == 0 || Stopwatch.GetElapsedTime(pikaInventoryAt).TotalSeconds > 5))
+            await RefreshPikaInventory(cancellation);
         await Render(cancellation);
     }
 

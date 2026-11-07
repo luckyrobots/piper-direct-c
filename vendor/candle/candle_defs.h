@@ -83,6 +83,7 @@ typedef struct {
     HANDLE rxevents[CANDLE_URB_COUNT];
     unsigned next_rx;
     uint32_t last_rx_bytes;
+    struct candle_tx_transfer *retained_tx;
 } candle_device_t;
 
 typedef struct {

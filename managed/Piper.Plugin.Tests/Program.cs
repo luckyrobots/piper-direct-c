@@ -11,6 +11,51 @@ void Reject(Action action, string description)
     try { action(); } catch (InvalidOperationException) { checks++; return; }
     throw new Exception(description);
 }
+if (args is ["--teaching-resume"])
+{
+    TeachingResumeTests.Run(Check);
+    await SimulationFollowingTests.RunTeachingResume(Check);
+    Console.WriteLine($"Passed {checks} stable teaching-resume checks.");
+    return;
+}
+if (args is ["--primary-ui"])
+{
+    await SimulationFollowingTests.RunPrimaryWorkspaceAction(Check);
+    Console.WriteLine($"Passed {checks} primary workspace action checks.");
+    return;
+}
+if (args is ["--group-follow"])
+{
+    GroupSimulationFollowingTests.Run(Check);
+    await SimulationFollowingTests.RunGroupFollow(Check);
+    await SimulationFollowingTests.RunPrimaryWorkspaceAction(Check);
+    Console.WriteLine($"Passed {checks} grouped following and primary action checks.");
+    return;
+}
+if (args is ["--endpoint-stationary"])
+{
+    SimulationEndpointStationaryTests.Run(Check);
+    OrderedSimulationExecutionTests.Run(Check);
+    await SimulationFollowingTests.RunOrderedProtocol(Check);
+    await SimulationFollowingTests.RunFailureHeader(Check);
+    Console.WriteLine($"Passed {checks} endpoint stationarity and failure presentation checks.");
+    return;
+}
+if (args is ["--telemetry-connection"])
+{
+    TelemetryConnectionPresentationTests.Run(Check);
+    await TelemetryConnectionPresentationTests.RunNavigation(Check);
+    Console.WriteLine($"Passed {checks} telemetry connection presentation checks.");
+    return;
+}
+if (args is ["--recovery-ui"])
+{
+    RecoveryWorkspaceTests.Run(Check);
+    await RecoveryWorkspaceTests.RunEvents(Check);
+    await RecoveryWorkspaceTests.RunSupportedSequence(Check);
+    Console.WriteLine($"Passed {checks} recovery workspace checks.");
+    return;
+}
 using (var authorized = System.Text.Json.JsonDocument.Parse("{\"owner\":\"plugin-session\"}"))
 using (var other = System.Text.Json.JsonDocument.Parse("{\"owner\":\"another-client\"}"))
 using (var absent = System.Text.Json.JsonDocument.Parse("{}"))
@@ -24,6 +69,17 @@ using (var absent = System.Text.Json.JsonDocument.Parse("{}"))
         Check(!LuckyRobots.Piper.SessionOwnerGuard.Allows("plugin-session", route, absent.RootElement), "Missing owner accepted for " + route);
     }
 }
+var followerPreferences = RobotProfileRouting.Normalize(new Preferences(Robots: [
+    new("first", "First", FollowSimulationSelected: true), new("second", "Second")], ActiveRobotId: "first"));
+followerPreferences = RobotProfileRouting.Activate(followerPreferences, "second");
+var restoredFollowers = RobotProfileRouting.Normalize(System.Text.Json.JsonSerializer.Deserialize<Preferences>(
+    System.Text.Json.JsonSerializer.Serialize(followerPreferences))!);
+Check(restoredFollowers.Robots![0].FollowSimulationSelected && !restoredFollowers.Robots[1].FollowSimulationSelected,
+    "Follower membership changed on profile selection or preference reload");
+Check(RobotProfileRouting.EventForProfile("second", RobotProfileRouting.ScopeEvent("first", "group.follow.selected")) == "",
+    "A delayed follower checkbox changed another robot's membership");
+Check(RobotProfileRouting.EventForProfile("second", RobotProfileRouting.ScopeEvent("first", "group.follow.toggle")) == "group.follow.toggle",
+    "The shared follower button became tied to the visible robot");
 var ownedServer = new JsonObject { ["backend_process_id"] = 123, ["token"] = "session-a" };
 Check(BackendGuards.IsOwned(ownedServer, 123, "session-a"), "Owned backend identity rejected");
 Check(!BackendGuards.IsOwned(ownedServer, 124, "session-a"), "Unrelated backend process treated as owned");
@@ -94,6 +150,7 @@ Check(RobotProfileRouting.EventForProfile("piper-2", "profiles.select.piper-1") 
 var reusedSlot = RobotProfileRouting.Normalize(twoProfiles with { Robots = [twoProfiles.Robots![0], new("replacement", "Replacement")] });
 Check(reusedSlot.Robots!.All(p => p.CameraSlot is >= 0 and < RobotProfileRouting.MaximumProfiles) && reusedSlot.Robots!.Select(p => p.CameraSlot).Distinct().Count() == 2, "Deleted profile's camera slot was not bounded/reusable");
 var lensProfile = JsonNode.Parse("""{"schema":1,"device":"camera-a","width":640,"height":480,"model":"kannala-brandt","fx":250,"fy":251,"cx":317,"cy":238,"coefficients":[0.01,-0.001,0,0]}""")!.AsObject();
+SimulationCameraRoutingTests.Run(Check);
 Check(CameraProfile.Matches(lensProfile, "camera-a", 640, 480, false), "Valid fisheye profile rejected");
 Check(!CameraProfile.Matches(lensProfile, "camera-b", 640, 480, false), "Lens calibration leaked to another camera");
 Check(!CameraProfile.Matches(lensProfile, "camera-a", 1280, 720, false), "Calibration accepted at wrong resolution");
@@ -218,6 +275,12 @@ stopped["reset_pending"] = false;
 Check(RecoveryPlan.Inspect(stopped, false).Action == "verify-current", "Healthy stationary state needs no reset");
 stopped["status"]!["teach_state"] = 3;
 Check(RecoveryPlan.Inspect(stopped, false).Action is null, "Active teaching must not reset");
+RecoveryPlanTests.Run(Check);
+await RecoveryPlanTests.RunObservation(Check);
+RecoveryWorkspaceTests.Run(Check);
+await RecoveryWorkspaceTests.RunEvents(Check);
+await RecoveryWorkspaceTests.RunSupportedSequence(Check);
+await RecoveryHomeTests.Run(Check);
 
 var gate = new FollowInputGate();
 JsonObject Gesture(string phase, long number, long sequence, long timestamp = 1000) => new() {
@@ -304,9 +367,14 @@ Check(!alignmentReport.MetricCalibrationValid && !alignmentReport.ExposureSynchr
     "Copied joint angles or operator confirmation were incorrectly promoted to metric/timing calibration");
 Reject(() => checkSession.Observe(observation, true, null), "Finished alignment report accepted new observations");
 GripperLinkTests.Run(Check);
+EpisodeReplayTests.Run(Check);
+await EpisodeReplayTests.RunFiles(Check);
 await PikaDisplayReferenceTests.Run(Check);
 CalibrationTests.Run(Check);
 CalibrationWizardTests.Run(Check);
+UnifiedWorkspaceTests.Run(Check);
+TelemetryConnectionPresentationTests.Run(Check);
+await TelemetryConnectionPresentationTests.RunNavigation(Check);
 WorkspaceViewTests.Run(Check);
 await WorkspaceViewTests.RunRendered(Check);
 await CalibrationSheetIntegrationTests.Run(Check);
@@ -354,7 +422,37 @@ monitorPika["configured"] = false;
 Check(!PikaMonitorPolicy.MayConnect(monitorPika, true, "this-reader"), "Scene linking tried to configure or open an unassigned gripper");
 
 await TeachingResetTests.Run(Check);
+TeachingModernTests.Run(Check);
+TeachingResumeTests.Run(Check);
+await SimulationFollowingTests.RunTeachingResume(Check);
+PikaTeachingTests.Run(Check);
+PikaTeachingWorkspaceTests.Run(Check);
+PikaMonitorConnectionTests.Run(Check);
+await UiEventDispatchTests.Run(Check);
+BackendRestartRequestTests.Run(Check);
+await EmergencyStopTests.Run(Check);
+await MeasuredTrackingTests.Run(Check);
+await MeasuredGhostPublicationTests.Run(Check);
 await TelemetryPipelineTests.Run(Check);
+SimulationFollowTests.Run(Check);
+CompoundRobotBindingTests.Run(Check);
+await SimulationPublishDiagnosticsTests.Run(Check);
+await SimulationFollowDiagnosticsTests.Run(Check);
+OrderedSimulationPathTests.Run(Check);
+OrderedSimulationSpeedTests.Run(Check);
+SimulationPublishCadenceTests.Run(Check);
+SimulationTrajectoryTransportTests.Run(Check);
+OrderedFrameReadRetryTests.Run(Check);
+SimulationFollowNativeReferenceTests.Run(Check);
+OrderedSimulationExecutionTests.Run(Check);
+GroupSimulationFollowingTests.Run(Check);
+await SimulationFollowingTests.RunGroupFollow(Check);
+SimulationEndpointStationaryTests.Run(Check);
+OrderedPhysicalContactTests.Run(Check);
+OrderedMissedGraspTests.Run(Check);
+OrderedContactLossTests.Run(Check);
+await SimulationFollowingTests.Run(Check);
+await NativeAdmissionTests.Run(Check);
 var resetGapDevice = new JsonObject { ["id"] = "reset-arm", ["generation"] = 7L, ["present"] = true, ["up"] = true, ["fresh"] = false };
 var resetGapSnapshot = new JsonObject { ["selected"] = "reset-arm", ["devices"] = new JsonArray(resetGapDevice) };
 Check(TeachingResetAssisted.ExpectedFeedbackGap(true, resetGapSnapshot, "reset-arm", 7), "Expected MCU reset gap discarded an unchanged connected scene binding");

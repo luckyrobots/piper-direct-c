@@ -148,6 +148,8 @@ DLL bool __stdcall candle_channel_start(candle_handle hdev, uint8_t ch, uint32_t
 DLL bool __stdcall candle_channel_stop(candle_handle hdev, uint8_t ch);
 
 DLL bool __stdcall candle_frame_send(candle_handle hdev, uint8_t ch, candle_frame_t *frame);
+typedef bool (__stdcall *candle_rx_pump_t)(void *context);
+DLL bool __stdcall candle_frame_send_pumped(candle_handle hdev,uint8_t ch,candle_frame_t *frame,candle_rx_pump_t pump,void *context);
 DLL bool __stdcall candle_frame_read(candle_handle hdev, candle_frame_t *frame, uint32_t timeout_ms);
 
 DLL candle_frametype_t __stdcall candle_frame_type(candle_frame_t *frame);

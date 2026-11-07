@@ -17,7 +17,11 @@ public sealed partial class PipersPlugin
     private BackendSettings BackendOptions => preferences.Backend ?? new();
 
     private Widget BackendSetup() => Widget.Column("backend.setup",
-        Widget.Row("backend.actions", Widget.Button("backend.start", "Start bundled server"), Widget.Button("backend.check", "Check Pika setup")),
+        Widget.Row("backend.actions", Widget.Button("backend.restart", "Restart backend") with { Hint = "Reopens connections. Releases Pika holding torque; does not clear a robot STOP or replay movement." },
+            Widget.Button("backend.start", "Start bundled server"), Widget.Button("backend.check", "Check Pika setup")),
+        Widget.Column("backend.restart.confirmation", Widget.Label("backend.restart.explanation", "Restarting releases all Pika grippers. Empty the jaws first. Arm power stays unchanged; robot STOPs still need recovery.") with { Height = 64 },
+            Widget.Row("backend.restart.confirmation.actions", Widget.Button("backend.restart.confirm", "Grippers empty — restart") with { Appearance = "primary" },
+                Widget.Button("backend.restart.cancel", "Cancel"))) with { Visible = backendRestartConfirmation, Padding = 12, Appearance = "panel" },
         Widget.Label("backend.status", backendStatus) with { Height = 42 },
         Widget.Label("backend.prerequisites", setupStatus) with { Height = 66 },
         Widget.Column("backend.options", Widget.Label("backend.wsl.label", "WSL distro") with { Visible = OperatingSystem.IsWindows() },
@@ -29,6 +33,9 @@ public sealed partial class PipersPlugin
     private async Task BackendEvent(string action, string value, CancellationToken cancellation)
     {
         if (action == "toggle") backendSetupOpen = !backendSetupOpen;
+        else if (action == "restart") { backendRestartConfirmation = true; await Render(cancellation); }
+        else if (action == "restart.cancel") { backendRestartConfirmation = false; await Render(cancellation); }
+        else if (action == "restart.confirm") await RestartBackend(cancellation);
         else if (action == "start") await StartBundledBackend(cancellation);
         else if (action == "check") await CheckPikaSetup(cancellation);
         else if (action is "wsl" or "device")
@@ -158,13 +165,14 @@ public sealed partial class PipersPlugin
             var snapshot = JsonNode.Parse(await http.GetStringAsync("http://127.0.0.1:8765/api/state", deadline.Token))!;
             if (!BackendGuards.IsOwned(snapshot, process.Id, ownedBackendToken)) return;
             string currentToken = snapshot["token"]!.GetValue<string>();
-            if (snapshot["motion"]?["active"]?.GetValue<bool>() == true)
+            if (BackendActivity.AnyMotion(snapshot))
             {
                 // An explicitly session-owned server cannot outlive the engine's
                 // process group. Stop its exact active request before closing USB.
-                string activeOwner = snapshot["motion"]!["owner"]!.GetValue<string>();
-                if (activeOwner != owner) { Trace.TraceWarning("Bundled server has another client's active lease; no stop or shutdown was sent."); return; }
-                var stop = new JsonObject { ["owner"] = owner, ["request_id"] = snapshot["motion"]!["request_id"]!.GetValue<long>() };
+                var motions = snapshot["motions"] is JsonArray lanes ? lanes : new JsonArray(snapshot["motion"]?.DeepClone());
+                if (motions.Any(lane => lane?["active"]?.GetValue<bool>() == true && lane["owner"]?.GetValue<string>() != owner))
+                { Trace.TraceWarning("Bundled server has another client's active lease; no stop or shutdown was sent."); return; }
+                var stop = new JsonObject { ["owner"] = owner };
                 using var stopRequest = new HttpRequestMessage(HttpMethod.Post, "http://127.0.0.1:8765/api/stop") { Content = new StringContent(stop.ToJsonString(), Encoding.UTF8, "application/json") };
                 stopRequest.Headers.Add("X-Piper-Token", currentToken);
                 using var stopped = await http.SendAsync(stopRequest, deadline.Token);

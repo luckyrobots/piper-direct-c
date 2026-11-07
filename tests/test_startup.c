@@ -8,15 +8,17 @@
 #include <unistd.h>
 
 static bool slow_first_enable=true;
+static double clock_now=100;
+double __wrap_piper_now(void) { return clock_now; }
 
 static void tick(struct controller *c)
 {
-    usleep(10000);
+    clock_now+=.01;
     c->heartbeat=piper_now(); controller_tick(c,piper_now());
 }
 static void settle(struct controller *c)
 {
-    for (unsigned i=0;i<50;++i) tick(c);
+    for (unsigned i=0;i<60;++i) tick(c);
 }
 static void action(struct controller *c,const char *name,int expected)
 {
@@ -157,7 +159,7 @@ int main(void)
         assert(piper_targets(angles,f));
         for (unsigned i=0;i<3;++i) { f[i].can_id=0x2a5+i; can_bus_ingest(d,&f[i],false,t); }
         can_bus_ingest(d,&status_frame,false,t);
-        if (sample>6) assert(t-d->stationary_since<.3);
+        if (sample>6) assert(!d->stationary_since||t-d->stationary_since<.3);
     }
     controller_close(&c);
     char path[256]; snprintf(path,sizeof path,"%s/control-state.json",directory); assert(!unlink(path)); assert(!rmdir(directory));

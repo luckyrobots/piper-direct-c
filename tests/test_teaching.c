@@ -15,7 +15,7 @@ static void setup(struct controller *c,char *directory)
     memset(d->feedback.arm[0].deg,0,sizeof d->feedback.arm[0].deg);
     c->bus.sim_enabled=63;
     double now=piper_now(); controller_tick(c,now);
-    strcpy(d->feedback.hardware,"H-V1.2-1"); strcpy(d->feedback.version,"S-V1.9-0");
+    strcpy(d->feedback.hardware,"H-V1.2-1"); strcpy(d->feedback.version,"S-V1.8-2");
     for (unsigned i=0;i<6;++i) {
         d->feedback.limit[i]=(struct piper_limit){.seen=true,.min=-180,.max=180,.speed=.3,.at=now};
         d->feedback.acceleration[i]=(struct piper_acceleration){.seen=true,.max=5,.at=now};
@@ -81,6 +81,20 @@ int main(void)
             const char *why=controller_blocker(&c,d,piper_now()); assert(why&&strstr(why,"teaching is active"));
         }
     }
+    uint64_t presentation_tx=d->tx;
+    for (unsigned state=0;state<=7;++state) {
+        d->feedback.arm[0].control=0; d->feedback.arm[0].arm_status=1; d->feedback.arm[0].teach=(uint8_t)state;
+        check_phase(&c,"stopped",false);
+        cJSON *stopped=snapshot(&c),*teaching=cJSON_GetObjectItem(stopped,"teaching");
+        assert(cJSON_IsTrue(cJSON_GetObjectItem(teaching,"controller_stopped")));
+        assert(!cJSON_IsTrue(cJSON_GetObjectItem(teaching,"return_required")));
+        assert(!cJSON_IsTrue(cJSON_GetObjectItem(teaching,"can_return"))&&!cJSON_IsTrue(cJSON_GetObjectItem(teaching,"can_recover_at_pose")));
+        assert(strstr(cJSON_GetObjectItem(teaching,"label")->valuestring,"STOP"));
+        assert(cJSON_GetObjectItem(cJSON_GetObjectItem(stopped,"status"),"teach_state")->valueint==(int)state);
+        cJSON_Delete(stopped);
+    }
+    assert(d->tx==presentation_tx); /* Presentation must not send a reset, mode or power packet. */
+    d->feedback.arm[0].control=2;
     d->feedback.arm[0].teach=2; d->feedback.arm[0].arm_status=0;
     uint64_t tx=d->tx;
     const char *flags[]={"button_off","zero_pose_confirmed","supported","clear"};
@@ -163,9 +177,9 @@ int main(void)
         usleep(2000); controller_tick(&c,piper_now());
         assert(c.op==OP_TEACH_RETURN&&c.teach_return_stage==2&&d->tx==tx+1);
         assert(d->feedback.arm[0].arm_status==0&&c.bus.sim_enabled==63);
-        // Both values can reset the normal stationary anchor (>0.03 degrees),
-        // but remain inside the supported settling allowance of 0.5 degrees.
-        assert(piper_now()-d->stationary_since<.4);
+        // Settling has not qualified a new stationary window, but remains
+        // inside the supported handoff settling allowance of 0.5 degrees.
+        assert(!d->stationary_since||piper_now()-d->stationary_since<.4);
         usleep(2000); controller_tick(&c,piper_now());
         assert(c.op==OP_IDLE&&!strcmp(c.phase,"complete")&&d->tx==tx+1);
         device=snapshot(&c); assert(!cJSON_IsTrue(cJSON_GetObjectItem(device,"recovery_required"))); cJSON_Delete(device);
@@ -173,5 +187,54 @@ int main(void)
     }
     char closing[]="/tmp/piper-teaching-close-XXXXXX"; setup(&c,closing); d=&c.bus.devices[0];
     action(&c,request(&c,"teach-return"),202); tx=d->tx; cleanup(&c,closing); assert(d->tx==tx);
-    puts("Teaching: feedback phases, benign takeover without STOP, zero-only standby/CAN fresh acknowledgements, rejected stale targets, bounded aborts and protective unexpected-motion STOP passed.");
+
+    char modern[]="/tmp/piper-teaching-modern-XXXXXX"; setup(&c,modern); d=&c.bus.devices[0];
+    const char *versions[]={"S-V1.8-4","S-V1.8-5","S-V1.9-0","S-V1.9-1","S-V1.9-2","unknown"};
+    for(unsigned i=0;i<6;++i) { strcpy(d->feedback.version,versions[i]); assert(piper_seamless_teach_supported(&d->feedback)==(i>=1&&i<=3)); }
+    strcpy(d->feedback.version,"S-V1.9-0");
+    double pose[]={-22.949,-.069,.709,-1.423,23.881,-8.384};
+    memcpy(d->feedback.arm[0].deg,pose,sizeof pose);
+    for(unsigned i=0;i<6;++i) c.bus.sim_target[i]=c.target[i]=80; // Never replay this prior destination.
+    d->feedback.limit[1].min=0; d->feedback.limit[2].max=0;
+    assert(can_return(&c));
+    device=snapshot(&c); cJSON *teaching=cJSON_GetObjectItem(device,"teaching");
+    assert(!strcmp(cJSON_GetObjectItem(teaching,"return_strategy")->valuestring,"measured-pose"));
+    assert(cJSON_IsFalse(cJSON_GetObjectItem(teaching,"return_requires_zero"))); cJSON_Delete(device);
+    tx=d->tx; action(&c,request(&c,"teach-return"),400); assert(d->tx==tx); // A legacy zero flag is not a current-pose acknowledgement.
+    for(unsigned rejected=0;rejected<6;++rejected) {
+        cJSON *j=request(&c,"teach-return"); cJSON_AddBoolToObject(j,"same_pose_confirmed",true);
+        if(rejected==0) { d->feedback.motor[3].enabled=false; }
+        if(rejected==1) { d->feedback.arm[0].deg[2]=3; } // Range correction includes the inward 0.5-degree margin.
+        if(rejected==2) { d->stationary_since=piper_now(); }
+        if(rejected==3) { d->feedback.motor[3].fault=1; }
+        if(rejected==4) { d->feedback.foreign_seen=true; d->feedback.foreign_at=piper_now(); }
+        if(rejected==5) { d->feedback.arm[0].joint_at[0]=piper_now()-2; }
+        action(&c,j,409); assert(d->tx==tx);
+        d->feedback.motor[3].enabled=true; d->feedback.arm[0].deg[2]=pose[2]; d->stationary_since=piper_now()-1;
+        d->feedback.motor[3].fault=0; d->feedback.foreign_seen=false; d->feedback.arm[0].joint_at[0]=piper_now();
+    }
+    cJSON *j=request(&c,"teach-return"); cJSON_AddBoolToObject(j,"same_pose_confirmed",true);
+    action(&c,j,202); assert(c.op==OP_TEACH_RETURN&&c.teach_return_stage==3&&d->tx==tx+3);
+    assert(c.bus.sim_enabled==63&&d->feedback.arm[0].control==2);
+    for(unsigned i=0;i<6;++i) { assert(fabs(c.bus.sim_target[i]-pose[i])<.00001); assert(c.target[i]==pose[i]); }
+    sent=c.sent_at; controller_tick(&c,sent); assert(c.op==OP_TEACH_RETURN); // No stale status acknowledgement.
+    usleep(25000); controller_tick(&c,piper_now()); assert(c.op==OP_TEACH_RETURN&&c.teach_return_stage==4&&d->tx==tx+7);
+    sent=c.sent_at; controller_tick(&c,sent); assert(c.op==OP_TEACH_RETURN); // Seed feedback cannot acknowledge the final batch.
+    usleep(2000); controller_tick(&c,piper_now()); assert(c.op==OP_IDLE&&d->tx==tx+7&&c.bus.sim_enabled==63);
+    for(unsigned i=0;i<6;++i) assert(fabs(d->feedback.arm[0].deg[i]-pose[i])<.00001);
+    j=request(&c,"teach-return"); cJSON_AddBoolToObject(j,"same_pose_confirmed",true); action(&c,j,200); assert(d->tx==tx+7);
+    cleanup(&c,modern);
+
+    for(unsigned variant=0;variant<3;++variant) {
+        char cancel[]="/tmp/piper-teaching-modern-abort-XXXXXX"; setup(&c,cancel); d=&c.bus.devices[0]; strcpy(d->feedback.version,"S-V1.9-0");
+        j=request(&c,"teach-return"); cJSON_AddBoolToObject(j,"same_pose_confirmed",true); action(&c,j,202); tx=d->tx;
+        if(variant==0) { d->feedback.arm[0].control=2; d->feedback.arm[0].teach=1; d->feedback.arm[0].arm_status=11; }
+        if(variant==1) { d->feedback.arm[0].control=1; d->feedback.arm[0].deg[5]=c.bus.sim_target[5]=.6; }
+        if(variant==2) { c.heartbeat=piper_now()-1; }
+        controller_tick(&c,piper_now()); assert(c.op==OP_IDLE&&c.bus.sim_enabled==63);
+        assert(d->tx==tx+(variant==1?1:0)); // STOP for unexpected CAN movement; hand guiding/lease cancellation never powers off.
+        if(variant!=1) assert(strstr(c.message,"measured hold pose"));
+        cleanup(&c,cancel);
+    }
+    puts("Teaching: legacy zero handoff, firmware-gated measured-pose handoff, fresh acknowledgements, discarded old targets, range-only hold exception and physical teaching priority passed.");
 }

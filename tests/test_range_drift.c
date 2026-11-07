@@ -71,12 +71,16 @@ static void run_case(double measured,const char *action,unsigned joint,double de
         else if (!strcmp(action,"jog")) assert(fabs(c.target[4]-(copysign(70,measured)+degrees))<1e-9);
         now=c.started;
         for (unsigned tick=0;tick<500&&c.op!=OP_IDLE;++tick) {
+            bool seed=c.position_seed_pending;
             now+=.03; c.heartbeat=now; controller_tick(&c,now);
-            /* Inspect each emitted simulated pose, including intermediate
-               synchronized poses starting outside a boundary. */
+            /* Only the one-shot unchanged measured hold may preserve the
+               admitted boundary overrun. Every moving target remains legal. */
             for (unsigned i=0;i<6;++i) {
-                assert(c.bus.sim_target[i]>=limits[i][0]);
-                assert(c.bus.sim_target[i]<=limits[i][1]);
+                if(seed) assert(fabs(c.bus.sim_target[i]-c.initial[i])<.00051);
+                else {
+                    assert(c.bus.sim_target[i]>=limits[i][0]);
+                    assert(c.bus.sim_target[i]<=limits[i][1]);
+                }
             }
         }
         assert(c.op==OP_IDLE && !strcmp(c.phase,"complete"));

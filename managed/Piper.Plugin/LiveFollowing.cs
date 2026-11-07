@@ -14,6 +14,8 @@ public sealed partial class PipersPlugin
     private async Task SelectTeleoperationJoint(string joint, CancellationToken cancellation)
     {
         var linked = link ?? throw new InvalidOperationException("Link the robot first.");
+        if (!linked.JointNames.Contains(joint, StringComparer.Ordinal))
+            throw new InvalidOperationException("Select a joint belonging to this robot's assigned model namespace.");
         if (!approved || !linkCommandsEnabled)
             throw new InvalidOperationException("Enable robot before starting Teleoperate.");
         var device = Device();

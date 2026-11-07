@@ -10,10 +10,25 @@ EXPORT void *piper_create(int simulated,const char *directory) {
     if (!c||!controller_init(c,simulated!=0,directory,"")) { free(c); return NULL; }
     return c;
 }
+EXPORT void *piper_create_simulated(int count,const char *directory) {
+    if (count<1||count>CANBUS_MAX) return NULL;
+    struct controller *c=calloc(1,sizeof *c);
+    if (!c||!controller_init_simulated(c,(unsigned)count,directory,"")) { free(c); return NULL; }
+    return c;
+}
 EXPORT void piper_tick(void *ptr) {
-    static double scanned;
     struct controller *c=ptr; double now=piper_now();
-    if (now-scanned>=1) { can_bus_scan(&c->bus); scanned=now; }
+    if (now-c->inventory_scanned>=1) {
+#ifdef _WIN32
+        /* Opening a new USB transport can block beyond a reference interval.
+           Defer discovery until idle; identity/loss checks still run in motion. */
+        if (!controller_any_motion_active(c)) can_bus_scan(&c->bus);
+        else can_bus_check_connections(&c->bus);
+#else
+        can_bus_scan(&c->bus);
+#endif
+        c->inventory_scanned=now;
+    }
     controller_tick(c,now);
 }
 EXPORT char *piper_state(void *ptr,const char *token) {

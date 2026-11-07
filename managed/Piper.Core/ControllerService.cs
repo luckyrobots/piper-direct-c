@@ -14,10 +14,12 @@ public sealed class ControllerService : IDisposable
     public string Token { get; } = Convert.ToHexString(RandomNumberGenerator.GetBytes(32)).ToLowerInvariant();
     public string? WorkerError { get; private set; }
 
-    public ControllerService(bool simulated, string stateDirectory)
+    public ControllerService(bool simulated, string stateDirectory, int simulatedRobotCount = 1)
     {
+        if (simulatedRobotCount is < 1 or > 16 || !simulated && simulatedRobotCount != 1)
+            throw new ArgumentOutOfRangeException(nameof(simulatedRobotCount));
         Directory.CreateDirectory(stateDirectory);
-        core = Native.Create(simulated ? 1 : 0, Path.GetFullPath(stateDirectory));
+        core = simulated ? Native.CreateSimulated(simulatedRobotCount, Path.GetFullPath(stateDirectory)) : Native.Create(0, Path.GetFullPath(stateDirectory));
         if (core == IntPtr.Zero) throw new InvalidOperationException("Cannot initialize controller. Inspect state files; never delete recovery state to bypass a stop.");
         worker = Task.Factory.StartNew(() =>
         {
@@ -36,10 +38,14 @@ public sealed class ControllerService : IDisposable
     {
         lock (gate) { Check(); return Take(Native.State(core, Token)); }
     }
-    public (int Status, string Json) Execute(string route, string json)
+    public (int Status, string Json) Execute(string route, string json, CancellationToken requestCancellation = default)
     {
         lock (gate)
         {
+            // Cancellation while waiting for a native tick/STOP must prevent
+            // later admission. The synchronous action completes under this
+            // same gate, so a subsequent hold is ordered after it.
+            requestCancellation.ThrowIfCancellationRequested();
             Check();
             var result = Native.Action(core, route, json, out int status);
             return (status, result == IntPtr.Zero ? "{\"ok\":false,\"error\":\"Invalid controller request\"}" : Take(result));
@@ -67,6 +73,8 @@ public sealed class ControllerService : IDisposable
         private const string Library = "piper-core";
         [DllImport(Library, EntryPoint="piper_create", CallingConvention=CallingConvention.Cdecl)]
         internal static extern IntPtr Create(int simulated, [MarshalAs(UnmanagedType.LPUTF8Str)] string directory);
+        [DllImport(Library, EntryPoint="piper_create_simulated", CallingConvention=CallingConvention.Cdecl)]
+        internal static extern IntPtr CreateSimulated(int count, [MarshalAs(UnmanagedType.LPUTF8Str)] string directory);
         [DllImport(Library, EntryPoint="piper_tick", CallingConvention=CallingConvention.Cdecl)] internal static extern void Tick(IntPtr core);
         [DllImport(Library, EntryPoint="piper_state", CallingConvention=CallingConvention.Cdecl)]
         internal static extern IntPtr State(IntPtr core, [MarshalAs(UnmanagedType.LPUTF8Str)] string token);

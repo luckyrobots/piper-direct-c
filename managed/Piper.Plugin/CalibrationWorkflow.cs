@@ -11,7 +11,7 @@ public sealed record CalibrationPreferences(CalibrationDesk Desk, CalibrationMea
 public static class CalibrationCommandGuard
 {
     public static bool Blocks(string action, bool calibrationOpen) => calibrationOpen &&
-        (action is "enable" or "safety.accept" or "teleoperate.toggle" or "zero.all" or "pika.target" or "engine.robot.target" or "engine.robot.follow" ||
+        (action is "enable" or "safety.accept" or "teleoperate.toggle" or "zero.all" or "recovery.home" or "recovery.home.incident" or "pika.target" or "engine.robot.target" or "engine.robot.follow" ||
             action.StartsWith("joint.", StringComparison.Ordinal));
 }
 
@@ -36,7 +36,7 @@ public sealed partial class PipersPlugin
         if (calibrationProfile == ActiveProfile.Id) return;
         calibrationProfile = ActiveProfile.Id;
         calibrationIdentity = null; calibrationOriginal = calibrationApplied = null; calibrationFit = null; calibrationReevaluation = null; calibrationSamples.Clear(); calibrationTcpConfirmed = calibrationPlacementUnverified = calibrationArchiveConfirmation = false;
-        calibrationDesk = new(); calibrationMeasurement = new();
+        calibrationDesk = preferences.BenchReference?.Apply(new()) ?? new(); calibrationMeasurement = new();
         string path = Path.Combine(RobotCalibrationDirectory, "settings.json");
         try
         {
@@ -132,6 +132,7 @@ public sealed partial class PipersPlugin
 
     private async Task CalibrationEvent(string action, JsonElement value, CancellationToken cancellation)
     {
+        EnsureIndependentCalibration();
         LoadCalibrationPreferences();
         if (!calibrationOpen && action != "toggle") throw new InvalidOperationException("Open calibration before editing its draft or invoking an action.");
         if (calibrationInputs.ContainsKey(action))

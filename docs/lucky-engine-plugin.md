@@ -15,11 +15,117 @@ over loopback gRPC (8766), alongside the existing web dashboard (8765).
 - Pika opening in millimetres; Enable robot enables Pika through the same server.
 - Bench/Lumina, Pika gripper and D405 preview tiles with preserved aspect ratio.
 - Camera, speed, jog and tolerance settings retained between editor sessions.
-- Hand-guided teaching detection, a verified standby/CAN return at physical zero,
+- Hand-guided teaching detection, a firmware-aware measured-pose standby/CAN return,
   and a single-page per-robot desk calibration sheet. See
   [teaching and alignment](teaching-alignment.md).
 - Explicit recovery controls for controller stops; existing backend obstruction
   detection and motion leases remain authoritative.
+
+## Follow simulation (development preview)
+
+`Follow simulation` is an explicit, session-only mode. It is off after every
+restart, disconnect, scene change or stop. It uses the public plugin runtime
+API; plugin authors still need only the published SDK, not engine source.
+
+1. In Edit mode, select the physical CAN adapter and its scene robot, then enable
+   the arm and assigned Pika controls. End onboard teaching/playback first.
+2. Check that the path to the simulation's start pose is clear, then click
+   **Follow simulation**. This prepares and shows the actual first frame, paused
+   before any physics/script update. Play stays locked during preparation and
+   matching.
+3. The real arm and Pika automatically match that starting pose at the slow
+   matching speed. The panel shows the measured and requested positions and
+   matching progress. **Stop following** cancels this movement and holds the
+   measured pose.
+4. When the positions agree, the panel says **Ready — press Play**. The simulation
+   stays at its first frame, and neither hardware motion stream is running while
+   you wait. The motors keep holding the matched pose.
+5. Press Play. The editor records your request but keeps that first frame paused
+   while the plugin starts both hardware sessions and confirms their initial
+   targets. Only the acknowledged, exactly scoped activation releases Play.
+6. During Play, the solid robot is the simulation leader at the scene's selected
+   rate. A cyan mesh at 50% opacity shows fresh measured hardware joints and
+   jaws. Use **Free Camera** in the Scene viewport to see the overlay during
+   Play. The ghost never changes physics, collisions, camera images or datasets.
+7. The real follower buffers one closed movement phase, preserving every source
+   waypoint and the order of jaw events. Continuous monotone cubic arm paths
+   use local timing qualified against fresh reported velocity/acceleration
+   limits. The leader can run ahead; that lag alone does not stop it. The speed
+   selected at preparation stays pinned until Stop following.
+8. A completed simulation episode displays **Waiting for real robot**. Its next
+   randomization waits for fresh stationary arm feedback, the expected measured
+   jaw opening, and acknowledgement of that exact final source frame. The
+   existing tube task uses this reusable scene-script episode gate.
+
+**Stop following** holds measured arm/Pika positions and pauses the simulation.
+The separate **STOP** action remains immediate. Changed identity, stale input,
+unknown actuator law, out-of-range targets, a fault or excessive divergence
+disarm the session; previous targets do not resume. CAN references use reported
+joint speed/acceleration limits and a replaceable 250 ms input deadline.
+
+The CAN reference shaper brakes before both reported joint boundaries and a
+**2° measured-position lead boundary**. That is soft scheduling headroom; the
+independent **3° native tracking fault** remains unchanged. Braking includes the
+millidegree wire grid and reported acceleration, so a moving destination cannot
+accelerate the reference into its lead boundary and leave no valid next step.
+If a fresh encoder update nevertheless makes the software boundary infeasible,
+the controller retires the trajectory and verifies a measured-pose hold, with no
+automatic replay. Hardware faults, changed/invalid limits, invalid arithmetic,
+excessive tracking error and an existing obstruction still use their hard stop;
+failure to verify or transmit the hold also stops the controller.
+
+The public runtime API must advertise `startActivationSupported` and the ordered
+`robotRuntimeFramesSupported` capability. The plugin
+opts into `prepare-start` with `activationHandshake: true`, observes
+`startRequested`, and uses `activate-start` only after controller admission.
+An older editor is rejected before physical matching. Legacy SDK clients that
+do not opt into this handshake retain the original preparation semantics.
+
+An inactive Ready state waits through brief feedback-age gaps without starting
+either hardware stream. Identity, ownership, fault and changed-pose checks still
+apply. Once controller admission begins, the active freshness deadlines apply.
+
+Ordered frames are captured at the selected robot runner's Export phase, rather
+than reconstructed from RPC poll intervals. Scene event and post-physics MuJoCo
+clocks are distinct. Every source cursor is retained; a gap, an unacknowledged
+episode reset, or buffer overflow fails closed. The bounded queue pauses only
+its source at high water and resumes after draining; it never skips a grip or
+release. Fresh source envelopes and hardware feedback still have strict
+deadlines. The native command shaper remains the final hardware rate bound.
+
+Arm and jaw phases must be separate for this preview. Jaw endpoints are checked
+against the simulation's measured contact opening, not blindly against a
+command narrower than a held object. Pika exposes no verified physical opening
+rate, so simultaneous moving-arm/jaw phases are rejected. An opening match does
+not independently establish a secure grasp.
+
+A missed native reference tick still discards delayed targets. If fresh CAN
+feedback and a measured hold can be verified, the controller retires following
+while keeping the motors enabled. A failed hold or a genuine controller fault
+still requests STOP. The first failure and subsequent cleanup results are saved
+under the plugin settings directory at `diagnostics/simulation-follow`.
+
+This is position-reference following, not proof of identical contact dynamics,
+pixel alignment or zero latency. Place physical objects at the episode's saved
+start coordinates before a physical pick/place attempt. The generic follow
+button does not detect or relocate real objects. Simulation recording time is
+distinct from wall time when deterministic rendering cannot run in real time.
+
+### Firmware-dependent speed units
+
+Maximum-speed feedback (CAN `0x473`) uses 0.001 rad/s per raw unit before firmware
+1.5-8 and 0.01 rad/s from 1.5-8 onward. Raw 300 on 1.9-1 therefore means 3 rad/s,
+not 0.3. Raw bytes, resolved units and firmware provenance are exposed beside
+the interpreted limits. Incomplete/unknown firmware leaves the unit unresolved;
+it never gains movement authority by assuming a version. See the
+[official speed message definition](https://github.com/agilexrobotics/piper_sdk/blob/master/piper_sdk/piper_msgs/msg_v2/feedback/arm_feedback_current_motor_angle_limit_max_spd.py).
+
+Maximum-acceleration feedback (`0x47C`) uses **0.01 rad/s² per unsigned raw unit**:
+raw500 means5 rad/s². This follows the current official parser and its matching
+write/readback conversion, rather than an older feedback-class comment. The
+controller still rejects unavailable, nonpositive or above5 rad/s² reports;
+this correction does not write controller settings or change admission guards.
+See the [pinned acceleration-unit evidence](protocol-acceleration-units.md).
 
 ## Native workspace
 
@@ -127,8 +233,13 @@ through the same validated controller commands as the dashboard. Measured feedba
 does not generate input events and cannot echo back as another command. Recovery
 keeps measured scene tracking alive but disarms scene-to-hardware commands until
 the user recovers and explicitly enables the robot. Stale data, changed USB
-connection generation, or a restarted backend break the link.
-Reconnection does not replay targets, re-enable motors or relink automatically.
+connection generation, or a restarted backend discard motion permission.
+Once a profile has both its scene robot and CAN adapter assigned, measured-only
+tracking restores automatically after restart or scene reload. Explicit
+**Unlink** remembers that tracking is off for that profile. Restoration never
+replays targets, enables motors, resumes teleoperation or restores motion
+approval. Choose **Use controls** to permit new commands when ready. Healthy
+links do not repeatedly rediscover the scene or interrupt live dragging.
 Use **Edit mode**, not Play. The scene's motion-graph preview yields while live
 feedback owns the pose; its saved enable setting is preserved. Link status reports
 the acknowledged joint error. Select an articulated link or its mesh, click the
@@ -146,10 +257,12 @@ Translation of the whole robot is scene placement, not physical arm control.
 The scene also follows the assigned Pika's fresh measured opening. The model
 must expose opposite, equal-travel `joint7`/`joint8` slide joints in metres; the
 two fingers receive half the opening in opposite directions. The current Pika
-model spans 100 mm, covering the controller's 0–90 mm opening commands. Stale or
+model exposes 90 mm of slide travel, covering the controller's 0–90 mm opening commands. Stale or
 different-device feedback leaves the last simulated opening unchanged with a
 status message. Openings outside the model range are reported rather than
-clamped; only closed-position encoder noise between −0.1 and 0 mm maps to zero.
+clamped; small closed-position encoder noise maps to zero. The mapping uses
+each slide joint's actual closed and open endpoints, including nonzero CAD
+offsets, plus the selected robot's saved closed-display reference.
 This is measured physical-to-scene feedback, not a calibration of fingertip
 geometry or a command to replay gripper motion.
 
@@ -160,12 +273,22 @@ Enable action grants this plugin's gripper control permission. Monitor-only
 cleanup preserves externally enabled motor power; failed explicit power attempts
 retain their separate ownership/uncertainty checks.
 
-Recovery shows the recorded reason, joint and tracking gap and selects the next
-step from live telemetry. A stopped controller offers **Clear & support arm —
-recover** because reset can remove holding torque. Verification follows
-automatically; the failed move is not retried and motors are not re-enabled.
-Healthy stationary states can be verified without reset. Cameras support human
-inspection; the plugin does not infer physical support or clearance from pixels.
+Recovery shows the recorded reason, joint and tracking gap. Its primary action,
+**Resting & clear — recover to zero**, is also available beside the ordinary
+zero control. Use it when the arm already rests securely on a surface or other
+support and its route to zero is clear; no manual lifting into the command range
+is required for the bounded resting overshoot.
+
+Healthy enabled motors stay powered and move directly to zero. Healthy disabled
+motors enable at their measured resting pose first. A controller STOP resets and
+verifies all six motors off before enabling. Small range overshoot is corrected
+at the existing 1% entry speed, then the requested zero move runs at 10%. Each
+stage requires fresh feedback from the same controller request and connection.
+An error or cancellation prevents later stages; no interrupted trajectory or
+Pika target resumes. Progress is saved at
+`recovery/<robot-profile>/last-recovery-to-zero.json`. Controller-only recovery
+remains a secondary action. Cameras support human inspection; the plugin does
+not infer physical support or clearance from pixels.
 
 The Pika serial parser discards packets with duplicate fields, including the
 intermittent repeated temperature/status fields observed on the real gripper.
@@ -316,8 +439,8 @@ robot is the leader target; the cyan skeleton shows measured real joint geometry
 Release commits the final target and finishes the movement. The panel shows
 Movement in progress and Stop movement (holds measured pose with motors enabled).
 Escape, lost focus or Pause Teleoperate cancels. The solid robot retains the
-destination while the measured cyan skeleton catches up.
-Cartesian tip dragging/IK and a full mesh ghost remain separate extensions.
+destination while the translucent cyan mesh shows the measured real pose.
+Cartesian tip dragging/IK remains a separate extension.
 
 Targets replace one another at up to 20 Hz; the controller ramps at its existing
 20 ms cadence using the selected speed and reported limits. Input older than

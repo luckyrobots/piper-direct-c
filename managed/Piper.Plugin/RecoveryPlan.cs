@@ -4,6 +4,9 @@ namespace LuckyRobots.Piper.Plugin;
 
 public sealed record RecoveryPlan(string Diagnosis, string NextStep, string? Action)
 {
+    public bool RetryFailedReset { get; init; }
+    public string ButtonText => RetryFailedReset ? "Rest arm securely — retry failed reset"
+        : Action == "reset" ? "Clear & rest arm securely — recover" : "Verify current state (no movement)";
     public static RecoveryPlan Inspect(JsonObject device, bool moving)
     {
         var incident = device["stop_event"];
@@ -24,23 +27,32 @@ public sealed record RecoveryPlan(string Diagnosis, string NextStep, string? Act
         var joints = device["joints"]?.AsArray();
         if (status is null || joints?.Count != 6 || joints.Any(j => j?["fresh"]?.GetValue<bool>() != true))
             return new(diagnosis, "Waiting for all six joint measurements before choosing a recovery step.", null);
-        if ((status["stationary_s"]?.GetValue<double>() ?? 0) < .4)
+        if (status["stationary_s"]?.GetValue<double>() is not double stationary || !double.IsFinite(stationary) || stationary < .4)
             return new(diagnosis, "Wait for the arm to stop. Camera previews remain available for inspection.", null);
         if (status["error"]?.GetValue<int>() != 0 || joints.Any(j => j?["fault"]?.GetValue<int>() != 0))
             return new(diagnosis, "A controller/driver fault is still present. Inspect the arm and fault information; automatic reset is withheld.", null);
-        int teach = status["teach_state"]?.GetValue<int>() ?? -1;
-        if (teach is not (0 or 2 or 6))
-            return new(diagnosis, "End the active teaching mode using the vendor procedure before recovery.", null);
         int armStatus = status["arm_status"]?.GetValue<int>() ?? -1;
         int control = status["control"]?.GetValue<int>() ?? -1;
         int mode = status["motion_mode"]?.GetValue<int>() ?? -1;
         bool allOff = joints.All(j => j?["enabled"]?.GetValue<bool>() == false);
         bool allOn = joints.All(j => j?["enabled"]?.GetValue<bool>() == true);
+        int teach = status["teach_state"]?.GetValue<int>() ?? -1;
+        // Some firmware retains teach_state=1 after STOP. This is not live
+        // hand guiding when STOP, zero error and all-six-off are verified.
+        bool stoppedResidualTeach = teach == 1 && armStatus == 1 && allOff;
+        if (teach is not (0 or 2 or 6) && !stoppedResidualTeach)
+            return new(diagnosis, "End the active teaching mode using the vendor procedure before recovery.", null);
         bool healthy = armStatus == 0 && control is >= 0 and <= 1 && mode is >= 0 and <= 1 && teach is 0 or 2;
         if (device["reset_pending"]?.GetValue<bool>() == true)
-            return healthy && allOff
-                ? new(diagnosis, "Reset completed; verify fresh disabled-motor feedback. No movement will resume.", "verify-reset")
-                : new(diagnosis, "Waiting for the reset to finish with all motors off. Do not resend reset.", null);
+        {
+            if (healthy && allOff)
+                return new(diagnosis, "Reset completed; verify fresh disabled-motor feedback. No movement will resume.", "verify-reset");
+            if (armStatus == 1 && control is >= 0 and <= 2 && mode is >= 0 and <= 1 && allOff)
+                return new(diagnosis + " The previous reset did not clear the controller STOP.",
+                    "All six motors are confirmed off and the previous action has ended. Keep supporting the arm and clear its surroundings, then retry the failed reset. It will verify automatically; no move will resume and no motors will be enabled.", "reset")
+                    { RetryFailedReset = true };
+            return new(diagnosis, "The reset is not verified. Wait for fresh stationary STOP feedback with all six motors off before retrying. No reset or movement will be sent in this state.", null);
+        }
         if (healthy && (allOff || allOn))
             return new(diagnosis, "Controller is healthy and stationary. Verify the current state without changing motor power or position.", "verify-current");
         if (armStatus == 1 && control is >= 0 and <= 2 && mode is >= 0 and <= 1)

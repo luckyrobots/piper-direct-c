@@ -4,7 +4,7 @@ using System.Runtime.Versioning;
 
 namespace LuckyRobots.Piper.Camera;
 
-public sealed record VideoDevice(int Index, string Name, string Path);
+public sealed record VideoDevice(int Index, string Name, string Path, string UsbLocation = "", string InstanceId = "");
 
 public static class VideoDevices
 {
@@ -36,7 +36,9 @@ public static class VideoDevices
                             var bag = (IPropertyBag)storage;
                             bag.Read("FriendlyName", out object name, IntPtr.Zero);
                             bag.Read("DevicePath", out object path, IntPtr.Zero);
-                            result.Add(new(index++, name?.ToString() ?? "Camera", path?.ToString() ?? ""));
+                            string devicePath = path?.ToString() ?? "";
+                            result.Add(new(index++, name?.ToString() ?? "Camera", devicePath,
+                                VideoDeviceLocation.ReadBusPort(devicePath), VideoDeviceLocation.InstanceId(devicePath)));
                         }
                         finally { Marshal.ReleaseComObject(storage); }
                     }

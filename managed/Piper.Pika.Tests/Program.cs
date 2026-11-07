@@ -2,13 +2,13 @@ using System.Text.Json;
 using System.Diagnostics;
 using LuckyRobots.Piper.Pika;
 
-if (args.Length == 2 && args[0] == "--device" && args[1] is "/dev/pika-fixture" or "/dev/pika-monitor-fixture" or "/dev/pika-monitor-die-fixture" or
+if (args.Length >= 2 && args[0] == "--device" && args[1] is "/dev/pika-fixture" or "/dev/pika-monitor-fixture" or "/dev/pika-monitor-die-fixture" or
     "/dev/pika-powered-disabled-die-fixture" or "/dev/pika-powered-stale-die-fixture" or "/dev/pika-powered-pending-die-fixture" or
-    "/dev/pika-powered-cancel-die-fixture" or "/dev/pika-powered-buffered-die-fixture" or "/dev/pika-enable-die-fixture")
+    "/dev/pika-powered-cancel-die-fixture" or "/dev/pika-powered-buffered-die-fixture" or "/dev/pika-enable-die-fixture" or "/dev/pika-unpowered-monitor-die-fixture")
 {
-    bool monitoringFixture = args[1] is "/dev/pika-monitor-fixture" or "/dev/pika-monitor-die-fixture";
+    bool monitoringFixture = args[1] is "/dev/pika-monitor-fixture" or "/dev/pika-monitor-die-fixture" or "/dev/pika-unpowered-monitor-die-fixture";
     Console.WriteLine("{\"type\":\"ready\",\"connected\":true}"); Console.Out.Flush();
-    bool enabled = monitoringFixture;
+    bool enabled = monitoringFixture && args[1] != "/dev/pika-unpowered-monitor-die-fixture";
     var fixtureClock = Stopwatch.StartNew();
     string last_motor_request = ""; double request_time_s = -100;
     while (Console.ReadLine() is { } line)
@@ -31,18 +31,39 @@ if (args.Length == 2 && args[0] == "--device" && args[1] is "/dev/pika-fixture" 
         if (ok && action is "enable" or "position" or "disable")
         { last_motor_request = root.GetProperty("id").GetString()!; request_time_s = fixtureClock.Elapsed.TotalSeconds; }
         double feedback_time_s = dyingPower && args[1] == "/dev/pika-powered-buffered-die-fixture" ? request_time_s - .01 : fixtureClock.Elapsed.TotalSeconds;
-        Console.WriteLine(JsonSerializer.Serialize(new { type = "state", connected = true, fresh = true, enabled, armed = enabled && !monitoringFixture, pending, age_s,
+        Console.WriteLine(JsonSerializer.Serialize(new { type = "state", connected = true, fresh = true, enabled, armed = enabled && !monitoringFixture, pending, following = false, age_s,
             last_motor_request, request_time_s, feedback_time_s,
             telemetry = new { motor = new { Position = .5756, Speed = 0 }, motorstatus = new { Status = enabled ? "0x40" : "0x00" } } }));
         Console.WriteLine(JsonSerializer.Serialize(new { type = "ack", id = root.GetProperty("id").GetString(), ok, message = ok ? "fixture accepted" : "finger-clear required" }));
         Console.Out.Flush();
-        if (action == "heartbeat" && args[1] == "/dev/pika-monitor-die-fixture") Environment.Exit(0);
+        if (action == "heartbeat" && args[1] is "/dev/pika-monitor-die-fixture" or "/dev/pika-unpowered-monitor-die-fixture") Environment.Exit(0);
         if (action == "position" && root.GetProperty("value").GetDouble() == .75) Environment.Exit(0); // Simulated enabled agent failure.
         if (action == "disconnect") break;
     }
     return;
 }
 void Check(bool condition, string message) { if (!condition) throw new Exception(message); }
+foreach (bool requested in new[] { false, true })
+{
+    var acknowledgement = new PikaPowerFeedback(requested, 10);
+    Check(acknowledgement.IsConfirmed(requested, 10.01), "Fresh matching motor feedback did not acknowledge the display state");
+    Check(!acknowledgement.IsConfirmed(!requested, 10.01), "Opposite motor state acknowledged enable/disable display status");
+    foreach (double time in new[] { 9.9, 10, double.NaN, double.PositiveInfinity })
+        Check(!acknowledgement.IsConfirmed(requested, time), "Old or invalid feedback acknowledged a motor-power display request");
+    Check(!new PikaPowerFeedback(requested, double.NaN).IsConfirmed(requested, 11), "Invalid request time acknowledged power feedback");
+}
+await PikaFollowTests.RunAsync();
+await PikaMultiDeviceTests.Run(Check);
+await PikaReadOnlyAdoptionTests.Run(Check);
+PikaMeasuredHoldResumeTests.Run(Check);
+await PikaDisabledEvidenceTests.Run(Check);
+PikaDiagnosticsTests.Run(Check);
+PikaDriverStatusTests.Run(Check);
+PikaTelemetryIntegrityTests.Run(Check);
+PikaHealthyPositionTests.Run(Check);
+await PikaDriverFaultEvidenceTests.Run(Check);
+PikaResyncTests.Run(Check);
+PikaResyncAdversarialTests.Run(Check);
 JsonElement Input(string owner, bool clear = false) => JsonSerializer.SerializeToElement(new { owner, clear });
 async Task Reject(Func<Task> action, string message)
 {

@@ -177,6 +177,8 @@ public sealed partial class PipersPlugin
         await File.WriteAllTextAsync(temporary, JsonSerializer.Serialize(Wizard, PluginProtocol.Json), cancellation);
         File.Move(temporary, WizardDraftPath, true);
         sheetSaveStatus = "Saved locally · measurements restore next session.";
+        if (calibrationIdentity is null && BenchReference.FromAnswers(Wizard.Answers, calibrationDesk.SurfaceY) is { } shared && preferences.BenchReference != shared)
+        { preferences = preferences with { BenchReference = shared }; await Save(cancellation); }
         if (calibrationIdentity is not null && calibrationPath.Length > 0)
         {
             var evidence = new { report = Path.GetFileName(calibrationPath), Wizard.ProfileId, Wizard.Answers,
@@ -190,6 +192,7 @@ public sealed partial class PipersPlugin
 
     private async Task WizardEvent(string action, JsonElement value, CancellationToken cancellation)
     {
+        EnsureIndependentCalibration();
         try { await WizardEventCore(action, value, cancellation); }
         catch (Exception error) when (error is not OperationCanceledException)
         {

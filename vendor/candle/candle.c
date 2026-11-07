@@ -26,6 +26,26 @@
 #include "candle_ctrl_req.h"
 #include "ch_9.h"
 
+struct candle_tx_transfer {
+    OVERLAPPED ovl;
+    candle_frame_t frame;
+};
+static bool candle_retire_tx(candle_device_t *dev)
+{
+    struct candle_tx_transfer *tx=dev->retained_tx;
+    if (!tx) return true;
+    CancelIoEx(dev->deviceHandle,&tx->ovl);
+    WinUsb_AbortPipe(dev->winUSBHandle,dev->bulkOutPipe);
+    if (WaitForSingleObject(tx->ovl.hEvent,1000)!=WAIT_OBJECT_0) return false;
+    DWORD ignored=0;
+    if (!WinUsb_GetOverlappedResult(dev->winUSBHandle,&tx->ovl,&ignored,false)) {
+        DWORD error=GetLastError();
+        if (error==ERROR_IO_INCOMPLETE||error==ERROR_IO_PENDING) return false;
+    }
+    CloseHandle(tx->ovl.hEvent); free(tx); dev->retained_tx=NULL;
+    return true;
+}
+
 static bool candle_read_di(HDEVINFO hdi, SP_DEVICE_INTERFACE_DATA interfaceData, candle_device_t *dev)
 {
     /* get required length first (this call always fails with an error) */
@@ -329,6 +349,7 @@ static bool candle_prepare_read(candle_device_t *dev, unsigned urb_num)
 
 static bool candle_close_rxurbs(candle_device_t *dev)
 {
+    if (!candle_retire_tx(dev)) return false;
     WinUsb_AbortPipe(dev->winUSBHandle, dev->bulkInPipe);
     WinUsb_AbortPipe(dev->winUSBHandle, dev->bulkOutPipe);
     CancelIoEx(dev->deviceHandle, NULL);
@@ -508,33 +529,54 @@ DLL bool __stdcall candle_channel_stop(candle_handle hdev, uint8_t ch)
 
 DLL bool __stdcall candle_frame_send(candle_handle hdev, uint8_t ch, candle_frame_t *frame)
 {
-    // TODO ensure device is open, check channel count..
-    candle_device_t *dev = (candle_device_t*)hdev;
-
-    unsigned long bytes_sent = 0;
-
-    /* Preserve caller echo ID, including 0xffffffff for no local echo. */
-    frame->channel = ch;
-
-    bool rc = WinUsb_WritePipe(
-        dev->winUSBHandle,
-        dev->bulkOutPipe,
-        (uint8_t*)frame,
-          20, /* classic gs_usb transmit header + 8 data bytes; no RX timestamp */
-        &bytes_sent,
-        0
-    );
-
-    DWORD transfer_error = rc ? ERROR_SUCCESS : GetLastError();
-    if (!rc) {
-        WinUsb_AbortPipe(dev->winUSBHandle, dev->bulkOutPipe);
-        WinUsb_ResetPipe(dev->winUSBHandle, dev->bulkOutPipe);
+    return candle_frame_send_pumped(hdev,ch,frame,NULL,NULL);
+}
+DLL bool __stdcall candle_frame_send_pumped(candle_handle hdev,uint8_t ch,candle_frame_t *frame,candle_rx_pump_t pump,void *context)
+{
+    candle_device_t *dev=hdev;
+    if (dev->retained_tx) { dev->last_error=CANDLE_ERR_SEND_FRAME; SetLastError(ERROR_BUSY); return false; }
+    struct candle_tx_transfer *tx=calloc(1,sizeof *tx);
+    if (!tx) { dev->last_error=CANDLE_ERR_SEND_FRAME; SetLastError(ERROR_NOT_ENOUGH_MEMORY); return false; }
+    tx->ovl.hEvent=CreateEvent(NULL,true,false,NULL);
+    if (!tx->ovl.hEvent) { DWORD error=GetLastError(); free(tx); dev->last_error=CANDLE_ERR_SEND_FRAME; SetLastError(error); return false; }
+    tx->frame=*frame; tx->frame.channel=ch;
+    /* RX and TX/echo share the adapter's frame pool. Drain ordered IN reads
+       before submission and while OUT waits, so backpressure cannot prevent
+       the very receive completion/requeue needed to release that pool. */
+    if (pump&&!pump(context)) {
+        CloseHandle(tx->ovl.hEvent); free(tx); dev->last_error=CANDLE_ERR_SEND_FRAME; SetLastError(ERROR_READ_FAULT); return false;
     }
-    rc = rc && bytes_sent == 20;
-    dev->last_error = rc ? CANDLE_ERR_OK : CANDLE_ERR_SEND_FRAME;
-    SetLastError(transfer_error);
-    return rc;
-
+    ULONGLONG started=GetTickCount64(); DWORD bytes_sent=0;
+    bool rc=WinUsb_WritePipe(dev->winUSBHandle,dev->bulkOutPipe,(uint8_t *)&tx->frame,20,&bytes_sent,&tx->ovl);
+    DWORD error=rc?ERROR_SUCCESS:GetLastError(); bool pending=!rc&&error==ERROR_IO_PENDING;
+    while (pending) {
+        if (pump&&!pump(context)) {
+            error=ERROR_READ_FAULT; dev->retained_tx=tx;
+            if (candle_retire_tx(dev)) tx=NULL;
+            rc=false; break;
+        }
+        DWORD wait=WaitForSingleObject(tx->ovl.hEvent,1);
+        if (wait==WAIT_OBJECT_0) {
+            rc=WinUsb_GetOverlappedResult(dev->winUSBHandle,&tx->ovl,&bytes_sent,false);
+            error=rc?ERROR_SUCCESS:GetLastError(); pending=false;
+            if (!rc&&(error==ERROR_IO_INCOMPLETE||error==ERROR_IO_PENDING)) {
+                dev->retained_tx=tx; if (candle_retire_tx(dev)) tx=NULL;
+            }
+        } else if (wait!=WAIT_TIMEOUT||GetTickCount64()-started>=20) {
+            error=wait==WAIT_TIMEOUT?ERROR_SEM_TIMEOUT:GetLastError();
+            dev->retained_tx=tx;
+            if (candle_retire_tx(dev)) tx=NULL; /* Otherwise retain live I/O memory until close can retire it. */
+            rc=false; break;
+        }
+    }
+    if (rc&&bytes_sent!=20) { rc=false; error=ERROR_BAD_LENGTH; }
+    if (!rc&&!dev->retained_tx) {
+        WinUsb_AbortPipe(dev->winUSBHandle,dev->bulkOutPipe);
+        WinUsb_ResetPipe(dev->winUSBHandle,dev->bulkOutPipe);
+    }
+    if (tx&&!dev->retained_tx) { CloseHandle(tx->ovl.hEvent); free(tx); }
+    dev->last_error=rc?CANDLE_ERR_OK:CANDLE_ERR_SEND_FRAME;
+    SetLastError(error); return rc;
 }
 
 DLL bool __stdcall candle_frame_read(candle_handle hdev, candle_frame_t *frame, uint32_t timeout_ms)

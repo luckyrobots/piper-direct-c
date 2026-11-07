@@ -20,15 +20,18 @@ struct win_timing { uint32_t prop,phase1,phase2,sjw,brp; };
 typedef bool (__stdcall *fn_timing)(void *,struct win_timing *);
 typedef bool (__stdcall *fn_start)(void *,uint32_t);
 typedef bool (__stdcall *fn_send)(void *,struct win_frame *);
+typedef bool (__stdcall *fn_pump)(void *);
+typedef bool (__stdcall *fn_send_pumped)(void *,struct win_frame *,fn_pump,void *);
 typedef bool (__stdcall *fn_read)(void *,struct win_frame *,uint32_t);
 static struct {
     HMODULE dll;
     fn_list_alloc list_alloc; fn_one list_free,list_scan,free,open,close,stop;
     fn_num num; fn_alloc alloc; fn_serial serial; fn_info info;
     fn_error last_error; fn_rx_bytes last_rx_bytes,rx_ready,rx_next;
-    fn_timing timing; fn_start start; fn_send send; fn_read read;
+    fn_timing timing; fn_start start; fn_send send; fn_send_pumped send_pumped; fn_read read;
     void *handles[CANBUS_MAX];
     uint64_t arrivals[CANBUS_MAX];
+    char load_error[160];
 } win;
 static bool windows_connection(const char *serial,uint64_t *arrival) {
     wchar_t instance[MAX_DEVICE_ID_LEN],suffix[128]; DEVINST node;
@@ -93,7 +96,7 @@ static bool windows_load(void) {
     wcscpy(end+1,L"piper-cando.dll");
     HMODULE dll=LoadLibraryExW(path,NULL,LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR|LOAD_LIBRARY_SEARCH_SYSTEM32);
     if (!dll) return false;
-#define BIND(member,name) do { FARPROC p=GetProcAddress(dll,name); if (!p) { FreeLibrary(dll); return false; } memcpy(&win.member,&p,sizeof p); } while (0)
+#define BIND(member,name) do { FARPROC p=GetProcAddress(dll,name); if (!p) { snprintf(win.load_error,sizeof win.load_error,"USB-CAN transport needs the matching updated DLL (missing %s).",name); FreeLibrary(dll); return false; } memcpy(&win.member,&p,sizeof p); } while (0)
     BIND(list_alloc,"cando_list_malloc"); BIND(list_free,"cando_list_free"); BIND(list_scan,"cando_list_scan");
     BIND(num,"cando_list_num"); BIND(alloc,"cando_malloc"); BIND(free,"cando_free");
     BIND(last_error,"candle_dev_last_error");
@@ -102,6 +105,7 @@ static bool windows_load(void) {
     BIND(open,"cando_open"); BIND(close,"cando_close"); BIND(stop,"cando_stop");
     BIND(serial,"cando_get_serial_number_str"); BIND(info,"cando_get_dev_info");
     BIND(timing,"cando_set_timing"); BIND(start,"cando_start"); BIND(send,"cando_frame_send"); BIND(read,"cando_frame_read");
+    BIND(send_pumped,"cando_frame_send_pumped"); /* Old transport cannot safely sustain the receive-heavy arm stream. */
 #undef BIND
     win.dll=dll; return true;
 }
@@ -113,26 +117,31 @@ static void lost(struct can_device *d,const char *why) {
     memset(&d->feedback,0,sizeof d->feedback); d->stationary_since=0;
     snprintf(d->problem,sizeof d->problem,"%s",why);
 }
-static void windows_scan(struct can_bus *b) {
-    if (!windows_load()) return;
-    bool active=false;
+static void windows_check_connections(struct can_bus *b,bool (*connection)(const char *,uint64_t *)) {
     for (unsigned i=0;i<CANBUS_MAX;i++) {
         struct can_device *d=&b->devices[i];
         if (d->fd>=0) {
             uint64_t arrival;
-            if (!windows_connection(d->id+4,&arrival)||arrival!=win.arrivals[d->fd]) lost(d,"Windows USB-CAN connection changed");
-            else active=true;
+            if (!connection(d->id+4,&arrival)||arrival!=win.arrivals[d->fd]) lost(d,"Windows USB-CAN connection changed");
         } else if (*d->id && !strncmp(d->id,"usb:",4)) {
             uint64_t arrival;
-            if (!windows_connection(d->id+4,&arrival)) {
+            if (!connection(d->id+4,&arrival)) {
                 d->present=d->up=d->link_verified=false;
                 snprintf(d->problem,sizeof d->problem,"Windows USB-CAN adapter not enumerated");
             }
         }
     }
-    /* Do not reopen another process's device or disturb active handles. An
-       explicit Reconnect refreshes adapter enumeration and connection identity. */
-    if (active) return;
+}
+/* Separate the PnP identity queries from the scan transaction so the same
+   production loop can be exercised with metadata-only offline callbacks. */
+static void windows_scan_inventory(struct can_bus *b,
+    bool (*connection)(const char *,uint64_t *),
+    bool (*identity)(const wchar_t *,char *,size_t)) {
+    windows_check_connections(b,connection);
+    /* Enumerating interface paths creates no USB I/O. Keep scanning while an
+       existing adapter is open so hot-plugged adapters can be added. A known
+       live identity is skipped below before open/stop/timing/start: its handle,
+       feedback and generation must not be disturbed by discovery. */
     void *list=NULL; uint8_t count=0;
     if (!win.list_alloc(&list)) return;
     if (!win.list_scan(list)||!win.num(list,&count)) { win.list_free(list); return; }
@@ -141,14 +150,15 @@ static void windows_scan(struct can_bus *b) {
         if (!win.alloc(list,(uint8_t)i,&handle)) continue;
         const wchar_t *serial=win.serial(handle); char id[160]="",name[128]="";
         uint64_t arrival;
-        bool valid=windows_identity(serial,name,sizeof name)&&windows_connection(name,&arrival);
+        bool valid=identity(serial,name,sizeof name)&&connection(name,&arrival);
         if (!valid) { win.free(handle); continue; }
         snprintf(id,sizeof id,"usb:%s",name);
         struct can_device *d=can_bus_find(b,id);
         if (!d) for (unsigned k=0;k<CANBUS_MAX;k++) if (!*b->devices[k].id) { d=&b->devices[k]; break; }
         if (!d||d->fd>=0) { win.free(handle); continue; }
+        unsigned slot=(unsigned)(d-b->devices);
         snprintf(d->id,sizeof d->id,"%s",id);
-        snprintf(d->name,sizeof d->name,"Cando %u",i);
+        snprintf(d->name,sizeof d->name,"Cando %u",slot);
         snprintf(d->path,sizeof d->path,"Windows USB-CAN %s",name);
         d->present=true;
         if (!win.open(handle)) {
@@ -157,7 +167,7 @@ static void windows_scan(struct can_bus *b) {
             snprintf(d->problem,sizeof d->problem,"Windows USB-CAN initialization failed (transport error %d, WinUSB error %lu)",transport,(unsigned long)error);
             win.free(handle); continue;
         }
-        unsigned slot=(unsigned)(d-b->devices); struct win_timing timing={1,12,2,1,3};
+        struct win_timing timing={1,12,2,1,3};
         /* gs_usb bit 8 is CAN FD, not the vendor DLL's NO_ECHO_BACK option.
            Classic CAN uses one-shot only; receive filters transmit echoes.
            No enable/motion/reset frame is sent during transport setup. */
@@ -165,12 +175,25 @@ static void windows_scan(struct can_bus *b) {
             win.close(handle); win.free(handle); continue;
         }
         win.handles[slot]=handle; win.arrivals[slot]=arrival; d->fd=(int)slot; d->index=i;
-        snprintf(d->id,sizeof d->id,"%s",id); snprintf(d->name,sizeof d->name,"Cando %u",i);
+        snprintf(d->id,sizeof d->id,"%s",id); snprintf(d->name,sizeof d->name,"Cando %u",slot);
         snprintf(d->path,sizeof d->path,"Windows USB-CAN %s",name);
         d->present=d->up=d->stable=d->link_verified=true; d->bitrate=1000000; d->bus_state=0; d->control_flags=0;
         d->generation=++b->sequence; d->problem[0]=0; memset(&d->feedback,0,sizeof d->feedback);
     }
     win.list_free(list);
+}
+void can_bus_check_connections(struct can_bus *b) {
+    /* During motion, keep the existing identity checks without enumerating or
+       opening a newly arrived adapter on the controller's reference thread. */
+    windows_check_connections(b,windows_connection);
+}
+static void windows_scan(struct can_bus *b) {
+    if (!windows_load()) {
+        for (unsigned i=0;i<CANBUS_MAX;++i) if (*b->devices[i].id&&*win.load_error)
+            snprintf(b->devices[i].problem,sizeof b->devices[i].problem,"%s",win.load_error);
+        return;
+    }
+    windows_scan_inventory(b,windows_connection,windows_identity);
 }
 static void windows_receive(struct can_bus *b,double now) {
     for (unsigned i=0;i<CANBUS_MAX;i++) {
@@ -193,10 +216,23 @@ static void windows_receive(struct can_bus *b,double now) {
         }
     }
 }
-static bool windows_send(struct can_device *d,const struct can_frame *f) {
+struct windows_pump_context { struct can_bus *bus; struct can_device *device; unsigned generation; bool failed; };
+static bool __stdcall windows_pump_receive(void *context) {
+    struct windows_pump_context *pump=context;
+    windows_receive(pump->bus,piper_now());
+    struct can_device *d=pump->device;
+    pump->failed=!d->present||!d->up||d->generation!=pump->generation||
+        !strncmp(d->problem,"Windows USB-CAN receive ",sizeof("Windows USB-CAN receive ")-1);
+    return !pump->failed;
+}
+static bool windows_send(struct can_bus *bus,struct can_device *d,const struct can_frame *f,unsigned *os_error,int *transport_error) {
     /* gs_usb copies this ID into transmit echoes. 0xffffffff is reserved
        for actual bus reception, so using it here defeats echo filtering. */
     struct win_frame frame={.echo=0,.id=f->can_id,.len=f->len}; memcpy(frame.data,f->data,8);
-    if (win.send(win.handles[d->fd],&frame)) return true;
-    snprintf(d->problem,sizeof d->problem,"Windows USB-CAN send failed (WinUSB error %lu)",(unsigned long)GetLastError()); return false;
+    struct windows_pump_context pump={.bus=bus,.device=d,.generation=d->generation};
+    if (win.send_pumped(win.handles[d->fd],&frame,windows_pump_receive,&pump)) return true;
+    *os_error=(unsigned)GetLastError(); /* Capture before another transport call. */
+    *transport_error=win.last_error(win.handles[d->fd]);
+    if (!pump.failed) snprintf(d->problem,sizeof d->problem,"Windows USB-CAN send failed (transport %d, WinUSB %u)",*transport_error,*os_error);
+    return false;
 }

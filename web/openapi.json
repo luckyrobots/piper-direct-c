@@ -358,7 +358,7 @@
             "properties": {
               "action": {
                 "type": "string",
-                "description": "teach-return is an explicit zero-only handoff after physical teaching ends: confirm button_off, zero_pose_confirmed, supported and clear. Fresh healthy joint/encoder/configuration feedback, a stationary pose, every reported joint within 1 degree of zero and within its limits are required. One standby mode packet is acknowledged before one CAN MoveJ packet; each stage has a 1.5-second deadline and requires a new status frame. No reset, motor-power, homing, position or replay command is sent. Mode/lease/connection changes cancel the handoff; unexpected measured movement after standby/CAN requests a protective STOP. device.teaching exposes phase, active, return_required, can_return, return_reason and zero_tolerance_deg. The 1-degree threshold is an application guard, not a manufacturer calibration tolerance.",
+                "description": "teach-return explicitly returns completed physical teaching to CAN. Qualified H-V1.2-1 with S-V1.8-5 through S-V1.8-9 or S-V1.9-0/1 firmware uses a frozen measured-pose hold: confirm button_off, same_pose_confirmed, supported and clear. Fresh healthy joint/motor encoders, current configuration, all six motors already enabled and a stationary pose are required. Three measured position packets seed the hold, then a fresh receive observation precedes CAN MoveJ plus the same six measured angles at 1% speed; completion requires fresh same-pose status, joint and motor acknowledgement. Other supported firmware requires zero_pose_confirmed, all joints within 1 degree of zero and within limits, then acknowledged standby/CAN mode packets. recover-at-pose uses only the qualified measured-pose path to clear a saved software obstruction after the backend observes a new physical hand-guiding-to-off cycle on this device/generation within 120 seconds. Reset-pending, real fault/transport evidence, stale feedback, out-of-range pose or missing cycle reject without transmission. The incident stays latched until the hold is acknowledged and saved. Neither action resets, changes motor power, homes or replays an old target. Both return 202/request_id and require the normal control heartbeat during the bounded handoff. Connection/lease/mode changes cancel; unexpected movement requests protective STOP. device.teaching exposes can_return/return_reason and can_recover_at_pose/recover_at_pose_reason.",
                 "enum": [
                   "enable",
                   "disable",
@@ -373,7 +373,8 @@
                   "align",
                   "verify-disabled",
                   "cycle",
-                  "teach-return"
+                  "teach-return",
+                  "recover-at-pose"
                 ]
               },
               "owner": {
@@ -399,11 +400,15 @@
               },
               "button_off": {
                 "type": "boolean",
-                "description": "Required true for teach-return: operator confirms the physical teaching button light is off"
+                "description": "Required true for teach-return/recover-at-pose: operator confirms the physical teaching button light is off"
               },
               "zero_pose_confirmed": {
                 "type": "boolean",
-                "description": "Required true for teach-return: operator confirms the physical arm is at its manufacturer's zero pose"
+                "description": "Required true for legacy teach-return only: operator confirms the physical arm is at its manufacturer's zero pose"
+              },
+              "same_pose_confirmed": {
+                "type": "boolean",
+                "description": "Required true for qualified measured-pose teach-return and recover-at-pose: hold the measured current pose stationary with a clear workspace; no previous destination will resume"
               },
               "joint": {
                 "type": "integer",

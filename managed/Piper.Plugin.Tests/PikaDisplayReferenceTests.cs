@@ -63,9 +63,29 @@ internal static class PikaDisplayReferenceTests
             check(GripperLink.TryMeasuredOpening(pika, out opening, ClosedAngle) && Math.Abs(opening - width) < 1e-7,
                 "Display reference did not normalize subsequent encoder readings consistently");
         }
+        foreach (double width in new[] { 90.0858, 90.249, 90.2501 })
+        {
+            pika["telemetry"]!["motor"]!["Position"] = ClosedAngle + MeasuredAngle(width);
+            var raw = pika.DeepClone();
+            bool accepted = GripperLink.TryMeasuredOpening(pika, out opening, ClosedAngle);
+            check(width <= 90.25 ? accepted && opening == 90 : !accepted,
+                "Full-open noise allowance was not applied after the saved closed reference, or expanded beyond its bound");
+            check(JsonNode.DeepEquals(pika, raw), "Reference-normalized endpoint presentation changed raw Pika telemetry");
+        }
         pika["fresh"] = false;
         check(!GripperLink.TryMeasuredOpening(pika, out _, ClosedAngle), "Display reference promoted stale data into a live reading");
         await RunRendered(check);
+    }
+
+    private static double MeasuredAngle(double width)
+    {
+        double low = PikaProtocol.Angle(89), high = PikaProtocol.Angle(90) + .2;
+        for (int i = 0; i < 60; i++)
+        {
+            double middle = (low + high) * .5;
+            if (PikaProtocol.Width(middle) < width) low = middle; else high = middle;
+        }
+        return low;
     }
 
     private static async Task RunRendered(Action<bool, string> check)
@@ -105,9 +125,9 @@ internal static class PikaDisplayReferenceTests
                     else if (method == "robot.feedback")
                     {
                         feedback.Add((JsonObject)args.DeepClone());
-                        reply = new() { ["applied"] = true, ["pose"] = new JsonObject { ["joints"] = new JsonArray(args["joints"]!.AsObject().Select(j => (JsonNode)new JsonObject { ["name"] = j.Key, ["position"] = j.Value!.DeepClone() }).ToArray()) } };
+                        reply = new() { ["applied"] = true, ["pose"] = new JsonObject { ["sceneId"] = "fixture-scene", ["entityId"] = "fixture-robot", ["joints"] = new JsonArray(args["joints"]!.AsObject().Select(j => (JsonNode)new JsonObject { ["name"] = j.Key, ["position"] = j.Value!.DeepClone() }).ToArray()) } };
                     }
-                    else if (method == "robot.subscribe") reply = new() { ["subscribed"] = true };
+                    else if (method == "robot.subscribe") reply = new() { ["sceneId"] = "fixture-scene", ["entityId"] = "fixture-robot", ["joints"] = model.DeepClone() };
                     else throw new InvalidOperationException("Unexpected display-reference engine request: " + method);
                     return Task.FromResult(JsonSerializer.SerializeToElement(reply));
                 })], null)!;
@@ -134,6 +154,12 @@ internal static class PikaDisplayReferenceTests
             double gap = 2000 * travel + 1000 * (updated["joint7"]!.GetValue<double>() - updated["joint8"]!.GetValue<double>());
             check(Math.Abs(gap - 20) < 1e-7 && Get<RobotLink>("link").GripperErrorMm == 0,
                 "Continuing telemetry omitted the saved display reference or failed to verify actual finger geometry");
+            pika["telemetry"]!["motor"]!["Position"] = ClosedAngle + MeasuredAngle(90.0858); Fresh();
+            await Invoke("PublishMeasuredScene", CancellationToken.None);
+            updated = feedback[^1]["joints"]!;
+            double openGap = 2000 * travel + 1000 * (updated["joint7"]!.GetValue<double>() - updated["joint8"]!.GetValue<double>());
+            check(Math.Abs(openGap - 90) < 1e-7 && Get<RobotLink>("link").GripperErrorMm == 0,
+                "Observed full-open endpoint noise left the reference-normalized scene gripper unsynchronized");
             pika["telemetry"]!["motor"]!["Position"] = ClosedAngle; Fresh();
             await Invoke("PublishMeasuredScene", CancellationToken.None);
             check(feedback[^1]["joints"]!["joint7"]!.GetValue<double>() == -travel, "Continuing closed feedback left the scene gripper open");

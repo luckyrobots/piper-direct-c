@@ -41,6 +41,10 @@ public sealed partial class PipersPlugin
 
     private Widget CalibrationSheetControls()
     {
+        if (ActiveProfile.RobotJointPrefix.Length > 0)
+            return Widget.Column("calibration.branch.mount", Widget.Label("calibration.branch.title", ActiveProfile.Name + " · bench placement") with { Appearance = "heading" },
+                Widget.Label("calibration.branch.explanation", "This arm shares a simulation model with another arm. Its mounting position is saved in the scene. Desk alignment editing is unavailable here because it would move both arms; joint linking and camera previews remain available.") with { Height = 92 },
+                Widget.Button("workspace.controls@branch", "Back to robot controls"));
         LoadWizard(); LoadSheetRows();
         var body = new List<Widget>
         {

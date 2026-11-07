@@ -17,6 +17,7 @@ API cando_set_timing(void *h,candle_bittiming_t *t) { return candle_channel_set_
 API cando_start(void *h,uint32_t flags) { return candle_channel_start(h,0,flags|0x10u); }
 API cando_stop(void *h) { return candle_channel_stop(h,0); }
 API cando_frame_send(void *h,candle_frame_t *f) { return candle_frame_send(h,0,f); }
+API cando_frame_send_pumped(void *h,candle_frame_t *f,candle_rx_pump_t pump,void *context) { return candle_frame_send_pumped(h,0,f,pump,context); }
 API cando_frame_read(void *h,candle_frame_t *f,uint32_t t) { return candle_frame_read(h,f,t); }
 
 __declspec(dllexport) uint32_t __stdcall cando_last_rx_bytes(void *h) { return ((candle_device_t*)h)->last_rx_bytes; }

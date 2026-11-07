@@ -12,6 +12,13 @@ void Reject(Action action, string expected)
     throw new Exception("Expected rejection: " + expected);
 }
 Cv2.SetNumThreads(2);
+Check(VideoDeviceLocation.InstanceId(@"\\?\usb#vid_1bcf&pid_2cd1&mi_00#8&1bd18552&0&0000#{guid}\global") ==
+    @"USB\vid_1bcf&pid_2cd1&mi_00\8&1bd18552&0&0000", "Camera interface identity did not match the Windows device-tree node");
+Check(VideoDeviceLocation.InstanceId("virtual-camera")=="" && VideoDeviceLocation.InstanceId("usb#broken")=="", "Non-USB/malformed camera path acquired a guessed device-tree identity");
+Check(VideoDeviceLocation.BusPort("Port_#0001.Hub_#0011")=="11-1" && VideoDeviceLocation.BusPort("Port_#0001.Hub_#0015")=="15-1",
+    "Duplicate Pika cameras lost their distinct Windows USB hub/port labels");
+Check(VideoDeviceLocation.BusPort("0000.0014.0000.001")=="" && VideoDeviceLocation.BusPort("Port_#0000.Hub_#0011")=="",
+    "Unrecognized device locations were presented as verified USB bus identities");
 Check(DepthPreview.Gray(0, .0001f) == 0 && DepthPreview.Gray(ushort.MaxValue, .0001f) == 0, "Invalid depth must stay black");
 Check(DepthPreview.Gray(100, .0001f) == 0 && DepthPreview.Gray(6000, .0001f) == 0, "Depth outside 7–50 cm must stay black");
 Check(DepthPreview.Gray(700, .0001f) >= 254 && DepthPreview.Gray(5000, .0001f) == 0, "Depth range endpoints changed");

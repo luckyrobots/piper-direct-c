@@ -9,7 +9,7 @@ namespace LuckyRobots.Piper.Plugin;
 public sealed record RobotProfile(string Id, string Name, string CanDeviceId = "", double Speed = 10, double Step = 1, double Tolerance = .5,
     string RobotId = "", CameraPreferences? Gripper = null, CameraPreferences? Depth = null, string DepthSerial = "",
     Dictionary<string, SimulationCameraPreferences>? SimulationCameras = null, string PikaDevice = "", string WslDistribution = "Ubuntu", int CameraSlot = -1,
-    AlignmentReference? Alignment = null);
+    AlignmentReference? Alignment = null, bool? RememberMeasuredLink = null, string SimulationTransport = SimulationTrajectoryTransport.PositionVelocity, string RobotJointPrefix = "", bool FollowSimulationSelected = false);
 
 /// <summary>Persistent identity and settings projection, independent of the editor and hardware.</summary>
 public static class RobotProfileRouting
@@ -20,17 +20,20 @@ public static class RobotProfileRouting
         RobotProfile[] profiles = value.Robots is { Length: > 0 } ? value.Robots :
             [new("piper-1", "Piper 1", Speed: value.Speed, Step: value.Step, Tolerance: value.Tolerance, RobotId: value.RobotId,
                 Gripper: value.Gripper, Depth: value.Depth, DepthSerial: value.DepthSerial,
-                SimulationCameras: RobotCameras(value.SimulationCameras), PikaDevice: value.Backend?.PikaDevice ?? "", WslDistribution: value.Backend?.WslDistribution ?? "Ubuntu")];
+                SimulationCameras: RobotCameras(value.SimulationCameras), PikaDevice: value.Backend?.PikaDevice ?? "", WslDistribution: value.Backend?.WslDistribution ?? "Ubuntu",
+                SimulationTransport: SimulationTrajectoryTransport.Name(value.SimulationTransport))];
         if (profiles.Length > MaximumProfiles || profiles.Select(p => p.Id).Distinct(StringComparer.Ordinal).Count() != profiles.Length ||
             profiles.Any(p => p.Id.Length is 0 or > 64 || p.Id.Any(c => !char.IsAsciiLetterOrDigit(c) && c is not ('-' or '_'))))
             throw new InvalidOperationException("Robot profile IDs must be unique simple names, with at most eight profiles.");
         var slots = new HashSet<int>();
         profiles = profiles.Select(p =>
         {
+            _ = SceneRobotBindings.ValidatePrefix(p.RobotJointPrefix);
             int slot = p.CameraSlot;
             if (slot < 0 || slot >= MaximumProfiles || !slots.Add(slot))
             { slot = Enumerable.Range(0, MaximumProfiles).First(i => !slots.Contains(i)); slots.Add(slot); }
-            return p with { Name = CleanName(p.Name), Speed = Math.Clamp(p.Speed, 0, 100), Step = Math.Clamp(p.Step, .1, 5), Tolerance = Math.Clamp(p.Tolerance, .05, 1), CameraSlot = slot };
+            return p with { Name = CleanName(p.Name), Speed = Math.Clamp(p.Speed, 0, 100), Step = Math.Clamp(p.Step, .1, 5), Tolerance = Math.Clamp(p.Tolerance, .05, 1), CameraSlot = slot,
+                SimulationTransport = SimulationTrajectoryTransport.Name(p.SimulationTransport) };
         }).ToArray();
         string active = profiles.Any(p => p.Id == value.ActiveRobotId) ? value.ActiveRobotId : profiles[0].Id;
         return Project(value with { Robots = profiles, ActiveRobotId = active }, profiles.Single(p => p.Id == active));
@@ -44,6 +47,8 @@ public static class RobotProfileRouting
     }
 
     public static bool SharedWidget(string id) => id.StartsWith("profiles.select.", StringComparison.Ordinal) ||
+        id.StartsWith("group.follow.", StringComparison.Ordinal) && id != "group.follow.selected" ||
+        id.StartsWith("global.", StringComparison.Ordinal) ||
         id is "profiles.add" or "profiles.heading" or "profiles.list" or "profiles.edit" or "profiles.mode" ||
         id.StartsWith("camera.bench", StringComparison.Ordinal) || id.StartsWith("backend.", StringComparison.Ordinal) ||
         id.StartsWith("engine.", StringComparison.Ordinal) || id is "workspace" or "sidebar";
@@ -82,7 +87,7 @@ public static class RobotProfileRouting
     {
         if (value.Robots is not { Length: > 0 }) return value;
         var active = Active(value) with { Speed = value.Speed, Step = value.Step, Tolerance = value.Tolerance, RobotId = value.RobotId,
-            Gripper = value.Gripper, Depth = value.Depth, DepthSerial = value.DepthSerial, SimulationCameras = RobotCameras(value.SimulationCameras) };
+            Gripper = value.Gripper, Depth = value.Depth, DepthSerial = value.DepthSerial, SimulationCameras = RobotCameras(value.SimulationCameras), SimulationTransport = value.SimulationTransport };
         return value with { Robots = value.Robots.Select(p => p.Id == active.Id ? active : p).ToArray() };
     }
 
@@ -98,7 +103,7 @@ public static class RobotProfileRouting
         var cameras = RobotCameras(profile.SimulationCameras);
         if (value.SimulationCameras?.TryGetValue("bench", out var bench) == true) cameras["bench"] = bench;
         return value with { Speed = profile.Speed, Step = profile.Step, Tolerance = profile.Tolerance, RobotId = profile.RobotId,
-            Gripper = profile.Gripper, Depth = profile.Depth, DepthSerial = profile.DepthSerial, SimulationCameras = cameras };
+            Gripper = profile.Gripper, Depth = profile.Depth, DepthSerial = profile.DepthSerial, SimulationCameras = cameras, SimulationTransport = profile.SimulationTransport };
     }
 
     public static void ValidateCanAssignment(Preferences value, string id, string canId)
@@ -106,6 +111,17 @@ public static class RobotProfileRouting
         if (canId.Length > 256 || canId.Any(char.IsControl)) throw new InvalidOperationException("Invalid CAN adapter identity.");
         if (canId.Length > 0 && value.Robots!.Any(p => p.Id != id && p.CanDeviceId == canId))
             throw new InvalidOperationException("That CAN adapter is assigned to another robot. Remove its assignment first.");
+    }
+
+    public static void ValidateSceneAssignment(Preferences value, string id, string entityId, string jointPrefix)
+    {
+        SceneRobotBindings.ValidatePrefix(jointPrefix);
+        if (entityId.Length > 256 || entityId.Any(char.IsControl) || entityId.Length == 0 && jointPrefix.Length > 0)
+            throw new InvalidOperationException("Invalid simulation arm identity.");
+        var assigned = value.Robots?.FirstOrDefault(p => p.Id != id && entityId.Length > 0 &&
+            p.RobotId == entityId && p.RobotJointPrefix == jointPrefix);
+        if (assigned is not null)
+            throw new InvalidOperationException($"That simulation arm is already assigned to {assigned.Name}. Unassign it there first.");
     }
 
     public static JsonObject Device(Preferences value, JsonObject snapshot)
@@ -131,26 +147,31 @@ public sealed partial class PipersPlugin
     private string CameraImageId(string id) => id == "bench" ? id : "piper-" + ActiveProfile.CameraSlot + "." + id;
     private bool CameraFrameReady(string id) => cameras.TryGetValue(id, out var camera) && camera.PublishedFrame is { } frame &&
         DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - frame.TimestampUnixMicroseconds / 1000 < 2000;
-    private string ScopeWidgetId(string id) => WorkspaceEventScope.Wrap(Interlocked.Read(ref workspaceViewEpoch), ActiveProfile.Id, id);
-    private Widget ScopeRobotWidget(Widget widget) => widget with { Id = ScopeWidgetId(widget.Id), Children = widget.Children?.Select(ScopeRobotWidget).ToArray() };
+    private string ScopeWidgetId(string id) => WorkspaceEventScope.Wrap(PublishedWorkspaceEpoch, ActiveProfile.Id, id);
+    private static Widget ScopeRobotWidget(Widget widget, long epoch, string profileId) => widget with {
+        Id = WorkspaceEventScope.Wrap(epoch, profileId, widget.Id), Children = widget.Children?.Select(child => ScopeRobotWidget(child, epoch, profileId)).ToArray() };
     private Task Patch(Dictionary<string, JsonObject> patches, CancellationToken cancellation) => engine.PatchAsync(Panel,
         patches.ToDictionary(p => ScopeWidgetId(p.Key), p => p.Value), cancellation);
-    private string UnscopeEvent(string id) => WorkspaceEventScope.Unwrap(Interlocked.Read(ref workspaceViewEpoch), ActiveProfile.Id, id);
+    private string UnscopeEvent(string id) => UnscopePublishedWorkspaceEvent(id);
 
     private Widget RobotSidebar()
     {
         var rows = preferences.Robots!.Select(p => Widget.Button("profiles.select." + p.Id, ProfileLabel(p)) with
         { Height = 56, Padding = 12, Appearance = p.Id == ActiveProfile.Id ? "selected" : "quiet", Hint = p.CanDeviceId.Length == 0 ? "Assign an adapter in Settings → Robot" : "Switch to " + p.Name }).ToArray();
-        return Widget.Column("sidebar", Widget.Row("profiles.heading.row", Widget.Label("profiles.heading", "ROBOTS") with { Appearance = "muted" },
-                Widget.Button("workspace.settings.robot@sidebar", "⚙") with { Width = 32, Appearance = "quiet", Hint = "Manage robot assignments" }),
+        return Widget.Column("sidebar", Widget.Button("workspace.settings.robot@sidebar", "⚙  Settings") with { Appearance = "quiet", Height = 38, Hint = "All robots, cameras, controllers and bench calibration" },
+            Widget.Label("profiles.heading", "ROBOTS") with { Appearance = "muted" },
             Widget.Column("profiles.list", rows) with { Spacing = 8 },
+            GroupFollowControls(),
             (workspacePage == "camera" && cameraDetail == "bench" ? Widget.Label("workspace.bench.enlarged", "Bench camera is enlarged") with { Height = 60, Appearance = "muted" } : Camera("bench", "Bench camera")),
-            Widget.Button("workspace.camera.bench@compare", "Compare with simulation") with { Appearance = "quiet", Hint = "The bench camera is shared by every robot." }) with { Width = 230, Padding = 16, Spacing = 18, Appearance = "sidebar" };
+            Widget.Button("workspace.camera.bench@compare", "Enlarge & compare") with { Appearance = "quiet", Hint = "The bench camera is shared by every robot." }) with { Width = 170, Padding = 12, Spacing = 14, Appearance = "sidebar" };
     }
 
     private string ProfileLabel(RobotProfile profile)
     {
-        string status = string.IsNullOrEmpty(profile.CanDeviceId) ? "unassigned" : state?["devices"]?.AsArray().Any(d => d?["id"]?.GetValue<string>() == profile.CanDeviceId && d["present"]?.GetValue<bool>() == true) == true ? "connected" : "offline";
+        var device = state?["devices"]?.AsArray().FirstOrDefault(d => d?["id"]?.GetValue<string>() == profile.CanDeviceId);
+        string status = string.IsNullOrEmpty(profile.CanDeviceId) ? "unassigned" : device?["present"]?.GetValue<bool>() != true ? "offline" :
+            device["recovery_required"]?.GetValue<bool>() == true || device["status"]?["arm_status"]?.GetValue<int>() == 1 ? "Needs recovery" :
+            GroupFollowIncludes(profile.Id) ? "In follower group" : "connected";
         return profile.Name + "\n" + status;
     }
 
@@ -195,19 +216,30 @@ public sealed partial class PipersPlugin
             }
             message = "The controller changed CAN selection. This robot is read-only until its assigned CAN bus is activated.";
         }
-        // API 1 dropdown choices are constructor-only. Rebuild the view once
-        // after inventory/hotplug changes, never on ordinary telemetry updates.
-        // Keep the pending change while an input/command owns the UI semaphore.
+        // Patch supported dropdown choices in place. Hotplug must not recreate
+        // button IDs and discard a click or slider gesture already in flight.
         if (canInventoryRenderPending && await commands.WaitAsync(0, cancellation))
         {
-            try { await Render(cancellation); canInventoryRenderPending = false; }
+            try
+            {
+                var patches = new Dictionary<string, JsonObject> { ["profiles.can"] = new() { ["options"] = JsonSerializer.SerializeToNode(CanOptions()), ["value"] = CanIndex() } };
+                foreach (var p in preferences.Robots!) patches["global.robot." + p.Id + ".can"] = new() {
+                    ["options"] = JsonSerializer.SerializeToNode(new[] { "Unassigned" }.Concat(knownCanIds.Select(CanFriendlyName))),
+                    ["value"] = Array.IndexOf(knownCanIds, p.CanDeviceId) + 1 };
+                await Patch(patches, cancellation); canInventoryRenderPending = false;
+            }
             finally { commands.Release(); }
         }
     }
 
     private void AddProfilePatches(Dictionary<string, JsonObject> patches)
     {
-        foreach (var profile in preferences.Robots!) patches["profiles.select." + profile.Id] = new() { ["text"] = ProfileLabel(profile) };
+        foreach (var profile in preferences.Robots!)
+        {
+            patches["profiles.select." + profile.Id] = new() { ["text"] = ProfileLabel(profile) };
+            var assignment = SceneArmAssignment(profile, settingsRobotOptions);
+            patches[assignment.Id] = new() { ["text"] = assignment.Text };
+        }
         string can = ActiveProfile.CanDeviceId;
         patches["profiles.can.status"] = new() { ["text"] = string.IsNullOrEmpty(can) ? "No CAN adapter assigned · scene and robot cameras can still be configured."
             : snapshotSelected() == can ? "Active CAN · " + can : "Assigned CAN inactive or disconnected · " + can };
@@ -291,11 +323,12 @@ public sealed partial class PipersPlugin
                 await Task.Delay(25, cancellation);
             }
         }
-        if (pikaOwned || pikaMonitoring || state?["pika"]?["owner"]?.GetValue<string>() == owner)
-            await ReleaseOwnPika(cancellation);
+        // Switching the visible robot does not release holding power on its
+        // independent gripper session. All owned sessions keep heartbeating.
         if (link is not null) await engine.RequestAsync("robot.unsubscribe", cancellation: cancellation);
         teleoperating = false; followInput.End(); followRequest = lease = lastCommand = 0;
         approved = pikaOwned = pikaMonitoring = linkCommandsEnabled = recoveryInProgress = false; link = null; linkErrorDegrees = null;
+        CancelHandGuideRecovery();
     }
 
     private async Task ReleaseOwnPika(CancellationToken cancellation)
@@ -325,16 +358,24 @@ public sealed partial class PipersPlugin
 
     private async Task SwitchProfile(RobotProfile profile, bool append, CancellationToken cancellation)
     {
+        bool groupViewOnly = GroupFollowActive;
+        if (groupViewOnly && (append || !preferences.Robots!.Any(p => p.Id == profile.Id && p.CanDeviceId == profile.CanDeviceId &&
+            p.RobotId == profile.RobotId && p.RobotJointPrefix == profile.RobotJointPrefix && p.PikaDevice == profile.PikaDevice && p.WslDistribution == profile.WslDistribution)))
+            throw new InvalidOperationException("Stop grouped following before changing a robot assignment.");
         if (calibrationWorker is { IsCompleted: false }) throw new InvalidOperationException("Finish camera setup/calibration before switching robots.");
         await FinishAlignment("Robot profile changed", cancellation);
         switchingProfile = true;
         try
         {
-            await ReleaseProfileControl(cancellation);
+            if (!groupViewOnly) await ReleaseProfileControl(cancellation);
+            else { link = null; approved = pikaOwned = pikaMonitoring = linkCommandsEnabled = false; lease = lastCommand = 0; }
+            await FinishPikaTeaching("Robot profile or hardware assignment changed", cancellation);
+            StorePikaTeachingWorkspace(ActiveProfile);
             preferences = RobotProfileRouting.Capture(preferences);
             foreach (string id in new[] { "gripper", "depth" }) if (cameras.Remove(id, out var camera)) await camera.DisposeAsync();
             var profiles = append ? preferences.Robots!.Append(profile).ToArray() : preferences.Robots!.Select(p => p.Id == profile.Id ? profile : p).ToArray();
             preferences = RobotProfileRouting.Activate(preferences with { Robots = profiles }, profile.Id);
+            RestorePikaTeachingWorkspace(ActiveProfile);
             LoadAlignmentSummary();
             cameraCalibration.Clear(); cameraDimensions.TryRemove("gripper", out _); cameraDimensions.TryRemove("depth", out _);
             cameraStatus["gripper"] = cameraStatus["depth"] = "Connecting…";
@@ -361,8 +402,9 @@ public sealed partial class PipersPlugin
         finally { switchingProfile = false; }
     }
 
-    private bool PikaMatchesProfile() => ActiveProfile.PikaDevice.Length > 0 && state?["pika"]?["device"]?.GetValue<string>() == ActiveProfile.PikaDevice &&
-        (!OperatingSystem.IsWindows() || state?["pika"]?["distribution"]?.GetValue<string>() == ActiveProfile.WslDistribution);
+    private bool PikaMatchesProfile() => PikaMatchesProfile(state?["pika"] as JsonObject);
+    private bool PikaMatchesProfile(JsonObject? pika) => ActiveProfile.PikaDevice.Length > 0 && pika?["device"]?.GetValue<string>() == ActiveProfile.PikaDevice &&
+        (!OperatingSystem.IsWindows() || pika?["distribution"]?.GetValue<string>() == ActiveProfile.WslDistribution);
 
     private async Task ConfigureProfilePika(CancellationToken cancellation)
     {

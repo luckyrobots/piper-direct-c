@@ -7,7 +7,9 @@ public sealed partial class PipersPlugin
     private string settingsCamera = "bench";
     private static string CameraTitle(string id) => id switch { "bench" => "Bench camera · shared", "depth" => "D405", _ => "Pika fisheye" };
 
-    private Widget Camera(string id, string title)
+    private Widget Camera(string id, string title) => CameraWithSimulation(id, title);
+
+    private Widget CameraWithSimulation(string id, string title)
     {
         var heading = new List<Widget> { Widget.Label("camera." + id + ".title", title) with { Height = 28 } };
         if (id == "depth")
@@ -18,8 +20,13 @@ public sealed partial class PipersPlugin
         heading.Add(Widget.Button("workspace.camera." + id, "↗") with { Width = 32, Appearance = "quiet", Hint = "Enlarge real and simulation camera views" });
         heading.Add(Widget.Button("workspace.settings.cameras." + id, "⚙") with { Width = 32, Appearance = "quiet", Hint = "Camera settings" });
         return Widget.Column("camera." + id, Widget.Row("camera." + id + ".header", heading.ToArray()) with { Spacing = 4 },
+            Widget.Label("camera." + id + ".real.title", "REAL") with { Height = 20, Appearance = "muted" },
             new Widget("image", "camera." + id + ".image") { ImageId = CameraImageId(id), Visible = CameraFrameReady(id), Height = id == "bench" ? 130 : 230 },
-            Widget.Label("camera." + id + ".empty", CameraSettings(id).Enabled ? "Connecting camera…" : "Camera paused · use ⚙ to start") with { Height = id == "bench" ? 80 : 120, Visible = !CameraFrameReady(id), Appearance = "muted" }) with { Spacing = 6 };
+            Widget.Label("camera." + id + ".empty", CameraSettings(id).Enabled ? "Connecting camera…" : "Camera paused · use ⚙ to start") with { Height = id == "bench" ? 80 : 120, Visible = !CameraFrameReady(id), Appearance = "muted" },
+            Widget.Label("camera." + id + ".sim.title", "SIM") with { Height = 20, Appearance = "muted", Hint = "Same scene-camera identity in Edit and Play. Camera mount and exposure synchronization still need verification." },
+            new Widget("scene-camera", "camera." + id + ".sim") { Height = id == "bench" ? 130 : 180,
+                Visible = SimulationCameraRouting.IsAvailable(preferences.SimulationCameras?.GetValueOrDefault(id), simulationCameras) },
+            Widget.Label("camera." + id + ".sim.status", "Camera alignment unverified") with { Height = 28, Appearance = "muted" }) with { Spacing = 6 };
     }
 
     private Widget CameraDetailPage() => Widget.Column("workspace.camera.body",
@@ -44,14 +51,16 @@ public sealed partial class PipersPlugin
         return Widget.Column("workspace.settings.cameras.section", Widget.Label("workspace.settings.cameras.title", "Cameras") with { Appearance = "heading" },
             Widget.Row("workspace.settings.camera-tabs", Select("bench", "Bench · shared"), Select("depth", "D405"), Select("gripper", "Pika")),
             Widget.Label("workspace.settings.camera-scope", id == "bench" ? "One bench camera is shared by all robot profiles." : "These camera settings belong to " + ActiveProfile.Name + ".") with { Appearance = "muted", Height = 28 },
-            Field("camera." + id + ".device", "Camera device", new Widget("input", "camera." + id + ".device") { Text = settings.Device, Visible = id != "depth" }) with { Visible = id != "depth" },
+            Field("camera." + id + ".device", "Camera device", CameraDeviceInput(id, settings)) with { Visible = id != "depth" },
+            Field("camera.depth.serial", "D405 camera", DepthCameraInput()) with { Visible = id == "depth" },
             Field("camera." + id + ".view", "D405 view", new Widget("dropdown", "camera." + id + ".view") { Options = ["Color image", "Depth distance · 7–50 cm"], Value = D405View.Mode(settings) == "depth" ? 1 : 0 }) with { Visible = id == "depth" },
-            Widget.Row("workspace.settings.camera-actions", Widget.Button("camera." + id + ".toggle", settings.Enabled ? "Pause preview" : "Start preview"), Widget.Button("workspace.camera." + id + "@settings", "Enlarge & compare")),
+            Widget.Row("workspace.settings.camera-actions", Widget.Button("camera." + id + ".toggle", settings.Enabled ? "Pause preview" : "Start preview"), Widget.Button("workspace.camera." + id + "@settings", "Enlarge & compare"),
+                Widget.Button("camera." + id + ".simrefresh", "Refresh cameras")),
             Widget.Label("workspace.settings.camera-remember", "Selection and preview state are remembered. Enabled cameras start when Pipers opens.") with { Height = 40, Appearance = "muted" },
             Widget.Button("workspace.camera-stream-details", cameraStreamDetailsOpen ? "Hide stream & device details" : "Stream & device details") with { Appearance = "quiet" },
-            Widget.Column("workspace.settings.camera-stream", Field("camera." + id + ".serial", "D405 serial", new Widget("input", "camera." + id + ".serial") { Text = preferences.DepthSerial, Hint = "Blank only when exactly one D405 is connected" }) with { Visible = id == "depth" },
+            Widget.Column("workspace.settings.camera-stream",
                 Widget.Label("camera." + id + ".info", cameraStatus.GetValueOrDefault(id, "Waiting for frames…")) with { Height = 40 },
-                Widget.Button("camera." + id + ".simrefresh", "Find simulation cameras"), Field("camera." + id + ".simselect", "Simulation counterpart", new Widget("dropdown", "camera." + id + ".simselect") { Options = SimulationCameraNames(), Value = SimulationCameraIndex(id) }),
+                Field("camera." + id + ".simselect", "Simulation counterpart", new Widget("dropdown", "camera." + id + ".simselect") { Options = SimulationCameraNames(), Value = SimulationCameraIndex(id) }),
                 Widget.Label("camera." + id + ".clock", "Host receipt timestamps are available. Exposure delay and camera-to-world alignment remain unverified.") with { Height = 42, Appearance = "muted" }) with { Visible = cameraStreamDetailsOpen, Spacing = 10 },
             Widget.Button("workspace.camera-lens-details", cameraLensDetailsOpen ? "Hide lens calibration" : "Lens calibration & profiles") with { Appearance = "quiet" },
             Widget.Column("camera." + id + ".calibration",

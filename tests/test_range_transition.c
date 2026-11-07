@@ -48,8 +48,12 @@ static void drive(struct controller *c)
 {
     double now=c->started; unsigned request=c->request_id; bool destination_seen=false;
     for (unsigned tick=0;tick<1000&&c->op!=OP_IDLE;++tick) {
+        bool seed=c->position_seed_pending;
         now+=.03; c->heartbeat=now; controller_tick(c,now);
-        for (unsigned i=0;i<6;++i) assert(c->bus.sim_target[i]>=limits[i][0]&&c->bus.sim_target[i]<=limits[i][1]);
+        for (unsigned i=0;i<6;++i) {
+            if(seed) assert(fabs(c->bus.sim_target[i]-c->initial[i])<.00051);
+            else assert(c->bus.sim_target[i]>=limits[i][0]&&c->bus.sim_target[i]<=limits[i][1]);
+        }
         if (c->op==OP_MOVE) {
             destination_seen=true; assert(!c->range_followup && c->synchronized_pose && c->speed_percent==100);
             assert(c->bus.devices[0].feedback.arm[0].deg[1]>=0); /* Never advance before entry is measured. */

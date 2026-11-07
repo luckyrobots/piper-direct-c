@@ -7,13 +7,18 @@ namespace LuckyRobots.Piper.Pika;
 
 /// <summary>Reusable C# owner of a Linux serial agent, local or through WSL.
 /// The Windows process never opens a WCH COM port.</summary>
-public sealed class PikaProcessService : IAsyncDisposable
+public sealed class PikaProcessService : IPikaSession
 {
     private string device;
     private readonly string agentPath;
+    private readonly double commandPeriodSeconds;
     private string? distribution;
-    public PikaProcessService(string device, string agentPath, string? distribution = null)
-    { this.device = device; this.agentPath = agentPath; this.distribution = distribution; }
+    public PikaProcessService(string device, string agentPath, string? distribution = null,
+        double commandPeriodSeconds = PikaFollowSession.MinimumCommandPeriodSeconds)
+    {
+        _ = new PikaFollowSession(_ => { }, commandPeriodSeconds); // Validate without opening a transport.
+        this.device = device; this.agentPath = agentPath; this.distribution = distribution; this.commandPeriodSeconds = commandPeriodSeconds;
+    }
     private readonly SemaphoreSlim operations = new(1);
     private readonly object stateGate = new();
     private readonly ConcurrentDictionary<string, TaskCompletionSource<JsonElement>> pending = new();
@@ -26,27 +31,47 @@ public sealed class PikaProcessService : IAsyncDisposable
     private string motorRequestId = "";
     private bool motorRequestAcknowledged, processConfirmedExited;
     private JsonObject? state;
+    private PikaFollowAudit? followAudit;
+    private readonly Queue<PikaDriverFaultEvidence> driverFaultEvidence = new();
     private bool connected;
     private string error = "Not connected";
     private long stateAt;
     private TaskCompletionSource ready = new(TaskCreationOptions.RunContinuationsAsynchronously);
     public bool Configured => !string.IsNullOrWhiteSpace(device);
 
-    public JsonObject Snapshot()
+    public JsonObject Snapshot(bool includeRawEvidence = false)
     {
         lock (stateGate)
         {
             double age = EvidenceAgeSeconds();
             var snapshot = state?.DeepClone().AsObject() ?? new JsonObject();
+            snapshot.Remove("driver_fault_evidence_raw");
+            if (driverFaultEvidence.LastOrDefault() is { } fault)
+                snapshot["driver_fault_evidence"] = JsonSerializer.SerializeToNode(fault.Summary);
+            if (includeRawEvidence) snapshot["driver_fault_evidence_raw"] = JsonSerializer.SerializeToNode(driverFaultEvidence.ToArray());
+            if (followAudit is not null) snapshot["follow_audit"] = JsonSerializer.SerializeToNode(followAudit);
             snapshot["configured"] = Configured;
             snapshot["device"] = device;
             snapshot["distribution"] = distribution;
             snapshot["owner"] = owner;
             snapshot["power_requested"] = sessionPowerRequested;
             snapshot["power_uncertain"] = unresolvedOwner is not null;
+            // A retained power reservation also exists during a healthy enabled
+            // session. Maintenance must distinguish that from an unresolved
+            // request, using private ACK identity and post-request feedback.
+            snapshot["post_request_feedback_verified"] = HasPostRequestEvidence();
             snapshot["configuration_blocked"] = process is not null || owner is not null || unresolvedOwner is not null;
             snapshot["transport"] = Configured ? distribution is null ? "linux-serial" : "wsl-linux-serial" : OperatingSystem.IsWindows() ? "disabled" : "browser";
             snapshot["connected"] = connected;
+            // A client may adopt only this privately verified dead, unpowered
+            // observer. ExecuteAsync rechecks this under the mutation lock.
+            snapshot["read_only_adoptable"] = ReadOnlyAdoptable();
+            // Transport cadence is not a measured/verified physical opening rate.
+            snapshot["follow_minimum_command_period_s"] = commandPeriodSeconds;
+            snapshot["follow_maximum_command_hz"] = 1 / commandPeriodSeconds;
+            snapshot["verified_maximum_opening_speed_mm_s"] = null;
+            snapshot["physical_replay_available"] = false;
+            snapshot["measured_hold_resume_supported"] = true;
             // The agent's age is relative to its last emission. Do not leave
             // that cached value looking current after its process has exited.
             snapshot["age_s"] = double.IsFinite(age) ? age : null;
@@ -63,6 +88,17 @@ public sealed class PikaProcessService : IAsyncDisposable
         await operations.WaitAsync(cancellation);
         try
         {
+            if (input.TryGetProperty("read_only_adopt", out var readOnlyAdopt))
+            {
+                if (readOnlyAdopt.ValueKind is not (JsonValueKind.True or JsonValueKind.False))
+                    throw new ArgumentException("read_only_adopt must be true or false.");
+                if (readOnlyAdopt.GetBoolean())
+                {
+                    lock (stateGate)
+                        if (action != "connect" || !input.TryGetProperty("take_over", out var takeover) || takeover.ValueKind != JsonValueKind.True || !ReadOnlyAdoptable())
+                            throw new InvalidOperationException("Read-only adoption requires a confirmed exited, unpowered, idle Pika monitor. A connected, powered or unverified session was not changed.");
+                }
+            }
             // A dead observer owns no motor state. Release that stale serial
             // reservation, but retain every failed power/position attempt.
             if (process is { HasExited: true } && !sessionPowerRequested && unresolvedOwner is null)
@@ -107,7 +143,7 @@ public sealed class PikaProcessService : IAsyncDisposable
                     {
                         info.FileName = "wsl.exe";
                         info.ArgumentList.Add("--distribution"); info.ArgumentList.Add(distribution);
-                        string linuxAgent = agentPath.StartsWith('/') ? agentPath : await ResolveWslPath(agentPath, cancellation);
+                        string linuxAgent = agentPath.StartsWith('/') ? agentPath : await ResolveWslPath(agentPath, distribution, cancellation);
                         info.ArgumentList.Add("--exec"); info.ArgumentList.Add(linuxAgent);
                     }
                     else
@@ -117,6 +153,7 @@ public sealed class PikaProcessService : IAsyncDisposable
                         info.FileName = agentPath;
                     }
                     info.ArgumentList.Add("--device"); info.ArgumentList.Add(device);
+                    info.ArgumentList.Add("--command-period-ms"); info.ArgumentList.Add((commandPeriodSeconds * 1000).ToString(System.Globalization.CultureInfo.InvariantCulture));
                     ready = new(TaskCreationOptions.RunContinuationsAsynchronously);
                     lock (stateGate) processConfirmedExited = false;
                     process = Process.Start(info) ?? throw new IOException("Could not start the Pika serial agent");
@@ -127,31 +164,63 @@ public sealed class PikaProcessService : IAsyncDisposable
                 return new JsonObject { ["ok"] = true, ["message"] = "Linux serial connected; reading only" };
             }
             if (owner != requestedOwner || process is null) throw new InvalidOperationException("This dashboard does not own the Pika session");
-            if (action is not ("heartbeat" or "enable" or "disable" or "position" or "disconnect")) throw new ArgumentException("Unsupported Pika action");
+            if (action is not ("heartbeat" or "enable" or "disable" or "position" or "disconnect" or "hold" or "follow-start" or "follow-update" or "resume-hold")) throw new ArgumentException("Unsupported Pika action");
             if (action == "disconnect" && process.HasExited)
             {
                 if (unresolvedOwner is not null || sessionPowerRequested && !KnownDisabled())
                     throw new InvalidOperationException("The Pika agent exited without verified disabled feedback. Reconnect the same device, disable it and verify feedback before changing its assignment.");
                 await CloseAsync(); return new JsonObject { ["ok"] = true, ["message"] = "Disconnected" };
             }
+            // Coordinated STOP uses this same hold action. Do not turn an
+            // already verified free-jaw state into a failed servo command or a
+            // new unresolved power reservation. Both ownership and the private
+            // acknowledged-request evidence remain serialized with mutations.
+            if (action == "hold" && KnownDisabled() && PikaDisabledEvidence.Confirmed(Snapshot(), requestedOwner))
+                return new JsonObject { ["ok"] = true, ["state"] = "disabled",
+                    ["message"] = "Pika already verified disabled; no motor command sent." };
             string id = Guid.NewGuid().ToString("N");
             var command = new JsonObject { ["id"] = id, ["action"] = action };
             if (action == "enable") command["clear"] = input.TryGetProperty("clear", out var clear) && clear.ValueKind == JsonValueKind.True;
+            if (action == "resume-hold")
+            {
+                if (!KnownDisabled() || !input.TryGetProperty("clear", out var supported) || supported.ValueKind != JsonValueKind.True ||
+                    !input.TryGetProperty("expected_angle_rad", out var expected) || !expected.TryGetDouble(out double angle) || !double.IsFinite(angle) ||
+                    !input.TryGetProperty("expected_feedback_time_s", out var expectedTime) || !expectedTime.TryGetDouble(out double feedbackTime) || !double.IsFinite(feedbackTime))
+                    throw new InvalidOperationException("Confirm a stationary measured hold with verified disabled Pika feedback before resuming.");
+                command["clear"] = true; command["expected_angle_rad"] = angle; command["expected_feedback_time_s"] = feedbackTime;
+            }
             if (action == "position") command["value"] = input.GetProperty("value").GetDouble();
+            if (action == "follow-update")
+            {
+                if (!input.TryGetProperty("follow_session", out var session) || session.ValueKind != JsonValueKind.String ||
+                    !input.TryGetProperty("sequence", out var sequence) || sequence.ValueKind != JsonValueKind.Number || !sequence.TryGetInt64(out long nextSequence) || nextSequence <= 0 ||
+                    !input.TryGetProperty("opening_mm", out var opening) || opening.ValueKind != JsonValueKind.Number || !opening.TryGetDouble(out double nextOpening) || !double.IsFinite(nextOpening) || nextOpening is < 0 or > 90)
+                    throw new ArgumentException("Pika follow-update needs its session, a positive integer sequence and an opening within 0–90 mm.");
+                command["follow_session"] = session.GetString();
+                command["sequence"] = nextSequence;
+                command["opening_mm"] = nextOpening;
+            }
             var completion = new TaskCompletionSource<JsonElement>(TaskCreationOptions.RunContinuationsAsynchronously);
             pending[id] = completion;
             bool disconnected = false;
             try
             {
-                if (action is "enable" or "position" or "disable")
+                if (action is "enable" or "position" or "disable" or "hold" or "follow-update" or "resume-hold")
                     lock (stateGate) { sessionPowerRequested = true; unresolvedOwner = requestedOwner; motorRequestId = id; motorRequestAcknowledged = false; }
                 await process.StandardInput.WriteLineAsync(command.ToJsonString().AsMemory(), cancellation);
                 await process.StandardInput.FlushAsync(cancellation);
                 var response = await completion.Task.WaitAsync(TimeSpan.FromSeconds(3), cancellation);
                 bool ok = response.GetProperty("ok").GetBoolean();
-                if (!ok) throw new InvalidOperationException(response.GetProperty("message").GetString());
+                if (!ok)
+                {
+                    PikaFollowAudit? rejected;
+                    lock (stateGate) { RetainFollowAudit(response); rejected = followAudit; }
+                    string reason = response.GetProperty("message").GetString() ?? "Pika request rejected";
+                    if (rejected is not null) throw new PikaFollowRejectedException(reason, rejected);
+                    throw new InvalidOperationException(reason);
+                }
                 cancellation.ThrowIfCancellationRequested();
-                if (action is "enable" or "position" or "disable")
+                if (action is "enable" or "position" or "disable" or "hold" or "follow-update" or "resume-hold")
                     lock (stateGate)
                     {
                         motorRequestAcknowledged = motorRequestId == id;
@@ -159,12 +228,24 @@ public sealed class PikaProcessService : IAsyncDisposable
                         RetireVerifiedEndedPower();
                     }
                 disconnected = action == "disconnect";
-                return new JsonObject { ["ok"] = true, ["message"] = response.GetProperty("message").GetString() };
+                var result = new JsonObject { ["ok"] = true, ["message"] = response.GetProperty("message").GetString() };
+                if (action is "enable" or "position" or "disable" or "hold" or "follow-update" or "resume-hold") result["motor_request_id"] = id;
+                if (response.TryGetProperty("follow_session", out var followSession)) result["follow_session"] = followSession.GetString();
+                return result;
             }
             finally { pending.TryRemove(id, out _); if (disconnected) await CloseAsync(); }
         }
         finally { operations.Release(); }
     }
+
+    // Caller holds stateGate. Cached public booleans cannot grant takeover:
+    // private process-exit and power-request evidence are authoritative.
+    private bool ReadOnlyAdoptable() => !connected && process is not null && processConfirmedExited &&
+        owner is not null && !sessionPowerRequested && unresolvedOwner is null && pending.IsEmpty &&
+        FalseState("enabled") && FalseState("armed") && FalseState("pending") && FalseState("following") &&
+        state?["resuming_hold"]?.GetValue<bool>() != true;
+
+    private bool FalseState(string key) => state?[key] is JsonValue value && value.TryGetValue<bool>(out bool active) && !active;
 
     private bool KnownDisabled()
     {
@@ -196,13 +277,13 @@ public sealed class PikaProcessService : IAsyncDisposable
     public static void ValidateConfiguration(string device, string? distribution)
     {
         if (device.Length > 1024 || device.Any(char.IsControl) || (device.Length > 0 && !device.StartsWith("/dev/", StringComparison.Ordinal)))
-            throw new ArgumentException("Choose a Linux /dev/serial/by-id device path, or leave it blank.");
+            throw new ArgumentException("Choose this gripper's Linux USB device identity from Settings, or leave it unassigned.");
         if (distribution is not null && (distribution.Length is 0 or > 128 || distribution.Any(char.IsControl)))
             throw new ArgumentException("Invalid WSL distribution name.");
         if (OperatingSystem.IsWindows() && distribution is null) throw new InvalidOperationException("Native Windows WCH serial is disabled. Choose a WSL distribution.");
     }
 
-    private async Task<string> ResolveWslPath(string path, CancellationToken cancellation)
+    internal static async Task<string> ResolveWslPath(string path, string distribution, CancellationToken cancellation)
     {
         if (!File.Exists(path)) throw new FileNotFoundException("The bundled Pika agent is missing. Reinstall the Pipers package.", path);
         var start = new ProcessStartInfo("wsl.exe") { UseShellExecute = false, CreateNoWindow = true,
@@ -222,7 +303,7 @@ public sealed class PikaProcessService : IAsyncDisposable
             string error = await errors;
             if (conversion.ExitCode != 0 || !linux.StartsWith('/') || linux.Contains('\n'))
                 throw new IOException("WSL could not locate the bundled Pika agent. " + error.Trim());
-            await MakeWslExecutable(linux, cancellation);
+            await MakeWslExecutable(linux, distribution, cancellation);
             return linux;
         }
         catch (OperationCanceledException) when (!cancellation.IsCancellationRequested)
@@ -235,7 +316,7 @@ public sealed class PikaProcessService : IAsyncDisposable
         }
     }
 
-    private async Task MakeWslExecutable(string linuxPath, CancellationToken cancellation)
+    private static async Task MakeWslExecutable(string linuxPath, string distribution, CancellationToken cancellation)
     {
         // ZIP extraction on Windows does not retain Unix execute bits. Change
         // only this user's packaged apphost, without root or global installation.
@@ -266,6 +347,38 @@ public sealed class PikaProcessService : IAsyncDisposable
         }
     }
 
+    // Called only under stateGate. ACKs carry the terminal event immediately;
+    // waiting for a100ms state emission can otherwise lose its cause to cleanup.
+    private void RetainFollowAudit(JsonElement data)
+    {
+        try
+        {
+            if (!data.TryGetProperty("follow_audit", out var audit)) return;
+            var parsed = audit.Deserialize<PikaFollowAudit>();
+            if (parsed is null || parsed.RecentEvents is null || parsed.RecentFeedback is null || parsed.RecentEvents.Count > 16 || parsed.RecentFeedback.Count > 4 ||
+                parsed.LastRetirement is { } retired && (retired.RecentEvents is null || retired.RecentFeedback is null || retired.RecentEvents.Count > 16 || retired.RecentFeedback.Count > 4)) return;
+            followAudit = parsed;
+        }
+        catch (JsonException) { /* Malformed diagnostics cannot change control or stream ownership. */ }
+    }
+
+    private void RetainDriverFaultEvidence(JsonElement data)
+    {
+        try
+        {
+            if (!data.TryGetProperty("evidence", out var value)) return;
+            var evidence = value.Deserialize<PikaDriverFaultEvidence>();
+            if (evidence is null || evidence.Summary is null || evidence.RawTelemetryJson is null || evidence.RawTelemetryJson.Length > 4096 ||
+                evidence.RecentFeedback is null || evidence.RecentFeedback.Count > 4 || evidence.RecentReads is null || evidence.RecentReads.Count > 16 ||
+                evidence.RecentWrites is null || evidence.RecentWrites.Count > 16 ||
+                evidence.RecentReads.Any(r => r is null || r.PrefixBase64 is null || r.SuffixBase64 is null || r.PrefixBase64.Length + r.SuffixBase64.Length > 344) ||
+                evidence.RecentWrites.Any(w => w is null || w.PacketBase64 is null || w.PacketBase64.Length > 12)) return;
+            if (driverFaultEvidence.Any(previous => previous.TransitionOrdinal == evidence.TransitionOrdinal)) return;
+            driverFaultEvidence.Enqueue(evidence); while (driverFaultEvidence.Count > 4) driverFaultEvidence.Dequeue();
+        }
+        catch (JsonException) { /* Evidence is passive; a malformed report never changes control. */ }
+    }
+
     private async Task PumpAsync(Process agent, TaskCompletionSource sessionReady)
     {
         var stderr = agent.StandardError.ReadToEndAsync();
@@ -285,6 +398,7 @@ public sealed class PikaProcessService : IAsyncDisposable
                     case "state":
                         lock (stateGate)
                         {
+                            RetainFollowAudit(data);
                             state = JsonNode.Parse(line)!.AsObject(); stateAt = Stopwatch.GetTimestamp();
                             if (state["fresh"]?.GetValue<bool>() == true)
                             {
@@ -296,10 +410,14 @@ public sealed class PikaProcessService : IAsyncDisposable
                         }
                         break;
                     case "ack":
+                        lock (stateGate) RetainFollowAudit(data);
                         if (pending.TryRemove(data.GetProperty("id").GetString() ?? "", out var completion)) completion.TrySetResult(data.Clone());
                         break;
+                    case "driver_fault_evidence":
+                        lock (stateGate) RetainDriverFaultEvidence(data);
+                        break;
                     case "error":
-                        lock (stateGate) error = data.GetProperty("message").GetString() ?? "Pika agent failed";
+                        lock (stateGate) { RetainFollowAudit(data); error = data.GetProperty("message").GetString() ?? "Pika agent failed"; }
                         break;
                 }
             }
@@ -348,7 +466,7 @@ public sealed class PikaProcessService : IAsyncDisposable
             agent.Dispose();
         }
         owner = null;
-        lock (stateGate) { sessionPowerRequested = false; motorRequestId = ""; motorRequestAcknowledged = processConfirmedExited = false;
+        lock (stateGate) { sessionPowerRequested = false; motorRequestId = ""; motorRequestAcknowledged = processConfirmedExited = false; followAudit = null; driverFaultEvidence.Clear();
             connected = false; state = null; stateAt = 0; error = "Disconnected"; }
     }
     public async ValueTask DisposeAsync()

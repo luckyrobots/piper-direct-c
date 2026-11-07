@@ -66,3 +66,4 @@ jobs:
         run: |
           dotnet build managed/Piper.Host -c Release -r linux-x64
           PIPER_TEST_EXE="$PWD/managed/Piper.Host/bin/Release/net9.0/linux-x64/Piper.Host" node tests/test_api.mjs
+          dotnet run --project managed/Piper.Host.Tests -c Release -r linux-x64

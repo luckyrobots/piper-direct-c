@@ -8,19 +8,24 @@ public sealed class RobotLink
     public string SceneId { get; }
     public string EntityId { get; }
     public string[] JointNames { get; }
+    public string JointPrefix { get; }
+    public string FirstFingerJoint => JointPrefix + "joint7";
+    public string SecondFingerJoint => JointPrefix + "joint8";
+    public string GripperActuator => JointPrefix + "gripper";
     public long Generation { get; }
     public string DeviceId { get; }
     private readonly GripperLink gripper;
     public string GripperStatus => gripper.Status;
     public double? GripperErrorMm => gripper.ErrorMm;
 
-    public RobotLink(string sceneId, string entityId, JsonArray modelJoints, JsonObject device)
+    public RobotLink(string sceneId, string entityId, JsonArray modelJoints, JsonObject device, string jointPrefix = "")
     {
         SceneId = sceneId; EntityId = entityId;
         DeviceId = device["id"]!.GetValue<string>();
         Generation = device["generation"]!.GetValue<long>();
-        gripper = new GripperLink(modelJoints);
-        JointNames = Enumerable.Range(1, 6).Select(i => "joint" + i).ToArray();
+        JointPrefix = SceneRobotBindings.ValidatePrefix(jointPrefix);
+        gripper = new GripperLink(modelJoints, JointPrefix);
+        JointNames = Enumerable.Range(1, 6).Select(i => JointPrefix + "joint" + i).ToArray();
         foreach (string name in JointNames)
         {
             var matches = modelJoints.OfType<JsonObject>().Where(j => j["name"]?.GetValue<string>() == name).ToArray();
@@ -43,6 +48,19 @@ public sealed class RobotLink
         }
         gripper.AddFeedback(values, pika, pikaMatchesProfile, pikaClosedDisplayReference);
         return new JsonObject { ["sceneId"] = SceneId, ["entityId"] = EntityId, ["joints"] = values };
+    }
+
+    public JsonObject OrderedCaptureMapping(JsonObject runtime)
+    {
+        var second = runtime["joints"]?.AsArray().OfType<JsonObject>().SingleOrDefault(j => j["name"]?.GetValue<string>() == SecondFingerJoint)
+            ?? throw new InvalidOperationException("The selected arm's second finger is missing from its runtime mapping.");
+        return new JsonObject {
+            ["jointNames"] = new JsonArray(JointNames.Select(n => (JsonNode?)JsonValue.Create(n)).ToArray()),
+            ["actuatorNames"] = new JsonArray(JointNames.Select(n => (JsonNode?)JsonValue.Create(n)).ToArray()),
+            ["gripperMapping"] = new JsonObject { ["firstJoint"] = FirstFingerJoint, ["secondJoint"] = SecondFingerJoint,
+                ["actuator"] = GripperActuator, ["offsetMm"] = 2000 * second["max"]!.GetValue<double>(),
+                ["measuredScaleMm"] = 1000, ["commandScaleMm"] = 2000 }
+        };
     }
 
     public double[] Target(JsonObject edit, JsonObject device)

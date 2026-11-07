@@ -111,6 +111,7 @@ public sealed partial class PipersPlugin
 
     private async Task HeightCheckEvent(string action, JsonElement value, CancellationToken cancellation)
     {
+        EnsureIndependentCalibration();
         heightActionError = "";
         try { await HeightCheckEventCore(action, value, cancellation); }
         catch (Exception error) when (!cancellation.IsCancellationRequested)

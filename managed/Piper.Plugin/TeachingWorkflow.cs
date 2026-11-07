@@ -11,6 +11,7 @@ public sealed partial class PipersPlugin
     private string teachingDevice = "";
     private long teachingGeneration;
     private bool teachingSeen, approvalBeforeTeaching, teachingHelpOpen, teachingReturnConfirmation;
+    private readonly TeachingReturnGate teachingReturnGate = new();
     private JsonObject? acknowledgedScenePose;
     private long acknowledgedSceneAt;
     private AlignmentCheck? alignmentCheck;
@@ -60,7 +61,7 @@ public sealed partial class PipersPlugin
             }
             if (next.Phase != teaching.Phase) message = next.Label + ". " + next.NextStep;
         }
-        else if (teachingSeen && device is not null && TeachingCanResume(device))
+        else if (!resumeControlsBusy && teachingSeen && device is not null && TeachingCanResume(device))
         {
             // Restore only a previous UI approval. This sends no enable, reset,
             // replay or position packet, and a new gesture is still required.
@@ -70,6 +71,37 @@ public sealed partial class PipersPlugin
             teachingReturnConfirmation = false;
             message = approved ? "CAN control restored · previous targets discarded · measured scene tracking continues"
                 : "Teaching ended and CAN control is healthy. Use Enable robot when ready; no movement was resumed.";
+        }
+        // Serialize with manual actions before consuming the one-attempt gate.
+        // A busy UI action leaves this poll observational; it grants no request.
+        if (!resumeControlsBusy && await commands.WaitAsync(0, cancellation))
+        {
+            bool attempting = false;
+            try
+            {
+                long permissionEpoch = Interlocked.Read(ref targetPermissionEpoch);
+                string expectedToken = token;
+                JsonObject current = Device(expectedToken: expectedToken);
+                string expectedDevice = current["id"]!.GetValue<string>();
+                long expectedGeneration = current["generation"]!.GetValue<long>();
+                TeachingState currentTeaching = TeachingState.Inspect(current);
+                if (teachingReturnGate.Observe(currentTeaching, approvalBeforeTeaching,
+                    workspacePage == "controls" && !calibrationOpen && !switchingProfile,
+                    expectedDevice + ":" + expectedGeneration + ":" + expectedToken))
+                {
+                    attempting = true;
+                    await Command("teach-return", currentTeaching.ReturnFlags(), cancellation, teachingAcknowledged: true,
+                        expectedDeviceId: expectedDevice, expectedGeneration: expectedGeneration, expectedToken: expectedToken,
+                        expectedPermissionEpoch: permissionEpoch);
+                    message = "Hand guiding finished · restoring CAN at the measured pose · previous targets discarded";
+                }
+            }
+            catch (InvalidOperationException error)
+            {
+                if (attempting) message = "Automatic CAN return paused: " + error.Message + " Use Return to CAN when ready.";
+                else teachingReturnGate.Invalidate();
+            }
+            finally { commands.Release(); }
         }
         teaching = next;
     }
@@ -94,39 +126,49 @@ public sealed partial class PipersPlugin
 
     private Widget TeachingControls() => FocusedRobotView ? Widget.Column("teaching",
         Widget.Label("teaching.label", teaching.Label) with { Height = 28 },
-        Widget.Label("teaching.next", AlignmentTeachingPrompt) with { Height = 38, Hint = teaching.NextStep }) : Widget.Column("teaching",
+        Widget.Label("teaching.next", AlignmentTeachingPrompt) with { Height = 38, Hint = teaching.NextStep }, PikaTeachingControls()) : Widget.Column("teaching",
         Widget.Row("teaching.header", Widget.Label("teaching.label", teaching.Label) with { Height = 34 },
             Widget.Button("teaching.help", "Hand-guide help") with { Width = 150 }),
         Widget.Label("teaching.next", teaching.NextStep) with { Height = 86, Visible = teaching.BlocksTargets || teachingHelpOpen },
         Widget.Label("teaching.zero", "") with { Height = 34, Visible = teaching.ReturnRequired },
         Widget.Button("teaching.return", "Return to CAN control") with { Visible = teaching.ReturnRequired, Enabled = teaching.CanReturn },
-        Widget.Row("teaching.return.confirmation", Widget.Label("teaching.return.warning", "Confirm: the physical arm is at zero, the teach light is OFF and the workspace is clear. Support the arm during the control-mode handoff; holding behavior can change."),
-            Widget.Button("teaching.return.confirm", "Confirm return to CAN"), Widget.Button("teaching.return.cancel", "Cancel")) with { Visible = teachingReturnConfirmation },
+        Widget.Column("teaching.return.confirmation",
+            Widget.Label("teaching.return.warning", teaching.ReturnConfirmation) with { Height = 48 },
+            Widget.Row("teaching.return.actions",
+                Widget.Button("teaching.return.confirm", "Confirm return to CAN") with { Width = 190 },
+                Widget.Button("teaching.return.cancel", "Cancel") with { Width = 90 })) with { Visible = teachingReturnConfirmation },
         ResetAssistedControls(),
-        Widget.Label("teaching.help.text", "Single-click the physical teach button: solid green records hand-guided motion; single-click again ends it. Double-click starts the robot's saved playback (flashing green). Starting a new onboard recording replaces its previous trajectory; the robot stores up to three minutes. To return to CAN, first bring the supported arm to its physical zero pose while hand guiding, then turn the light off. The plugin detects the mode and keeps the measured model moving. It never starts onboard playback or writes encoder-zero calibration.") with { Visible = teachingHelpOpen, Height = 118 });
+        PikaTeachingControls(),
+        Widget.Label("teaching.help.text", "Single-click the physical teach button: solid green records hand-guided arm motion; single-click again ends it. Double-click starts the controller's saved playback (flashing green). A new onboard recording replaces its previous trajectory. Modern supported firmware can return to CAN at the measured pose; older firmware requires zero. The plugin follows measured feedback and never automatically starts playback or changes encoder-zero calibration. Onboard teaching records the arm; USB Pika motion is separate.") with { Visible = teachingHelpOpen, Height = 118 });
 
     private async Task TeachingEvent(string action, CancellationToken cancellation)
     {
+        if (action.StartsWith("pika.", StringComparison.Ordinal)) { await PikaTeachingEvent(action[5..], cancellation); return; }
         if (action.StartsWith("reset.", StringComparison.Ordinal)) { await ResetAssistedEvent(action[6..], cancellation); return; }
         if (action == "help") { teachingHelpOpen = !teachingHelpOpen; await Render(cancellation); return; }
         if (action == "return.cancel") { teachingReturnConfirmation = false; await Render(cancellation); return; }
-        if (!TeachingState.Inspect(Device()).CanReturn)
-            throw new InvalidOperationException("Finish hand guiding at the physical zero pose, turn the teach light off, and wait for the live zero/stationary checks. No mode change was sent.");
+        TeachingState current = TeachingState.Inspect(Device());
+        if (!current.CanReturn)
+            throw new InvalidOperationException(current.SamePoseReturn
+                ? "Finish hand guiding, turn the teach light off and hold still until all six motors report healthy, enabled feedback. No mode change was sent."
+                : "Finish hand guiding at the physical zero pose, turn the teach light off, and wait for the live zero/stationary checks. No mode change was sent.");
         if (action == "return") { teachingReturnConfirmation = true; await Render(cancellation); return; }
         if (action == "return.confirm")
         {
             teachingReturnConfirmation = false;
-            await Command("teach-return", new() { ["button_off"] = true, ["zero_pose_confirmed"] = true }, cancellation, teachingAcknowledged: true);
+            await Command("teach-return", current.ReturnFlags(), cancellation, teachingAcknowledged: true);
             await Render(cancellation);
         }
     }
 
     private void AddTeachingPatches(Dictionary<string, JsonObject> patches, JsonObject? device)
     {
+        AddPikaTeachingPatches(patches, device);
         patches["teaching.label"] = new() { ["text"] = teaching.Label };
         patches["teaching.next"] = new() { ["text"] = FocusedRobotView ? AlignmentTeachingPrompt : teaching.NextStep, ["visible"] = FocusedRobotView || teaching.BlocksTargets || teachingHelpOpen };
         string zero = device?["joints"] is JsonArray joints ? string.Join(" · ", joints.Select((j, i) => $"J{i + 1} {j?["actual_deg"]?.GetValue<double>().ToString("F2") ?? "—"}°")) : "Waiting for six fresh joint measurements";
-        patches["teaching.zero"] = new() { ["visible"] = teaching.ReturnRequired, ["text"] = zero + " · return guard ±1° (not encoder calibration)" };
+        patches["teaching.zero"] = new() { ["visible"] = teaching.ReturnRequired, ["text"] = zero + (teaching.SamePoseReturn ? " · CAN returns at this measured pose" : " · return guard ±1° (not encoder calibration)") };
+        patches["teaching.return.warning"] = new() { ["text"] = teaching.ReturnConfirmation };
         patches["teaching.return"] = new() { ["visible"] = teaching.ReturnRequired, ["enabled"] = teaching.CanReturn };
         patches["teaching.return.confirmation"] = new() { ["visible"] = teachingReturnConfirmation && teaching.CanReturn };
         patches["enable"] = new() { ["enabled"] = device is not null && !switchingProfile && !teaching.BlocksTargets };

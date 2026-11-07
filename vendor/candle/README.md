@@ -7,6 +7,12 @@ License: LGPL-3.0-or-later (LICENSE); accompanying GPL terms in COPYING.
 Local changes, 2026-10-27:
 - piper_adapter.c exposes the small Cando-compatible ABI used by the controller.
 - OUT pipe transfers time out after 20 ms and abort the pipe on failure.
+- `cando_frame_send_pumped` submits one overlapped OUT transfer and services
+  ordered IN completions on the same thread while it waits. The adapter shares
+  64 buffers between CAN RX, host TX and echoes; completed IN reads must be
+  requeued so its OUT endpoint can resume. No position transfer is retried.
+- Failed or canceled OUT operations retain their OVERLAPPED/frame storage until
+  completion is verified; uncertain operations prevent another submission.
 - Read requeue accepts both immediate and pending completion.
 - Receive drains URBs in submission order so multi-frame replies stay ordered.
 - Receive accepts 20-byte and 24-byte records, zeroing omitted timestamps.
@@ -24,6 +30,13 @@ gcc -shared -static-libgcc -std=c17 -O2 -g -DCANDLE_API_LIBRARY -DUNICODE -D_UNI
 
 This DLL is dynamically loaded beside piper-core.dll and can be rebuilt or
 replaced independently. The proprietary vendor cando.dll is not loaded.
+
+The receive-pumping core requires the matching updated transport DLL and rejects
+an older DLL without `cando_frame_send_pumped`. Install the two DLLs together.
+Run `tools/Test-WindowsTransport.ps1` to exercise the actual production transport
+with fake WinUSB and receive callbacks; it opens no hardware. The fixtures cover
+receive backpressure, unchanged timeouts, cancellation, incomplete/partial
+transfers, safe oversized-record discard and local-echo filtering.
 
 Current receive recovery behavior: normal opens do not abort/reset/flush IN;
 queued packets must complete so firmware can release their buffers. WinUSB
