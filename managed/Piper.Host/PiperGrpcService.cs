@@ -18,13 +18,17 @@ public sealed class PiperRpcContext(ControllerService controller, PikaSessionReg
     public string SessionOwner { get; } = sessionOwner;
     public BackendMaintenance Maintenance { get; } = maintenance;
     internal HostControlDispatcher Control { get; } = new(controller, pika, simulated, sessionOwner, maintenance);
+    internal TimeProvider Clock { get; init; } = TimeProvider.System;
     public StateFrame Snapshot()
     {
+        // Source ages in the JSON are measured during sampling. Timestamp the
+        // start so composition and serialization never make them younger.
+        long captured = (Clock.GetUtcNow().Ticks - DateTimeOffset.UnixEpoch.Ticks) / 10;
         var state = Control.ReadState();
         return new StateFrame
         {
             Json = state.ToJsonString(), Sequence = Interlocked.Increment(ref sequence),
-            TimestampUnixMicroseconds = (DateTimeOffset.UtcNow.Ticks - DateTimeOffset.UnixEpoch.Ticks) / 10,
+            TimestampUnixMicroseconds = captured,
             ClockDomain = "host-utc"
         };
     }

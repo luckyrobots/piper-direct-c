@@ -40,6 +40,24 @@ public sealed class PikaSessionRegistry : IPikaSession
         lock (gate) return new JsonArray(sessions.Values.Select(entry => (JsonNode)Decorate(entry, includeRawEvidence)).ToArray());
     }
 
+    internal (JsonObject Default, JsonArray Sessions) SnapshotPair()
+    {
+        lock (gate)
+        {
+            string path = boundAliases.GetValueOrDefault(Key(defaultDevice, defaultDistribution), defaultDevice);
+            var selected = sessions.GetValueOrDefault(Key(path, defaultDistribution));
+            JsonObject? defaultSample = null;
+            var inventory = new JsonArray();
+            foreach (var entry in sessions.Values)
+            {
+                var sample = Decorate(entry, raw: false);
+                if (ReferenceEquals(entry, selected)) defaultSample = sample.DeepClone().AsObject();
+                inventory.Add(sample);
+            }
+            return (defaultSample ?? MissingSnapshot(defaultDevice, defaultDistribution), inventory);
+        }
+    }
+
     public async Task<JsonObject> HoldOwnedAsync(string owner, CancellationToken cancellation)
     {
         if (!Guid.TryParse(owner, out _)) throw new ArgumentException("A dashboard Pika owner ID is required");
@@ -79,18 +97,20 @@ public sealed class PikaSessionRegistry : IPikaSession
             string path = boundAliases.GetValueOrDefault(Key(device, distribution), device);
             if (sessions.TryGetValue(Key(path, distribution), out var entry))
                 return Decorate(entry, includeRawEvidence);
-            return new()
-            {
-                ["configured"] = device.Length > 0, ["device"] = device, ["distribution"] = distribution,
-                ["connected"] = false, ["fresh"] = false, ["owner"] = null, ["enabled"] = false, ["pending"] = false,
-                ["power_requested"] = false, ["power_uncertain"] = false, ["configuration_blocked"] = false,
-                ["transport"] = distribution is null ? "linux-serial" : "wsl-linux-serial",
-                ["age_s"] = null, ["message"] = device.Length == 0 ? "No Pika assigned." : "Connect to read this gripper's telemetry.",
-                ["follow_minimum_command_period_s"] = commandPeriodSeconds, ["follow_maximum_command_hz"] = 1 / commandPeriodSeconds,
-                ["physical_replay_available"] = false, ["measured_hold_resume_supported"] = true
-            };
+            return MissingSnapshot(device, distribution);
         }
     }
+
+    private JsonObject MissingSnapshot(string device, string? distribution) => new()
+    {
+        ["configured"] = device.Length > 0, ["device"] = device, ["distribution"] = distribution,
+        ["connected"] = false, ["fresh"] = false, ["owner"] = null, ["enabled"] = false, ["pending"] = false,
+        ["power_requested"] = false, ["power_uncertain"] = false, ["configuration_blocked"] = false,
+        ["transport"] = distribution is null ? "linux-serial" : "wsl-linux-serial",
+        ["age_s"] = null, ["message"] = device.Length == 0 ? "No Pika assigned." : "Connect to read this gripper's telemetry.",
+        ["follow_minimum_command_period_s"] = commandPeriodSeconds, ["follow_maximum_command_hz"] = 1 / commandPeriodSeconds,
+        ["physical_replay_available"] = false, ["measured_hold_resume_supported"] = true
+    };
 
     public Task<JsonObject> DiscoverAsync(string? distribution, CancellationToken cancellation)
     {
@@ -115,7 +135,14 @@ public sealed class PikaSessionRegistry : IPikaSession
         return result;
     }
 
-    public async Task<JsonObject> ExecuteAsync(string action, JsonElement input, CancellationToken cancellation)
+    public Task<JsonObject> ExecuteAsync(string action, JsonElement input, CancellationToken cancellation) =>
+        ExecuteAsync(action, input, cancellation, null);
+
+    internal Task<JsonObject> ConfigureAsync(JsonElement input, CancellationToken cancellation, Func<Func<JsonObject>, JsonObject> authorizeCommit) =>
+        ExecuteAsync("configure", input, cancellation, authorizeCommit);
+
+    private async Task<JsonObject> ExecuteAsync(string action, JsonElement input, CancellationToken cancellation,
+        Func<Func<JsonObject>, JsonObject>? authorizeCommit)
     {
         bool explicitDevice = input.TryGetProperty("pika_device", out var selector);
         if (explicitDevice && selector.ValueKind != JsonValueKind.String) throw new ArgumentException("pika_device must be a Linux device identity.");
@@ -143,47 +170,68 @@ public sealed class PikaSessionRegistry : IPikaSession
             if (device.Length == 0)
             {
                 if (action != "configure") throw new InvalidOperationException("No Pika is assigned to this robot. Choose a gripper in Settings.");
-                if (!explicitDevice)
-                    lock (gate)
-                    {
-                        if (Snapshot()["configuration_blocked"]?.GetValue<bool>() == true)
-                            throw new InvalidOperationException("Verify disabled feedback and disconnect the assigned Pika before clearing its assignment.");
-                        defaultDevice = device; defaultDistribution = distribution;
-                    }
-                return new JsonObject { ["ok"] = true, ["device"] = device, ["distribution"] = distribution, ["message"] = "No gripper assigned; no transport changed." };
+                return Configure(device);
             }
             string canonical = await CanonicalizeAsync(device, distribution, cancellation);
-            if (!explicitDevice && action == "configure")
-            {
-                var current = Snapshot();
-                if (current["configuration_blocked"]?.GetValue<bool>() == true &&
-                    (current["device"]?.GetValue<string>() != canonical || current["distribution"]?.GetValue<string>() != distribution))
-                    throw new InvalidOperationException("Verify disabled feedback and disconnect the assigned Pika before changing its serial device.");
-            }
+            if (action == "configure") return Configure(canonical);
             Entry entry;
             lock (gate)
             {
-                if (!sessions.TryGetValue(Key(canonical, distribution), out entry!))
-                {
-                    if (!needsAdmission) throw new InvalidOperationException("Connect this robot's assigned Pika first.");
-                    if (sessions.Count >= 16) throw new InvalidOperationException("Too many configured Pika devices; restart the idle backend to clear unused assignments.");
-                    entry = new(canonical, distribution, factory(canonical, distribution));
-                    sessions.Add(Key(canonical, distribution), entry);
-                }
+                entry = Session(canonical, distribution, needsAdmission);
                 if (action == "connect" && sessions.Values.Any(other => other.Device == canonical &&
                     !ReferenceEquals(other, entry) && other.Session.Snapshot()["configuration_blocked"]?.GetValue<bool>() == true))
                     throw new InvalidOperationException("This physical Pika already has a session in another WSL distribution. Disconnect that session first.");
                 boundAliases.TryAdd(Key(device, distribution), canonical);
-                if (!explicitDevice && action == "configure") { defaultDevice = canonical; defaultDistribution = distribution; }
             }
-            if (action == "configure")
-                return new JsonObject { ["ok"] = true, ["device"] = canonical, ["distribution"] = distribution,
-                    ["message"] = "Gripper assignment registered independently; no serial port opened or motor command sent." };
             var result = await entry.Session.ExecuteAsync(action, input, cancellation);
             result["device"] = canonical; result["distribution"] = distribution;
             return result;
+
+            JsonObject Configure(string path)
+            {
+                JsonObject Commit()
+                {
+                    lock (gate)
+                    {
+                        cancellation.ThrowIfCancellationRequested();
+                        bool clear = path.Length == 0;
+                        if (!explicitDevice)
+                        {
+                            var current = Snapshot();
+                            if (current["configuration_blocked"]?.GetValue<bool>() == true &&
+                                (clear || current["device"]?.GetValue<string>() != path || current["distribution"]?.GetValue<string>() != distribution))
+                                throw new InvalidOperationException(clear
+                                    ? "Verify disabled feedback and disconnect the assigned Pika before clearing its assignment."
+                                    : "Verify disabled feedback and disconnect the assigned Pika before changing its serial device.");
+                        }
+                        if (!clear)
+                        {
+                            _ = Session(path, distribution, create: true);
+                            boundAliases.TryAdd(Key(device, distribution), path);
+                        }
+                        if (!explicitDevice) { defaultDevice = path; defaultDistribution = distribution; }
+                        return new JsonObject { ["ok"] = true, ["device"] = path, ["distribution"] = distribution,
+                            ["message"] = clear ? "No gripper assigned; no transport changed." :
+                                "Gripper assignment registered independently; no serial port opened or motor command sent." };
+                    }
+                }
+                return authorizeCommit is null ? Commit() : authorizeCommit(Commit);
+            }
         }
         finally { if (needsAdmission) admission.Release(); }
+    }
+
+    // Registry gate must be held. Construction reserves an identity and never
+    // opens its transport.
+    private Entry Session(string canonical, string? distribution, bool create)
+    {
+        string key = Key(canonical, distribution);
+        if (sessions.TryGetValue(key, out var entry)) return entry;
+        if (!create) throw new InvalidOperationException("Connect this robot's assigned Pika first.");
+        if (sessions.Count >= 16) throw new InvalidOperationException("Too many configured Pika devices; restart the idle backend to clear unused assignments.");
+        entry = new(canonical, distribution, factory(canonical, distribution));
+        sessions.Add(key, entry);
+        return entry;
     }
 
     private async Task<string> CanonicalizeAsync(string device, string? distribution, CancellationToken cancellation)

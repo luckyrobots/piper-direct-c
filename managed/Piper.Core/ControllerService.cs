@@ -1,5 +1,6 @@
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
+using System.Text.Json.Nodes;
 
 namespace LuckyRobots.Piper;
 
@@ -38,6 +39,22 @@ public sealed class ControllerService : IDisposable
     {
         lock (gate) { Check(); return Take(Native.State(core, Token)); }
     }
+
+    // Only a prepared, synchronous routing commit belongs here. Discovery and
+    // other transport waits must finish before taking the native action gate.
+    internal T CommitWhenArmIdle<T>(Func<T> commit, string activeMessage, CancellationToken requestCancellation)
+    {
+        lock (gate)
+        {
+            requestCancellation.ThrowIfCancellationRequested();
+            Check();
+            if (ControllerActivity.AnyMotion(JsonNode.Parse(Take(Native.State(core, Token)))))
+                throw new InvalidOperationException(activeMessage);
+            requestCancellation.ThrowIfCancellationRequested();
+            return commit();
+        }
+    }
+
     public (int Status, string Json) Execute(string route, string json, CancellationToken requestCancellation = default)
     {
         lock (gate)

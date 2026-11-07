@@ -9,6 +9,7 @@ using LuckyRobots.Piper.Grpc;
 using LuckyRobots.Piper.Host;
 
 await BackendMaintenanceTests.Run();
+await HostPikaBoundaryTests.Run();
 await MultiRobotHostIntegrationTests.Run();
 
 // Run the actual HTTP/gRPC host with its hardware-disabled simulator. Keep

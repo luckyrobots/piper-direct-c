@@ -28,8 +28,9 @@ internal sealed class HostControlDispatcher(ControllerService controller, PikaSe
     {
         var state = JsonNode.Parse(controller.Snapshot())!.AsObject();
         if (dashboardBackend is not null) state["backend"] = dashboardBackend;
-        state["pika"] = pika.Snapshot();
-        state["pikas"] = pika.Snapshots();
+        var grippers = pika.SnapshotPair();
+        state["pika"] = grippers.Default;
+        state["pikas"] = grippers.Sessions;
         state["backend_process_id"] = Environment.ProcessId;
         state["backend_instance_id"] = maintenance.InstanceId;
         state["backend_restart"] = maintenance.Snapshot();
@@ -71,10 +72,19 @@ internal sealed class HostControlDispatcher(ControllerService controller, PikaSe
             if (grpc && route == "/api/pika/devices") return new(200, EmptySimulatedInventory);
             return new(409, Error: "Pika hardware is disabled in simulation");
         }
-        if (route == "/api/pika/configure" && ControllerActivity.AnyMotion(JsonNode.Parse(controller.Snapshot())))
-            return new(409, Error: grpc ? "Finish the active arm movement before changing Pika assignment" :
-                "Finish active arm movements before changing Pika assignment");
-        try { return new(200, await pika.ExecuteAsync(route[10..], input, cancellation)); }
+        try
+        {
+            if (route == "/api/pika/configure")
+            {
+                string activeMessage = grpc ? "Finish the active arm movement before changing Pika assignment" :
+                    "Finish active arm movements before changing Pika assignment";
+                if (ControllerActivity.AnyMotion(JsonNode.Parse(controller.Snapshot())))
+                    return new(409, Error: activeMessage);
+                return new(200, await pika.ConfigureAsync(input, cancellation,
+                    commit => controller.CommitWhenArmIdle(commit, activeMessage, cancellation)));
+            }
+            return new(200, await pika.ExecuteAsync(route[10..], input, cancellation));
+        }
         catch (PikaFollowRejectedException error) { return new(409, Error: error.Message, PikaAudit: error.Audit); }
         catch (Exception error) when (IsControlOperationError(error)) { return new(409, Error: error.Message); }
     }
