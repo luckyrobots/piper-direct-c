@@ -25,7 +25,7 @@ public sealed partial class PipersPlugin
 
     private async Task RestoreMeasuredTracking(CancellationToken cancellation)
     {
-        if (SimulationFollowingActive || !passiveMeasuredTrackingStarted || !MeasuredTrackingPolicy.Enabled(ActiveProfile) || switchingProfile || teachingResetBusy ||
+        if (GroupFollowActive || !passiveMeasuredTrackingStarted || !MeasuredTrackingPolicy.Enabled(ActiveProfile) || switchingProfile || CurrentRecovery is not null ||
             teleoperating || followRequest != 0 || state?["motion"]?["active"]?.GetValue<bool>() == true ||
             measuredTrackingAttemptAt != 0 && Stopwatch.GetElapsedTime(measuredTrackingAttemptAt).TotalSeconds < 1) return;
         // Healthy tracking already receives a verified robot.feedback reply.
@@ -39,7 +39,7 @@ public sealed partial class PipersPlugin
         if (!await commands.WaitAsync(0, cancellation)) return;
         try
         {
-            if (!MeasuredTrackingPolicy.Enabled(ActiveProfile) || switchingProfile || teachingResetBusy) return;
+            if (!MeasuredTrackingPolicy.Enabled(ActiveProfile) || switchingProfile || CurrentRecovery is not null || GroupFollowActive) return;
             await StartMeasuredLink(automatic: true, cancellation);
         }
         catch (Exception error) when (!cancellation.IsCancellationRequested)

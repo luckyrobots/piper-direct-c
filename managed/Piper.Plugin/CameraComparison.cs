@@ -115,16 +115,29 @@ public sealed partial class PipersPlugin
             await Save(cancellation);
     }
 
-    private async Task CameraComparisonEvent(string camera, string action, JsonElement value, CancellationToken cancellation)
+    private async Task CameraComparisonEvent(string camera, string action, JsonElement value, string wireId, CancellationToken cancellation)
     {
         if (action == "simrefresh") { QueueCameraDeviceRefresh(cancellation, force: true); await DiscoverSimulationCameras(cancellation); await Render(cancellation); return; }
         var bindings = new Dictionary<string, SimulationCameraPreferences>(preferences.SimulationCameras ?? []);
         if (action == "simselect")
         {
-            int index = value.GetInt32() - 1;
-            if (index < 0) bindings.Remove(camera);
-            else if (simulationCameras is not null && index < simulationCameras["cameras"]!.AsArray().Count)
-                bindings[camera] = new(simulationCameras["sceneId"]!.GetValue<string>(), simulationCameras["cameras"]![index]!["entityId"]!.GetValue<string>());
+            var view = Volatile.Read(ref publishedWorkspaceView);
+            var inventory = simulationCameras;
+            int selection = value.GetInt32();
+            const string changed = "Simulation cameras changed. Click Refresh cameras and select the counterpart again.";
+            if (view is null || Volatile.Read(ref workspacePublicationUncertain) != 0 || view.Context != CurrentWorkspaceViewContext ||
+                view.Context is not { Page: "settings", SettingsCategory: "cameras" } || view.Context.SettingsCamera != camera ||
+                wireId != WorkspaceEventScope.Wrap(view.Epoch, view.Context.Profile, "camera." + camera + ".simselect") ||
+                view.CameraChoices.SceneId != (inventory?["sceneId"]?.GetValue<string>() ?? "") ||
+                selection < 0 || selection > view.CameraChoices.Cameras.Length)
+                throw new InvalidOperationException(changed);
+            if (selection == 0) bindings.Remove(camera);
+            else
+            {
+                var selected = new SimulationCameraPreferences(view.CameraChoices.SceneId, view.CameraChoices.Cameras[selection - 1].Id);
+                if (!SimulationCameraRouting.IsAvailable(selected, inventory)) throw new InvalidOperationException(changed);
+                bindings[camera] = selected;
+            }
         }
         else if (action == "simoverlay" && !D405View.MetricDepth(camera, CameraSettings(camera)) && bindings.TryGetValue(camera, out var saved))
             bindings[camera] = saved with { Overlay = !saved.Overlay };

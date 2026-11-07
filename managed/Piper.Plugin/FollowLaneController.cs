@@ -37,7 +37,7 @@ internal sealed class FollowLaneController(string backend, string owner, RobotPr
         var body = fields ?? new();
         body["owner"] = owner;
         body["pika_device"] = profile.PikaDevice;
-        body["pika_distribution"] = profile.WslDistribution;
+        body["pika_distribution"] = profile.PikaDistribution;
         string route = action switch
         {
             FollowPikaAction.MatchOpening => "/api/pika/position",

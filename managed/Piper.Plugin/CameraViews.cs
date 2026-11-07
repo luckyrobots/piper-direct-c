@@ -40,7 +40,7 @@ public sealed partial class PipersPlugin
                 Widget.Label("camera." + cameraDetail + ".sim.status", "Camera alignment unverified") with { Height = 50, Appearance = "muted" })) with { Spacing = 18 },
         Widget.Button("camera." + cameraDetail + ".simoverlay", "Real / simulation overlay") with { Width = 225, Enabled = !D405View.MetricDepth(cameraDetail, CameraSettings(cameraDetail)), Hint = "Visual comparison only. It does not establish calibrated mounts or synchronized exposures." }) with { Spacing = 14 };
 
-    private Widget CameraSettingsPage()
+    private Widget CameraSettingsPage(SimulationCameraChoices cameraChoices)
     {
         string id = settingsCamera;
         var settings = CameraSettings(id);
@@ -64,9 +64,9 @@ public sealed partial class PipersPlugin
             Widget.Column("workspace.settings.camera-stream",
                 Widget.Label("camera." + id + ".info", cameraStatus.GetValueOrDefault(id, "Waiting for frames…")) with { Height = 40 },
                 Field("camera." + id + ".simselect", "Simulation counterpart", new Widget("dropdown", "camera." + id + ".simselect") {
-                    Options = new[] { "Automatic counterpart" }.Concat(simulationCameras?["cameras"]?.AsArray().Select(c => c?["name"]?.GetValue<string>() ?? "Camera") ?? []).ToArray(),
-                    Value = preferences.SimulationCameras?.GetValueOrDefault(id) is not { } counterpart || simulationCameras is null ? 0 :
-                        simulationCameras["cameras"]!.AsArray().Select((camera, index) => camera?["entityId"]?.GetValue<string>() == counterpart.CameraId ? index + 1 : 0).FirstOrDefault(index => index > 0) }),
+                    Options = ["Automatic counterpart", .. cameraChoices.Cameras.Select(camera => camera.Name)],
+                    Value = preferences.SimulationCameras?.GetValueOrDefault(id) is not { } counterpart || counterpart.SceneId != cameraChoices.SceneId
+                        ? 0 : Array.FindIndex(cameraChoices.Cameras, camera => camera.Id == counterpart.CameraId) + 1 }),
                 Widget.Label("camera." + id + ".clock", "Host receipt timestamps are available. Exposure delay and camera-to-world alignment remain unverified.") with { Height = 42, Appearance = "muted" }) with { Visible = cameraStreamDetailsOpen, Spacing = 10 },
             Widget.Button("workspace.camera-lens-details", cameraLensDetailsOpen ? "Hide lens calibration" : "Lens calibration & profiles") with { Appearance = "quiet" },
             Widget.Column("camera." + id + ".calibration",

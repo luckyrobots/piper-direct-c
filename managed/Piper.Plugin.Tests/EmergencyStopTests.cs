@@ -252,6 +252,23 @@ internal static class EmergencyStopTests
             }
             finally { fixture.Rpc.ConnectReply.TrySetCanceled(); }
         }
+        using (var fixture = new Fixture())
+        {
+            var telemetry = fixture.Get<LatestTelemetry>("telemetry");
+            var receipt = telemetry.Latest!;
+            var snapshot = receipt.State.DeepClone().AsObject();
+            var gripper = snapshot["pika"]!.AsObject();
+            gripper["aliases"] = new JsonArray("/dev/pika-one");
+            gripper["device"] = "/dev/pika/by-host/fixture";
+            snapshot["pikas"] = new JsonArray(gripper.DeepClone());
+            fixture.Set("state", snapshot);
+            telemetry.Publish(receipt with { State = snapshot, Sequence = 2 });
+            fixture.Set("approved", true);
+            fixture.Set("pikaOwned", true);
+            await fixture.Invoke("Enable", CancellationToken.None, true, null, null, null, null);
+            check(fixture.Rpc.Routes.IsEmpty && fixture.Authority.Current.Approvals.Count == 1,
+                "An assigned Pika alias was found in telemetry but Enable reconfigured the already-owned canonical gripper");
+        }
         foreach (StatusCode status in new[] { StatusCode.InvalidArgument, StatusCode.Unimplemented })
         {
             using var fixture = new Fixture();

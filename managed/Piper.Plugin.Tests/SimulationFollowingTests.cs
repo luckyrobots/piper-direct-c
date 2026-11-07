@@ -959,9 +959,16 @@ internal static partial class SimulationFollowingTests
                 new(frame, "fixture-backend", Interlocked.Increment(ref sequence), followClock.GetTimestamp(), EnvelopeAgeMs));
         }
         public void RemoveMeasuredLink(int editorDelayMilliseconds) { Set("link", null); LinkEditorDelayMilliseconds = editorDelayMilliseconds; }
-        public void UseUiDispatcher() => Set("uiEvents", new UiEventDispatch((input, cancellation) => Invoke("HandleEventCoreAsync", input, cancellation),
-            () => plugin.CommandAuthority.Epoch, input => WorkspaceCommandPolicy.RequiresControls(WorkspaceEventScope.Unwrap(Get<long>("workspaceViewEpoch"), "piper-1", input.WidgetId)),
-            error => throw new InvalidOperationException("Unexpected fixture UI actor failure", error)));
+        public ConcurrentQueue<UiEvent> DiscardedUiEvents { get; } = new();
+        public void UseUiDispatcher()
+        {
+            var epoch = typeof(PipersPlugin).GetProperty("ControlInputEpoch", Fields)!;
+            var needsPermission = typeof(PipersPlugin).GetMethod("UiEventNeedsPermission", Fields)!;
+            Set("uiEvents", new UiEventDispatch((input, cancellation) => Invoke("HandleEventCoreAsync", input, cancellation),
+                () => (long)epoch.GetValue(plugin)!, input => (bool)needsPermission.Invoke(plugin, [input])!,
+                error => throw new InvalidOperationException("Unexpected fixture UI actor failure", error),
+                discarded: (input, _) => DiscardedUiEvents.Enqueue(input)));
+        }
         public Task Navigate(string action) => Invoke("WorkspaceEvent", action, CancellationToken.None);
         public Task Click(string id)
         {
@@ -999,6 +1006,7 @@ internal static partial class SimulationFollowingTests
         public ConcurrentQueue<(string Route, JsonObject Body)> Requests { get; } = new();
         public ConcurrentQueue<string> Events { get; } = new();
         public string DelayedOperation = "";
+        public string FailedPikaHeartbeatDevice = "";
         public bool LostAcknowledgement;
         public string? TransportAcknowledgementOverride;
         public bool HoldFailure;
@@ -1042,12 +1050,16 @@ internal static partial class SimulationFollowingTests
                     return (TResponse)(object)new ControlReply { Status = 409, Json = JsonSerializer.Serialize(new { error = "No matching active Pika following session.", pika_follow_audit = audit }) };
                 if (FailArmWithPikaAudit && PikaFailureAudit is not null && action == "follow-update")
                     return (TResponse)(object)new ControlReply { Status = 409, Json = "{\"error\":\"Arm following input expired.\"}" };
-                if (DelayedOperation.Length > 0 && operation == DelayedOperation)
+                bool failedPika = FailedPikaHeartbeatDevice.Length > 0 && command.Route == "/api/pika/heartbeat" &&
+                    body["pika_device"]?.GetValue<string>() == FailedPikaHeartbeatDevice;
+                if (failedPika || DelayedOperation.Length > 0 && operation == DelayedOperation)
                 {
                     AdmissionCancellation = options.CancellationToken; AdmissionDeadline = options.Deadline;
                     DelayedReached.TrySetResult(); await ReleaseDelayed.Task;
                     Events.Enqueue("accepted:" + operation);
                 }
+                if (failedPika)
+                    return (TResponse)(object)new ControlReply { Status = 409, Json = "{\"error\":\"Pika fixture heartbeat failed\"}" };
                 Accepted?.Invoke(command.Route, body);
                 if (RejectHeartbeatAfterAccepted && command.Route == "/api/heartbeat")
                     return (TResponse)(object)new ControlReply { Status = 409, Json = "{\"error\":\"No matching active motion lease\"}" };

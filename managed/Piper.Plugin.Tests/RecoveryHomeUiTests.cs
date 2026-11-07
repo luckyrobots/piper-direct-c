@@ -12,6 +12,12 @@ internal static class RecoveryHomeUiTests
 {
     public static async Task Run(Action<bool, string> check)
     {
+        await RunRenderedRecovery(check, cancelMove: false);
+        await RunRenderedRecovery(check, cancelMove: true);
+    }
+
+    private static async Task RunRenderedRecovery(Action<bool, string> check, bool cancelMove)
+    {
         const BindingFlags fields = BindingFlags.Instance | BindingFlags.NonPublic;
         string root = Path.Combine(Path.GetTempPath(), "piper-recovery-home-ui-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(root);
@@ -19,14 +25,27 @@ internal static class RecoveryHomeUiTests
         void Set(string name, object? value) => typeof(PipersPlugin).GetField(name, fields)!.SetValue(plugin, value);
         T Get<T>(string name) => (T)typeof(PipersPlugin).GetField(name, fields)!.GetValue(plugin)!;
         var errors = new ConcurrentQueue<Exception>();
-        var calls = new HomeCalls(Get<string>("owner"));
+        var calls = new HomeCalls(Get<string>("owner"), cancelMove);
+        JsonObject? rendered = null, patches = null;
         var engine = (PluginContext)Activator.CreateInstance(typeof(PluginContext), fields, null,
             [new PluginStart("fixture", root, Path.GetTempPath()),
-                (Func<object, CancellationToken, Task>)((_, _) => Task.CompletedTask),
+                (Func<object, CancellationToken, Task>)((message, _) =>
+                {
+                    var json = JsonSerializer.SerializeToNode(message, PluginProtocol.Json)!.AsObject();
+                    if (json["type"]?.GetValue<string>() == "view") rendered = json["root"]!.AsObject();
+                    if (json["type"]?.GetValue<string>() == "patch") patches = json["widgets"]!.AsObject();
+                    return Task.CompletedTask;
+                }),
                 (Func<string, JsonObject, CancellationToken, Task<JsonElement>>)((_, _, _) => Task.FromResult(JsonSerializer.SerializeToElement(new { })))], null)!;
         Set("engine", engine); Set("client", new PiperControl.PiperControlClient(calls)); Set("token", "home-ui-fixture");
         Set("preferences", RobotProfileRouting.Normalize(new Preferences(Robots: [new("piper-1", "Fixture", "resting-arm")], ActiveRobotId: "piper-1")));
-        Set("workspaceViewEpoch", 1L);
+        static IEnumerable<JsonObject> Walk(JsonObject node)
+        {
+            yield return node;
+            foreach (var child in node["children"]?.AsArray().OfType<JsonObject>() ?? [])
+                foreach (var nested in Walk(child)) yield return nested;
+        }
+        Task Present(string method) => (Task)typeof(PipersPlugin).GetMethod(method, fields)!.Invoke(plugin, [CancellationToken.None])!;
         long sequence = 0;
         void Publish()
         {
@@ -37,28 +56,50 @@ internal static class RecoveryHomeUiTests
         }
         Publish();
         using var pumping = new CancellationTokenSource();
-        Task pump = Task.Run(async () => { while (!pumping.IsCancellationRequested) { Publish(); await Task.Delay(5, pumping.Token); } });
+        Task pump = Task.CompletedTask;
         await using var dispatch = new UiEventDispatch((input, cancellation) =>
                 (Task)typeof(PipersPlugin).GetMethod("HandleEventCoreAsync", fields)!.Invoke(plugin, [input, cancellation])!,
             () => plugin.CommandAuthority.Epoch, _ => true, errors.Enqueue);
         Set("uiEvents", dispatch);
         try
         {
-            await plugin.HandleEventAsync(new("fixture", WorkspaceEventScope.Wrap(1, "piper-1", "recovery.home.incident"), "click",
+            await Present("Render");
+            await Present("Update");
+            string card = Walk(rendered!).Single(node => node["id"]!.GetValue<string>().EndsWith(".workspace.incident", StringComparison.Ordinal))["id"]!.GetValue<string>();
+            string button = Walk(rendered!).Single(node => node["id"]!.GetValue<string>().EndsWith(".recovery.home", StringComparison.Ordinal))["id"]!.GetValue<string>();
+            string cancel = Walk(rendered!).Single(node => node["id"]!.GetValue<string>().EndsWith(".recovery.guide.cancel", StringComparison.Ordinal))["id"]!.GetValue<string>();
+            check(patches?[card]?["visible"]?.GetValue<bool>() == true && patches[button]?["enabled"]?.GetValue<bool>() == true,
+                "The published recovery card did not expose its real recover-to-zero action");
+            pump = Task.Run(async () => { while (!pumping.IsCancellationRequested) { Publish(); await Task.Delay(5, pumping.Token); } });
+            await plugin.HandleEventAsync(new("fixture", button, "click",
                 JsonSerializer.SerializeToElement(new { })), CancellationToken.None);
             long started = Stopwatch.GetTimestamp();
-            while (typeof(PipersPlugin).GetField("recoveryHomeWorker", fields)!.GetValue(plugin) is null)
+            Task? recoveryWorker;
+            while ((recoveryWorker = Get<PipersPlugin.RecoveryOperation?>("recoveryOperation")?.Worker) is null)
             {
                 if (Stopwatch.GetElapsedTime(started).TotalSeconds > 3) throw new TimeoutException("Recovery UI event did not start its worker: " + string.Join("; ", errors));
                 await Task.Delay(5);
             }
-            await Get<Task>("recoveryHomeWorker").WaitAsync(TimeSpan.FromSeconds(4));
+            if (cancelMove)
+            {
+                while (Get<LatestTelemetry>("telemetry").Latest?.State["motion"]?["active"]?.GetValue<bool>() != true)
+                {
+                    if (Stopwatch.GetElapsedTime(started).TotalSeconds > 3) throw new TimeoutException("Recovery did not report its in-flight zero move.");
+                    await Task.Delay(5);
+                }
+                await plugin.HandleEventAsync(new("fixture", cancel, "click", JsonSerializer.SerializeToElement(true)), CancellationToken.None);
+            }
+            await recoveryWorker.WaitAsync(TimeSpan.FromSeconds(4));
             check(calls.Actions.SequenceEqual(["enable", "move-to-zero"]),
                 "The single real UI-actor healthy/all-off recovery event cancelled itself, reset unnecessarily or failed to finish: " + Get<string>("message"));
-            check(errors.IsEmpty && !Get<bool>("recoveryHomeBusy") && Get<bool>("approved"),
-                "Successful UI recovery did not finish with usable controls");
+            check(errors.IsEmpty && Get<PipersPlugin.RecoveryOperation?>("recoveryOperation") is null && Get<bool>("approved") == !cancelMove,
+                "Retired UI recovery published incorrect approval");
+            if (cancelMove)
+                check(calls.ScopedStopRequest == 12 && plugin.CommandAuthority.Current.Lease is null,
+                    "Cancel failed to stop the exact active zero request or kept its old heartbeat lease");
             var report = JsonNode.Parse(await File.ReadAllTextAsync(Path.Combine(root, "recovery", "piper-1", "last-recovery-to-zero.json")))!;
-            check(report["stage"]!.GetValue<string>().StartsWith("Recovery complete") && report["automaticResume"]?.GetValue<bool>() == false &&
+            check(report["stage"]!.GetValue<string>().StartsWith(cancelMove ? "Recovery to zero cancelled" : "Recovery complete") &&
+                report["automaticResume"]?.GetValue<bool>() == false &&
                 report["goal"]?.GetValue<string>() == "all-joints-zero" && !report.ToJsonString().Contains("home-ui-fixture"),
                 "Recovery did not durably save its completed zero goal without a reusable backend token or resume intent");
             check(calls.AllCommandsScoped && calls.SpeedPercents.All(s => s == 10),
@@ -74,26 +115,29 @@ internal static class RecoveryHomeUiTests
         }
     }
 
-    private sealed class HomeCalls(string owner) : CallInvoker
+    private sealed class HomeCalls(string owner, bool leaveMoveActive) : CallInvoker
     {
         private readonly object gate = new();
         private long request = 10;
         private bool enabled;
+        private bool moving;
         private string phase = "monitor";
         private double[] angles = [0, -2.064, 2.105, 0, 21.346, 0];
         public List<string> Actions { get; } = [];
         public List<double> SpeedPercents { get; } = [];
         public bool AllCommandsScoped { get; private set; } = true;
+        public long ScopedStopRequest { get; private set; }
         public JsonObject Snapshot()
         {
             lock (gate) return new()
             {
                 ["token"] = "home-ui-fixture", ["selected"] = "resting-arm", ["phase"] = phase, ["message"] = "Fixture state",
-                ["motion"] = new JsonObject { ["active"] = false, ["request_id"] = request, ["owner"] = "" },
+                ["motion"] = new JsonObject { ["active"] = moving, ["request_id"] = request, ["owner"] = moving ? owner : "" },
                 ["devices"] = new JsonArray(new JsonObject
                 {
                     ["id"] = "resting-arm", ["generation"] = 7L, ["present"] = true, ["up"] = true, ["fresh"] = true,
                     ["firmware_supported"] = true, ["recovery_required"] = false, ["reset_pending"] = false,
+                    ["range_recovery"] = new JsonObject { ["required"] = angles[1] < 0 || angles[2] > 0 },
                     ["status"] = new JsonObject { ["arm_status"] = 0, ["control"] = 0, ["motion_mode"] = 1,
                         ["teach_state"] = 0, ["error"] = 0, ["stationary_s"] = 1d, ["age_s"] = 0d },
                     ["joints"] = new JsonArray(angles.Select((angle, i) => (JsonNode)new JsonObject
@@ -110,6 +154,21 @@ internal static class RecoveryHomeUiTests
             var command = input as ControlRequest ?? throw new InvalidOperationException("Unexpected fixture RPC");
             var body = JsonNode.Parse(command.Json)!;
             options.CancellationToken.ThrowIfCancellationRequested();
+            if (command.Route == "/api/stop")
+            {
+                lock (gate)
+                {
+                    if (moving && body["request_id"]?.GetValue<long>() == request &&
+                        body["device_id"]?.GetValue<string>() == "resting-arm" && body["generation"]?.GetValue<long>() == 7 &&
+                        body["owner"]?.GetValue<string>() == owner)
+                    {
+                        ScopedStopRequest = request;
+                        moving = false;
+                    }
+                }
+                return new(Task.FromResult((TResponse)(object)new ControlReply { Status = 200, Json = "{}" }),
+                    Task.FromResult(new Metadata()), () => Status.DefaultSuccess, () => new Metadata(), () => { });
+            }
             string step = body["action"]!.GetValue<string>();
             if (command.Route != "/api/command" || step is not ("reset" or "enable" or "move-to-zero"))
                 throw new InvalidOperationException("Recovery sent an unexpected route/action");
@@ -120,8 +179,9 @@ internal static class RecoveryHomeUiTests
                 AllCommandsScoped &= body["owner"]?.GetValue<string>() == owner && body["device_id"]?.GetValue<string>() == "resting-arm" &&
                     body["generation"]?.GetValue<long>() == 7 && body["supported"]?.GetValue<bool>() == true && body["clear"]?.GetValue<bool>() == true;
                 enabled = step != "reset";
-                if (step == "move-to-zero") angles = new double[6];
-                phase = "complete"; accepted = ++request;
+                moving = step == "move-to-zero" && leaveMoveActive;
+                if (step == "move-to-zero" && !moving) angles = new double[6];
+                phase = moving ? "moving" : "complete"; accepted = ++request;
             }
             return new(Task.FromResult((TResponse)(object)new ControlReply { Status = 202,
                 Json = new JsonObject { ["request_id"] = accepted, ["message"] = step + " accepted" }.ToJsonString() }),

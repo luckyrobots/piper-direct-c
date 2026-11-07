@@ -59,7 +59,7 @@ internal static class CalibrationSheetUiTests
                     return Task.FromResult(JsonSerializer.SerializeToElement(result));
                 })], null)!;
         Set("preferences", prefs); Set("engine", context); Set("state", state); Set("token", "fixture-session");
-        Set("calibrationProfile", "piper-1"); Set("wizardProfile", "piper-1"); Set("workspacePage", "calibration"); Set("calibrationOpen", true);
+        Set("calibrationProfile", "piper-1"); Set("wizardProfile", "piper-1"); Set("workspacePage", "settings"); Set("settingsCategory", "bench"); Set("calibrationOpen", true);
         Set("link", new RobotLink("scene-a", "robot-a", joints, device));
         Get<LatestTelemetry>("telemetry").Publish(new(state, "fixture-session", 1, Stopwatch.GetTimestamp(), 0));
         var draft = CalibrationWizardFlow.New("piper-1", 10) with { Step = CalibrationWizardStep.DeskBack, ModelAssetId = "asset-a", ModelRevision = "revision-a" };

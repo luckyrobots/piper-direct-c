@@ -20,10 +20,13 @@ internal sealed class RobotCommandAuthority
     public RobotCommandState Current => Volatile.Read(ref state);
     public long Epoch => Current.Epoch;
 
-    public long Revoke(string? forgetApproval = null, Action? revokeLocalApproval = null, bool forgetAllApprovals = false)
+    public long Revoke(string? forgetApproval = null, Action? revokeLocalApproval = null, bool forgetAllApprovals = false,
+        long? expectedEpoch = null)
     {
         lock (gate)
         {
+            if (expectedEpoch is { } expected && expected != state.Epoch)
+                throw new InvalidOperationException("Control permission changed. Start a new action after checking the robot.");
             long epoch = state.Epoch + 1;
             var approvals = forgetAllApprovals ? state.Approvals.Clear() :
                 forgetApproval is null ? state.Approvals : state.Approvals.Remove(forgetApproval);

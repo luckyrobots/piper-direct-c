@@ -17,18 +17,18 @@ public static class BackendActivity
 
 public sealed partial class PipersPlugin
 {
-    // These are value records. Clone nested camera maps as well so a running
-    // follower's assignment cannot be changed by an unrelated settings edit.
+    // Only the captured profile's scalar assignments and motion settings are used by Follow.
     private RobotProfile[] SelectedFollowProfiles() => RobotProfileRouting.Capture(preferences).Robots!
-        .Where(p => p.FollowSimulationSelected)
-        .Select(p => p with { SimulationCameras = p.SimulationCameras is null ? null : new(p.SimulationCameras) }).ToArray();
+        .Where(p => p.FollowSimulationSelected).ToArray();
 
     private string groupFollowFailure = "";
 
-    private FollowPreparationReport GroupPreparation(RobotProfile[]? selected = null, TelemetryReceipt? receipt = null, JsonObject? discovered = null) =>
-        FollowPreparationReport.Inspect(selected ?? SelectedFollowProfiles(), receipt ?? telemetry.Latest, token, owner,
-            controlApprovals.ToDictionary(p => p.Key, p => p.Value, StringComparer.Ordinal),
+    private FollowPreparationReport GroupPreparation(RobotProfile[]? selected = null, TelemetryReceipt? receipt = null, JsonObject? discovered = null)
+    {
+        var report = FollowPreparationReport.Inspect(selected ?? SelectedFollowProfiles(), receipt ?? telemetry.Latest, token, owner, controlApprovals,
             discovered ?? scene, followClock.GetTimestamp());
+        return GroupStartConflict() is { } conflict ? report with { Issues = [.. report.Issues, new("", "", "control-busy", conflict)] } : report;
+    }
 
     private Widget GroupFollowControls()
     {
@@ -84,25 +84,13 @@ public sealed partial class PipersPlugin
         patches["group.follow.selected"] = new() { ["value"] = ActiveProfile.FollowSimulationSelected ? 1 : 0,
             ["enabled"] = !active, ["hint"] = active ? "Stop following before changing the group." : "Include this robot when you press Follow simulation in the left sidebar." };
         if (!active) return;
-        foreach (string id in patches.Keys.Where(id => id is "enable" or "link" or "zero.all" or "teleoperate.toggle" or "speed" or
-            "pika.target" or "pika.minus" or "pika.plus" or "pika.zero" or "pika.reference.set" or "pika.reference.clear" or
-            "teaching.return" or "teaching.return.confirm" or "teaching.reset.begin" or "teaching.reset.confirm" or
-            "teaching.pika.free" or "teaching.pika.confirm" or "teaching.pika.hold" ||
-            id.StartsWith("teleoperate.joint.", StringComparison.Ordinal) || id.StartsWith("joint.", StringComparison.Ordinal) &&
-                (id.EndsWith(".target", StringComparison.Ordinal) || id.EndsWith(".minus", StringComparison.Ordinal) ||
-                 id.EndsWith(".plus", StringComparison.Ordinal) || id.EndsWith(".zero", StringComparison.Ordinal))))
+        foreach (string id in patches.Keys.Where(id => GroupBlocksControlEvent(id) && id is not ("enable" or "teaching.help") &&
+            (!id.StartsWith("joint.", StringComparison.Ordinal) || !id.EndsWith(".value", StringComparison.Ordinal) && !id.EndsWith(".current", StringComparison.Ordinal))))
         {
             patches[id]["enabled"] = false;
             patches[id]["hint"] = "Stop following in the left sidebar before changing robot controls.";
         }
         // Power release and movement-stop remain actionable cancellation paths.
         patches["motion.hold"] = new() { ["enabled"] = true, ["hint"] = "Stop following and hold all selected arms and grippers." };
-        if (!GroupFollowIncludes(ActiveProfile.Id)) return;
-        patches["enable"] = new() { ["text"] = "Enabled · in follower group", ["enabled"] = false, ["visible"] = workspacePage == "controls" };
-        patches["workspace.connection"] = new() { ["text"] = GroupFollowStatus, ["hint"] = GroupFollowDetail };
-        foreach (int i in Enumerable.Range(1, 6)) foreach (string action in new[] { "minus", "plus", "target", "zero" })
-            patches[$"joint.{i}.{action}"] = new() { ["enabled"] = false, ["hint"] = "The follower group owns this robot. Stop following to use manual controls." };
-        foreach (string id in new[] { "pika.minus", "pika.plus", "pika.target", "pika.zero", "zero.all", "teleoperate.toggle", "speed" })
-            patches[id] = new() { ["enabled"] = false, ["hint"] = "Stop the follower group before sending manual targets or changing its speed." };
     }
 }

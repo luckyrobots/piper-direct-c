@@ -73,6 +73,13 @@ internal static class RecoveryWorkspaceTests
         Directory.CreateDirectory(folder);
         void Set(string field, object? value) => typeof(PipersPlugin).GetField(field, flags)!.SetValue(plugin, value);
         T Get<T>(string field) => (T)typeof(PipersPlugin).GetField(field, flags)!.GetValue(plugin)!;
+        PipersPlugin.RecoveryOperation SimulatedRecovery(PipersPlugin.RecoveryKind kind)
+        {
+            var operation = new PipersPlugin.RecoveryOperation(kind, new("piper-2", "recovery-ui-fixture", "can-b", 7),
+                plugin.CommandAuthority.Epoch, new());
+            Set("recoveryOperation", operation);
+            return operation;
+        }
         var calls = new Calls();
         var device = Stopped();
         var snapshot = new JsonObject { ["token"] = "recovery-ui-fixture", ["selected"] = "can-b", ["devices"] = new JsonArray(device),
@@ -88,19 +95,23 @@ internal static class RecoveryWorkspaceTests
         {
             Fresh(); await Click("enable");
             check(calls.Actions.Count == 0 && Get<bool>("recoveryGuideOpen"), "Generic Recover click removed torque instead of opening its supported guide");
-            Set("recoveryHomeBusy", true); Set("teachingResetBusy", true);
-            Fresh(); await Click("disable");
-            check(calls.Actions.SequenceEqual(["disable"]), "A visible Disable action was blocked by the STOP teaching presentation or sent a reset/target");
-            Set("recoveryHomeBusy", false); Set("teachingResetBusy", false);
+            using (SimulatedRecovery(PipersPlugin.RecoveryKind.ReturnToZero))
+            {
+                Fresh(); await Click("disable");
+                check(calls.Actions.SequenceEqual(["disable"]), "A visible Disable action was blocked by the STOP teaching presentation or sent a reset/target");
+                Set("recoveryOperation", null);
+            }
             calls.Actions.Clear();
             device["status"]!["arm_status"] = 0; device["status"]!["control"] = 2; device["status"]!["teach_state"] = 2;
             device["teaching"]!["phase"] = "ended"; device["teaching"]!["can_recover_at_pose"] = true;
             device["teaching"]!["recovery_teach_cycle_complete"] = true;
             device["joints"]![1]!["actual_deg"] = .5; device["joints"]![2]!["actual_deg"] = -.5;
-            Set("recoveryHomeBusy", true);
-            Fresh(); await Click("recovery.card.run");
-            check(calls.Actions.Count == 0, "A queued recovery click ran while its card was disabled by another recovery action");
-            Set("recoveryHomeBusy", false);
+            using (SimulatedRecovery(PipersPlugin.RecoveryKind.ReturnToZero))
+            {
+                Fresh(); await Click("recovery.card.run");
+                check(calls.Actions.Count == 0, "A queued recovery click ran while its card was disabled by another recovery action");
+                Set("recoveryOperation", null);
+            }
             Fresh(); await Click("recovery.card.run");
             check(calls.Actions.SequenceEqual(["recover-at-pose"]) && Get<bool>("handGuideRecoveryCommandSent"),
                 "A qualified green/off cycle did not admit the explicit same-pose return");
@@ -114,24 +125,26 @@ internal static class RecoveryWorkspaceTests
             await (Task)typeof(PipersPlugin).GetMethod("ObserveHandGuideRecovery", flags)!.Invoke(plugin, [CancellationToken.None])!;
             check(Get<bool>("recoveryGuideOpen") && Get<HandGuideRecoveryGate?>("handGuideRecovery") is null && calls.Actions.Count == 0,
                 "Reset's retired stop record closed the visible range/holding guide or reused old teaching proof");
-            Set("supportedRecoveryBusy", true); Set("supportedRecoveryResetting", true);
-            Set("supportedRecoveryBackend", "recovery-ui-fixture"); Set("supportedRecoveryDevice", "can-b"); Set("supportedRecoveryProfile", "piper-2");
-            Set("supportedRecoveryGeneration", 7L); Set("supportedRecoveryPermission", plugin.CommandAuthority.Epoch);
-            Set("supportedRecoveryResetAt", Stopwatch.GetTimestamp());
+            using var reset = SimulatedRecovery(PipersPlugin.RecoveryKind.HoldHere);
+            reset.ResetAt = Stopwatch.GetTimestamp();
             device["fresh"] = false; device["joints"]![0]!["fresh"] = false; Fresh();
-            bool Gap() => (bool)typeof(PipersPlugin).GetMethod("SupportedRecoveryExpectedGap", flags)!.Invoke(plugin, [Get<LatestTelemetry>("telemetry").Latest])!;
+            bool Gap() => (bool)typeof(PipersPlugin).GetMethod("RecoveryExpectedGap", flags)!.Invoke(plugin, [Get<LatestTelemetry>("telemetry").Latest])!;
             check(Gap(), "A bounded same-device reset feedback gap invalidated supported recovery");
             device["generation"] = 8L; Fresh(); check(!Gap(), "Another CAN generation inherited a reset-gap exception"); device["generation"] = 7L;
             device["present"] = false; Fresh(); check(!Gap(), "A disconnected adapter inherited a reset-gap exception"); device["present"] = true;
             device["joints"]![0]!["fault"] = 1; Fresh(); check(!Gap(), "Reset-gap handling masked a known motor-driver fault"); device["joints"]![0]!["fault"] = 0;
-            Set("supportedRecoveryResetting", false); Fresh(); check(!Gap(), "Stale feedback outside reset was treated as an expected gap"); Set("supportedRecoveryResetting", true);
-            Set("supportedRecoveryResetAt", Stopwatch.GetTimestamp() - Stopwatch.Frequency * 6); Fresh(); check(!Gap(), "The reset-gap exception outlived its five-second bound");
-            Set("supportedRecoveryResetAt", Stopwatch.GetTimestamp());
+            reset.ResetAt = 0; Fresh(); check(!Gap(), "Stale feedback outside reset was treated as an expected gap");
+            reset.ResetAt = Stopwatch.GetTimestamp() - Stopwatch.Frequency * 6; Fresh(); check(!Gap(), "The reset-gap exception outlived its five-second bound");
+            reset.ResetAt = Stopwatch.GetTimestamp();
             Get<LatestTelemetry>("telemetry").Publish(new(snapshot, "recovery-ui-fixture", 1, Stopwatch.GetTimestamp() - Stopwatch.Frequency * 2, 0));
             check(!Gap(), "An old telemetry envelope was accepted as a fresh reset gap");
-            Fresh(); plugin.CommandAuthority.Revoke();
+            Fresh(); plugin.CommandAuthority.Revoke(revokeLocalApproval: () => Set("approved", false));
             check(!Gap(), "A STOP/permission change retained the reset-gap exception");
-            Set("supportedRecoveryBusy", false); Set("supportedRecoveryResetting", false);
+            bool retiredGrant = false;
+            try { typeof(PipersPlugin).GetMethod("GrantRecoveryHolding", flags)!.Invoke(plugin, [reset, CancellationToken.None]); }
+            catch (TargetInvocationException error) when (error.InnerException is InvalidOperationException) { retiredGrant = true; }
+            check(retiredGrant && !Get<bool>("approved") && calls.Actions.Count == 0, "A recovery continuation granted holding permission after STOP");
+            Set("recoveryOperation", null);
             device["fresh"] = true; device["joints"]![0]!["fresh"] = true;
             device["blocker"] = "Another controller is sending commands on this CAN bus.";
             Set("approved", true);

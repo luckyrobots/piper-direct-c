@@ -13,13 +13,16 @@ public static class ProfilePikaRouting
 
     public static JsonObject? Find(JsonObject snapshot, RobotProfile profile)
     {
-        bool Match(JsonObject pika) => (pika["device"]?.GetValue<string>() == profile.PikaDevice ||
-            pika["aliases"]?.AsArray().Any(a => a?.GetValue<string>() == profile.PikaDevice) == true) &&
-            (!OperatingSystem.IsWindows() || pika["distribution"]?.GetValue<string>() == profile.WslDistribution);
         if (profile.PikaDevice.Length == 0) return null;
-        if (snapshot["pikas"] is JsonArray sessions) return sessions.OfType<JsonObject>().SingleOrDefault(Match);
-        return snapshot["pika"] is JsonObject legacy && Match(legacy) ? legacy : null;
+        if (snapshot["pikas"] is JsonArray sessions)
+            return sessions.OfType<JsonObject>().SingleOrDefault(pika => Matches(profile, pika));
+        return snapshot["pika"] is JsonObject legacy && Matches(profile, legacy) ? legacy : null;
     }
+
+    internal static bool Matches(RobotProfile profile, JsonObject? pika) => profile.PikaDevice.Length > 0 && pika is not null &&
+        (pika["device"]?.GetValue<string>() == profile.PikaDevice ||
+            pika["aliases"] is JsonArray aliases && aliases.OfType<JsonValue>().Any(a => a.TryGetValue<string>(out var alias) && alias == profile.PikaDevice)) &&
+        (!OperatingSystem.IsWindows() || pika["distribution"]?.GetValue<string>() == profile.PikaDistribution);
 }
 
 public sealed partial class PipersPlugin
@@ -60,7 +63,8 @@ public sealed partial class PipersPlugin
     {
         var permission = CommandAuthority.Current;
         var profile = ActiveProfile;
-        if (switchingProfile || calibrationOpen || !HasFreshControlTelemetry(out var receipt) || !permission.Approvals.TryGetValue(profile.Id, out var saved)) return;
+        if (switchingProfile || calibrationOpen || CurrentRecovery is not null || !HasFreshControlTelemetry(out var receipt) ||
+            !permission.Approvals.TryGetValue(profile.Id, out var saved)) return;
         var d = Device(sourceReceipt: receipt);
         if (saved != ControlScope(profile, receipt!.BackendToken, d))
         { CommandAuthority.ForgetApproval(profile.Id, saved); return; }
@@ -103,7 +107,7 @@ public sealed partial class PipersPlugin
                     // and the normal command gate prevent assignment races.
                     await Call("/api/pika/connect", new() { ["owner"] = owner, ["take_over"] = connection == PikaMonitorConnection.AdoptReadOnly,
                         ["read_only_adopt"] = connection == PikaMonitorConnection.AdoptReadOnly,
-                        ["pika_device"] = profile.PikaDevice, ["pika_distribution"] = profile.WslDistribution }, cancellation);
+                        ["pika_device"] = profile.PikaDevice, ["pika_distribution"] = profile.PikaDistribution }, cancellation);
                 }
                 catch (Exception error) when (!cancellation.IsCancellationRequested)
                 { System.Diagnostics.Trace.TraceWarning("{0} gripper monitor: {1}", profile.Name, error.Message); }
@@ -112,25 +116,60 @@ public sealed partial class PipersPlugin
         } while (await timer.WaitForNextTickAsync(cancellation));
     }
 
-    private async Task ReleaseOtherPikas(CancellationToken cancellation)
+    private async Task ReleaseOwnedPikas(CancellationToken cancellation)
     {
-        foreach (var session in OwnedPikaSessions(state ?? new()))
+        var receipt = telemetry.Latest;
+        if (receipt is null || receipt.BackendToken != token) return;
+        string backend = receipt.BackendToken;
+        var identities = OwnedPikaSessions(receipt.State)
+            .Select(session => (Device: session["device"]!.GetValue<string>(), Distribution: session["distribution"]?.GetValue<string>()))
+            .Distinct().ToArray();
+        await Task.WhenAll(identities.Select(Release));
+
+        async Task Release((string Device, string? Distribution) identity)
         {
-            string device = session["device"]!.GetValue<string>(), distribution = session["distribution"]?.GetValue<string>() ?? "";
-            if (device == ActiveProfile.PikaDevice && distribution == ActiveProfile.WslDistribution) continue;
-            JsonObject Body() => new() { ["owner"] = owner, ["pika_device"] = device, ["pika_distribution"] = distribution };
-            if (session["power_requested"]?.GetValue<bool>() == true || session["armed"]?.GetValue<bool>() == true)
+            JsonObject Body() => new() { ["owner"] = owner, ["pika_device"] = identity.Device, ["pika_distribution"] = identity.Distribution };
+            (TelemetryReceipt Receipt, JsonObject Gripper)? ReadOwned()
             {
-                await Call("/api/pika/disable", Body(), cancellation);
-                while (true)
-                {
-                    cancellation.ThrowIfCancellationRequested();
-                    var current = state?["pikas"]?.AsArray().OfType<JsonObject>().SingleOrDefault(p => p["device"]?.GetValue<string>() == device && p["distribution"]?.GetValue<string>() == distribution);
-                    if (current?["fresh"]?.GetValue<bool>() == true && current["enabled"]?.GetValue<bool>() == false) break;
-                    await Task.Delay(25, cancellation);
-                }
+                var latest = telemetry.Latest;
+                if (latest is null || latest.BackendToken != backend || token != backend) return null;
+                var inventory = latest.State["pikas"] is JsonArray sessions ? sessions.OfType<JsonObject>() :
+                    latest.State["pika"] is JsonObject single ? new[] { single } : [];
+                var gripper = inventory.SingleOrDefault(p => p["device"]?.GetValue<string>() == identity.Device &&
+                    p["distribution"]?.GetValue<string>() == identity.Distribution);
+                return gripper is not null && gripper["owner"]?.GetValue<string>() == owner && gripper["connected"]?.GetValue<bool>() == true
+                    ? (latest, gripper) : null;
             }
-            await Call("/api/pika/disconnect", Body(), cancellation);
+
+            try
+            {
+                cancellation.ThrowIfCancellationRequested();
+                if (ReadOwned() is not { } original) return;
+                var session = original.Gripper;
+                if (session["power_requested"]?.GetValue<bool>() == true || session["armed"]?.GetValue<bool>() == true)
+                {
+                    var reply = await Call("/api/pika/disable", Body(), cancellation, backend);
+                    if (reply["motor_request_id"]?.GetValue<string>() is not { Length: > 0 } request)
+                        throw new InvalidOperationException("Disable did not acknowledge a motor request.");
+                    while (true)
+                    {
+                        cancellation.ThrowIfCancellationRequested();
+                        if (ReadOwned() is not { } current) return;
+                        if (current.Receipt.HasFreshPika(current.Gripper, System.Diagnostics.Stopwatch.GetTimestamp(), 500) &&
+                            current.Gripper["last_motor_request"]?.GetValue<string>() == request &&
+                            Pika.PikaDisabledEvidence.Confirmed(current.Gripper, owner)) break;
+                        await Task.Delay(25, cancellation);
+                    }
+                }
+                else if (session["power_requested"]?.GetValue<bool>() != false || session["armed"]?.GetValue<bool>() != false ||
+                    session["power_uncertain"]?.GetValue<bool>() != false || session["pending"]?.GetValue<bool>() == true ||
+                    session["following"]?.GetValue<bool>() == true || session["resuming_hold"]?.GetValue<bool>() == true)
+                    throw new InvalidOperationException("The gripper's read-only state could not be verified.");
+
+                cancellation.ThrowIfCancellationRequested();
+                await Call("/api/pika/disconnect", Body(), cancellation, backend);
+            }
+            catch (Exception error) { System.Diagnostics.Trace.TraceWarning("Pika shutdown ({0}): {1}", identity.Device, error.Message); }
         }
     }
 }

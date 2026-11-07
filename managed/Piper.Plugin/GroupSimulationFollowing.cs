@@ -46,7 +46,6 @@ public sealed partial class PipersPlugin
         public readonly TaskCompletionSource Retired = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public readonly string PrepareId = Guid.NewGuid().ToString("N");
         public readonly CancellationTokenSource Stop = new();
-        public readonly SemaphoreSlim Writes = new(1);
         public readonly object Gate = new();
         public readonly GroupSimulationPhaseBarrier Barrier = new();
         public string RunId = "", FirstFailure = "", AcknowledgedEpisode = "", EndReason = "";
@@ -89,6 +88,7 @@ public sealed partial class PipersPlugin
             // while the coordinator joins it, but no new batch starts there.
             if (current is not (GroupFollowPhase.Admitting or GroupFollowPhase.Activating or GroupFollowPhase.DrainingPrimer or GroupFollowPhase.Following))
                 RejectPhase(current, "target publication");
+            if (current == GroupFollowPhase.Following) RequireOrderedSourceLease(this);
         }
 
         private void RejectPhase(GroupFollowPhase current, string operation)
@@ -115,6 +115,7 @@ public sealed partial class PipersPlugin
     private GroupSession? groupSimulation;
     private GroupRetirement? groupRetirement;
     private long groupInputEpoch;
+    private long groupControlEpoch;
     private bool GroupFollowActive => Volatile.Read(ref groupSimulation) is not null;
     private bool SimulationFollowingActive => GroupFollowActive;
     private string GroupFollowStatus = "Simulation only";
@@ -122,6 +123,24 @@ public sealed partial class PipersPlugin
     private bool GroupFollowIncludes(string profileId) => Volatile.Read(ref groupSimulation)?.Lanes.Any(l => l.Profile.Id == profileId) == true;
     private bool GroupWaitingForUserPlay(GroupSession group) =>
         group.Phase is GroupFollowPhase.Arming or GroupFollowPhase.Armed && group.RunId.Length == 0 && GroupScopeCurrent(group);
+
+    private static bool GroupBlocksControlEvent(string id) => id is "speed" or "recovery.run" or "recovery.card.run" or "robots.select" or "link" or "backend.restart.confirm" ||
+        WorkspaceCommandPolicy.RequiresControls(id) && id is not ("simulation.toggle" or "simulation.match") ||
+        id.StartsWith("global.robot.", StringComparison.Ordinal) ||
+        id.StartsWith("teaching.", StringComparison.Ordinal) || id.StartsWith("pika.reference.", StringComparison.Ordinal) ||
+        id.StartsWith("profiles.", StringComparison.Ordinal) && !id.StartsWith("profiles.select.", StringComparison.Ordinal);
+
+    private string? GroupStartConflict()
+    {
+        if (CommandAuthority.Current.Lease is { } lease)
+        {
+            string robot = preferences.Robots?.FirstOrDefault(profile => profile.Id == lease.Scope.ProfileId)?.Name ?? "the robot";
+            return $"Finish the current arm action for {robot} before arming Follow simulation.";
+        }
+        return teleoperating || followRequest != 0 || calibrationOpen || handGuideRecovery is not null ||
+            CurrentRecovery is not null || PikaTeachingRecording
+            ? "Finish the current control, recovery, or calibration action before arming Follow simulation." : null;
+    }
 
     private GroupSession? CancelGroupSimulationFollowingInput(string reason = "Following canceled")
     {
@@ -152,9 +171,6 @@ public sealed partial class PipersPlugin
         long inputEpoch = Interlocked.Read(ref groupInputEpoch);
         try
         {
-            if (teleoperating || followRequest != 0 || calibrationOpen ||
-                handGuideRecovery is not null || teachingResetBusy || recoveryHomeBusy || PikaTeachingRecording)
-                throw new InvalidOperationException("Finish the current control or calibration action before arming grouped following.");
             var profiles = SelectedFollowProfiles();
             var initial = GroupPreparation(profiles);
             // Inventory evidence can change within the same scene. Resolve it
@@ -209,6 +225,7 @@ public sealed partial class PipersPlugin
                 lane.Diagnostics = new(Path.Combine(engine.Start.SettingsDirectory, "diagnostics", "simulation-follow"), group.PrepareId + "-" + lane.Profile.Id,
                     async diagnostic => { using var timeout = new CancellationTokenSource(400); await engine.ReportAsync("error", diagnostic, timeout.Token); });
             if (Interlocked.CompareExchange(ref groupSimulation, group, null) is not null) throw new InvalidOperationException("Another grouped follower is still retiring.");
+            Interlocked.Increment(ref groupControlEpoch);
             using var cancelSetup = cancellation.Register(() =>
             { if (ReferenceEquals(Volatile.Read(ref groupSimulation), group)) CancelGroupSimulationFollowingInput("Preparation canceled · previous targets discarded"); });
             _ = Task.Run(() => RunGroupSimulation(group));
@@ -286,10 +303,10 @@ public sealed partial class PipersPlugin
         {
             case FollowArmAction.MatchPose: group.Require(GroupFollowPhase.Matching); break;
             case FollowArmAction.Start: group.Require(GroupFollowPhase.Admitting); break;
-            case FollowArmAction.Update: group.RequireTargetPublication(); break;
             case FollowArmAction.Hold: group.Require(GroupFollowPhase.Retiring); break;
         }
         if (action != FollowArmAction.Hold) _ = GroupHardware(group, lane);
+        if (action == FollowArmAction.Update) group.RequireTargetPublication();
         bool admission = action is FollowArmAction.MatchPose or FollowArmAction.Start;
         if (admission) lane.ArmTouched = true;
         try { return await lane.Controller.Arm(action, fields); }
@@ -302,10 +319,10 @@ public sealed partial class PipersPlugin
         {
             case FollowPikaAction.MatchOpening: group.Require(GroupFollowPhase.Matching); break;
             case FollowPikaAction.Start: group.Require(GroupFollowPhase.Admitting); break;
-            case FollowPikaAction.Update: group.RequireTargetPublication(); break;
             case FollowPikaAction.Hold: group.Require(GroupFollowPhase.Retiring); break;
         }
         if (action != FollowPikaAction.Hold) _ = GroupHardware(group, lane);
+        if (action == FollowPikaAction.Update) group.RequireTargetPublication();
         if (action is FollowPikaAction.MatchOpening or FollowPikaAction.Start) lane.PikaTouched = true;
         return await lane.Controller.Pika(action, fields);
     }

@@ -16,6 +16,129 @@ internal static partial class SimulationFollowingTests
             while (!condition())
             { if (Stopwatch.GetElapsedTime(began).TotalSeconds > 5) throw new InvalidOperationException(reason); await Task.Delay(10); }
         }
+        foreach (bool supportedRecovery in new[] { false, true })
+        {
+            await using var f = new Fixture();
+            f.ConfigureGroup(); f.SelectGroupFollowers("piper-2"); f.UseUiDispatcher();
+            var plugin = Plugin(f);
+            var authority = plugin.CommandAuthority;
+            object? recovery = null;
+            if (supportedRecovery)
+            {
+                var kind = Enum.Parse(typeof(PipersPlugin).GetNestedType("RecoveryKind", BindingFlags.NonPublic)!, "HoldHere");
+                recovery = typeof(PipersPlugin).GetMethod("BeginRecovery", fields)!.Invoke(plugin,
+                    [kind, f.Snapshot["devices"]![0]!.AsObject(), authority.Epoch, CancellationToken.None]);
+            }
+            else authority.TryAcknowledge(authority.Epoch, new("piper-1", f.Get<string>("token"), "can-a", 7), 77);
+            try
+            {
+                await f.Click("group.follow.toggle");
+                await Until(() => supportedRecovery ? f.Get<string>("message").StartsWith("Recovery is in progress", StringComparison.Ordinal) :
+                    f.Get<string>("groupFollowFailure").Length > 0, "A conflicting ordinary operation did not block group preparation");
+                check(!f.GroupActive && f.SidebarStatus().Contains(supportedRecovery ? "recovery" : "First", StringComparison.Ordinal) &&
+                    !f.EngineRequests.Any(r => r.Action == "arm-next-play") && f.Rpc.Requests.IsEmpty,
+                    "Follow armed alongside a tracked ordinary arm lease or supported recovery on an unchecked robot");
+            }
+            finally
+            {
+                if (recovery is not null) typeof(PipersPlugin).GetMethod("RetireRecovery", fields)!.Invoke(plugin, [recovery]);
+            }
+        }
+        await using (var f = new Fixture())
+        {
+            f.ConfigureGroup(); f.UseUiDispatcher(); f.LinkEditorDelayMilliseconds = 180; f.DelayedRuntimeAction = "arm-next-play";
+            await f.Click("group.follow.toggle");
+            await Until(() => f.EngineRequests.Any(r => r.Method == "scene.robots"), "Pending-control fixture did not start Follow discovery");
+            check(!f.GroupActive, "Follow discovery installed ownership before its inventory returned");
+            await f.Click("joint.6.plus"); // Stamped while the read-only discovery still owns the actor.
+            await f.RuntimeReached.Task.WaitAsync(TimeSpan.FromSeconds(3));
+            await f.Click("pika.zero"); // Arrived after Follow owned control and must never be queued.
+            await f.ClickSidebarGroupStop();
+            f.ReleaseRuntime.TrySetResult();
+            await Until(() => !f.GroupActive && f.DiscardedUiEvents.Any(input => input.WidgetId.EndsWith(".joint.6.plus", StringComparison.Ordinal)),
+                "A queued jog was not discarded at the Follow ownership boundary");
+            check(f.Rpc.Requests.IsEmpty && !f.DiscardedUiEvents.Any(input => input.WidgetId.EndsWith(".pika.zero", StringComparison.Ordinal)),
+                "A stale queued or active-group manual target reached transport after retirement");
+        }
+        await using (var f = new Fixture())
+        {
+            f.ConfigureGroup(); f.SelectGroupFollowers("piper-2"); f.UseUiDispatcher();
+            long before = f.Get<long>("groupControlEpoch");
+            await f.GroupEvent("toggle");
+            var authority = Plugin(f).CommandAuthority;
+            authority.TryAcknowledge(authority.Epoch, new("piper-1", f.Get<string>("token"), "can-a", 7), 77);
+            var motion = f.Snapshot["devices"]![0]!["motion"]!;
+            motion["active"] = true; motion["request_id"] = 77L; motion["owner"] = f.Get<string>("owner");
+            f.FocusGroupSecond();
+            await f.Gap("ArmHeartbeats");
+            check(f.GroupArmedForPlay && f.Get<long>("groupControlEpoch") == before + 1 &&
+                f.Rpc.Requests.Any(r => r.Route == "/api/heartbeat" && r.Body["device_id"]?.GetValue<string>() == "can-a" &&
+                    r.Body["generation"]?.GetValue<long>() == 7 && r.Body["request_id"]?.GetValue<long>() == 77),
+                "An armed follower suppressed an independent ordinary heartbeat or rebound it to the viewed robot");
+            f.RequestGroupPlay();
+            await Until(() => !f.GroupActive, "An independent lease appearing after arming did not block physical admission");
+            check(f.Get<long>("groupControlEpoch") == before + 2 &&
+                !f.Rpc.Requests.Any(r => r.Body["action"]?.GetValue<string>() is "pose" or "follow-start" or "follow-update"),
+                "Retired group ownership failed to fence stale controls or admitted hardware alongside the ordinary lease");
+        }
+        await using (var f = new Fixture())
+        {
+            f.ConfigureGroup(); f.Rpc.FailedPikaHeartbeatDevice = "/dev/pika-b";
+            using var stopHeartbeats = new CancellationTokenSource();
+            var worker = (Task)typeof(PipersPlugin).GetMethod("PikaHeartbeats", fields)!.Invoke(Plugin(f), [stopHeartbeats.Token])!;
+            int Renewed(string device) => f.Rpc.Requests.Count(r => r.Route == "/api/pika/heartbeat" &&
+                r.Body["pika_device"]?.GetValue<string>() == device);
+            try
+            {
+                await f.Rpc.DelayedReached.Task.WaitAsync(TimeSpan.FromSeconds(2));
+                await Until(() => Renewed("/dev/pika-a") >= 2, "A stalled Pika heartbeat blocked the healthy gripper's next cadence");
+                check(Renewed("/dev/pika-b") == 1, "A stalled gripper accumulated duplicate heartbeat requests");
+                f.Rpc.ReleaseDelayed.TrySetResult();
+                await Until(() => Renewed("/dev/pika-a") >= 3, "A failed Pika heartbeat retired the healthy gripper's renewal");
+                check(f.Get<bool>("pikaOwned"), "A partner Pika heartbeat failure cleared ownership of the healthy selected gripper");
+            }
+            finally
+            {
+                stopHeartbeats.Cancel();
+                f.Rpc.ReleaseDelayed.TrySetResult();
+                try { await worker; } catch (OperationCanceledException) { }
+            }
+        }
+        await using (var f = new Fixture(followClock: new FollowTestClock()))
+        {
+            f.ConfigureGroup(); f.SelectGroupFollowers("piper-1"); f.UseUiDispatcher();
+            await f.GroupEvent("toggle");
+            var plugin = Plugin(f);
+            var original = f.Session!;
+            var sessionType = original.GetType();
+            var lanes = (Array)sessionType.GetField("Lanes")!.GetValue(original)!;
+            await f.ClickSidebarGroupStop();
+            await Until(() => !f.GroupActive, "Write-expiry fixture did not retire its initial Edit latch");
+            var clock = (FollowTestClock)f.Get<TimeProvider>("followClock");
+            var session = Activator.CreateInstance(sessionType, fields | BindingFlags.Public, null,
+                [f.Get<string>("token"), "source-a", "robot-a", "asset-a", "model-a", lanes, f.Get<long>("groupInputEpoch"), clock], null)!;
+            var advance = sessionType.GetMethod("Advance")!;
+            foreach (var phase in new[] { GroupFollowPhase.Armed, GroupFollowPhase.Matching, GroupFollowPhase.Admitting,
+                GroupFollowPhase.Activating, GroupFollowPhase.DrainingPrimer, GroupFollowPhase.Following })
+                advance.Invoke(session, [phase]);
+            sessionType.GetField("EnvelopeTicks")!.SetValue(session, clock.GetTimestamp());
+            clock.Advance(TimeSpan.FromMilliseconds(251));
+            f.Refresh(); // Hardware evidence remains fresh while the already-planned source batch expires.
+            var groupField = typeof(PipersPlugin).GetField("groupSimulation", fields)!;
+            groupField.SetValue(plugin, session);
+            bool rejected = false;
+            try
+            {
+                var targets = new Dictionary<string, OrderedSimulationTarget> { ["piper-1"] = new(new double[6], 20) };
+                await (Task)typeof(PipersPlugin).GetMethod("SendGroupTargets", fields)!.Invoke(plugin,
+                    [session, targets, CancellationToken.None, false])!;
+            }
+            catch (InvalidOperationException error) when (error.Message.Contains("source expired after 250 ms", StringComparison.Ordinal))
+            { rejected = true; }
+            finally { groupField.SetValue(plugin, null); }
+            check(rejected && f.Rpc.Requests.IsEmpty,
+                "An ordered batch reached the arm after its source lease expired between planning and transport");
+        }
         await using (var f = new Fixture())
         {
             f.ConfigureGroup(); f.UseUiDispatcher(); f.DelayedRuntimeAction = "cancel-start";

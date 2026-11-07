@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Reflection;
 using System.Text.Json;
@@ -23,6 +24,7 @@ internal static class CalibrationSheetIntegrationTests
         var root = CalibrationPlacement.At(new(.1, .75, -.2), 0);
         (double Left, double Back)[] marks = [(697.0, 200.0), (800.0, 450.0), (900.0, 120.0), (800.0, 440.0), (903.0, 350.0)];
         int point = 0;
+        bool sharedRoot = false;
         var device = new JsonObject
         {
             ["id"] = "can-a", ["generation"] = 7L, ["fresh"] = true,
@@ -44,7 +46,9 @@ internal static class CalibrationSheetIntegrationTests
             {
                 ["sceneId"] = "fixture-scene", ["entityId"] = "fixture-robot", ["modelAssetId"] = "fixture-model", ["modelRevision"] = "fixture-revision",
                 ["metricPlacementSupported"] = true, ["metricFrame"] = "engine-world-y-up", ["rootPlacement"] = root.Json(),
-                ["joints"] = new JsonArray(Enumerable.Range(1, 6).Select(i => (JsonNode)new JsonObject { ["name"] = "joint" + i, ["unit"] = "rad", ["position"] = 0.0 }).ToArray()),
+                ["joints"] = new JsonArray((sharedRoot ? new[] { "", "opposite_" } : [""]).SelectMany(prefix =>
+                    Enumerable.Range(1, sharedRoot ? 8 : 6).Select(i => (JsonNode)new JsonObject
+                    { ["name"] = prefix + "joint" + i, ["unit"] = i <= 6 ? "rad" : "m", ["position"] = 0.0 })).ToArray()),
                 ["toolSites"] = new JsonArray(new[] { "grasp_site", "calibration_jaw_tips" }.Select(name => (JsonNode)new JsonObject { ["name"] = name, ["unit"] = "m", ["position"] = tcp.Json() }).ToArray())
             };
         }
@@ -57,7 +61,11 @@ internal static class CalibrationSheetIntegrationTests
             return new() { ["applied"] = true, ["pose"] = Pose() };
         }
         JsonObject? view = null, patches = null;
-        var calls = new List<string>();
+        var calls = new ConcurrentQueue<string>();
+        var deskMarkers = new ConcurrentQueue<(string Id, string Label, bool Framed)>();
+        var deskMarkerReached = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseDeskMarker = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        int pauseDeskMarker = 0;
         var context = (PluginContext)Activator.CreateInstance(typeof(PluginContext), hidden, null,
             [new PluginStart("fixture", folder, folder),
                 (Func<object, CancellationToken, Task>)((message, _) =>
@@ -67,9 +75,18 @@ internal static class CalibrationSheetIntegrationTests
                     if (json["type"]?.GetValue<string>() == "patch") patches = json["widgets"]!.AsObject();
                     return Task.CompletedTask;
                 }),
-                (Func<string, JsonObject, CancellationToken, Task<JsonElement>>)((method, arguments, _) =>
+                (Func<string, JsonObject, CancellationToken, Task<JsonElement>>)(async (method, arguments, ct) =>
                 {
-                    calls.Add(method); Fresh();
+                    calls.Enqueue(method); Fresh();
+                    if (method == "robot.highlightReference" && arguments["markerId"]?.GetValue<string>() is { } markerId)
+                    {
+                        deskMarkers.Enqueue((markerId, arguments["label"]?.GetValue<string>() ?? "", arguments["frame"]?.GetValue<bool>() == true));
+                        if (Interlocked.Exchange(ref pauseDeskMarker, 0) != 0)
+                        {
+                            deskMarkerReached.TrySetResult();
+                            await releaseDeskMarker.Task.WaitAsync(ct);
+                        }
+                    }
                     JsonObject response = method switch
                     {
                         "robot.read" => Pose(),
@@ -79,11 +96,11 @@ internal static class CalibrationSheetIntegrationTests
                         "robot.teleoperate" when arguments["enabled"]?.GetValue<bool>() == false => new() { ["enabled"] = false },
                         _ => throw new InvalidOperationException("Unexpected engine mutation: " + method)
                     };
-                    return Task.FromResult(JsonSerializer.SerializeToElement(response));
+                    return JsonSerializer.SerializeToElement(response);
                 })], null)!;
         Set("engine", context); Set("token", "fixture-session"); Set("state", snapshot); Fresh();
         Set("link", new RobotLink("fixture-scene", "fixture-robot", Pose()["joints"]!.AsArray(), device));
-        Set("linkBackendToken", "fixture-session"); Set("workspacePage", "calibration"); Set("calibrationOpen", true);
+        Set("linkBackendToken", "fixture-session"); Set("workspacePage", "settings"); Set("settingsCategory", "bench"); Set("calibrationOpen", true);
         IEnumerable<JsonObject> Walk(JsonObject node)
         {
             yield return node;
@@ -99,12 +116,37 @@ internal static class CalibrationSheetIntegrationTests
         try
         {
             await Invoke("Render", CancellationToken.None); await Invoke("Update", CancellationToken.None);
+            var initialDraft = Get<CalibrationWizardDraft>("calibrationWizard");
+            string retiredNext = WorkspaceEventScope.Wrap(Get<long>("workspaceViewEpoch"), "piper-1", $"wizard.{initialDraft.Epoch}.next");
+            await plugin.HandleEventAsync(new("luckyrobots.pipers.controls", retiredNext, "click", JsonSerializer.SerializeToElement(true)), CancellationToken.None);
+            check(ReferenceEquals(initialDraft, Get<CalibrationWizardDraft>("calibrationWizard")) && calls.Count == 0,
+                "A retired wizard Next event still advanced a persisted draft or called the editor");
             foreach (var (field, value) in new[] { ("width", "1400"), ("depth", "700"), ("precision", "5") }) await Event("field." + field, value);
             for (int i = 0; i < marks.Length; i++)
             {
                 await Event($"field.p{i}left", marks[i].Left.ToString(System.Globalization.CultureInfo.InvariantCulture));
                 await Event($"field.p{i}back", marks[i].Back.ToString(System.Globalization.CultureInfo.InvariantCulture));
             }
+            Volatile.Write(ref pauseDeskMarker, 1);
+            Task renewal = Invoke("MaintainWizardHighlight", CancellationToken.None);
+            Task? selection = null;
+            try
+            {
+                await deskMarkerReached.Task.WaitAsync(TimeSpan.FromSeconds(2));
+                selection = Event("move.1");
+                check(!selection.IsCompleted && deskMarkers.Count == 1 && !Get<CalibrationWizardDraft>("calibrationWizard").Answers.ContainsKey("sheetselected"),
+                    "A manual selection changed state or published markers while the old background batch was still in flight");
+            }
+            finally { Fresh(); releaseDeskMarker.TrySetResult(); }
+            await Task.WhenAll(renewal, selection!).WaitAsync(TimeSpan.FromSeconds(3));
+            var publishedMarks = deskMarkers.ToArray();
+            string[] markerIds = Enumerable.Range(0, 5).Select(row => "desk-point-" + row).ToArray();
+            check(publishedMarks.Select(mark => mark.Id).SequenceEqual(markerIds.Concat(markerIds)) &&
+                publishedMarks.Take(5).Where(mark => mark.Label.EndsWith(" - SELECTED", StringComparison.Ordinal)).Select(mark => mark.Id).SequenceEqual(new[] { "desk-point-0" }) &&
+                publishedMarks.Skip(5).Where(mark => mark.Label.EndsWith(" - SELECTED", StringComparison.Ordinal) && mark.Framed).Select(mark => mark.Id).SequenceEqual(new[] { "desk-point-1" }) &&
+                Get<CalibrationWizardDraft>("calibrationWizard").Answers["sheetselected"] == "1",
+                "An old marker batch overtook or mixed with the newer selected cross");
+            await Event("move.0");
             await Event("left.show"); await Event("left.confirm"); await Event("back.show"); await Event("back.confirm");
             await Event("tool.show");
             await Invoke("MaintainWizardHighlight", CancellationToken.None);
@@ -153,6 +195,19 @@ internal static class CalibrationSheetIntegrationTests
             check(File.Exists(report) && JsonSerializer.Deserialize<CalibrationReport>(File.ReadAllText(report), PluginProtocol.Json)!.Samples.Length == 5, "Complete calibration samples did not survive report persistence");
             // Correct a ruler entry without reacquiring or rewriting physical evidence.
             var originalP2 = Get<List<CalibrationSample>>("calibrationSamples")[1];
+            string reportBeforeBlockedCorrection = File.ReadAllText(report);
+            foreach (var (row, left, back) in new[] { (1, "903", "375"), (4, "800", "425") })
+            {
+                await Event("move." + row);
+                await Event($"field.p{row}left", left); await Event($"field.p{row}back", back);
+                check(!CaptureEnabled(row) && Status(".sheet.row.status." + row).Contains("50 mm", StringComparison.Ordinal),
+                    "Editing either side of the check/reference pair within 50 mm did not block Save entry with the spacing reason");
+                await Event("capture." + row);
+                check(File.ReadAllText(report) == reportBeforeBlockedCorrection && Get<CalibrationFit>("calibrationFit") == fit &&
+                    Get<int>("sheetEditingRow") == row,
+                    "A stale Save entry click committed a correction inside the 50 mm check spacing");
+                await Event("move." + row);
+            }
             long editPage = Get<long>("workspaceViewEpoch");
             await Event("move.1"); await Event("field.p1left", "780");
             check(Get<List<CalibrationSample>>("calibrationSamples")[1] == originalP2 &&
@@ -215,6 +270,18 @@ internal static class CalibrationSheetIntegrationTests
             check(calls.All(c => c is "robot.read" or "robot.highlightReference" or "robot.highlightToolSite" or "robot.teleoperate"), "Calibration attempted a robot/scene mutation before Apply");
             check(root.Same(CalibrationPlacement.At(new(.1, .75, -.2), 0)), "Fit changed the scene before explicit Apply");
             point = marks.Length - 1;
+            sharedRoot = true;
+            Set("scene", new JsonObject { ["sceneId"] = "fixture-scene", ["robots"] = new JsonArray(Pose()) });
+            await Invoke("Render", CancellationToken.None);
+            check(Walk(view!).Any(w => w["id"]!.GetValue<string>().EndsWith(".calibration.branch.explanation", StringComparison.Ordinal)),
+                "The unprefixed arm of a compound entity presented an independent calibration sheet");
+            Set("scene", null);
+            await Invoke("Render", CancellationToken.None);
+            await Event("apply");
+            check(!calls.Contains("robot.placement") && !Get<bool>("calibrationPlacementUnverified") &&
+                Get<string>("uiActionError").Contains("move every arm", StringComparison.Ordinal),
+                "A compound model discovered in the live pose was allowed to write its shared root");
+            sharedRoot = false;
             await Event("apply");
             check(root.Same(fit.ProposedPlacement) && Get<CalibrationPlacement>("calibrationApplied").Same(root), "Actual Apply event did not install and verify the proposed scene root");
             check(!Get<bool>("calibrationPlacementUnverified") && calls.Count(c => c == "robot.placement") == 1, "Apply remained unverified or repeated its scene write");

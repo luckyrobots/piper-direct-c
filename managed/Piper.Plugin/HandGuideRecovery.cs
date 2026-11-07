@@ -125,29 +125,7 @@ public sealed partial class PipersPlugin
     private bool handGuideRecoveryCommandSent;
     private bool recoveryGuideOpen;
     private string recoveryGuideScope = "";
-    private volatile bool supportedRecoveryBusy;
-    private CancellationTokenSource? supportedRecoveryCancellation;
-    private Task? supportedRecoveryWorker;
     private JsonObject? supportedRecoveryStop;
-    private volatile bool supportedRecoveryResetting;
-    private string supportedRecoveryBackend = "", supportedRecoveryDevice = "", supportedRecoveryProfile = "";
-    private long supportedRecoveryGeneration, supportedRecoveryPermission, supportedRecoveryResetAt;
-
-    private bool SupportedRecoveryExpectedGap(TelemetryReceipt? receipt)
-    {
-        long now = Stopwatch.GetTimestamp();
-        if (!supportedRecoveryBusy || !supportedRecoveryResetting || supportedRecoveryCancellation?.IsCancellationRequested == true || supportedRecoveryResetAt == 0 ||
-            Stopwatch.GetElapsedTime(supportedRecoveryResetAt, now).TotalSeconds > 5 ||
-            token != supportedRecoveryBackend || ActiveProfile.Id != supportedRecoveryProfile ||
-            supportedRecoveryPermission != CommandAuthority.Epoch ||
-            receipt is null || receipt.BackendToken != supportedRecoveryBackend || !receipt.IsFresh(now) ||
-            receipt.State["selected"]?.GetValue<string>() != supportedRecoveryDevice) return false;
-        var device = receipt.State["devices"]?.AsArray().OfType<JsonObject>().SingleOrDefault(d => d["id"]?.GetValue<string>() == supportedRecoveryDevice);
-        return device?["generation"]?.GetValue<long>() == supportedRecoveryGeneration && device["present"]?.GetValue<bool>() == true &&
-            device["up"]?.GetValue<bool>() == true && device["status"]?["error"]?.GetValue<int>() == 0 &&
-            device["status"]?["arm_status"]?.GetValue<int>() is 0 or 1 && device["joints"] is JsonArray { Count: 6 } joints &&
-            joints.All(j => j?["fault"]?.GetValue<int>() == 0) && !receipt.HasFreshDevice(device, now);
-    }
 
     private string RecoveryConnectionIdentity(JsonObject device) => token + ":" + ActiveProfile.Id + ":" +
         device["id"]?.GetValue<string>() + ":" + device["generation"]?.GetValue<long>();
@@ -157,7 +135,7 @@ public sealed partial class PipersPlugin
     private RecoveryWorkspaceState RecoveryCardState(JsonObject? device) => RecoveryWorkspaceState.Inspect(device,
         state?["motion"]?["active"]?.GetValue<bool>() == true, recoveryInProgress || supportedRecoveryBusy && RecoveryGuideFor(device));
 
-    private bool RecoveryCardCanRun(RecoveryWorkspaceState view) => view.CanAct && !switchingProfile && !recoveryHomeBusy && !teachingResetBusy && !SimulationFollowingActive;
+    private bool RecoveryCardCanRun(RecoveryWorkspaceState view) => view.CanAct && !switchingProfile && CurrentRecovery is null && !GroupFollowActive;
 
     private async Task RunRecoveryCard(CancellationToken cancellation)
     {
@@ -172,7 +150,7 @@ public sealed partial class PipersPlugin
             switch (view.NextAction)
             {
                 case RecoveryWorkspaceAction.SupportedStop:
-                    StartSupportedStopRecovery(device);
+                    StartSupportedStopRecovery(device, permissionEpoch, cancellation);
                     break;
                 case RecoveryWorkspaceAction.Disable:
                     approved = linkCommandsEnabled = false; ForgetControlApproval();
@@ -225,7 +203,7 @@ public sealed partial class PipersPlugin
 
     private void CancelHandGuideRecovery()
     {
-        try { supportedRecoveryCancellation?.Cancel(); } catch (ObjectDisposedException) { }
+        CurrentRecovery?.Cancel();
         supportedRecoveryStop = null;
         recoveryGuideOpen = false; recoveryGuideScope = "";
         handGuideRecovery = null;
@@ -235,7 +213,7 @@ public sealed partial class PipersPlugin
 
     private async Task ObserveHandGuideRecovery(CancellationToken cancellation)
     {
-        if (supportedRecoveryBusy || (!recoveryGuideOpen && handGuideRecovery is null) || switchingProfile || calibrationOpen || !HasFreshControlTelemetry(out _)) return;
+        if (CurrentRecovery is not null || GroupFollowActive || (!recoveryGuideOpen && handGuideRecovery is null) || switchingProfile || calibrationOpen || !HasFreshControlTelemetry(out _)) return;
         long expectedPermission = CommandAuthority.Epoch;
         var device = Device();
         if (recoveryGuideScope != RecoveryConnectionIdentity(device)) { CancelHandGuideRecovery(); return; }
@@ -269,8 +247,10 @@ public sealed partial class PipersPlugin
         try
         {
             device = Device();
-            if (!gate.Observe(RecoveryIdentity(device), TeachingState.Inspect(device), device["teaching"]?["can_recover_at_pose"]?.GetValue<bool>() == true)) return;
-            await Command("recover-at-pose", new() { ["button_off"] = true, ["same_pose_confirmed"] = true }, cancellation, recoveryAcknowledged: true);
+            if (GroupFollowActive || !ReferenceEquals(handGuideRecovery, gate) ||
+                !gate.Observe(RecoveryIdentity(device), TeachingState.Inspect(device), device["teaching"]?["can_recover_at_pose"]?.GetValue<bool>() == true)) return;
+            await Command("recover-at-pose", new() { ["button_off"] = true, ["same_pose_confirmed"] = true }, cancellation,
+                recoveryAcknowledged: true, expectedPermissionEpoch: expectedPermission);
             handGuideRecoveryCommandSent = true;
             handGuideRecoveryMessage = "Restoring holding control at the measured pose · no power change, homing or replay";
         }
@@ -278,34 +258,22 @@ public sealed partial class PipersPlugin
         finally { commands.Release(); }
     }
 
-    private void StartSupportedStopRecovery(JsonObject initial)
+    private void StartSupportedStopRecovery(JsonObject initial, long permissionEpoch, CancellationToken cancellation)
     {
-        if (supportedRecoveryBusy) throw new InvalidOperationException("Supported recovery is already in progress.");
-        string expectedToken = token, expectedProfile = ActiveProfile.Id, expectedDevice = initial["id"]!.GetValue<string>();
-        long expectedGeneration = initial["generation"]!.GetValue<long>(), expectedPermission = CommandAuthority.Epoch;
-        supportedRecoveryBackend = expectedToken; supportedRecoveryDevice = expectedDevice; supportedRecoveryProfile = expectedProfile;
-        supportedRecoveryGeneration = expectedGeneration; supportedRecoveryPermission = expectedPermission;
-        supportedRecoveryResetting = false; supportedRecoveryResetAt = 0;
+        var operation = BeginRecovery(RecoveryKind.HoldHere, initial, permissionEpoch, cancellation);
+        var scope = operation.Scope;
         supportedRecoveryStop = initial["stop_event"] is JsonObject stopped ? (JsonObject)stopped.DeepClone() : new JsonObject { ["reason"] = initial["stop_reason"]?.DeepClone() };
-        supportedRecoveryCancellation?.Dispose();
-        supportedRecoveryCancellation = CancellationTokenSource.CreateLinkedTokenSource(shutdown.Token);
-        var operation = supportedRecoveryCancellation;
-        supportedRecoveryBusy = true;
-        approved = linkCommandsEnabled = false; ForgetControlApproval();
-        CommandAuthority.ClearTracked();
-        followRequest = 0; followInput.End();
         handGuideRecoveryMessage = "Supported recovery starting. Keep the arm supported; Cancel or Disable interrupts this sequence.";
-        supportedRecoveryWorker = Task.Run(async () =>
+        operation.Worker = Task.Run(async () =>
         {
             bool entered = false;
+            bool completedHolding = false;
             string finalStatus = handGuideRecoveryMessage;
             bool SameIdentity()
             {
                 var receipt = telemetry.Latest;
-                if (token != expectedToken || ActiveProfile.Id != expectedProfile || ActiveProfile.CanDeviceId != expectedDevice ||
-                    expectedPermission != CommandAuthority.Epoch || receipt is null || receipt.BackendToken != expectedToken ||
-                    receipt.State["selected"]?.GetValue<string>() != expectedDevice) return false;
-                return receipt.State["devices"]?.AsArray().OfType<JsonObject>().SingleOrDefault(d => d["id"]?.GetValue<string>() == expectedDevice)?["generation"]?.GetValue<long>() == expectedGeneration;
+                return RecoveryScopeCurrent(operation) && receipt is not null &&
+                    TelemetryScope.Read(receipt.State, scope.Device) == new TelemetryScope(scope.Backend, scope.Device, scope.Generation);
             }
             void Progress(string status)
             {
@@ -317,11 +285,11 @@ public sealed partial class PipersPlugin
                 await commands.WaitAsync(operation.Token); entered = true;
                 SupportedRecoverySnapshot Read()
                 {
-                    if (ActiveProfile.Id != expectedProfile || token != expectedToken || expectedPermission != CommandAuthority.Epoch)
+                    if (!RecoveryScopeCurrent(operation))
                         throw new InvalidOperationException("Recovery cancelled because robot identity or control permission changed. No previous target will resume.");
                     var receipt = telemetry.Latest ?? throw new InvalidOperationException("Waiting for live recovery feedback.");
-                    bool expectedGap = SupportedRecoveryExpectedGap(receipt);
-                    var device = expectedGap ? RobotProfileRouting.Device(preferences, receipt.State) : Device(expectedDevice, expectedGeneration, expectedToken, receipt);
+                    bool expectedGap = RecoveryExpectedGap(receipt);
+                    var device = expectedGap ? RobotProfileRouting.Device(preferences, receipt.State) : Device(scope.Device, scope.Generation, scope.Backend, receipt);
                     if (expectedGap) { device = (JsonObject)device.DeepClone(); device["fresh"] = false; }
                     return new(device, receipt.State["motion"]?["active"]?.GetValue<bool>() == true,
                         receipt.State["motion"]?["request_id"]?.GetValue<long>() ?? 0, receipt.Sequence, receipt.ReceivedTicks, expectedGap);
@@ -332,22 +300,27 @@ public sealed partial class PipersPlugin
                     // Only reset's bounded missing-feedback interval is expected.
                     // Every command below still calls Device() and rejects stale
                     // evidence; only the runner's wait can consume a gap marker.
-                    if (action == "reset") { supportedRecoveryResetAt = Stopwatch.GetTimestamp(); supportedRecoveryResetting = true; }
-                    else supportedRecoveryResetting = false;
+                    Volatile.Write(ref operation.ResetAt, action == "reset" ? Stopwatch.GetTimestamp() : 0);
                     var result = await Command(action, null, ct, recoveryAcknowledged: action != "disable",
-                        expectedDeviceId: expectedDevice, expectedGeneration: expectedGeneration, expectedToken: expectedToken,
-                        expectedPermissionEpoch: expectedPermission);
+                        expectedDeviceId: scope.Device, expectedGeneration: scope.Generation, expectedToken: scope.Backend,
+                        expectedPermissionEpoch: operation.Epoch);
                     return new(result["request_id"]?.GetValue<long>() ?? 0, telemetry.Latest?.Sequence ?? 0, Stopwatch.GetTimestamp());
                 }
                 bool held = await SupportedStopRecovery.Run(Read, Send, async ct =>
                 {
-                    _ = Read(); approved = true;
-                    await Enable(ct, includePika: false, expectedDeviceId: expectedDevice, expectedGeneration: expectedGeneration, expectedToken: expectedToken);
-                    _ = Read(); RememberControlApproval(expectedPermission);
+                    _ = Read();
+                    GrantRecoveryHolding(operation, ct);
+                    await Enable(ct, includePika: false, expectedDeviceId: scope.Device, expectedGeneration: scope.Generation,
+                        expectedToken: scope.Backend, expectedPermissionEpoch: operation.Epoch);
                 }, Progress, operation.Token);
                 if (SameIdentity())
                 {
-                    if (held) { handGuideRecovery = null; handGuideRecoveryCommandSent = false; recoveryGuideOpen = false; }
+                    if (held)
+                    {
+                        CompleteRecoveryHolding(operation);
+                        completedHolding = true;
+                        handGuideRecovery = null; handGuideRecoveryCommandSent = false; recoveryGuideOpen = false;
+                    }
                     message = finalStatus;
                 }
             }
@@ -355,7 +328,13 @@ public sealed partial class PipersPlugin
             catch (Exception error) { Progress("Recovery paused: " + error.Message); }
             finally
             {
-                supportedRecoveryResetting = false; supportedRecoveryResetAt = 0; supportedRecoveryBusy = false;
+                if (!completedHolding)
+                    CommandAuthority.TryInEpoch(operation.Epoch, () =>
+                    {
+                        approved = linkCommandsEnabled = false;
+                        CommandAuthority.ForgetApproval(scope.ProfileId);
+                    });
+                RetireRecovery(operation);
                 if (entered) commands.Release();
             }
         }, CancellationToken.None);

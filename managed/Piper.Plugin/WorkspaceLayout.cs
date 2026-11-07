@@ -7,10 +7,10 @@ public sealed partial class PipersPlugin
 {
     private Task Render(CancellationToken cancellation) => PublishWorkspaceView(cancellation);
 
-    private Widget BuildWorkspaceView(bool showClearanceConfirmation)
+    private Widget BuildWorkspaceView(bool showClearanceConfirmation, SimulationCameraChoices cameraChoices)
     {
         Widget body = workspacePage switch {
-            "settings" => SettingsPage(), "calibration" => CalibrationSheetControls(),
+            "settings" => SettingsPage(cameraChoices),
             "recording" => RecordingPage(), "replay" => ReplayPage(), "camera" => CameraDetailPage(), _ => ControlsPage() };
         var content = Widget.Column("controls",
             Widget.Column("header", Widget.Row("header.title", Widget.Label("workspace.robot-name", ActiveProfile.Name) with { Appearance = "heading", Height = 30 },
@@ -30,6 +30,7 @@ public sealed partial class PipersPlugin
                 Widget.Label("recovery.requirements", "") with { Height = 96 },
                 Widget.Label("recovery.feedback", "") with { Height = 56, Visible = false },
                 Widget.Button("recovery.card.run", "Open recovery") with { Enabled = false, Hint = "The current recovery step and unmet conditions appear above." },
+                Widget.Button("recovery.home", "Arm resting, path clear — recover to zero") with { Enabled = false },
                 Widget.Button("recovery.guide.cancel", "Cancel recovery guide") with { Visible = false, Appearance = "quiet" }) with { Visible = false, Padding = 12, Appearance = "panel" },
             body, Widget.Label("status", "Connecting…") with { Height = 28, Appearance = "muted" }) with { Padding = 18, Spacing = 12 };
         return Widget.Row("workspace", RobotSidebar(), content) with { Spacing = 0 };
@@ -70,10 +71,10 @@ public sealed partial class PipersPlugin
         return Widget.Column("workspace.controls.body", widgets.ToArray()) with { Spacing = 10 };
     }
 
-    private Widget SettingsPage()
+    private Widget SettingsPage(SimulationCameraChoices cameraChoices)
     {
         Widget section = settingsCategory switch {
-            "cameras" => Widget.Column("global.cameras", SettingsRobotPicker("cameras"), CameraSettingsPage()),
+            "cameras" => Widget.Column("global.cameras", SettingsRobotPicker("cameras"), CameraSettingsPage(cameraChoices)),
             "bench" => Widget.Column("global.bench", Widget.Label("global.bench.shared", "Shared desk reference · each arm keeps its own mounting alignment") with { Height = 32, Appearance = "muted" },
                 SettingsRobotPicker("bench"), CalibrationSheetControls()),
             "controller" => BackendSetup(),
@@ -82,7 +83,6 @@ public sealed partial class PipersPlugin
                 Widget.Label("pika.monitor", pikaMonitorStatus) with { Height = 42 }, BackendSetup(),
                 Widget.Button("workspace.connection-details", connectionDetailsOpen ? "Hide advanced controller actions" : "Advanced controller actions") with { Appearance = "quiet" },
                 Widget.Column("global.advanced", Widget.Button("recovery.run", "Verify controller state"),
-                    Widget.Button("recovery.home", "Resting & clear — recover to zero"),
                     Widget.Label("profiles.can.status", "") with { Height = 42 }, PikaReferenceControls()) with { Visible = connectionDetailsOpen }),
             _ => GlobalRobotsSettings()
         };

@@ -67,7 +67,7 @@ internal static class WorkspaceViewTests
                 "A shared event bypassed the rendered-view scope: " + id);
         }
 
-        foreach (string id in new[] { "stop", "disable", "recovery.guide.cancel", "teaching.reset.abort", "motion.hold" })
+        foreach (string id in new[] { "stop", "disable", "recovery.guide.cancel", "motion.hold" })
         {
             string wire = WorkspaceEventScope.Wrap(epoch, profile, id);
             check(wire == "robot.piper-1." + id, "Persistent hold/stop gained a page epoch: " + id);
@@ -102,7 +102,7 @@ internal static class WorkspaceViewTests
 
         foreach (string id in new[]
         {
-            "stop", "motion.hold", "teaching.reset.abort", "disable", "recovery.run", "calibration.capture", "calibration.inspect", "camera.bench.settings", "profiles.select.piper-2"
+            "stop", "motion.hold", "disable", "recovery.run", "calibration.capture", "calibration.inspect", "camera.bench.settings", "profiles.select.piper-2"
         })
             check(!WorkspaceCommandPolicy.RequiresControls(id), "A stop, passive setup or explicit recovery action required the controls page: " + id);
     }
@@ -144,18 +144,26 @@ internal static class WorkspaceViewTests
             foreach (var child in node["children"]?.AsArray().OfType<JsonObject>() ?? [])
                 foreach (var descendant in Walk(child)) yield return descendant;
         }
+        string WidgetId(string suffix) => Walk(rendered!).Single(n => n["id"]!.GetValue<string>().EndsWith("." + suffix, StringComparison.Ordinal))["id"]!.GetValue<string>();
+        Task Click(string id, int? selection = null) => plugin.HandleEventAsync(new("luckyrobots.pipers.controls", id,
+            selection.HasValue ? "change" : "click", JsonSerializer.SerializeToElement(selection)), CancellationToken.None);
+        static JsonObject CameraInventory(string sceneId, params string[] ids) => new()
+        {
+            ["sceneId"] = sceneId, ["cameras"] = new JsonArray(ids.Select(id => (JsonNode)new JsonObject { ["entityId"] = id, ["name"] = id }).ToArray())
+        };
         int Depth(JsonObject node) => 1 + (node["children"]?.AsArray().OfType<JsonObject>().Select(Depth).DefaultIfEmpty(0).Max() ?? 0);
         async Task CheckView(string page, string category = "robot", string camera = "bench")
         {
             Set("workspacePage", page); Set("settingsCategory", category); Set("settingsCamera", camera); Set("cameraDetail", camera);
-            Set("calibrationOpen", page == "calibration");
+            bool calibration = page == "settings" && category == "bench";
+            Set("calibrationOpen", calibration);
             await Invoke("Render", CancellationToken.None);
             var nodes = Walk(rendered!).ToArray();
             string[] ids = nodes.Select(n => n["id"]!.GetValue<string>()).ToArray();
             string label = page + "/" + category + "/" + camera;
             check(ids.Distinct(StringComparer.Ordinal).Count() == ids.Length, "Duplicate widget IDs in rendered " + label);
             check(ids.Length <= 2048 && Depth(rendered!) <= 24, "Rendered view exceeds public SDK limits: " + label);
-            if (page == "calibration")
+            if (calibration)
             {
                 check(Enumerable.Range(0, 5).All(row => ids.Any(id => id.EndsWith("sheet.capture." + row, StringComparison.Ordinal))), "The calibration sheet hides uncaptured rows behind navigation");
                 check(Enumerable.Range(0, 5).All(row => new[] { "left", "back" }.All(axis => ids.Any(id => id.EndsWith($"sheet.field.p{row}{axis}", StringComparison.Ordinal)))), "All five measurement pairs must be editable on one page");
@@ -217,6 +225,44 @@ internal static class WorkspaceViewTests
                 await CheckView("settings", "cameras", camera);
                 await CheckView("camera", camera: camera);
             }
+
+            Set("cameraStreamDetailsOpen", true);
+            Set("simulationCameras", CameraInventory("source-a", "camera-a", "camera-b"));
+            await CheckView("settings", "cameras");
+            string selector = WidgetId("camera.bench.simselect");
+            Set("simulationCameras", CameraInventory("source-a", "camera-b", "camera-a"));
+            await Click(selector, 1);
+            check(Get<Preferences>("preferences").SimulationCameras?.GetValueOrDefault("bench") is { CameraId: "camera-a", SceneId: "source-a" },
+                "A reordered camera inventory routed a rendered selection to the wrong camera");
+            Set("simulationCameras", CameraInventory("source-a", "camera-b"));
+            await Click(selector, 1);
+            check(Get<Preferences>("preferences").SimulationCameras?.GetValueOrDefault("bench")?.CameraId == "camera-a" &&
+                Get<string>("uiActionError").Contains("Simulation cameras changed", StringComparison.Ordinal),
+                "A removed camera selection silently rebound the bench preview");
+            Set("simulationCameras", CameraInventory("source-b", "camera-a", "camera-b"));
+            await Click(selector, 0);
+            check(Get<Preferences>("preferences").SimulationCameras?.GetValueOrDefault("bench")?.SceneId == "source-a",
+                "An Automatic selection from an old scene changed the new scene's binding");
+
+            var groupType = typeof(PipersPlugin).GetNestedType("GroupSession", BindingFlags.NonPublic)!;
+            var lanes = Array.CreateInstance(groupType.GetField("Lanes")!.FieldType.GetElementType()!, 0);
+            var group = Activator.CreateInstance(groupType, flags | BindingFlags.Public, null,
+                [Get<string>("token"), "source-a", "robot-a", "asset-a", "revision-a", lanes, Get<long>("groupInputEpoch"), TimeProvider.System], null)!;
+            Set("groupSimulation", group);
+            try
+            {
+                await CheckView("settings", "cameras");
+                long before = Get<long>("workspaceViewEpoch");
+                string back = WidgetId("workspace.controls@settings");
+                await Click(WidgetId("workspace.settings.bench"));
+                check(Get<string>("settingsCategory") == "cameras" && Get<long>("workspaceViewEpoch") == before &&
+                    Get<string>("uiActionError").Contains("Stop following", StringComparison.Ordinal),
+                    "Rejected Bench navigation mutated the published camera page");
+                await Click(back);
+                check(Get<string>("workspacePage") == "controls" && Get<long>("workspaceViewEpoch") > before,
+                    "The old page became unclickable after rejected Bench navigation");
+            }
+            finally { Set("groupSimulation", null); }
             await CheckView("recording");
             Set("replayArtifact", EpisodeReplayTests.ValidArtifact());
             Set("replayProfile", "piper-1");
@@ -232,7 +278,7 @@ internal static class WorkspaceViewTests
                 Set("wizardProfile", "piper-1");
                 Set("calibrationWizard", CalibrationWizardFlow.New("piper-1") with { Step = step });
                 Set("calibrationArchiveConfirmation", step == CalibrationWizardStep.InspectSaved);
-                await CheckView("calibration");
+                await CheckView("settings", "bench");
             }
 
             // Exercise the actual edit/save/reload path without starting any

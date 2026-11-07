@@ -175,7 +175,7 @@ internal static class TelemetryPipelineTests
             await Until(() => Volatile.Read(ref sceneRequests) > beforeGhost && Get<string>("sceneTrackingStatus").StartsWith("Leader target + measured ghost", StringComparison.Ordinal), "Native leader/ghost feedback was not recognized");
             check(Get<bool>("teleoperating") && Get<bool>("linkCommandsEnabled") && Get<long>("followRequest") == 7 && authority.Current.Lease?.Request == 7,
                 "Expected native applied:false leader/ghost feedback stopped a valid drag or finishing target");
-            check(Get<JsonObject?>("acknowledgedScenePose") is null && Get<long>("acknowledgedSceneAt") == 0,
+            check(Get<JsonObject?>("acknowledgedScenePose") is null,
                 "Leader/ghost feedback was incorrectly promoted to a calibration pose acknowledgement");
             Volatile.Write(ref editorMode, 2);
             await Until(() => !Get<bool>("teleoperating"), "A remote teleoperation stop did not pause local following");
@@ -228,16 +228,15 @@ internal static class TelemetryPipelineTests
             try { await producer; } catch (OperationCanceledException) { }
             try { await watching; } catch (OperationCanceledException) { }
 
-            // An inactive reset stage must let shutdown reach active recovery.
-            // Keep its worker pending until we can verify it is being drained.
+            // Keep the shared recovery worker pending until we can verify it is drained.
             using var recoveryCancellation = new CancellationTokenSource();
             var recoveryCancelled = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             var recoveryFinished = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             using var registration = recoveryCancellation.Token.Register(() => recoveryCancelled.TrySetResult());
             var shutdown = Get<CancellationTokenSource>("shutdown");
-            Set("teachingResetWorker", Task.CompletedTask);
-            Set("recoveryHomeCancellation", recoveryCancellation);
-            Set("recoveryHomeWorker", recoveryFinished.Task);
+            var recovery = new PipersPlugin.RecoveryOperation(PipersPlugin.RecoveryKind.ReturnToZero, commandScope,
+                authority.Epoch, recoveryCancellation) { Worker = recoveryFinished.Task };
+            Set("recoveryOperation", recovery);
             Task disposal = plugin.DisposeAsync().AsTask();
             try
             {
@@ -252,6 +251,7 @@ internal static class TelemetryPipelineTests
             }
             check(shutdown.IsCancellationRequested, "Disposal did not finish shutdown after recovery drained");
         }
+        await PikaShutdownTests.Run(check);
     }
 
     private sealed class FakeCalls(ChannelReader<StateFrame> frames) : CallInvoker

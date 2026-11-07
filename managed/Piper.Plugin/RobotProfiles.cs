@@ -9,7 +9,10 @@ namespace LuckyRobots.Piper.Plugin;
 public sealed record RobotProfile(string Id, string Name, string CanDeviceId = "", double Speed = 10, double Step = 1, double Tolerance = .5,
     string RobotId = "", CameraPreferences? Gripper = null, CameraPreferences? Depth = null, string DepthSerial = "",
     Dictionary<string, SimulationCameraPreferences>? SimulationCameras = null, string PikaDevice = "", string WslDistribution = "Ubuntu", int CameraSlot = -1,
-    AlignmentReference? Alignment = null, bool? RememberMeasuredLink = null, string SimulationTransport = SimulationTrajectoryTransport.PositionVelocity, string RobotJointPrefix = "", bool FollowSimulationSelected = false);
+    AlignmentReference? Alignment = null, bool? RememberMeasuredLink = null, string SimulationTransport = SimulationTrajectoryTransport.PositionVelocity, string RobotJointPrefix = "", bool FollowSimulationSelected = false)
+{
+    internal string? PikaDistribution => OperatingSystem.IsWindows() ? WslDistribution : null;
+}
 
 /// <summary>Persistent identity and settings projection, independent of the editor and hardware.</summary>
 public static class RobotProfileRouting
@@ -240,30 +243,13 @@ public sealed partial class PipersPlugin
         patches["profiles.can.status"] = new() { ["text"] = string.IsNullOrEmpty(can) ? "No CAN adapter assigned · scene and robot cameras can still be configured."
             : snapshotSelected() == can ? "Active CAN · " + can : "Assigned CAN inactive or disconnected · " + can };
         string snapshotSelected() => state?["selected"]?.GetValue<string>() ?? "";
-        patches["enable"] = new() { ["enabled"] = !switchingProfile && can.Length > 0 && snapshotSelected() == can };
     }
 
-    private async Task ProfileEvent(string action, JsonElement value, CancellationToken cancellation)
+    private async Task ProfileEvent(string action, CancellationToken cancellation)
     {
         // An explicit profile edit/selection supersedes the one-time legacy
         // import, even if controller feedback has not arrived yet.
         legacyImportPending = false;
-        if (action == "name")
-        {
-            var profile = ActiveProfile with { Name = RobotProfileRouting.CleanName(value.GetString() ?? "") };
-            preferences = preferences with { Robots = preferences.Robots!.Select(p => p.Id == profile.Id ? profile : p).ToArray() };
-            await Save(cancellation); return;
-        }
-        if (action is "pika" or "wsl")
-        {
-            var profile = action == "pika" ? ActiveProfile with { PikaDevice = value.GetString()?.Trim() ?? "" } : ActiveProfile with { WslDistribution = value.GetString()?.Trim() ?? "" };
-            PikaProcessService.ValidateConfiguration(profile.PikaDevice, OperatingSystem.IsWindows() ? profile.WslDistribution : null);
-            if (profile.PikaDevice.Length > 0 && preferences.Robots!.Any(p => p.Id != profile.Id && p.PikaDevice == profile.PikaDevice && p.WslDistribution == profile.WslDistribution))
-                throw new InvalidOperationException("That Pika serial device is assigned to another robot.");
-            await ReleaseProfileControl(cancellation);
-            preferences = preferences with { Robots = preferences.Robots!.Select(p => p.Id == profile.Id ? profile : p).ToArray() };
-            await Save(cancellation); message = "Pika assignment saved. Enable this robot to connect its selected gripper."; return;
-        }
         if (action == "add")
         {
             if (preferences.Robots!.Length >= RobotProfileRouting.MaximumProfiles) throw new InvalidOperationException("At most eight robots are supported in this workspace.");
@@ -271,29 +257,12 @@ public sealed partial class PipersPlugin
                 Gripper: new("", false), Depth: new("", false), CameraSlot: Enumerable.Range(0, RobotProfileRouting.MaximumProfiles).First(i => preferences.Robots.All(p => p.CameraSlot != i)));
             await SwitchProfile(profile, append: true, cancellation); return;
         }
-        if (action == "remove")
-        {
-            if (preferences.Robots!.Length <= 1) throw new InvalidOperationException("Keep at least one robot profile.");
-            string removed = ActiveProfile.Id;
-            await SwitchProfile(preferences.Robots.First(p => p.Id != removed), false, cancellation);
-            preferences = preferences with { Robots = preferences.Robots!.Where(p => p.Id != removed).ToArray() };
-            await Save(cancellation); return;
-        }
         if (action.StartsWith("select.", StringComparison.Ordinal))
         {
             var profile = RobotProfileRouting.Capture(preferences).Robots!.Single(p => p.Id == action[7..]);
             await SwitchProfile(profile, false, cancellation); return;
         }
-        if (action == "activate") { await SwitchProfile(ActiveProfile, false, cancellation); return; }
-        if (action == "can")
-        {
-            int index = value.GetInt32() - 1;
-            var choices = knownCanIds;
-            if (index < -1 || index >= choices.Length) throw new InvalidOperationException("CAN selection is no longer available.");
-            string canId = index < 0 ? "" : choices[index];
-            RobotProfileRouting.ValidateCanAssignment(preferences, ActiveProfile.Id, canId);
-            await SwitchProfile(ActiveProfile with { CanDeviceId = canId }, false, cancellation);
-        }
+        throw new InvalidOperationException("Unknown robot profile action.");
     }
 
     private async Task ReleaseProfileControl(CancellationToken cancellation)
@@ -328,31 +297,6 @@ public sealed partial class PipersPlugin
         CancelHandGuideRecovery();
     }
 
-    private async Task ReleaseOwnPika(CancellationToken cancellation)
-    {
-        if (state?["pika"]?["owner"]?.GetValue<string>() != owner)
-        {
-            pikaOwned = pikaMonitoring = false;
-            return; // Never disable or disconnect a foreign client's agent.
-        }
-        if (!PikaMatchesProfile()) throw new InvalidOperationException("Pika assignment changed outside this robot profile. Reconnect its original assignment before switching.");
-        if (pikaOwned || state?["pika"]?["power_requested"]?.GetValue<bool>() == true)
-        {
-            await Call("/api/pika/disable", new JsonObject { ["owner"] = owner }, cancellation);
-            long started = Stopwatch.GetTimestamp();
-            while (state?["pika"]?["fresh"]?.GetValue<bool>() != true || state["pika"]?["enabled"]?.GetValue<bool>() != false)
-            {
-                if (Stopwatch.GetElapsedTime(started).TotalSeconds > 3) throw new InvalidOperationException("Pika disable is not verified. Keep this robot selected and restore its gripper connection before switching.");
-                await Task.Delay(25, cancellation);
-            }
-        }
-        // A read-only monitor never armed its agent. EOF/disconnect therefore
-        // releases serial ownership without turning off externally enabled Pika.
-        await Call("/api/pika/disconnect", new JsonObject { ["owner"] = owner }, cancellation);
-        pikaOwned = pikaMonitoring = false;
-        pikaMonitorStatus = "Pika telemetry starts read-only when the scene is linked.";
-    }
-
     private async Task SwitchProfile(RobotProfile profile, bool append, CancellationToken cancellation)
     {
         bool groupViewOnly = GroupFollowActive;
@@ -360,7 +304,6 @@ public sealed partial class PipersPlugin
             p.RobotId == profile.RobotId && p.RobotJointPrefix == profile.RobotJointPrefix && p.PikaDevice == profile.PikaDevice && p.WslDistribution == profile.WslDistribution)))
             throw new InvalidOperationException("Stop grouped following before changing a robot assignment.");
         if (calibrationWorker is { IsCompleted: false }) throw new InvalidOperationException("Finish camera setup/calibration before switching robots.");
-        await FinishAlignment("Robot profile changed", cancellation);
         switchingProfile = true;
         try
         {
@@ -373,7 +316,6 @@ public sealed partial class PipersPlugin
             var profiles = append ? preferences.Robots!.Append(profile).ToArray() : preferences.Robots!.Select(p => p.Id == profile.Id ? profile : p).ToArray();
             preferences = RobotProfileRouting.Activate(preferences with { Robots = profiles }, profile.Id);
             RestorePikaTeachingWorkspace(ActiveProfile);
-            LoadAlignmentSummary();
             cameraCalibration.Clear(); cameraDimensions.TryRemove("gripper", out _); cameraDimensions.TryRemove("depth", out _);
             cameraStatus["gripper"] = cameraStatus["depth"] = "Connecting…";
             calibrationSession = null; calibrationLastSequence = 0; calibrationStatus = "No lens calibration. Camera mount remains unverified.";
@@ -401,16 +343,14 @@ public sealed partial class PipersPlugin
 
     private bool PikaMatchesProfile() => PikaMatchesProfile(ActiveProfile, state?["pika"] as JsonObject);
 
-    private static bool PikaMatchesProfile(RobotProfile profile, JsonObject? pika) =>
-        profile.PikaDevice.Length > 0 && pika?["device"]?.GetValue<string>() == profile.PikaDevice &&
-        (!OperatingSystem.IsWindows() || pika?["distribution"]?.GetValue<string>() == profile.WslDistribution);
+    private static bool PikaMatchesProfile(RobotProfile profile, JsonObject? pika) => ProfilePikaRouting.Matches(profile, pika);
 
     private async Task ConfigureProfilePika(string expectedToken, CancellationToken cancellation)
     {
         if (ActiveProfile.PikaDevice.Length == 0 || PikaMatchesProfile()) return;
         if (state?["motion"]?["active"]?.GetValue<bool>() == true) throw new InvalidOperationException("Finish arm movement before changing the Pika assignment.");
         await Call("/api/pika/configure", new JsonObject { ["owner"] = owner, ["device"] = ActiveProfile.PikaDevice,
-            ["distribution"] = OperatingSystem.IsWindows() ? ActiveProfile.WslDistribution : null }, cancellation, expectedToken);
+            ["distribution"] = ActiveProfile.PikaDistribution }, cancellation, expectedToken);
         long started = Stopwatch.GetTimestamp();
         while (!PikaMatchesProfile())
         {

@@ -1,7 +1,4 @@
-using System.Diagnostics;
-using System.Text.Json;
 using System.Text.Json.Nodes;
-using LuckyEngine.PluginSdk;
 
 namespace LuckyRobots.Piper.Plugin;
 
@@ -10,23 +7,9 @@ public sealed partial class PipersPlugin
     private TeachingState teaching = TeachingState.Inspect(null);
     private string teachingDevice = "";
     private long teachingGeneration;
-    private bool teachingSeen, approvalBeforeTeaching, teachingHelpOpen, teachingReturnConfirmation;
+    private bool teachingSeen, approvalBeforeTeaching;
     private readonly TeachingReturnGate teachingReturnGate = new();
     private JsonObject? acknowledgedScenePose;
-    private long acknowledgedSceneAt;
-    private AlignmentCheck? alignmentCheck;
-    private string? alignmentPath;
-    private AlignmentFrame? alignmentPending;
-    private bool alignmentOpen;
-    private double alignmentGapMm;
-    private AlignmentReference AlignmentOptions => ActiveProfile.Alignment ?? new();
-
-    private void LoadAlignmentSummary()
-    {
-        string directory = Path.Combine(engine.Start.SettingsDirectory, "alignment-checks", ActiveProfile.Id);
-        alignmentPath = Directory.Exists(directory) ? Directory.EnumerateFiles(directory, "*.json").OrderByDescending(File.GetLastWriteTimeUtc).FirstOrDefault() : null;
-        alignmentPending = null; alignmentGapMm = 0;
-    }
 
     private async Task ObserveTeaching(CancellationToken cancellation)
     {
@@ -40,7 +23,6 @@ public sealed partial class PipersPlugin
         {
             teachingSeen = approvalBeforeTeaching = false;
             teachingDevice = currentDevice; teachingGeneration = generation;
-            if (alignmentCheck is not null) await FinishAlignment("Connection or selected robot changed", cancellation);
         }
         if (next.BlocksTargets)
         {
@@ -71,14 +53,13 @@ public sealed partial class PipersPlugin
                 approved = approvalBeforeTeaching;
                 linkCommandsEnabled = approved && link is not null;
                 teachingSeen = approvalBeforeTeaching = false;
-                teachingReturnConfirmation = false;
                 message = approved ? "CAN control restored · previous targets discarded · measured scene tracking continues"
                     : "Teaching ended and CAN control is healthy. Use Enable robot when ready; no movement was resumed.";
             })) return;
         }
         // Serialize with manual actions before consuming the one-attempt gate.
         // A busy UI action leaves this poll observational; it grants no request.
-        if (!resumeControlsBusy && await commands.WaitAsync(0, cancellation))
+        if (!resumeControlsBusy && !GroupFollowActive && CurrentRecovery is null && await commands.WaitAsync(0, cancellation))
         {
             bool attempting = false;
             try
@@ -89,7 +70,7 @@ public sealed partial class PipersPlugin
                 string expectedDevice = current["id"]!.GetValue<string>();
                 long expectedGeneration = current["generation"]!.GetValue<long>();
                 TeachingState currentTeaching = TeachingState.Inspect(current);
-                if (teachingReturnGate.Observe(currentTeaching, approvalBeforeTeaching,
+                if (!GroupFollowActive && CurrentRecovery is null && teachingReturnGate.Observe(currentTeaching, approvalBeforeTeaching,
                     workspacePage == "controls" && !calibrationOpen && !switchingProfile,
                     expectedDevice + ":" + expectedGeneration + ":" + expectedToken))
                 {
@@ -122,130 +103,10 @@ public sealed partial class PipersPlugin
                 j["enabled"]?.GetValue<bool>() == true && j["fault"]?.GetValue<int>() == 0);
     }
 
-    private string AlignmentTeachingPrompt => teaching.HandGuiding
-        ? "Hand guiding active. Guide the named tool point to the reference and hold it still before Capture."
-        : teaching.Active ? "Onboard playback owns the arm. Wait for it to finish; do not guide or capture during playback."
-        : teaching.ReturnRequired ? "Recording ended. Use Back to robot controls for the supported return to CAN control."
-        : "Single-click the physical teach button for hand guiding (solid green). Linking reads the arm's measured pose.";
-
-    private async Task TeachingEvent(string action, CancellationToken cancellation)
-    {
-        if (action.StartsWith("pika.", StringComparison.Ordinal)) { await PikaTeachingEvent(action[5..], cancellation); return; }
-        if (action.StartsWith("reset.", StringComparison.Ordinal)) { await ResetAssistedEvent(action[6..], cancellation); return; }
-        if (action == "help") { teachingHelpOpen = !teachingHelpOpen; await Render(cancellation); return; }
-        if (action == "return.cancel") { teachingReturnConfirmation = false; await Render(cancellation); return; }
-        TeachingState current = TeachingState.Inspect(Device());
-        if (!current.CanReturn)
-            throw new InvalidOperationException(current.SamePoseReturn
-                ? "Finish hand guiding, turn the teach light off and hold still until all six motors report healthy, enabled feedback. No mode change was sent."
-                : "Finish hand guiding at the physical zero pose, turn the teach light off, and wait for the live zero/stationary checks. No mode change was sent.");
-        if (action == "return") { teachingReturnConfirmation = true; await Render(cancellation); return; }
-        if (action == "return.confirm")
-        {
-            teachingReturnConfirmation = false;
-            await Command("teach-return", current.ReturnFlags(), cancellation, teachingAcknowledged: true);
-            await Render(cancellation);
-        }
-    }
-
     private void AddTeachingPatches(Dictionary<string, JsonObject> patches, JsonObject? device)
     {
         AddPikaTeachingPatches(patches, device);
         patches["teaching.label"] = new() { ["text"] = teaching.Label };
-        patches["teaching.next"] = new() { ["text"] = FocusedRobotView ? AlignmentTeachingPrompt : teaching.NextStep, ["visible"] = FocusedRobotView || teaching.BlocksTargets || teachingHelpOpen };
-        string zero = device?["joints"] is JsonArray joints ? string.Join(" · ", joints.Select((j, i) => $"J{i + 1} {j?["actual_deg"]?.GetValue<double>().ToString("F2") ?? "—"}°")) : "Waiting for six fresh joint measurements";
-        patches["teaching.zero"] = new() { ["visible"] = teaching.ReturnRequired, ["text"] = zero + (teaching.SamePoseReturn ? " · CAN returns at this measured pose" : " · return guard ±1° (not encoder calibration)") };
-        patches["teaching.return.warning"] = new() { ["text"] = teaching.ReturnConfirmation };
-        patches["teaching.return"] = new() { ["visible"] = teaching.ReturnRequired, ["enabled"] = teaching.CanReturn };
-        patches["teaching.return.confirmation"] = new() { ["visible"] = teachingReturnConfirmation && teaching.CanReturn };
-        patches["enable"] = new() { ["enabled"] = device is not null && !switchingProfile && !teaching.BlocksTargets };
-    }
-
-    private async Task AlignmentEvent(string action, JsonElement value, CancellationToken cancellation)
-    {
-        if (action == "toggle") { alignmentOpen = !alignmentOpen; await Render(cancellation); return; }
-        if (action is "name" or "tool" or "x" or "y" or "z" or "height")
-        {
-            if (alignmentCheck is not null) throw new InvalidOperationException("Finish the current check before changing its reference.");
-            var reference = action switch {
-                "name" => AlignmentOptions with { Name = value.GetString() ?? "" }, "tool" => AlignmentOptions with { ToolPoint = value.GetString() ?? "" },
-                "x" => AlignmentOptions with { X = value.GetDouble() }, "y" => AlignmentOptions with { DeskY = value.GetDouble() },
-                "z" => AlignmentOptions with { Z = value.GetDouble() }, _ => AlignmentOptions with { ObjectHeightMm = value.GetDouble() } };
-            AlignmentCheck.ValidateReference(reference);
-            preferences = preferences with { Robots = preferences.Robots!.Select(p => p.Id == ActiveProfile.Id ? p with { Alignment = reference } : p).ToArray() };
-            await Save(cancellation); return;
-        }
-        if (action == "gap") { alignmentGapMm = Math.Clamp(value.GetDouble(), 0, 1000); return; }
-        if (action == "start")
-        {
-            if (alignmentCheck is not null) throw new InvalidOperationException("Finish the current local check first.");
-            AlignmentCheck.ValidateReference(AlignmentOptions);
-            var device = Device(); var linked = link ?? throw new InvalidOperationException("Link the scene robot first. Linking reads measurements and does not move hardware.");
-            var profiles = new JsonObject { ["benchDevice"] = CameraSettings("bench").Device,
-                ["gripperDevice"] = CameraSettings("gripper").Device, ["depthSerial"] = preferences.DepthSerial,
-                ["profiles"] = new JsonObject(cameraCalibration.Select(p => new KeyValuePair<string, JsonNode?>(p.Key, p.Value.DeepClone()))) };
-            alignmentCheck = new(ActiveProfile.Id, linked.DeviceId, linked.Generation, linked.SceneId, linked.EntityId, AlignmentOptions,
-                device["firmware"]?.GetValue<string>() ?? "unavailable", profiles);
-            string directory = Path.Combine(engine.Start.SettingsDirectory, "alignment-checks", ActiveProfile.Id);
-            Directory.CreateDirectory(directory);
-            alignmentPath = Path.Combine(directory, DateTime.UtcNow.ToString("yyyyMMdd-HHmmss") + "-" + Guid.NewGuid().ToString("N")[..8] + ".json");
-            alignmentPending = null;
-            await PersistAlignment(cancellation); await Render(cancellation); return;
-        }
-        if (action == "open")
-        {
-            if (alignmentPath is null || !File.Exists(alignmentPath)) throw new InvalidOperationException("Start and save a local check first.");
-            Process.Start(new ProcessStartInfo(alignmentPath) { UseShellExecute = true }); return;
-        }
-        if (action == "finish") { await FinishAlignment("Operator finished", cancellation); await Render(cancellation); return; }
-        var session = alignmentCheck ?? throw new InvalidOperationException("Start a local alignment check first.");
-        if (action == "capture")
-        {
-            var device = Device();
-            if (!TeachingState.Inspect(device).HandGuiding) throw new InvalidOperationException("Capture this observation while hand guiding with the physical teach light solid green.");
-            if (device["status"]?["stationary_s"]?.GetValue<double>() is not >= .4) throw new InvalidOperationException("Hold the tool point still for at least 0.4 seconds before capturing.");
-            alignmentPending = ReadAlignmentFrame(session, device);
-            await Render(cancellation); return;
-        }
-        if (action is "match" or "mismatch")
-        {
-            var captured = alignmentPending ?? throw new InvalidOperationException("Capture a fresh stationary pose first.");
-            var currentDevice = Device();
-            if (!TeachingState.Inspect(currentDevice).HandGuiding || currentDevice["joints"]!.AsArray()
-                .Select((j, i) => Math.Abs(j!["actual_deg"]!.GetValue<double>() - captured.MeasuredDegrees[i])).Any(error => error > .2))
-                throw new InvalidOperationException("The arm moved or left hand guiding after capture. Hold the current reference pose and capture again before confirming it.");
-            if (DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - captured.HostUnixMilliseconds > 30000)
-                throw new InvalidOperationException("That observation is over 30 seconds old. Capture the current stationary pose again.");
-            session.Observe(captured, action == "match", alignmentGapMm > 0 ? alignmentGapMm : null);
-            alignmentPending = null;
-            await PersistAlignment(cancellation); await Render(cancellation);
-        }
-    }
-
-    private AlignmentFrame ReadAlignmentFrame(AlignmentCheck session, JsonObject device)
-    {
-        if (link is null || acknowledgedScenePose is null) throw new InvalidOperationException("Wait for a linked scene acknowledgement.");
-        return session.Read(DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(), ActiveProfile.Id, device, link, acknowledgedScenePose, acknowledgedSceneAt);
-    }
-
-    private void SampleAlignment(JsonObject device)
-    {
-        if (alignmentCheck is not { } session || !teaching.HandGuiding) return;
-        try { session.Sample(ReadAlignmentFrame(session, device)); }
-        catch (InvalidOperationException) { /* Incomplete or delayed observations are omitted, never fabricated. */ }
-    }
-    private async Task WriteAlignmentReport(AlignmentReport report, CancellationToken cancellation)
-    {
-        if (alignmentPath is null) return;
-        string temporary = alignmentPath + ".tmp";
-        await File.WriteAllTextAsync(temporary, JsonSerializer.Serialize(report, PluginProtocol.Json), cancellation);
-        File.Move(temporary, alignmentPath, true);
-    }
-    private Task PersistAlignment(CancellationToken cancellation) => alignmentCheck is null ? Task.CompletedTask : WriteAlignmentReport(alignmentCheck.Snapshot(), cancellation);
-    private async Task FinishAlignment(string reason, CancellationToken cancellation)
-    {
-        if (alignmentCheck is not { } session) return;
-        await WriteAlignmentReport(session.Finish(reason), cancellation);
-        alignmentCheck = null; alignmentPending = null;
+        patches["teaching.next"] = new() { ["text"] = teaching.NextStep };
     }
 }

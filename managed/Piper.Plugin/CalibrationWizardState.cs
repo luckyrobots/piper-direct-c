@@ -17,19 +17,11 @@ public sealed record CalibrationTabletopInputs(CalibrationDesk Desk, Calibration
 public sealed record CalibrationOptionalOfficeAudit(double? SceneFloorYMillimetres, double? MeasuredTabletopHeightMillimetres,
     string Meaning = "Optional visual-office audit only; not required or used for tabletop capture/fit.");
 
-/// <summary>Question order and input validation only: no engine, camera or robot command path.</summary>
+/// <summary>Calibration draft compatibility and measurement validation.</summary>
 public static class CalibrationWizardFlow
 {
     public static CalibrationWizardDraft New(string profileId, long epoch = 1) => new(2, profileId, CalibrationWizardStep.Prepare, epoch,
         new(StringComparer.Ordinal) { ["tool"] = "grasp_site", ["role"] = "training", ["method"] = "edge measurements" }, []);
-    public static string? Input(CalibrationWizardStep step) => step switch
-    {
-        CalibrationWizardStep.ModelPoint => "tool", CalibrationWizardStep.SceneSurfaceY => "sceney", CalibrationWizardStep.SceneFloorOrigin => "floory",
-        CalibrationWizardStep.DeskWidth => "width", CalibrationWizardStep.DeskDepth => "depth",
-        CalibrationWizardStep.TabletopHeight => "tableheight", CalibrationWizardStep.Precision => "precision", CalibrationWizardStep.GridSquare => "square",
-        CalibrationWizardStep.GridOriginLeft => "originleft", CalibrationWizardStep.GridOriginBack => "originback", CalibrationWizardStep.PointLeft => "left",
-        CalibrationWizardStep.PointBack => "back", CalibrationWizardStep.PointHeight => "height", CalibrationWizardStep.GridColumn => "column", CalibrationWizardStep.GridRow => "row", _ => null
-    };
     public static double Number(CalibrationWizardDraft draft, string key, double minimum, double maximum, bool whole = false)
     {
         if (!draft.Answers.TryGetValue(key, out var text) || string.IsNullOrWhiteSpace(text) ||
@@ -52,39 +44,6 @@ public static class CalibrationWizardFlow
             Math.Abs(Number(draft, "tableheight", 1, 3000) - RelativeTabletopHeight(draft)) > precisionMillimetres)
             throw new InvalidOperationException("Physical tabletop height and scene tabletop-minus-floor differ beyond the stated precision. Edit/verify scene desk/root and floor-reference setup; no scene transform was changed.");
     }
-    public static CalibrationWizardDraft Advance(CalibrationWizardDraft draft)
-    {
-        bool grid = draft.Answers.GetValueOrDefault("method") == "grid intersections";
-        var next = draft.Step switch
-        {
-            CalibrationWizardStep.Prepare => CalibrationWizardStep.ContactPoint,
-            CalibrationWizardStep.ContactPoint => CalibrationWizardStep.ModelPoint,
-            CalibrationWizardStep.ModelPoint => CalibrationWizardStep.SceneSurfaceY,
-            CalibrationWizardStep.DeskFrame => CalibrationWizardStep.DeskBack,
-            CalibrationWizardStep.DeskBack => CalibrationWizardStep.Precision,
-            CalibrationWizardStep.SceneSurfaceY => CalibrationWizardStep.DeskWidth,
-            CalibrationWizardStep.SceneFloorOrigin => CalibrationWizardStep.DeskWidth,
-            CalibrationWizardStep.DeskWidth => CalibrationWizardStep.DeskDepth,
-            CalibrationWizardStep.DeskDepth => CalibrationWizardStep.DeskFrame,
-            CalibrationWizardStep.TabletopHeight => CalibrationWizardStep.Precision,
-            CalibrationWizardStep.Precision => CalibrationWizardStep.Method,
-            CalibrationWizardStep.Method => grid ? CalibrationWizardStep.GridSquare : CalibrationWizardStep.PointIntro,
-            CalibrationWizardStep.GridSquare => CalibrationWizardStep.GridOriginLeft,
-            CalibrationWizardStep.GridOriginLeft => CalibrationWizardStep.GridOriginBack,
-            CalibrationWizardStep.GridOriginBack => CalibrationWizardStep.PointIntro,
-            CalibrationWizardStep.PointIntro => grid ? CalibrationWizardStep.GridColumn : CalibrationWizardStep.PointLeft,
-            CalibrationWizardStep.PointLeft => CalibrationWizardStep.PointBack,
-            CalibrationWizardStep.PointBack => CalibrationWizardStep.PointHeight,
-            CalibrationWizardStep.GridColumn => CalibrationWizardStep.GridRow,
-            CalibrationWizardStep.GridRow => CalibrationWizardStep.PointHeight,
-            CalibrationWizardStep.PointHeight => CalibrationWizardStep.HandGuide,
-            CalibrationWizardStep.HandGuide => CalibrationWizardStep.Capture,
-            _ => throw new InvalidOperationException("This step requires its explicit capture, review or scene-only action.")
-        };
-        return draft with { Step = next, Epoch = draft.Epoch + 1, History = draft.History.Append(draft.Step).ToArray() };
-    }
-    public static CalibrationWizardDraft Back(CalibrationWizardDraft draft) => draft.History.Length == 0 ? draft :
-        draft with { Step = draft.History[^1], Epoch = draft.Epoch + 1, History = draft.History[..^1] };
     public static CalibrationWizardDraft NextPoint(CalibrationWizardDraft draft, int trainingCount, int validationCount)
     {
         var answers = new Dictionary<string, string>(draft.Answers, StringComparer.Ordinal);

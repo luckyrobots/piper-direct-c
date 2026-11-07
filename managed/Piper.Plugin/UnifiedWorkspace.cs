@@ -74,7 +74,7 @@ public sealed partial class PipersPlugin
         GroupFollowIncludes(ActiveProfile.Id), state?["motion"]?["active"]?.GetValue<bool>() == true,
         measuredLinkReady: ActiveProfile.RobotId.Length == 0 || link is not null);
 
-    private bool PrimaryActionAvailable => !supportedRecoveryBusy && !switchingProfile && !recoveryHomeBusy && !teachingResetBusy;
+    private bool PrimaryActionAvailable => !switchingProfile && CurrentRecovery is null && !GroupFollowActive;
 
     private Task PrimaryRobotAction(CancellationToken cancellation) => RunPrimaryAction(RunPrimaryRobotAction, cancellation);
 
@@ -211,7 +211,10 @@ public sealed partial class PipersPlugin
         bool controls = workspacePage == "controls";
         bool controllerStopped = device?["status"]?["arm_status"]?.GetValue<int>() == 1;
         bool canReleasePower = controllerStopped || !TeachingState.Inspect(device).Active;
-        patches["workspace.connection"] = new() { ["text"] = resumeControlsBusy ? "Reconnecting controls" : readiness.Label, ["hint"] = readiness.Detail };
+        bool groupParticipant = GroupFollowIncludes(ActiveProfile.Id);
+        patches["workspace.connection"] = new() {
+            ["text"] = groupParticipant ? GroupFollowStatus : resumeControlsBusy ? "Reconnecting controls" : readiness.Label,
+            ["hint"] = groupParticipant ? GroupFollowDetail : readiness.Detail };
         patches["enable"] = new() { ["text"] = resumeControlsBusy ? "Resuming controls…" : readiness.Action, ["visible"] = controls,
             ["enabled"] = controls && readiness.Enabled && !primaryActionBusy && PrimaryActionAvailable,
             ["hint"] = readiness.Detail };
@@ -220,8 +223,7 @@ public sealed partial class PipersPlugin
             ["enabled"] = controls && device?["fresh"]?.GetValue<bool>() == true && canReleasePower && !switchingProfile,
             ["hint"] = "Support the arm. Disable cancels pending plugin actions, stops following, then removes motor holding torque. It does not home or replay." };
         bool currentRecoveryGuide = RecoveryGuideFor(device);
-        bool showRecovery = readiness.NextAction is RobotPrimaryAction.OpenRecovery or RobotPrimaryAction.OpenStoppedRecovery;
-        patches["workspace.incident"] = new() { ["visible"] = controls && (showRecovery || currentRecoveryGuide) };
+        patches["workspace.incident"] = new() { ["visible"] = controls && RecoveryPanelVisible(device) };
         var recoveryView = RecoveryCardState(device);
         string recoveryCause = supportedRecoveryStop?["reason"]?.GetValue<string>() is { Length: > 0 } original && currentRecoveryGuide ? "Recovery after: " + original : recoveryView.Cause;
         patches["incident"] = new() { ["text"] = recoveryCause, ["hint"] = recoveryCause };
@@ -232,7 +234,7 @@ public sealed partial class PipersPlugin
         patches["teaching"] = new() { ["visible"] = !controllerStopped && teaching.BlocksTargets || PikaTeachingControlsVisible };
         patches["teleoperate.toggle"]!["text"] = teleoperating ? "Finish dragging" : "Drag joints";
         patches["profiles.inventory"] = new() { ["text"] = pikaInventoryMessage };
-        patches["recovery.guide.cancel"] = new() { ["visible"] = currentRecoveryGuide };
+        patches["recovery.guide.cancel"] = new() { ["visible"] = currentRecoveryGuide || CurrentRecovery is not null };
     }
 
     private Widget SettingsRobotPicker(string target) => Widget.Row("global.context." + target,
@@ -243,7 +245,7 @@ public sealed partial class PipersPlugin
     {
         try
         {
-            var reply = await Call("/api/pika/devices", new() { ["pika_distribution"] = ActiveProfile.WslDistribution }, cancellation);
+            var reply = await Call("/api/pika/devices", new() { ["pika_distribution"] = ActiveProfile.PikaDistribution }, cancellation);
             pikaDevices = reply["devices"]?.AsArray().OfType<JsonObject>().Select(d => (JsonObject)d.DeepClone()).ToArray() ?? [];
             pikaInventoryMessage = pikaDevices.Length == 0 ? "No Pika detected. Connect its USB cable; discovery retries automatically." : $"{pikaDevices.Length} grippers detected · assignments are saved automatically";
         }
@@ -395,6 +397,6 @@ public sealed partial class PipersPlugin
         if (gripper["owner"]?.GetValue<string>() is { Length: > 0 } gripperOwner && gripperOwner != owner)
             throw new InvalidOperationException("Another controller owns this gripper. Finish its session before changing the assignment.");
         if (gripper["owner"]?.GetValue<string>() == owner)
-            await Call("/api/pika/disconnect", new() { ["owner"] = owner, ["pika_device"] = profile.PikaDevice, ["pika_distribution"] = profile.WslDistribution }, cancellation);
+            await Call("/api/pika/disconnect", new() { ["owner"] = owner, ["pika_device"] = profile.PikaDevice, ["pika_distribution"] = profile.PikaDistribution }, cancellation);
     }
 }

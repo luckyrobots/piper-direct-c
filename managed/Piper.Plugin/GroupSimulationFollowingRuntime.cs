@@ -35,6 +35,7 @@ public sealed partial class PipersPlugin
         try
         {
             ct.ThrowIfCancellationRequested();
+            if (GroupStartConflict() is { } conflict) throw new InvalidOperationException(conflict);
             foreach (var lane in group.Lanes) _ = GroupHardware(group, lane);
             var edit = await GroupEngine(group, "robot.runtime.read", null, ct);
             if (edit["mode"]?.GetValue<string>() != "edit") throw new InvalidOperationException("Stop Play before arming followers.");
@@ -62,6 +63,7 @@ public sealed partial class PipersPlugin
             if (group.RunId.Length == 0 || raw["prepareId"]?.GetValue<string>() != group.PrepareId || raw["startRequested"]?.GetValue<bool>() != true)
                 throw new InvalidOperationException("The user-requested Play run did not match this grouped preparation.");
             group.OriginalScale = raw["timeScale"]!.GetValue<double>();
+            if (GroupStartConflict() is { } matchingConflict) throw new InvalidOperationException(matchingConflict);
             group.Advance(GroupFollowPhase.Matching);
             await GroupEngine(group, "robot.runtime.control", "pause", ct, new() { ["timeScale"] = .2 });
             raw = await GroupEngine(group, "robot.runtime.read", null, ct);
@@ -173,6 +175,7 @@ public sealed partial class PipersPlugin
             {
                 group.Armed.TrySetCanceled(group.Stop.Token);
                 group.Advance(GroupFollowPhase.Retired);
+                Interlocked.Increment(ref groupControlEpoch);
                 Interlocked.CompareExchange(ref groupSimulation, null, group);
                 group.Retired.TrySetResult();
             }
@@ -235,6 +238,7 @@ public sealed partial class PipersPlugin
 
     private async Task AdmitGroup(GroupSession group, CancellationToken ct)
     {
+        if (GroupStartConflict() is { } conflict) throw new InvalidOperationException(conflict);
         group.Advance(GroupFollowPhase.Admitting);
         GroupFollowStatus = "Starting selected followers · simulation remains paused";
         foreach (var lane in group.Lanes)
@@ -308,6 +312,12 @@ public sealed partial class PipersPlugin
         }
     }
 
+    private static void RequireOrderedSourceLease(GroupSession group)
+    {
+        if (group.Clock.GetElapsedTime(Volatile.Read(ref group.EnvelopeTicks)).TotalMilliseconds > SimulationFollowPolicy.MaximumSourceAgeMilliseconds)
+            throw new InvalidOperationException("The shared simulation source expired after 250 ms; all follower targets were retired.");
+    }
+
     private async Task PublishGroupTargets(GroupSession group, CancellationToken ct)
     {
         try
@@ -315,8 +325,7 @@ public sealed partial class PipersPlugin
             var cadence = new SimulationPublishCadence(group.Clock.GetTimestamp(), group.Clock.TimestampFrequency, TimeSpan.FromMilliseconds(30));
             while (!ct.IsCancellationRequested)
             {
-                if (group.Clock.GetElapsedTime(Volatile.Read(ref group.EnvelopeTicks)).TotalMilliseconds > 250)
-                    throw new InvalidOperationException("The shared simulation source expired after 250 ms; all follower targets were retired.");
+                RequireOrderedSourceLease(group);
                 var source = telemetry.Latest!;
                 var hardware = group.Lanes.ToDictionary(l => l.Profile.Id, l => GroupHardware(group, l, native: true, source: source));
                 var targets = new Dictionary<string, OrderedSimulationTarget>(StringComparer.Ordinal);
@@ -349,9 +358,9 @@ public sealed partial class PipersPlugin
 
     private async Task SendGroupTargets(GroupSession group, IReadOnlyDictionary<string, OrderedSimulationTarget> targets, CancellationToken ct, bool priming = false)
     {
-        long waiting = Stopwatch.GetTimestamp();
-        await group.Writes.WaitAsync(ct);
+        ct.ThrowIfCancellationRequested();
         var attempts = new List<(GroupLane Lane, SimulationPublishDiagnostics.Attempt Timing)>();
+        var writes = new List<Task>();
         try
         {
             if (priming)
@@ -359,14 +368,13 @@ public sealed partial class PipersPlugin
                 if (!group.CanPrime) return;
             }
             else group.Require(GroupFollowPhase.Following);
-            var writes = new List<Task>();
             var receipt = telemetry.Latest;
             foreach (var lane in group.Lanes) _ = GroupHardware(group, lane, source: receipt);
             foreach (var lane in group.Lanes.Where(l => targets.ContainsKey(l.Profile.Id)))
             {
                 var target = targets[lane.Profile.Id];
                 long sequence = Interlocked.Increment(ref lane.Sequence);
-                var timing = lane.Publications.Begin(sequence, Stopwatch.GetTimestamp(), Stopwatch.GetElapsedTime(waiting).TotalMilliseconds);
+                var timing = lane.Publications.Begin(sequence, Stopwatch.GetTimestamp(), 0);
                 attempts.Add((lane, timing));
                 writes.Add(lane.Publications.Observe(timing, GroupArmCommand(group, lane, FollowArmAction.Update, new() { ["request_id"] = lane.ArmRequest, ["sequence"] = sequence,
                     ["degrees"] = JsonSerializer.SerializeToNode(target.JointDegrees) }), arm: true));
@@ -376,10 +384,16 @@ public sealed partial class PipersPlugin
             }
             await Task.WhenAll(writes);
         }
+        catch
+        {
+            // A synchronous payload/evidence failure must still join every
+            // write already started before retirement can issue holds.
+            try { await Task.WhenAll(writes); } catch { }
+            throw;
+        }
         finally
         {
             foreach (var (lane, timing) in attempts) lane.Publications.Complete(timing);
-            group.Writes.Release();
         }
         static async Task ObservePika(GroupLane lane, Task operation)
         {

@@ -8,8 +8,9 @@ public sealed partial class PipersPlugin
     private readonly SemaphoreSlim workspacePublicationGate = new(1, 1);
     private long nextWorkspaceViewEpoch;
     private int workspacePublicationUncertain;
+    private sealed record SimulationCameraChoices(string SceneId, (string Id, string Name)[] Cameras);
     private sealed record PublishedWorkspaceView(long Epoch, WorkspaceViewContext Context, RobotProfile StopProfile,
-        WorkspaceClearConfirmation? Confirmation);
+        WorkspaceClearConfirmation? Confirmation, SimulationCameraChoices CameraChoices);
     private readonly record struct WorkspaceViewContext(string Profile, string Page, string SettingsCategory,
         string SettingsCamera, string CameraDetail, bool Calibration);
     private sealed record WorkspacePatchScope(PublishedWorkspaceView? View, long Epoch, WorkspaceViewContext Context, Preferences Preferences);
@@ -108,11 +109,13 @@ public sealed partial class PipersPlugin
         return id;
     }
 
-    private async Task PublishWorkspaceView(CancellationToken cancellation)
+    private async Task PublishWorkspaceView(CancellationToken cancellation, Action? commitContext = null)
     {
         await workspacePublicationGate.WaitAsync(cancellation);
         try
         {
+            cancellation.ThrowIfCancellationRequested();
+            commitContext?.Invoke();
             Volatile.Write(ref workspacePublicationUncertain, 1);
             try { await Publish(cancellation); }
             catch (Exception first) when (!shutdown.IsCancellationRequested)
@@ -147,13 +150,18 @@ public sealed partial class PipersPlugin
             }
             long candidate = Math.Max(nextWorkspaceViewEpoch, Interlocked.Read(ref workspaceViewEpoch)) + 1;
             nextWorkspaceViewEpoch = candidate;
-            var tree = ScopeRobotWidget(BuildWorkspaceView(confirmation is not null), candidate, context.Profile);
+            var inventory = simulationCameras;
+            var cameraChoices = new SimulationCameraChoices(inventory?["sceneId"]?.GetValue<string>() ?? "",
+                (inventory?["cameras"] as JsonArray)?.OfType<JsonObject>()
+                    .Where(camera => camera["entityId"]?.GetValue<string>() is { Length: > 0 })
+                    .Select(camera => (camera["entityId"]!.GetValue<string>(), camera["name"]?.GetValue<string>() ?? "Camera")).ToArray() ?? []);
+            var tree = ScopeRobotWidget(BuildWorkspaceView(confirmation is not null, cameraChoices), candidate, context.Profile);
             await engine.PublishViewAsync(Panel, tree, ct);
             var current = ActiveProfile;
             if (context != CurrentWorkspaceViewContext || profile.Id != context.Profile || profile.Id != current.Id ||
                 profile.CanDeviceId != current.CanDeviceId || profile.PikaDevice != current.PikaDevice || profile.WslDistribution != current.WslDistribution)
                 throw new InvalidOperationException("The workspace changed while publishing its controls; refreshing the current view.");
-            Volatile.Write(ref publishedWorkspaceView, new(candidate, context, profile, confirmation));
+            Volatile.Write(ref publishedWorkspaceView, new(candidate, context, profile, confirmation, cameraChoices));
             Interlocked.Exchange(ref workspaceViewEpoch, candidate);
             Volatile.Write(ref workspacePublicationUncertain, 0);
         }

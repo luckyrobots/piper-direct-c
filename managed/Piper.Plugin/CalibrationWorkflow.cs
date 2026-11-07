@@ -11,23 +11,21 @@ public sealed record CalibrationPreferences(CalibrationDesk Desk, CalibrationMea
 public static class CalibrationCommandGuard
 {
     public static bool Blocks(string action, bool calibrationOpen) => calibrationOpen &&
-        (action is "enable" or "safety.accept" or "teleoperate.toggle" or "zero.all" or "recovery.home" or "recovery.home.incident" or "pika.target" or "engine.robot.target" or "engine.robot.follow" ||
+        (action is "enable" or "safety.accept" or "teleoperate.toggle" or "zero.all" or "recovery.home" or "pika.target" or "engine.robot.target" or "engine.robot.follow" ||
             action.StartsWith("joint.", StringComparison.Ordinal));
 }
 
 public sealed partial class PipersPlugin
 {
-    private bool calibrationOpen, calibrationTcpConfirmed, calibrationPlacementUnverified, calibrationArchiveConfirmation;
+    private bool calibrationOpen, calibrationPlacementUnverified, calibrationArchiveConfirmation;
     private string calibrationProfile = "";
-    private string calibrationMode = "edge measurements", calibrationPath = "";
+    private string calibrationPath = "";
     private CalibrationDesk calibrationDesk = new();
     private CalibrationMeasurement calibrationMeasurement = new();
     private CalibrationIdentity? calibrationIdentity;
     private CalibrationPlacement? calibrationOriginal, calibrationApplied;
     private CalibrationFit? calibrationFit;
     private readonly List<CalibrationSample> calibrationSamples = [];
-    private readonly Dictionary<string, string> calibrationInputs = [];
-    private bool FocusedRobotView => alignmentOpen || calibrationOpen;
     private string RobotCalibrationDirectory => Path.Combine(engine.Start.SettingsDirectory, "calibration", ActiveProfile.Id);
     private static string CalibrationNumber(double value) => value.ToString("0.###", CultureInfo.InvariantCulture);
 
@@ -35,7 +33,7 @@ public sealed partial class PipersPlugin
     {
         if (calibrationProfile == ActiveProfile.Id) return;
         calibrationProfile = ActiveProfile.Id;
-        calibrationIdentity = null; calibrationOriginal = calibrationApplied = null; calibrationFit = null; calibrationReevaluation = null; calibrationSamples.Clear(); calibrationTcpConfirmed = calibrationPlacementUnverified = calibrationArchiveConfirmation = false;
+        calibrationIdentity = null; calibrationOriginal = calibrationApplied = null; calibrationFit = null; calibrationReevaluation = null; calibrationSamples.Clear(); calibrationPlacementUnverified = calibrationArchiveConfirmation = false;
         calibrationDesk = preferences.BenchReference?.Apply(new()) ?? new(); calibrationMeasurement = new();
         string path = Path.Combine(RobotCalibrationDirectory, "settings.json");
         try
@@ -63,33 +61,8 @@ public sealed partial class PipersPlugin
         }
         catch (Exception error) when (error is IOException or JsonException or InvalidOperationException or ArgumentException)
         { Trace.TraceWarning("Saved calibration could not be restored: {0}", error.Message); }
-        calibrationMode = calibrationMeasurement.Mode;
-        calibrationInputs.Clear();
-        foreach (var pair in new Dictionary<string, double> { ["width"] = calibrationDesk.Width * 1000, ["depth"] = calibrationDesk.Depth * 1000,
-            ["surface"] = calibrationDesk.SurfaceY * 1000, ["precision"] = calibrationDesk.PrecisionMm, ["left"] = calibrationMeasurement.LeftMm,
-            ["back"] = calibrationMeasurement.BackMm, ["height"] = calibrationMeasurement.HeightMm, ["square"] = calibrationMeasurement.SquareMm,
-            ["originleft"] = calibrationMeasurement.OriginLeftMm, ["originback"] = calibrationMeasurement.OriginBackMm,
-            ["column"] = calibrationMeasurement.Column, ["row"] = calibrationMeasurement.Row }) calibrationInputs[pair.Key] = CalibrationNumber(pair.Value);
-        calibrationInputs["tool"] = calibrationDesk.ToolPoint;
     }
 
-    private double CalibrationValue(string key)
-    {
-        if (!double.TryParse(calibrationInputs[key], NumberStyles.Float, CultureInfo.InvariantCulture, out double value) || !double.IsFinite(value))
-            throw new InvalidOperationException("Enter a finite number for " + key + ". Use millimetres and a decimal point.");
-        return value;
-    }
-    private void ReadCalibrationInputs(bool readDesk)
-    {
-        if (readDesk) calibrationDesk = new(CalibrationValue("width") / 1000, CalibrationValue("depth") / 1000, CalibrationValue("surface") / 1000,
-            CalibrationValue("precision"), calibrationInputs["tool"].Trim());
-        calibrationDesk.Validate();
-        double column = CalibrationValue("column"), row = CalibrationValue("row");
-        if (column != Math.Truncate(column) || row != Math.Truncate(row)) throw new InvalidOperationException("Grid intersection row/column must be whole numbers.");
-        calibrationMeasurement = new(calibrationMode, CalibrationValue("left"), CalibrationValue("back"), CalibrationValue("height"), CalibrationValue("square"),
-            CalibrationValue("originleft"), CalibrationValue("originback"), checked((int)column), checked((int)row));
-        _ = calibrationMeasurement.World(calibrationDesk);
-    }
     private CalibrationIdentity CurrentCalibrationIdentity()
     {
         var current = link ?? throw new InvalidOperationException("Link the scene robot first; linking reads measurements without moving hardware.");
@@ -107,8 +80,10 @@ public sealed partial class PipersPlugin
         var after = Device();
         if (before["joints"]!.AsArray().Zip(after["joints"]!.AsArray()).Any(p => Math.Abs(p.First!["actual_deg"]!.GetValue<double>() - p.Second!["actual_deg"]!.GetValue<double>()) > .05))
             throw new InvalidOperationException("The arm moved during scene measurement. Hold the same point still and capture again.");
-        return CalibrationCapture.Read(identity, CurrentCalibrationIdentity(), calibrationDesk, expectedPlacement, after, pose, start,
+        var captured = CalibrationCapture.Read(identity, CurrentCalibrationIdentity(), calibrationDesk, expectedPlacement, after, pose, start,
             DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(), handGuiding);
+        EnsureIndependentCalibration(pose);
+        return captured;
     }
 
     private void RequireCalibrationIdle()
@@ -124,35 +99,11 @@ public sealed partial class PipersPlugin
         if (link is { } current) await engine.RequestAsync("robot.teleoperate", new JsonObject { ["sceneId"] = current.SceneId, ["entityId"] = current.EntityId, ["enabled"] = false }, cancellation);
     }
 
-    private async Task CalibrationEvent(string action, JsonElement value, CancellationToken cancellation)
+    private async Task CalibrationEvent(string action, CancellationToken cancellation)
     {
         EnsureIndependentCalibration();
         LoadCalibrationPreferences();
-        if (!calibrationOpen && action != "toggle") throw new InvalidOperationException("Open calibration before editing its draft or invoking an action.");
-        if (calibrationInputs.ContainsKey(action))
-        {
-            if (calibrationIdentity is not null && action is "width" or "depth" or "surface" or "precision" or "tool")
-                throw new InvalidOperationException("Start a new calibration before changing its desk, precision or fixed tool point.");
-            calibrationInputs[action] = value.GetString() ?? "";
-            if (action is "width" or "depth" or "surface" or "precision" or "tool") calibrationTcpConfirmed = false;
-            return;
-        }
-        if (action == "toggle")
-        {
-            if (!calibrationOpen) { await MakeCalibrationReadOnly(cancellation); alignmentOpen = false; }
-            calibrationOpen = !calibrationOpen; await Render(cancellation); return;
-        }
         if (!calibrationOpen) throw new InvalidOperationException("Open Calibrate robot to review its measurements and scene-only actions first.");
-        if (action == "mode")
-        {
-            calibrationMode = value.GetInt32() == 0 ? "edge measurements" : "grid intersections";
-            await Render(cancellation); return;
-        }
-        if (action == "tcp")
-        {
-            if (calibrationIdentity is not null) throw new InvalidOperationException("The TCP is fixed for the active check. Start a new calibration to redefine it.");
-            calibrationTcpConfirmed = !calibrationTcpConfirmed; await Render(cancellation); return;
-        }
         if (action == "open")
         {
             if (!File.Exists(calibrationPath)) throw new InvalidOperationException("Start and save a calibration report first.");
@@ -165,16 +116,13 @@ public sealed partial class PipersPlugin
             { calibrationArchiveConfirmation = true; await Render(cancellation); return; }
             if (action == "archive" && !calibrationArchiveConfirmation) throw new InvalidOperationException("Review the saved-placement archive warning first.");
             await SaveCalibration(cancellation);
-            calibrationIdentity = null; calibrationOriginal = calibrationApplied = null; calibrationFit = null; calibrationReevaluation = null; calibrationSamples.Clear(); calibrationTcpConfirmed = calibrationPlacementUnverified = calibrationArchiveConfirmation = false;
+            calibrationIdentity = null; calibrationOriginal = calibrationApplied = null; calibrationFit = null; calibrationReevaluation = null; calibrationSamples.Clear(); calibrationPlacementUnverified = calibrationArchiveConfirmation = false;
             await Render(cancellation); return;
         }
         RequireCalibrationIdle();
         if (action == "start")
         {
             if (calibrationIdentity is not null) throw new InvalidOperationException("Use New / edit settings to preserve the old report and start a different calibration.");
-            if (!calibrationTcpConfirmed) throw new InvalidOperationException("Confirm the scene desk frame (centre X/Z=0, back edge −Z) and that the named model TCP is your exact physical contact/measurement point.");
-            // Start also replaces an old session, so parse all draft settings now.
-            ReadCalibrationInputs(true);
             var identity = CurrentCalibrationIdentity();
             var capture = await ReadCalibrationPose(identity, null, true, cancellation);
             await MakeCalibrationReadOnly(cancellation);
@@ -204,7 +152,6 @@ public sealed partial class PipersPlugin
         {
             if (calibrationApplied is not null) throw new InvalidOperationException("This fit was already applied. Roll back or start a new calibration before capturing more points.");
             if (calibrationSamples.Count >= 24) throw new InvalidOperationException("Use at most 24 points per calibration. Start a new check for more points.");
-            ReadCalibrationInputs(false);
             var measured = calibrationMeasurement.World(calibrationDesk);
             if (calibrationSamples.Any(s => s.MeasuredWorld.Distance(measured) < CalibrationSolver.ReferenceDuplicateDistanceMetres))
                 throw new InvalidOperationException("That desk location was already sampled (within 1 mm). Choose a distinct physical mark.");

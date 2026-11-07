@@ -79,6 +79,15 @@ internal static class WorkspacePublicationTests
         var first = serial.Render();
         await entered.Task.WaitAsync(TimeSpan.FromSeconds(2));
         var second = serial.Render();
+        using (var cancelled = new CancellationTokenSource())
+        {
+            var navigation = serial.Navigate("settings.cameras.depth", cancelled.Token);
+            cancelled.Cancel();
+            bool retired = false;
+            try { await navigation; } catch (OperationCanceledException) { retired = true; }
+            check(retired && serial.Get<string>("workspacePage") == "controls" && serial.Get<string>("settingsCategory") == "robot" &&
+                serial.Get<string>("settingsCamera") == "bench", "Cancelled navigation committed a destination before entering the view publication gate");
+        }
         check(serialCalls == 1 && serial.Epoch == serialInitial, "Concurrent renders published out of order or committed an in-flight candidate");
         release.TrySetResult();
         await Task.WhenAll(first, second).WaitAsync(TimeSpan.FromSeconds(3));
@@ -153,6 +162,7 @@ internal static class WorkspacePublicationTests
         public string Wire(string id) => WorkspaceEventScope.Wrap(Epoch, RobotProfileRouting.Active(Get<Preferences>("preferences")).Id, id);
         public string Unscope(string id) => (string)typeof(PipersPlugin).GetMethod("UnscopeEvent", Flags)!.Invoke(plugin, [id])!;
         public Task Render(CancellationToken ct = default) => (Task)typeof(PipersPlugin).GetMethod("Render", Flags)!.Invoke(plugin, [ct])!;
+        public Task Navigate(string action, CancellationToken ct) => (Task)typeof(PipersPlugin).GetMethod("WorkspaceEvent", Flags)!.Invoke(plugin, [action, ct])!;
         public Task Update() => (Task)typeof(PipersPlugin).GetMethod("Update", Flags)!.Invoke(plugin, [CancellationToken.None])!;
     }
 }

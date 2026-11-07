@@ -4,6 +4,7 @@ namespace LuckyRobots.Piper.Plugin;
 
 public sealed partial class PipersPlugin
 {
+    private const double CheckSpacingMetres = .05;
     private static string SheetPointName(int row) => row == 4 ? "Check" : "P" + (row + 1);
     private int SheetSelectedRow => int.TryParse(Wizard.Answers.GetValueOrDefault("sheetselected"), out int row) && row is >= 0 and <= 4 ? row : Math.Min(WizardTrainingCount, 4);
     // Informational only: reopening a scene does not authorize editing its old
@@ -50,9 +51,11 @@ public sealed partial class PipersPlugin
     {
         if (SheetSample(row) is not null && sheetEditingRow != row) return "";
         if (SheetPoint(row) is not { } point) return "Enter BACK and LEFT distances for this cross, within the desk edges (mm).";
+        if (row < 4 && SheetSample(4) is { } check && point.PlanarDistance(check.MeasuredWorld) < CheckSpacingMetres)
+            return "Keep each reference point at least 50 mm from the captured check cross.";
         // Reject duplicates before the operator spends time touching them.
         for (int previous = 0; previous < row; previous++)
-            if (SheetPoint(previous) is { } other && point.PlanarDistance(other) < (row == 4 ? .05 : CalibrationSolver.ReferenceDuplicateDistanceMetres))
+            if (SheetPoint(previous) is { } other && point.PlanarDistance(other) < (row == 4 ? CheckSpacingMetres : CalibrationSolver.ReferenceDuplicateDistanceMetres))
                 return row == 4 ? "Use a check cross at least 50 mm from every reference point." : $"This overlaps {SheetPointName(previous)} (within 1 mm). Use a distinct physical cross.";
         if (row < 4 && WizardCross() is { } cross)
         {
