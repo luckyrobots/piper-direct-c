@@ -61,6 +61,39 @@ internal static partial class SimulationFollowingTests
             check((double?)lane.GetType().GetField("ClosedReference")!.GetValue(lane) == captured,
                 "An armed lane reread its captured display reference");
         }
+        foreach (string scenario in new[] { "missing cache", "stale cache", "invalid current scene" })
+        {
+            await using var refresh = new Fixture(); refresh.ConfigureGroup(); refresh.UseUiDispatcher();
+            var cached = refresh.Get<JsonObject>("scene");
+            var current = cached.DeepClone().AsObject();
+            cached["robots"]![0]!["joints"]!.AsArray().RemoveAt(8);
+            if (scenario == "invalid current scene") current["robots"]![0]!["modelRevision"] = "";
+            refresh.SetGroupSceneEvidence(scenario == "missing cache" ? null : cached, current);
+            check(!refresh.Preparation().Ready, "The cached scene did not exercise a refreshable blocker: " + scenario);
+            await refresh.Click("group.follow.toggle");
+            await WaitFor(() => refresh.GroupStage == "armed" || refresh.Get<string>("groupFollowFailure").Length > 0,
+                "Follow did not finish checking current scene evidence: " + scenario);
+            check(refresh.EngineRequests.Any(r => r.Method == "scene.robots") && refresh.Rpc.Requests.IsEmpty && refresh.Mode == "edit",
+                "Scene refresh was skipped or sent a hardware command: " + scenario);
+            if (scenario == "invalid current scene")
+                check(!refresh.GroupActive && !refresh.EngineRequests.Any(r => r.Action == "arm-next-play") && refresh.SidebarStatus().Contains("model identity"),
+                    "Invalid current scene evidence passed the full arming gate");
+            else
+                check(refresh.GroupActive && refresh.EngineRequests.Count(r => r.Action == "arm-next-play") == 1,
+                    "A valid current scene did not arm after refresh: " + scenario);
+        }
+        foreach (string robotId in new[] { "", "robot-a" })
+        {
+            await using var assignment = new Fixture(); assignment.ConfigureGroup(); assignment.UseUiDispatcher();
+            assignment.SetSecondSceneBinding(robotId, "");
+            assignment.SetGroupSceneEvidence(null);
+            await assignment.Click("group.follow.toggle");
+            await WaitFor(() => assignment.Get<string>("groupFollowFailure").Length > 0, "The static assignment failure did not finish");
+            string reason = robotId.Length == 0 ? "Assign this robot's simulation arm" : "Assign a different simulation arm";
+            check(assignment.SidebarStatus().Contains("Second: " + reason) && !assignment.GroupActive && assignment.Rpc.Requests.IsEmpty &&
+                !assignment.EngineRequests.Any(r => r.Method == "scene.robots" || r.Action == "arm-next-play"),
+                "A static scene assignment error was deferred to discovery");
+        }
         // Exercise the same pure report used by admission and sidebar patches,
         // including a nonselected participant rather than only the visible arm.
         foreach (var (code, change) in new (string, Action<Fixture>)[] {
@@ -113,12 +146,14 @@ internal static partial class SimulationFollowingTests
         await using (var stopped = new Fixture())
         {
             stopped.ConfigureGroup(); stopped.UseUiDispatcher();
+            stopped.SetGroupSceneEvidence(null);
             stopped.Snapshot["devices"]![1]!["status"]!["arm_status"] = 1;
             stopped.Snapshot["devices"]![1]!["recovery_required"] = true; stopped.Refresh();
             await stopped.Click("group.follow.toggle");
             await WaitFor(() => stopped.Get<string>("groupFollowFailure").Length > 0, "The stopped partner's public Follow event did not finish");
             check(stopped.SidebarStatus().Contains("Second: Open recovery") && stopped.Rpc.Requests.IsEmpty &&
-                stopped.Snapshot["devices"]![1]!["recovery_required"]!.GetValue<bool>() && !stopped.EngineRequests.Any(r => r.Action == "arm-next-play"),
+                stopped.Snapshot["devices"]![1]!["recovery_required"]!.GetValue<bool>() &&
+                !stopped.EngineRequests.Any(r => r.Method == "scene.robots" || r.Action == "arm-next-play"),
                 "Follow admission cleared a recorded STOP or concealed the stopped partner");
         }
         await using (var idle = new Fixture())
@@ -253,11 +288,16 @@ internal static partial class SimulationFollowingTests
         await using (var f = new Fixture())
         {
             f.ConfigureTeachingResume(completeImmediately: false); f.SetResumeEligible();
+            f.Rpc.DelayedOperation = "heartbeat";
             Task resume = f.PrimaryResume();
-            for (int i = 0; i < 3; i++) { f.Refresh(); await Task.Delay(35); }
+            await f.Rpc.DelayedReached.Task.WaitAsync(TimeSpan.FromSeconds(2));
             check(!resume.IsCompleted && !f.Get<bool>("approved") && f.Get<bool>("resumeControlsBusy"),
                 "CAN mode alone completed Resume before the native handoff acknowledgement");
+            var pendingMotion = f.Get<LatestTelemetry>("telemetry").Latest!.State["devices"]![0]!["motion"]!;
             f.CompleteResume();
+            f.Rpc.ReleaseDelayed.TrySetResult();
+            check(pendingMotion["active"]?.GetValue<bool>() == true && pendingMotion["phase"]?.GetValue<string>() == "teaching-return",
+                "Publishing the completion mutated an earlier active telemetry frame");
             await resume.WaitAsync(TimeSpan.FromSeconds(2));
             check(f.Rpc.Requests.Count(r => r.Route == "/api/command") == 1 &&
                 f.Rpc.Requests.Where(r => r.Route == "/api/heartbeat").All(r => r.Body["device_id"]?.GetValue<string>() == "can-a" &&
@@ -269,7 +309,7 @@ internal static partial class SimulationFollowingTests
             await using var f = new Fixture(); f.ConfigureTeachingResume();
             Task resume = f.PrimaryResume();
             for (int i = 0; i < 100 && !f.Get<bool>("resumeControlsBusy"); i++) { f.Refresh(); await Task.Delay(5); }
-            f.InterruptResume(interruption); f.Refresh();
+            f.InterruptResume(interruption);
             bool rejected = false;
             try { await resume.WaitAsync(TimeSpan.FromSeconds(2)); } catch (InvalidOperationException) { rejected = true; }
             check(rejected && f.Rpc.Requests.IsEmpty && !f.Get<bool>("approved") &&
@@ -371,6 +411,8 @@ internal static partial class SimulationFollowingTests
     {
         private const BindingFlags Fields = BindingFlags.Instance | BindingFlags.NonPublic;
         private readonly PipersPlugin plugin = new();
+        private readonly object resumeFrameGate = new();
+        private bool publishResumeFrameCopies;
         public readonly FakeCalls Rpc = new();
         public ConcurrentQueue<(string Method, string Action, JsonObject Body)> EngineRequests { get; } = new();
         public ConcurrentQueue<(string Method, string Action, JsonObject Body)> AppliedEngineRequests { get; } = new();
@@ -394,6 +436,7 @@ internal static partial class SimulationFollowingTests
         public volatile bool FrameCursorGap, TerminalFrame;
         public bool ScriptedMissedGrasp, ScriptedSourceMiss;
         public bool GroupMode;
+        private JsonObject? currentSceneEvidence;
         private string[] capturedGroupTracks = [];
         private bool groupArmed;
         private readonly CancellationTokenSource groupTelemetryStop = new();
@@ -445,6 +488,18 @@ internal static partial class SimulationFollowingTests
             var current = Get<Preferences>("preferences");
             Set("preferences", current with { Robots = current.Robots!.Select(p => p with { FollowSimulationSelected = ids.Contains(p.Id) }).ToArray() });
             Refresh();
+        }
+        public void SetGroupSceneEvidence(JsonObject? cached, JsonObject? current = null)
+        {
+            Set("scene", cached);
+            currentSceneEvidence = current;
+        }
+        public void SetSecondSceneBinding(string robotId, string prefix)
+        {
+            var current = Get<Preferences>("preferences");
+            Set("preferences", current with { Robots = current.Robots!.Select(p => p.Id == "piper-2" ? p with { RobotId = robotId, RobotJointPrefix = prefix } : p).ToArray() });
+            var approvals = Get<ConcurrentDictionary<string, FollowControlApproval>>("controlApprovals");
+            approvals["piper-2"] = approvals["piper-2"] with { SceneRobot = robotId, JointPrefix = prefix };
         }
         public void FocusGroupSecond()
         { Set("preferences", RobotProfileRouting.Activate(Get<Preferences>("preferences"), "piper-2")); Snapshot["selected"] = "can-b"; Refresh(); }
@@ -535,6 +590,7 @@ internal static partial class SimulationFollowingTests
         }
         public void ConfigureTeachingResume(bool completeImmediately = true)
         {
+            publishResumeFrameCopies = true;
             var device = Snapshot["devices"]![0]!;
             device["status"]!["control"] = 2; device["status"]!["teach_state"] = 2;
             device["teaching"] = new JsonObject { ["phase"] = "ended", ["return_required"] = true, ["can_return"] = false,
@@ -545,21 +601,35 @@ internal static partial class SimulationFollowingTests
             Rpc.Accepted = (route, body) =>
             {
                 if (route != "/api/command" || body["action"]?.GetValue<string>() != "teach-return") return;
-                device["motion"]!["request_id"] = 77L; device["motion"]!["active"] = true;
-                device["motion"]!["phase"] = "teaching-return";
-                device["status"]!["control"] = 1; device["teaching"]!["phase"] = "off";
-                device["teaching"]!["return_required"] = false;
-                if (completeImmediately) CompleteResume(); else Refresh();
+                lock (resumeFrameGate)
+                {
+                    device["motion"]!["request_id"] = 77L;
+                    device["motion"]!["active"] = !completeImmediately;
+                    device["motion"]!["phase"] = completeImmediately ? "complete" : "teaching-return";
+                    device["status"]!["control"] = 1; device["teaching"]!["phase"] = "off";
+                    device["teaching"]!["return_required"] = false;
+                    Refresh();
+                }
             };
             Refresh();
         }
         public void SetResumeEligible()
-        { Snapshot["devices"]![0]!["teaching"]!["can_return"] = true; Refresh(); }
+        {
+            lock (resumeFrameGate)
+            {
+                Snapshot["devices"]![0]!["teaching"]!["can_return"] = true;
+                Refresh();
+            }
+        }
         public void CompleteResume()
         {
-            var device = Snapshot["devices"]![0]!;
-            device["motion"]!["active"] = false; device["motion"]!["phase"] = "complete";
-            Refresh();
+            lock (resumeFrameGate)
+            {
+                var motion = Snapshot["devices"]![0]!["motion"]!;
+                motion["active"] = false;
+                motion["phase"] = "complete";
+                Refresh();
+            }
         }
         public void CompleteResumeOnHeartbeat()
         {
@@ -569,11 +639,15 @@ internal static partial class SimulationFollowingTests
         }
         public void InterruptResume(string kind)
         {
-            var device = Snapshot["devices"]![0]!;
-            if (kind == "permission") Set("targetPermissionEpoch", Get<long>("targetPermissionEpoch") + 1);
-            if (kind == "generation") device["generation"] = 8L;
-            if (kind == "playback") device["teaching"]!["phase"] = "playback";
-            if (kind == "fault") device["joints"]![3]!["fault"] = 1;
+            lock (resumeFrameGate)
+            {
+                var device = Snapshot["devices"]![0]!;
+                if (kind == "permission") Set("targetPermissionEpoch", Get<long>("targetPermissionEpoch") + 1);
+                if (kind == "generation") device["generation"] = 8L;
+                if (kind == "playback") device["teaching"]!["phase"] = "playback";
+                if (kind == "fault") device["joints"]![3]!["fault"] = 1;
+                Refresh();
+            }
         }
         public void SetTransport(string transport) => Set("preferences", Get<Preferences>("preferences") with { SimulationTransport = transport });
         public void SetProfileTransport(string profile, string transport)
@@ -681,7 +755,7 @@ internal static partial class SimulationFollowingTests
                         EngineRequests.Enqueue((method, action, (JsonObject)body.DeepClone()));
                         if (method is "scene.robots" or "robot.feedback" or "robot.subscribe" && LinkEditorDelayMilliseconds > 0)
                         { await Task.Delay(LinkEditorDelayMilliseconds, cancellation); Refresh(); }
-                        if (method == "scene.robots") return JsonSerializer.SerializeToElement(new JsonObject { ["sceneId"] = "source-a", ["robots"] = new JsonArray(
+                        if (method == "scene.robots") return JsonSerializer.SerializeToElement(currentSceneEvidence ?? new JsonObject { ["sceneId"] = "source-a", ["robots"] = new JsonArray(
                             new JsonObject { ["entityId"] = "robot-a", ["modelAssetId"] = "asset-a", ["modelRevision"] = "model-a", ["joints"] = GroupPose()["joints"]!.DeepClone() }) });
                         if (method == "robot.subscribe") return JsonSerializer.SerializeToElement(new { sceneId = "source-a", entityId = "robot-a" });
                         if (method == "host.info") return JsonSerializer.SerializeToElement(new { robotRuntimeFramesSupported = FramesSupported, robotRuntimeTracksSupported = GroupMode });
@@ -851,13 +925,27 @@ internal static partial class SimulationFollowingTests
         public void Refresh()
         {
             if (FreezeTelemetry) return;
+            if (publishResumeFrameCopies)
+            {
+                lock (resumeFrameGate)
+                {
+                    // Resume can retain a receipt across several checks.
+                    var frame = Snapshot.DeepClone().AsObject();
+                    Set("state", frame);
+                    Publish(frame);
+                }
+                return;
+            }
             double now = Stopwatch.GetTimestamp() / (double)Stopwatch.Frequency;
             Snapshot["pika"]!["last_motor_request"] = "pika-position-fixture";
             Snapshot["pika"]!["request_time_s"] = pikaRequestAt;
             Snapshot["pika"]!["feedback_time_s"] = now;
             Snapshot["pika"]!["pending"] = false;
             if (GroupMode) foreach (var pika in Snapshot["pikas"]!.AsArray().OfType<JsonObject>()) pika["feedback_time_s"] = now;
-            Get<LatestTelemetry>("telemetry").Publish(new(Snapshot, "fixture-backend", Interlocked.Increment(ref sequence), Stopwatch.GetTimestamp(), EnvelopeAgeMs));
+            Publish(Snapshot);
+
+            void Publish(JsonObject frame) => Get<LatestTelemetry>("telemetry").Publish(
+                new(frame, "fixture-backend", Interlocked.Increment(ref sequence), Stopwatch.GetTimestamp(), EnvelopeAgeMs));
         }
         public void RemoveMeasuredLink(int editorDelayMilliseconds) { Set("link", null); LinkEditorDelayMilliseconds = editorDelayMilliseconds; }
         public void UseUiDispatcher() => Set("uiEvents", new UiEventDispatch((input, cancellation) => Invoke("HandleEventCoreAsync", input, cancellation),
@@ -922,7 +1010,14 @@ internal static partial class SimulationFollowingTests
             string action = body["action"]?.GetValue<string>() ?? "";
             if (command.Route == "/api/command" && action is "hold" or "follow-update" && body["standalone"]?.GetValue<bool>() != true)
                 throw new InvalidOperationException("Missing standalone declaration in raw arm control");
-            string operation = command.Route == "/api/pika/follow-start" ? "pika-start" : command.Route == "/api/pika/position" ? "pika-position" : action == "follow-start" ? "arm-start" : action;
+            string operation = command.Route switch
+            {
+                "/api/pika/follow-start" => "pika-start",
+                "/api/pika/position" => "pika-position",
+                "/api/heartbeat" => "heartbeat",
+                _ when action == "follow-start" => "arm-start",
+                _ => action
+            };
             Events.Enqueue("send:" + (command.Route == "/api/pika/hold" ? "pika-hold" : operation));
             async Task<TResponse> Reply()
             {

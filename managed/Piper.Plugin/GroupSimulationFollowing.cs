@@ -100,8 +100,11 @@ public sealed partial class PipersPlugin
                 handGuideRecovery is not null || teachingResetBusy || recoveryHomeBusy || PikaTeachingRecording)
                 throw new InvalidOperationException("Finish the current control or calibration action before arming grouped following.");
             var profiles = SelectedFollowProfiles();
-            var preparation = GroupPreparation(profiles);
-            if (!preparation.Ready) throw new InvalidOperationException(preparation.Summary);
+            var initial = GroupPreparation(profiles);
+            // Inventory evidence can change within the same scene. Resolve it
+            // through read-only discovery before applying the full arming gate.
+            initial = initial with { Issues = initial.Issues.Where(issue => !issue.RefreshableSceneEvidence).ToArray() };
+            if (!initial.Ready) throw new InvalidOperationException(initial.Summary);
             using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellation);
             deadline.CancelAfter(1500);
             var capabilities = await engine.RequestAsync("host.info", cancellation: deadline.Token);
@@ -112,7 +115,7 @@ public sealed partial class PipersPlugin
             // Discovery is read-only. Recheck the whole group from one current
             // receipt before installing its immutable lanes or arming the engine.
             var receipt = telemetry.Latest ?? throw new InvalidOperationException("Waiting for controller feedback.");
-            preparation = GroupPreparation(profiles, receipt, discovered);
+            var preparation = GroupPreparation(profiles, receipt, discovered);
             if (!preparation.Ready) throw new InvalidOperationException(preparation.Summary);
             string sceneId = discovered["sceneId"]!.GetValue<string>();
             var lanes = new List<GroupLane>();

@@ -7,6 +7,7 @@ public sealed record FollowControlApproval(string Backend, string Device, long G
 
 public sealed record FollowPreparationIssue(string ProfileId, string RobotName, string Code, string Action)
 {
+    public bool RefreshableSceneEvidence { get; init; }
     public string Text => RobotName.Length == 0 ? Action : RobotName + ": " + Action;
 }
 
@@ -23,7 +24,10 @@ public sealed record FollowPreparationReport(IReadOnlyList<FollowPreparationIssu
         string backend, string owner, IReadOnlyDictionary<string, FollowControlApproval> approvals, JsonObject? scene, long nowTicks)
     {
         var issues = new List<FollowPreparationIssue>();
-        void Add(RobotProfile? p, string code, string action) => issues.Add(new(p?.Id ?? "", p?.Name ?? "", code, action));
+        void Add(RobotProfile? p, string code, string action, bool refreshableSceneEvidence = false)
+        {
+            issues.Add(new(p?.Id ?? "", p?.Name ?? "", code, action) { RefreshableSceneEvidence = refreshableSceneEvidence });
+        }
         if (profiles.Count == 0) Add(null, "selection", "Check the robots you want to follow.");
         if (profiles.Count > RobotProfileRouting.MaximumProfiles) Add(null, "selection", "Select at most eight robots.");
         if (receipt is null || receipt.BackendToken != backend || !receipt.IsFresh(nowTicks))
@@ -53,12 +57,12 @@ public sealed record FollowPreparationReport(IReadOnlyList<FollowPreparationIssu
             else if (profiles.Any(other => other.Id != p.Id && other.RobotId == p.RobotId && other.RobotJointPrefix == p.RobotJointPrefix))
                 Add(p, "scene-binding", "Assign a different simulation arm; another selected robot uses this one.");
             else if (!sceneKnown || !bindings.Any(b => b.Matches(p)))
-                Add(p, "scene-binding", "Refresh and assign the matching simulation arm in Settings.");
+                Add(p, "scene-binding", "Refresh and assign the matching simulation arm in Settings.", refreshableSceneEvidence: true);
             else if (scene!["robots"]!.AsArray().OfType<JsonObject>().Count(r => r["entityId"]?.GetValue<string>() == p.RobotId) != 1)
-                Add(p, "scene-binding", "Refresh this simulation arm; its scene identity is ambiguous.");
+                Add(p, "scene-binding", "Refresh this simulation arm; its scene identity is ambiguous.", refreshableSceneEvidence: true);
             else if (scene!["robots"]!.AsArray().OfType<JsonObject>().First(r => r["entityId"]?.GetValue<string>() == p.RobotId) is { } model &&
                 (model["modelAssetId"]?.GetValue<string>() is not { Length: > 0 } || model["modelRevision"]?.GetValue<string>() is not { Length: > 0 }))
-                Add(p, "scene-model", "Refresh this simulation arm's model identity in Settings.");
+                Add(p, "scene-model", "Refresh this simulation arm's model identity in Settings.", refreshableSceneEvidence: true);
 
             var devices = receipt.State["devices"] is JsonArray inventory
                 ? inventory.OfType<JsonObject>().Where(d => d["id"]?.GetValue<string>() == p.CanDeviceId).ToArray() : [];

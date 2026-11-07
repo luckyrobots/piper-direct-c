@@ -6,10 +6,10 @@ for example, **Piper 1: Use Resume controls** and **Piper 1: Use Enable robot to
 enable this robot's Pika gripper**. Selecting a checkbox still only saves a
 preference. It does not switch control modes, enter Play or send a target.
 
-Follow remains clickable when robots are selected. A temporary encoder-stillness
-or `can_return` change does not disable this explicit action. Clicking it while
-unready displays the same preparation report without arming Play or sending
-arm/gripper commands. The failed attempt stays beside Follow until another
+Follow remains clickable when robots are selected, including while a controller
+waits for encoder stillness. When a controller or assignment check blocks arming,
+clicking Follow displays the same report and sends no arm or gripper commands.
+The failed attempt stays beside Follow until another
 explicit attempt or a membership change. A later runtime failure also retains
 its original cause there after cleanup.
 
@@ -21,6 +21,9 @@ Approval scope includes backend, CAN identity/generation, scene arm/prefix and
 Pika identity/distribution. It checks the complete group's assignments,
 teaching/recovery/power/health/configuration and Pika control/readiness. Scene
 discovery and subsequent native/engine admission still validate live identities.
+When the cached scene inventory is missing or outdated, Follow refreshes it
+after checking static assignments and controller readiness. Every selected
+arm must match the current scene before Follow can arm.
 This report does not replace firmware handoff, lease, source expiry or endpoint
 guards, and it never interprets a failed check as permission to reset or enable.
 
