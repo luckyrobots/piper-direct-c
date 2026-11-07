@@ -24,6 +24,12 @@ if (args is ["--primary-ui"])
     Console.WriteLine($"Passed {checks} primary workspace action checks.");
     return;
 }
+if (args is ["--unified-follow"])
+{
+    await SimulationFollowingTests.RunUnifiedFollowing(Check);
+    Console.WriteLine($"Passed {checks} unified simulation characterization checks.");
+    return;
+}
 if (args is ["--group-follow"])
 {
     GroupSimulationFollowingTests.Run(Check);
@@ -36,8 +42,8 @@ if (args is ["--endpoint-stationary"])
 {
     SimulationEndpointStationaryTests.Run(Check);
     OrderedSimulationExecutionTests.Run(Check);
-    await SimulationFollowingTests.RunOrderedProtocol(Check);
-    await SimulationFollowingTests.RunFailureHeader(Check);
+    await SimulationFollowingTests.RunGroupFollow(Check);
+    await SimulationFollowingTests.RunUnifiedFollowing(Check);
     Console.WriteLine($"Passed {checks} endpoint stationarity and failure presentation checks.");
     return;
 }
@@ -447,11 +453,11 @@ SimulationFollowNativeReferenceTests.Run(Check);
 OrderedSimulationExecutionTests.Run(Check);
 GroupSimulationFollowingTests.Run(Check);
 await SimulationFollowingTests.RunGroupFollow(Check);
+await SimulationFollowingTests.RunUnifiedFollowing(Check);
 SimulationEndpointStationaryTests.Run(Check);
 OrderedPhysicalContactTests.Run(Check);
 OrderedMissedGraspTests.Run(Check);
 OrderedContactLossTests.Run(Check);
-await SimulationFollowingTests.Run(Check);
 await NativeAdmissionTests.Run(Check);
 var resetGapDevice = new JsonObject { ["id"] = "reset-arm", ["generation"] = 7L, ["present"] = true, ["up"] = true, ["fresh"] = false };
 var resetGapSnapshot = new JsonObject { ["selected"] = "reset-arm", ["devices"] = new JsonArray(resetGapDevice) };

@@ -62,7 +62,7 @@ public sealed partial class PipersPlugin
     private RobotReadiness Readiness(JsonObject? device) => RobotReadiness.Inspect(device, approved,
         ActiveProfile.PikaDevice.Length == 0 || PikaMatchesProfile() && pikaOwned && state?["pika"]?["fresh"]?.GetValue<bool>() == true &&
             state["pika"]?["enabled"]?.GetValue<bool>() == true && state["pika"]?["armed"]?.GetValue<bool>() == true,
-        Volatile.Read(ref simulationSession) is not null || GroupFollowIncludes(ActiveProfile.Id), state?["motion"]?["active"]?.GetValue<bool>() == true);
+        GroupFollowIncludes(ActiveProfile.Id), state?["motion"]?["active"]?.GetValue<bool>() == true);
 
     private Task PrimaryRobotAction(CancellationToken cancellation) => RunPrimaryAction(RunPrimaryRobotAction, cancellation);
 
@@ -206,7 +206,6 @@ public sealed partial class PipersPlugin
         patches["recovery.feedback"] = new() { ["text"] = currentRecoveryGuide ? handGuideRecoveryMessage : "", ["visible"] = currentRecoveryGuide && handGuideRecoveryMessage.Length > 0, ["hint"] = currentRecoveryGuide ? handGuideRecoveryMessage : "" };
         patches["recovery.card.run"] = new() { ["text"] = recoveryView.ActionText, ["enabled"] = recoveryView.CanAct && !switchingProfile && !recoveryHomeBusy && !teachingResetBusy && !SimulationFollowingActive, ["hint"] = recoveryView.NextStep };
         patches["teaching"] = new() { ["visible"] = !controllerStopped && teaching.BlocksTargets || PikaTeachingControlsVisible };
-        patches["simulation.follow"] = new() { ["visible"] = SimulationFollowingActive };
         patches["teleoperate.toggle"]!["text"] = teleoperating ? "Finish dragging" : "Drag joints";
         patches["profiles.inventory"] = new() { ["text"] = pikaInventoryMessage };
         patches["recovery.guide.cancel"] = new() { ["visible"] = currentRecoveryGuide };

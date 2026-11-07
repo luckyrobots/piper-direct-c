@@ -93,13 +93,9 @@ public sealed partial class PipersPlugin
     private long recoveryRequestId, recoveryAcknowledgedTicks, recoveryAcknowledgedSequence;
 
     private bool TelemetryIsFresh() => telemetry.Latest is { } receipt && receipt.BackendToken == token && receipt.IsFresh(Stopwatch.GetTimestamp());
-    private static bool TransientTelemetryTransport(Exception error) => error is IOException or TimeoutException ||
-        error is RpcException { StatusCode: StatusCode.Unavailable or StatusCode.DeadlineExceeded };
-
     private void DisarmTelemetryTargets(string reason, bool clearLink)
     {
         CancelRecoveryHome();
-        CancelSimulationFollowingInput();
         CancelGroupSimulationFollowingInput(reason);
         Interlocked.Increment(ref targetPermissionEpoch);
         teachingReturnGate.Invalidate();
@@ -195,8 +191,7 @@ public sealed partial class PipersPlugin
             {
                 telemetry.Disconnect();
                 PikaTeachingTelemetryInterrupted();
-                if (InactiveSimulationReady && TransientTelemetryTransport(error)) WaitingForReadyFeedback("Controller telemetry is reconnecting.");
-                else { DisarmTelemetryTargets("Controller telemetry interrupted", clearLink: false); pikaOwned = pikaMonitoring = false; }
+                DisarmTelemetryTargets("Controller telemetry interrupted", clearLink: false); pikaOwned = pikaMonitoring = false;
                 telemetryIssue = error is RpcException { StatusCode: StatusCode.Unavailable }
                     ? "Controller unavailable on 127.0.0.1:8766; reconnecting automatically."
                     : "Controller telemetry interrupted: " + error.Message;
@@ -263,8 +258,7 @@ public sealed partial class PipersPlugin
             {
                 bool expectedReset = SupportedRecoveryExpectedGap(receipt) || RecoveryHomeExpectedGap(receipt) || receipt is not null && receipt.IsFresh(Stopwatch.GetTimestamp()) && link is { } linked &&
                     TeachingResetAssisted.ExpectedFeedbackGap(teachingResetBusy, receipt.State, linked.DeviceId, linked.Generation);
-                if (!expectedReset && !InactiveSimulationReady) DisarmTelemetryTargets("Measured robot feedback exceeded the 500 ms freshness window", clearLink: false);
-                else if (InactiveSimulationReady) WaitingForReadyFeedback("Measured controller feedback is temporarily delayed.");
+                if (!expectedReset) DisarmTelemetryTargets("Measured robot feedback exceeded the 500 ms freshness window", clearLink: false);
                 continue;
             }
             telemetryTargetsDisarmed = false;
@@ -297,8 +291,7 @@ public sealed partial class PipersPlugin
             }
             catch (Exception error) when (!cancellation.IsCancellationRequested)
             {
-                if (InactiveSimulationReady && TransientTelemetryTransport(error)) WaitingForReadyFeedback("Pika heartbeat acknowledgement is temporarily delayed.");
-                else pikaOwned = pikaMonitoring = false;
+                pikaOwned = pikaMonitoring = false;
                 message = "Pika connection: " + error.Message;
             }
         } while (await timer.WaitForNextTickAsync(cancellation));
@@ -386,12 +379,12 @@ public sealed partial class PipersPlugin
 
     private async Task PublishMeasuredScene(CancellationToken cancellation)
     {
-        if (GroupFollowActive) return; // The group's first frame and shared runtime own the solid leaders.
+        var group = Volatile.Read(ref groupSimulation);
+        if (group is not null && !GroupWaitingForUserPlay(group)) return;
         if (link is not { } linked) return;
-        var simulation = Volatile.Read(ref simulationSession);
         bool SamePublishingScope() => ReferenceEquals(link, linked) &&
-            ReferenceEquals(Volatile.Read(ref simulationSession), simulation) &&
-            (simulation is null || SimulationAwaitingPlay(simulation));
+            ReferenceEquals(Volatile.Read(ref groupSimulation), group) &&
+            (group is null || GroupWaitingForUserPlay(group));
         // Arming Follow in Edit does not transfer pose ownership. Keep the
         // measured pose lease alive until the actual Play runtime takes over;
         // otherwise the editor motion graph restores its authored (open) jaws.
@@ -418,8 +411,8 @@ public sealed partial class PipersPlugin
                 double? target = index >= 0 ? device["joints"]?[index]?["target_deg"]?.GetValue<double>() : null;
                 if (target.HasValue) { requested["leaderJoint"] = followJoint; requested["leaderPosition"] = target.Value * Math.PI / 180; }
             }
-            using var sceneDeadline = simulation is null ? CancellationTokenSource.CreateLinkedTokenSource(cancellation)
-                : CancellationTokenSource.CreateLinkedTokenSource(cancellation, simulation.Stop.Token);
+            using var sceneDeadline = group is null ? CancellationTokenSource.CreateLinkedTokenSource(cancellation)
+                : CancellationTokenSource.CreateLinkedTokenSource(cancellation, group.Stop.Token);
             sceneDeadline.CancelAfter(TimeSpan.FromMilliseconds(400));
             if (!SamePublishingScope()) return;
             // The native API is Edit-only and rejects a Play transition before
@@ -463,14 +456,21 @@ public sealed partial class PipersPlugin
         {
             // A rejected old publication cannot revoke a replacement link or
             // the runtime leader that took ownership while it was pending.
-            if (!SamePublishingScope()) return;
-            if (simulation is not null && SimulationScopeCurrent(simulation) &&
+            if (!ReferenceEquals(link, linked) || !ReferenceEquals(Volatile.Read(ref groupSimulation), group)) return;
+            if (group is not null && GroupScopeCurrent(group) && !GroupWaitingForUserPlay(group) &&
                 error.Message.Contains("Robot linking requires an open scene in Edit mode", StringComparison.Ordinal))
             {
                 // Expected boundary: Follow owns the upcoming runtime, while
                 // this final measured Edit update lost the race to Play.
                 acknowledgedScenePose = null; acknowledgedSceneAt = 0; linkErrorDegrees = null;
                 sceneTrackingStatus = "Simulation is taking control · measured Edit tracking paused";
+                return;
+            }
+            if (group is not null && !GroupWaitingForUserPlay(group))
+            {
+                // A late Edit failure has no authority over an active runtime
+                // leader. Its worker owns runtime failures and final holds.
+                Trace.TraceWarning("Measured Edit update retired after group runtime takeover: {0}", error.Message);
                 return;
             }
             PauseSceneFollowing();

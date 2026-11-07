@@ -10,10 +10,8 @@ public sealed partial class PipersPlugin
     // for editor requests. The backend attempts the two channels independently.
     private async Task StopImmediately(CancellationToken ignoredCallerCancellation)
     {
-        var simulation = Volatile.Read(ref simulationSession);
         bool groupActive = GroupFollowActive;
         CancelGroupSimulationFollowingInput("Operator STOP · follower group discarded");
-        CancelSimulationFollowingInput();
         string deviceId = ActiveProfile.CanDeviceId, expectedToken = token;
         bool ownPika = groupActive || PikaMatchesProfile() && state?["pika"]?["owner"]?.GetValue<string>() == owner;
         if (teachingResetBusy) CancelResetAssisted();
@@ -27,7 +25,7 @@ public sealed partial class PipersPlugin
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(4));
         try
         {
-            if (deviceId.Length == 0) throw new InvalidOperationException("Assign this robot's CAN adapter before sending its STOP.");
+            if (!groupActive && deviceId.Length == 0) throw new InvalidOperationException("Assign this robot's CAN adapter before sending its STOP.");
             var body = new JsonObject { ["owner"] = owner, ["device_id"] = deviceId,
                 ["pika_device"] = ActiveProfile.PikaDevice, ["pika_distribution"] = ActiveProfile.WslDistribution };
             if (groupActive) { body.Remove("device_id"); body.Remove("pika_device"); body.Remove("pika_distribution"); }
@@ -77,11 +75,6 @@ public sealed partial class PipersPlugin
         {
             try { await StopGroupSimulationFollowing("Operator STOP · follower group discarded", timeout.Token); }
             catch (Exception error) { System.Diagnostics.Trace.TraceWarning("Group STOP: {0}", error.Message); }
-        }
-        if (simulation is not null)
-        {
-            try { await StopSimulationFollowing(simulation, "Operator STOP · simulation following discarded", timeout.Token); }
-            catch (Exception error) { System.Diagnostics.Trace.TraceWarning("Simulation STOP: {0}", error.Message); }
         }
         try { await FinishPikaTeaching("Operator STOP", timeout.Token); }
         catch (Exception error) { System.Diagnostics.Trace.TraceWarning("Teaching stop save: {0}", error.Message); }

@@ -193,15 +193,6 @@ public sealed partial class PipersPlugin : ILuckyPlugin
             await StopGroupSimulationFollowing("Stopped · holding all selected robots", release.Token);
             await Update(cancellation); return;
         }
-        if (UnscopeEvent(input.WidgetId) == "simulation.stop" || UnscopeEvent(input.WidgetId) is "enable" or "motion.hold" && Volatile.Read(ref simulationSession) is not null)
-        {
-            if (Volatile.Read(ref simulationSession) is { } simulation)
-            {
-                using var release = new CancellationTokenSource(TimeSpan.FromSeconds(2));
-                await StopSimulationFollowing(simulation, "Stopped · holding real joints and Pika; simulation paused", release.Token);
-            }
-            return;
-        }
         if (uiEvents is { } dispatch)
         {
             if (!dispatch.Enqueue(input, Interlocked.Read(ref targetPermissionEpoch)))
@@ -248,6 +239,13 @@ public sealed partial class PipersPlugin : ILuckyPlugin
             uiActionError = "";
             if (id.StartsWith("group.follow.", StringComparison.Ordinal))
             { await GroupFollowWorkspaceEvent(id[13..], input.Value, cancellation); return; }
+            if (id.StartsWith("simulation.", StringComparison.Ordinal))
+            {
+                string action = id[11..] switch {
+                    "toggle" or "match" => "toggle", "stop" => "cancel",
+                    _ => throw new InvalidOperationException("Unknown simulation follow action.") };
+                await GroupFollowEvent(action, cancellation); await Update(cancellation); return;
+            }
             if (GroupFollowActive && (id == "disable" || id == "motion.hold"))
                 await StopGroupSimulationFollowing("Operator stopped the follower group", cancellation);
             if (GroupFollowActive && (WorkspaceCommandPolicy.RequiresControls(id) || id is "recovery.run" or "recovery.card.run" or "robots.select" or "link" ||
@@ -257,13 +255,6 @@ public sealed partial class PipersPlugin : ILuckyPlugin
             if (id.StartsWith("global.", StringComparison.Ordinal))
             { await GlobalSettingsEvent(id[7..], input.Value, cancellation); await Update(cancellation); return; }
             if (id == "recovery.guide.cancel") { CancelHandGuideRecovery(); await Update(cancellation); return; }
-            if (id.StartsWith("simulation.", StringComparison.Ordinal))
-            {
-                await SimulationEvent(id[11..], cancellation); await Update(cancellation); return;
-            }
-            if (Volatile.Read(ref simulationSession) is not null && (WorkspaceCommandPolicy.RequiresControls(id) || id is "recovery.run" or "recovery.card.run" or "robots.select" or "link" ||
-                id.StartsWith("profiles.", StringComparison.Ordinal) || id.StartsWith("teaching.", StringComparison.Ordinal) || id.StartsWith("pika.reference.", StringComparison.Ordinal)))
-                throw new InvalidOperationException("Following owns controls — Stop following first. STOP remains immediate.");
             if (workspacePage != "controls" && WorkspaceCommandPolicy.RequiresControls(id)) throw new InvalidOperationException("Return to Controls before enabling or moving the robot.");
             if (CalibrationCommandGuard.Blocks(id, calibrationOpen)) throw new InvalidOperationException("Calibrate robot is read-only. Use Back to robot controls before enabling or moving the real robot.");
             if (id.StartsWith("workspace.", StringComparison.Ordinal))
@@ -317,11 +308,6 @@ public sealed partial class PipersPlugin : ILuckyPlugin
             else if (id == "safety.cancel") await Patch(new Dictionary<string, JsonObject> { ["safety"] = new() { ["visible"] = false } }, cancellation);
             else if (id == "disable")
             {
-                if (Volatile.Read(ref simulationSession) is { } following)
-                {
-                    await StopSimulationFollowing(following, "Disable requested · stopping following before removing motor power", cancellation);
-                    await following.Ended.Task.WaitAsync(TimeSpan.FromSeconds(4), cancellation);
-                }
                 try { await FinishAlignment("Robot disabled", cancellation); }
                 catch (IOException error) { Trace.TraceWarning("Disable continued after alignment report could not be saved: {0}", error.Message); }
                 link = null;
@@ -651,7 +637,6 @@ public sealed partial class PipersPlugin : ILuckyPlugin
         foreach (string action in new[] { "minus", "plus", "zero" }) patches["pika." + action] = new() { ["enabled"] = !PikaTeachingRecording && workspacePage == "controls" && pikaOwned && pika?["fresh"]?.GetValue<bool>() == true && pika["armed"]?.GetValue<bool>() == true && pika["pending"]?.GetValue<bool>() != true };
         AddWorkspacePatches(patches, device);
         AddPikaReferencePatches(patches, pika as JsonObject);
-        AddSimulationControlPatches(patches);
         AddRecoveryHomePatches(patches, device);
         AddUnifiedWorkspacePatches(patches, device);
         AddGroupFollowPatches(patches);
@@ -668,13 +653,6 @@ public sealed partial class PipersPlugin : ILuckyPlugin
             catch (Exception error) { Trace.TraceWarning("Group following shutdown: {0}", error.Message); }
         }
         await StopSupportedRecoveryOnDispose();
-        if (Volatile.Read(ref simulationSession) is { } simulation)
-        {
-            using var followingTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(2));
-            await StopSimulationFollowing(simulation, "Plugin closed · following stopped", followingTimeout.Token);
-            try { await simulation.Ended.Task.WaitAsync(TimeSpan.FromSeconds(7)); }
-            catch (TimeoutException) { Trace.TraceWarning("Simulation follower did not verify final teardown before transport shutdown."); }
-        }
         if (uiEvents is { } dispatch) await dispatch.DisposeAsync();
         await StopCameraDiscoveryOnDispose();
         using (var markerTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(1)))

@@ -27,34 +27,35 @@ over loopback gRPC (8766), alongside the existing web dashboard (8765).
 restart, disconnect, scene change or stop. It uses the public plugin runtime
 API; plugin authors still need only the published SDK, not engine source.
 
-1. In Edit mode, select the physical CAN adapter and its scene robot, then enable
-   the arm and assigned Pika controls. End onboard teaching/playback first.
-2. Check that the path to the simulation's start pose is clear, then click
-   **Follow simulation**. This prepares and shows the actual first frame, paused
-   before any physics/script update. Play stays locked during preparation and
-   matching.
-3. The real arm and Pika automatically match that starting pose at the slow
-   matching speed. The panel shows the measured and requested positions and
-   matching progress. **Stop following** cancels this movement and holds the
-   measured pose.
-4. When the positions agree, the panel says **Ready — press Play**. The simulation
-   stays at its first frame, and neither hardware motion stream is running while
-   you wait. The motors keep holding the matched pose.
-5. Press Play. The editor records your request but keeps that first frame paused
-   while the plugin starts both hardware sessions and confirms their initial
-   targets. Only the acknowledged, exactly scoped activation releases Play.
-6. During Play, the solid robot is the simulation leader at the scene's selected
+1. In Edit mode, assign each physical CAN adapter, Pika and matching scene arm in
+   Settings, then use **Enable robot** for each participant. End onboard
+   teaching/playback and use **Resume controls** when the panel requests it.
+2. Check **Follow simulation with this robot** for each participant. The saved
+   checkboxes only select the group. The sidebar names every unready robot and
+   its next action, including another selected robot's missing gripper
+   power or return from teaching.
+3. Check that every start-pose path is clear, then click the single sidebar
+   **Follow simulation** button. The group becomes **Armed · press Play** while
+   the editor stays in Edit. This action sends no arm or jaw target.
+4. Press the editor's Play button once. Its first frame pauses before any
+   physics/script update. All selected real arms and Pikas match that frame at
+   the slow matching speed, then acknowledge their scoped following sessions.
+   Only the acknowledged shared activation releases the episode; no second
+   Play click is needed. **Stop following** holds all participants and cancels
+   pending preparation, including a delayed acknowledgement.
+5. During Play, each solid robot is the simulation leader at the scene's selected
    rate. A cyan mesh at 50% opacity shows fresh measured hardware joints and
    jaws. Use **Free Camera** in the Scene viewport to see the overlay during
    Play. The ghost never changes physics, collisions, camera images or datasets.
-7. The real follower buffers one closed movement phase, preserving every source
+6. Each real follower buffers one closed movement phase, preserving every source
    waypoint and the order of jaw events. Continuous monotone cubic arm paths
    use local timing qualified against fresh reported velocity/acceleration
    limits. The leader can run ahead; that lag alone does not stop it. The speed
    selected at preparation stays pinned until Stop following.
-8. A completed simulation episode displays **Waiting for real robot**. Its next
-   randomization waits for fresh stationary arm feedback, the expected measured
-   jaw opening, and acknowledgement of that exact final source frame. The
+7. Selected partners share phase barriers. Faster arms hold the measured
+   endpoint until all participants finish that phase. A completed episode waits
+   for every arm and jaw before one acknowledgement of its final source frame
+   permits the next randomization. The
    existing tube task uses this reusable scene-script episode gate.
 
 **Stop following** holds measured arm/Pika positions and pauses the simulation.
@@ -74,16 +75,14 @@ automatic replay. Hardware faults, changed/invalid limits, invalid arithmetic,
 excessive tracking error and an existing obstruction still use their hard stop;
 failure to verify or transmit the hold also stops the controller.
 
-The public runtime API must advertise `startActivationSupported` and the ordered
-`robotRuntimeFramesSupported` capability. The plugin
-opts into `prepare-start` with `activationHandshake: true`, observes
-`startRequested`, and uses `activate-start` only after controller admission.
-An older editor is rejected before physical matching. Legacy SDK clients that
-do not opt into this handshake retain the original preparation semantics.
-
-An inactive Ready state waits through brief feedback-age gaps without starting
-either hardware stream. Identity, ownership, fault and changed-pose checks still
-apply. Once controller admission begins, the active freshness deadlines apply.
+The public runtime API must advertise `robotRuntimeTracksSupported`; the backend
+must advertise independent device lanes. One or several distinct arm namespaces
+must belong to the same compiled scene world. The plugin uses `arm-next-play`
+without entering Play, observes the user's `startRequested` run, captures one
+atomic tape containing each participant's joints and jaws, and calls
+`activate-start` only after all controller admissions. Older capabilities are
+rejected before physical matching. Identity, ownership, fault and freshness
+guards remain active while Armed and during playback.
 
 Ordered frames are captured at the selected robot runner's Export phase, rather
 than reconstructed from RPC poll intervals. Scene event and post-physics MuJoCo

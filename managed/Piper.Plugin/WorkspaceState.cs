@@ -86,8 +86,8 @@ public sealed partial class PipersPlugin
         if (page != workspacePage)
         {
             bool enteringCalibration = page == "settings" && settingsCategory == "bench";
-            if (enteringCalibration && Volatile.Read(ref simulationSession) is { } simulation)
-                await StopSimulationFollowing(simulation, "Following stopped on leaving Controls", cancellation);
+            if (enteringCalibration && GroupFollowActive)
+                await StopGroupSimulationFollowing("Following stopped on leaving Controls", cancellation);
             // End a viewport gesture when hiding its controls. Browsing settings
             // does not revoke a healthy robot session or interrupt an episode.
             if (teleoperating || followRequest != 0) await PauseTeleoperation(cancellation);

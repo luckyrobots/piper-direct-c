@@ -67,8 +67,6 @@ public sealed partial class PipersPlugin
         widgets.Add(Widget.Row("teleoperate", Widget.Button("teleoperate.toggle", "Drag joints") with { Width = 135 },
             Widget.Row("teleoperate.joints", Enumerable.Range(1, 6).Select(i => Widget.Button("teleoperate.joint." + i, "J" + i) with { Width = 38, Enabled = false }).ToArray()) with { Spacing = 4 },
             Info("workspace.link-info", "The solid robot is the simulated leader. The translucent ghost shows measured real joint and gripper feedback.")));
-        widgets.Add(Widget.Column("simulation.follow", Widget.Label("simulation.status", simulationStatus) with { Height = 42, Hint = simulationDetail },
-            Widget.Label("simulation.start-comparison", "") with { Height = 120, Appearance = "numeric", Visible = false }) with { Visible = SimulationFollowingActive, Spacing = 4 });
         return Widget.Column("workspace.controls.body", widgets.ToArray()) with { Spacing = 10 };
     }
 

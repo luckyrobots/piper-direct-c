@@ -41,7 +41,7 @@ public sealed partial class PipersPlugin
         recoveryHomeDevice = current.Device["id"]!.GetValue<string>(); recoveryHomeGeneration = current.Device["generation"]!.GetValue<long>();
         // This labelled action acknowledges a securely resting arm and a clear
         // zero path. It does not infer support from joint angles or power bits.
-        CancelSimulationFollowingInput();
+        CancelGroupSimulationFollowingInput("Recovery to zero requested · previous follower targets discarded");
         recoveryHomeEpoch = Interlocked.Increment(ref targetPermissionEpoch);
         // The actor drops previously queued controls by epoch at dequeue. Do
         // not cancel its currently executing event: it starts this operation.

@@ -43,12 +43,33 @@ GroupFollowControls / AddGroupFollowPatches
 
 SDK callbacks, the UI actor and background runtime workers are asynchronous entry
 points rather than private single-use helpers to inline. Keeping these boundaries
-explicit permits immediate STOP/cancel and orderly worker draining. Legacy
-single-robot following and viewport dragging remain in this batch; their later
-consolidation requires separate characterization tests.
+explicit permits immediate STOP/cancel and orderly worker draining. One existing
+coordinator now runs both one and multiple selected robots; the parallel legacy
+single-robot executor has been removed. Viewport dragging remains a separate
+input mode because its gesture/commit contract differs from an ordered episode.
+
+The coordinator owns arming, user Play, first-frame matching, native admission,
+source publication and cleanup as one worker lifetime. A late engine or native
+acknowledgement cannot release the captured identity or let a replacement group
+start before all requests retire and final holds finish. STOP also retires
+read-only discovery before a session has been allocated. Measured Edit feedback
+keeps the current jaws visible while merely Armed; runtime takeover ends that
+Edit lease. Native control guards and source deadlines are unchanged.
+
+Every participant retains bounded publication timings and an independently
+scoped first-failure diagnostic, including negative Pika acknowledgements and
+ordered-phase endpoint evidence. Independent cleanup attempts include their
+evidence lookup, so a malformed arm or gripper inventory cannot prevent holds
+for a healthy partner or the final engine cancellation/pause. A fresh, exact
+post-admission idle receipt can prove an arm already retired; an idle controller
+does not receive an unsupported hold request.
 
 Offline regressions use the actual public UI event path, simulated engine RPCs
 and fake arm/Pika calls. They cover an unready nonselected partner, teaching ended
 with a disabled gripper, STOP preservation, retrying once in Edit, public profile
 navigation during following, stable action clickability, and immediate group
-cancel while the normal command semaphore is occupied.
+cancel while the normal command semaphore is occupied. The unified suite also
+covers canonical and prefixed one-participant tracks, delayed engine/native
+acknowledgements, lost acknowledgements, discovery cancellation, malformed
+partner evidence, source expiry/model/cursor rejection, per-channel diagnostics,
+and completing release/home after a missed grasp.
