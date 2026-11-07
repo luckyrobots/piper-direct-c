@@ -1,6 +1,5 @@
 using System.Diagnostics;
 using System.Text.Json.Nodes;
-using LuckyEngine.PluginSdk;
 
 namespace LuckyRobots.Piper.Plugin;
 
@@ -28,14 +27,6 @@ public sealed partial class PipersPlugin
         }
         return new(device, snapshot["motion"]?["active"]?.GetValue<bool>() == true);
     }
-
-    private Widget ResetAssistedControls() => Widget.Column("teaching.reset",
-        Widget.Button("teaching.reset.begin", "Reset-assisted return") with { Visible = teaching.Phase == "ended" },
-        Widget.Label("teaching.reset.requirements", "Vendor supported reset posture: |J2| < 10°, |J3| < 10°, 12° < J5 < 45°; teach light OFF. This alternative briefly removes holding torque and explicitly re-enables six arm motors, without a position target.") with { Height = 68, Visible = teaching.Phase == "ended" },
-        Widget.Column("teaching.reset.confirmation", Widget.Label("teaching.reset.warning", "Keep the arm physically supported throughout STOP → reset → verified motors off → enable. The arm will briefly lose holding torque. Confirm the teach light is OFF, the displayed supported posture is correct, and the workspace is clear. No homing, position target or recorded trajectory will be sent. Keep supporting until all six motors are verified enabled.") with { Height = 100 },
-            Widget.Row("teaching.reset.confirmation.actions", Widget.Button("teaching.reset.confirm", "Supported & clear — reset and enable"), Widget.Button("teaching.reset.cancel", "Cancel"))) with { Visible = teachingResetConfirmation },
-        Widget.Row("teaching.reset.running", Widget.Label("teaching.reset.progress", teachingResetProgress) with { Height = 52 },
-            Widget.Button("teaching.reset.abort", "Cancel / STOP") with { Width = 130 }) with { Visible = teachingResetBusy });
 
     private async Task ResetAssistedEvent(string action, CancellationToken cancellation)
     {

@@ -124,23 +124,6 @@ public sealed partial class PipersPlugin
         : teaching.ReturnRequired ? "Recording ended. Use Back to robot controls for the supported return to CAN control."
         : "Single-click the physical teach button for hand guiding (solid green). Linking reads the arm's measured pose.";
 
-    private Widget TeachingControls() => FocusedRobotView ? Widget.Column("teaching",
-        Widget.Label("teaching.label", teaching.Label) with { Height = 28 },
-        Widget.Label("teaching.next", AlignmentTeachingPrompt) with { Height = 38, Hint = teaching.NextStep }, PikaTeachingControls()) : Widget.Column("teaching",
-        Widget.Row("teaching.header", Widget.Label("teaching.label", teaching.Label) with { Height = 34 },
-            Widget.Button("teaching.help", "Hand-guide help") with { Width = 150 }),
-        Widget.Label("teaching.next", teaching.NextStep) with { Height = 86, Visible = teaching.BlocksTargets || teachingHelpOpen },
-        Widget.Label("teaching.zero", "") with { Height = 34, Visible = teaching.ReturnRequired },
-        Widget.Button("teaching.return", "Return to CAN control") with { Visible = teaching.ReturnRequired, Enabled = teaching.CanReturn },
-        Widget.Column("teaching.return.confirmation",
-            Widget.Label("teaching.return.warning", teaching.ReturnConfirmation) with { Height = 48 },
-            Widget.Row("teaching.return.actions",
-                Widget.Button("teaching.return.confirm", "Confirm return to CAN") with { Width = 190 },
-                Widget.Button("teaching.return.cancel", "Cancel") with { Width = 90 })) with { Visible = teachingReturnConfirmation },
-        ResetAssistedControls(),
-        PikaTeachingControls(),
-        Widget.Label("teaching.help.text", "Single-click the physical teach button: solid green records hand-guided arm motion; single-click again ends it. Double-click starts the controller's saved playback (flashing green). A new onboard recording replaces its previous trajectory. Modern supported firmware can return to CAN at the measured pose; older firmware requires zero. The plugin follows measured feedback and never automatically starts playback or changes encoder-zero calibration. Onboard teaching records the arm; USB Pika motion is separate.") with { Visible = teachingHelpOpen, Height = 118 });
-
     private async Task TeachingEvent(string action, CancellationToken cancellation)
     {
         if (action.StartsWith("pika.", StringComparison.Ordinal)) { await PikaTeachingEvent(action[5..], cancellation); return; }
@@ -173,32 +156,6 @@ public sealed partial class PipersPlugin
         patches["teaching.return.confirmation"] = new() { ["visible"] = teachingReturnConfirmation && teaching.CanReturn };
         patches["enable"] = new() { ["enabled"] = device is not null && !switchingProfile && !teaching.BlocksTargets };
     }
-
-    private Widget AlignmentControls() => !alignmentOpen
-        ? Widget.Button("alignment.toggle", "Guided desk alignment check")
-        : Widget.Column("alignment",
-            Widget.Row("alignment.header", Widget.Label("alignment.title", "Guided desk alignment check"),
-                Widget.Button("alignment.toggle", "Back to robot controls") with { Width = 190 }),
-            Widget.Column("alignment.form",
-            Widget.Label("alignment.instructions", "1. Put a distinct object at the measured desk cross and the same scene reference; enter its height above the desk.\n2. Name the exact tool/contact point (for example grasp_site), then hand-guide it to the object's top.\n3. Capture while stationary, compare both views and repeat from different approach poses.") with { Height = 66,
-                Hint = "The tool point is recorded, not inferred. A camera origin or an unspecified fingertip is not a defined contact point. This wizard sends no homing or playback. Use Back to robot controls for the supported teaching return flow." },
-            Widget.Row("alignment.identity", Widget.Label("alignment.name.label", "Reference") with { Width = 70 },
-                new Widget("input", "alignment.name") { Text = AlignmentOptions.Name, Hint = "Physical reference name" },
-                Widget.Label("alignment.tool.label", "Tool point") with { Width = 75 },
-                new Widget("input", "alignment.tool") { Text = AlignmentOptions.ToolPoint, Hint = "Exact named model TCP/contact point; not inferred" }),
-            Widget.Row("alignment.reference", Widget.Label("alignment.x.label", "Scene X m"), Widget.Slider("alignment.x", AlignmentOptions.X, -20, 20, .001),
-                Widget.Label("alignment.y.label", "Desk Y m"), Widget.Slider("alignment.y", AlignmentOptions.DeskY, -20, 20, .001),
-                Widget.Label("alignment.z.label", "Scene Z m"), Widget.Slider("alignment.z", AlignmentOptions.Z, -20, 20, .001)),
-            Widget.Row("alignment.height.row", Widget.Label("alignment.height.label", "Measured object height mm (0 = bare desk)"), Widget.Slider("alignment.height", AlignmentOptions.ObjectHeightMm, 0, 1000, 1)),
-            Widget.Row("alignment.actions", Widget.Button("alignment.start", "Start local check / trace"), Widget.Button("alignment.capture", "Capture stationary pose"), Widget.Button("alignment.finish", "Finish & save report")),
-            Widget.Label("alignment.status", alignmentStatus) with { Height = 48 },
-            Widget.Column("alignment.confirmation",
-                Widget.Label("alignment.confirm.text", "Is the defined physical tool point at the reference, and does the simulated point visibly agree?") with { Height = 34 },
-                Widget.Row("alignment.confirm.actions", Widget.Button("alignment.match", "Both look aligned"), Widget.Button("alignment.mismatch", "Mismatch")),
-                Widget.Row("alignment.gap.row", Widget.Label("alignment.gap.label", "Estimated gap mm (0 = unmeasured)"), Widget.Slider("alignment.gap", alignmentGapMm, 0, 1000, 1))) with { Visible = alignmentPending is not null },
-            Widget.Button("alignment.open", "Open saved report"),
-            Widget.Label("alignment.limits", "Visual check only · metric calibration and camera exposure synchronization remain unverified.") with { Height = 34,
-                Hint = "This records joint agreement and operator observations. It does not solve base/tool/camera transforms, independently measure TCP position or validate contact force. Returning to zero alone does not make a dataset calibrated." }));
 
     private async Task AlignmentEvent(string action, JsonElement value, CancellationToken cancellation)
     {

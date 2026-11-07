@@ -32,12 +32,7 @@ public sealed class PikaSessionRegistry : IPikaSession
 
     public JsonObject Snapshot(bool includeRawEvidence = false)
     {
-        lock (gate)
-        {
-            string path = boundAliases.GetValueOrDefault(Key(defaultDevice, defaultDistribution), defaultDevice);
-            return sessions.TryGetValue(Key(path, defaultDistribution), out var entry)
-                ? Decorate(entry, includeRawEvidence) : Empty(defaultDevice, defaultDistribution);
-        }
+        lock (gate) return Snapshot(defaultDevice, defaultDistribution, includeRawEvidence);
     }
 
     public JsonArray Snapshots(bool includeRawEvidence = false)
@@ -88,8 +83,9 @@ public sealed class PikaSessionRegistry : IPikaSession
                     string path = item["device"]?.GetValue<string>() ?? "";
                     string? distro = item["distribution"]?.GetValue<string>();
                     var entry = sessions.GetValueOrDefault(Key(path, distro));
-                    item["connected"] = entry?.Session.Snapshot()["connected"]?.GetValue<bool>() == true;
-                    item["owner"] = entry?.Session.Snapshot()["owner"]?.DeepClone();
+                    var snapshot = entry?.Session.Snapshot();
+                    item["connected"] = snapshot?["connected"]?.GetValue<bool>() == true;
+                    item["owner"] = snapshot?["owner"]?.DeepClone();
                 }
         return result;
     }
@@ -129,10 +125,11 @@ public sealed class PikaSessionRegistry : IPikaSession
         try
         {
             string canonical = await CanonicalizeAsync(device, distribution, cancellation);
-            if (!explicitDevice && action == "configure" && Snapshot()["configuration_blocked"]?.GetValue<bool>() == true)
+            if (!explicitDevice && action == "configure")
             {
                 var current = Snapshot();
-                if (current["device"]?.GetValue<string>() != canonical || current["distribution"]?.GetValue<string>() != distribution)
+                if (current["configuration_blocked"]?.GetValue<bool>() == true &&
+                    (current["device"]?.GetValue<string>() != canonical || current["distribution"]?.GetValue<string>() != distribution))
                     throw new InvalidOperationException("Verify disabled feedback and disconnect the assigned Pika before changing its serial device.");
             }
             Entry entry;

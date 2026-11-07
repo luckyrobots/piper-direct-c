@@ -63,37 +63,6 @@ public sealed partial class PipersPlugin
         ReconcileReevaluatedWizard();
     }
 
-    private Widget WizardButton(string action, string text) => Widget.Button(WizardId(action), text) with
-    { Appearance = action is "next" or "capture" or "apply" ? "primary" : action is "back" or "new" or "open" ? "quiet" : "default", Padding = 8 };
-    private string WizardQuestion() => Wizard.Step switch
-    {
-        CalibrationWizardStep.Prepare => "Choose the real robot and its matching simulated copy, then click Link robot here. Check that both show the same pose. This page reads positions only; it never enables, resets or moves the real arm.",
-        CalibrationWizardStep.ContactPoint => "Which physical point will you measure at every location? Use the midpoint between BOTH jaw tips, not one tilted fingertip or the camera lens. Software has not verified its matching model site.",
-        CalibrationWizardStep.ModelPoint => "What exact named model point represents the physical midpoint? Read its coordinates and inspect the temporary scene marker, then report correspondence. A grasp centre may be behind the jaw tips; a name or marker alone does not verify the physical TCP.",
-        CalibrationWizardStep.DeskFrame => "Stand at the front long edge of your real desk, facing across it. The LEFT edge is the short edge on your left. The pointer marks the simulated LEFT edge. Confirm only if these are the corresponding edges. Advanced: this scene desk is centred at X/Z=0; its left edge is X=-width/2. A differently placed or rotated simulated desk must be corrected first.",
-        CalibrationWizardStep.DeskBack => "Keep standing at the same front long edge. BACK means the far long edge, furthest from you. The pointer marks the simulated BACK edge. Confirm only if it matches the real edge you will measure from. Advanced: this scene's back edge is Z=-depth/2.",
-        CalibrationWizardStep.SceneSurfaceY => "Check that the simulated base is on the simulated tabletop, then use that reference. The validated model root supplies the technical world-Y value; this reads a scene reference without moving anything. Physical floor/table height is irrelevant to tabletop-relative contact measurements.",
-        CalibrationWizardStep.SceneFloorOrigin => "Optional legacy office-height audit only: enter a known scene-world floor reference if you want to preserve it. This value is not required or used for tabletop capture, fitting or Apply.",
-        CalibrationWizardStep.DeskWidth => "What is the full tabletop width, from left edge to right edge, in millimetres? Enter your measured value.",
-        CalibrationWizardStep.DeskDepth => "What is the full tabletop depth, from back edge to front edge, in millimetres? Enter your measured value.",
-        CalibrationWizardStep.TabletopHeight => "Optional legacy office-height audit only: physical tabletop height remains unknown unless measured and entered. It is visual-office metadata, not a tabletop-calibration requirement or capture gate.",
-        CalibrationWizardStep.Precision => "Enter how much your ruler or hand placement could be off, in millimetres, from 1 to 10. For example, enter 5 if you can place and measure a point only to about 5 mm. The result is rejected when the recorded points disagree too much; this number is not a guarantee of accuracy.",
-        CalibrationWizardStep.Method => "How will you locate each point: measure its distance from the desk edges, or use numbered intersections on a grid mat? No object is required.",
-        CalibrationWizardStep.GridSquare => "What is the grid square size in millimetres? Verify with a ruler. Secure the mat flat and parallel to the desk edges; rotated grids are not supported.",
-        CalibrationWizardStep.GridOriginLeft => "How far is grid intersection (column 0, row 0) from the desk's LEFT edge, in millimetres? Columns must increase toward the right.",
-        CalibrationWizardStep.GridOriginBack => "How far is grid intersection (column 0, row 0) from the desk's BACK edge, in millimetres? Rows must increase toward the front.",
-        CalibrationWizardStep.PointIntro => WizardValidation ? "Choose a new check point that you have not captured before, at least 5 cm away from each reference point. It checks the alignment without helping calculate it. You may use your saved desk cross after verifying its measurements." : $"Choose reference point {WizardTrainingCount + 1} of four: a spot where you can position and measure the midpoint between the jaw tips. Use spots spread across both desk directions, not one line. Keep the desk cross for the final check.",
-        CalibrationWizardStep.PointLeft => "At this point, what is the distance from the physical desk's LEFT edge to the defined contact point, in millimetres?",
-        CalibrationWizardStep.PointBack => "At this point, what is the distance from the physical desk's BACK edge to the same defined contact point, in millimetres?",
-        CalibrationWizardStep.PointHeight => "How high is that contact point above the tabletop, in millimetres? Enter 0 only if it is actually on the bare desk. Include grid-mat thickness; do not assume zero.",
-        CalibrationWizardStep.GridColumn => "Which numbered grid intersection COLUMN is this point? Use a whole number from column 0 at the measured origin; not a square centre.",
-        CalibrationWizardStep.GridRow => "Which numbered grid intersection ROW is this point? Use a whole number from row 0 at the measured origin; not a square centre.",
-        CalibrationWizardStep.HandGuide => "Single-click the arm's physical button for solid green hand guiding. Bring the defined midpoint to your measured location by hand. Keep support as needed and hold still at least 0.4 seconds. The scene should follow measured joints.",
-        CalibrationWizardStep.Capture => "Ready to record this one point? Check the entered measurements and both views. Capture is an explicit action, requires fresh healthy stationary hand guiding, and never moves the arm.",
-        CalibrationWizardStep.Review => "Click Calculate alignment, then compare the errors with your measurement precision. All four reference points and the separate check point must pass. Apply changes only where the simulated robot sits and faces; it sends no movement command to the real robot. The detailed report keeps every measurement and error.",
-        CalibrationWizardStep.Complete => "The simulated robot's placement was saved; the real arm was not commanded. A successful desk check does not verify camera alignment, the exact physical measuring point, or synchronized recording. Those need separate checks.",
-        _ => "A saved scene write/applied placement needs read-only inspection. No Apply, rollback or motion resumes automatically after a restart."
-    };
     private string WizardPrompt() => Wizard.Step switch
     {
         CalibrationWizardStep.Prepare => "Link this real robot with its simulated copy.",
@@ -123,15 +92,6 @@ public sealed partial class PipersPlugin
         CalibrationWizardStep.Complete => "Simulation alignment saved. The real arm was not moved.",
         _ => "Inspect the saved scene placement before continuing."
     };
-    private string WizardNextLabel() => Wizard.Step switch
-    {
-        CalibrationWizardStep.ModelPoint => "Marker matches jaw tips",
-        CalibrationWizardStep.DeskFrame => "This is my LEFT edge",
-        CalibrationWizardStep.DeskBack => "This is my BACK edge",
-        CalibrationWizardStep.SceneSurfaceY => "The base is on the tabletop",
-        CalibrationWizardStep.HandGuide => "I am holding it still",
-        _ => "Continue"
-    };
     private (double LeftMm, double RightMm, double BackMm)? WizardCross()
     {
         var reference = ActiveProfile.Alignment;
@@ -141,10 +101,6 @@ public sealed partial class PipersPlugin
         double left = width / 2 + reference.X * 1000, back = depth / 2 + reference.Z * 1000;
         return left >= 0 && left <= width && back >= 0 && back <= depth ? (left, width - left, back) : null;
     }
-    private string WizardMeasurementSummary() => $"{(WizardValidation ? "Check point" : "Reference point")} · " +
-        (Wizard.Answers.GetValueOrDefault("method") == "grid intersections" ? $"grid ({Wizard.Answers.GetValueOrDefault("column", "?")}, {Wizard.Answers.GetValueOrDefault("row", "?")})" :
-            $"left {Wizard.Answers.GetValueOrDefault("left", "?")} / back {Wizard.Answers.GetValueOrDefault("back", "?")} mm") +
-        $" · jaw-tip midpoint above tabletop {Wizard.Answers.GetValueOrDefault("height", "?")} mm.";
 
     private string WizardStepName() => Wizard.Step switch
     {

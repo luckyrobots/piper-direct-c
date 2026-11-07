@@ -77,8 +77,6 @@ public sealed partial class PipersPlugin
             : "A saved base-calibration report is available. Start a new check to verify the current hardware, scene and contact point.";
     }
 
-    private Widget CalibrationControls() => CalibrationSheetControls();
-
     private double CalibrationValue(string key)
     {
         if (!double.TryParse(calibrationInputs[key], NumberStyles.Float, CultureInfo.InvariantCulture, out double value) || !double.IsFinite(value))
@@ -276,15 +274,6 @@ public sealed partial class PipersPlugin
         }
     }
 
-    private string CalibrationPreview()
-    {
-        if (calibrationFit is not { } fit || calibrationOriginal is not { } original) return "No fit yet · scene base unchanged.";
-        var p = fit.ProposedPlacement.Position; var old = original.Position;
-        return $"Scene base ({old.X:F3}, {old.Y:F3}, {old.Z:F3}) → ({p.X:F3}, {p.Y:F3}, {p.Z:F3}) m; yaw {original.YawRadians * 180 / Math.PI:F2}° → {fit.ProposedPlacement.YawRadians * 180 / Math.PI:F2}°.\n" +
-            $"J1 rotation-axis distances: left {(old.X + calibrationDesk.Width / 2) * 1000:F0} → {(p.X + calibrationDesk.Width / 2) * 1000:F0} mm; back {(old.Z + calibrationDesk.Depth / 2) * 1000:F0} → {(p.Z + calibrationDesk.Depth / 2) * 1000:F0} mm. Recheck outer mounting clearances separately.\n" +
-            $"Training RMS {fit.TrainingRmsMm:F1} mm / max {fit.TrainingMaxMm:F1} mm; validation max {fit.ValidationMaxMm:F1} mm; height RMS {fit.VerticalRmsMm:F1} mm. Precision entered ±{calibrationDesk.PrecisionMm:F0} mm.\n" +
-            string.Join(" · ", fit.Residuals.TakeLast(4).Select(r => $"{r.Name}: {r.TotalMm:F1} mm"));
-    }
     private async Task SaveCalibration(CancellationToken cancellation)
     {
         Directory.CreateDirectory(RobotCalibrationDirectory);

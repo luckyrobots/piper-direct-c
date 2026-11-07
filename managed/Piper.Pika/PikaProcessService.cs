@@ -202,10 +202,11 @@ public sealed class PikaProcessService : IPikaSession
             }
             var completion = new TaskCompletionSource<JsonElement>(TaskCreationOptions.RunContinuationsAsynchronously);
             pending[id] = completion;
+            bool motorRequest = action is "enable" or "position" or "disable" or "hold" or "follow-update" or "resume-hold";
             bool disconnected = false;
             try
             {
-                if (action is "enable" or "position" or "disable" or "hold" or "follow-update" or "resume-hold")
+                if (motorRequest)
                     lock (stateGate) { sessionPowerRequested = true; unresolvedOwner = requestedOwner; motorRequestId = id; motorRequestAcknowledged = false; }
                 await process.StandardInput.WriteLineAsync(command.ToJsonString().AsMemory(), cancellation);
                 await process.StandardInput.FlushAsync(cancellation);
@@ -220,7 +221,7 @@ public sealed class PikaProcessService : IPikaSession
                     throw new InvalidOperationException(reason);
                 }
                 cancellation.ThrowIfCancellationRequested();
-                if (action is "enable" or "position" or "disable" or "hold" or "follow-update" or "resume-hold")
+                if (motorRequest)
                     lock (stateGate)
                     {
                         motorRequestAcknowledged = motorRequestId == id;
@@ -229,7 +230,7 @@ public sealed class PikaProcessService : IPikaSession
                     }
                 disconnected = action == "disconnect";
                 var result = new JsonObject { ["ok"] = true, ["message"] = response.GetProperty("message").GetString() };
-                if (action is "enable" or "position" or "disable" or "hold" or "follow-update" or "resume-hold") result["motor_request_id"] = id;
+                if (motorRequest) result["motor_request_id"] = id;
                 if (response.TryGetProperty("follow_session", out var followSession)) result["follow_session"] = followSession.GetString();
                 return result;
             }
