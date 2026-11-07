@@ -195,7 +195,8 @@ public sealed partial class PipersPlugin
         patches["disable"] = new() { ["visible"] = controls && RobotPowerState.Inspect(device).EnabledCount > 0 && canReleasePower,
             ["enabled"] = controls && device?["fresh"]?.GetValue<bool>() == true && canReleasePower && !switchingProfile,
             ["hint"] = "Support the arm. Disable cancels pending plugin actions, stops following, then removes motor holding torque. It does not home or replay." };
-        bool currentRecoveryGuide = RecoveryGuideMatches(device);
+        bool currentRecoveryGuide = device is not null && recoveryGuideOpen &&
+            recoveryGuideScope == RecoveryConnectionIdentity(device);
         bool currentSupportedRecovery = supportedRecoveryBusy && currentRecoveryGuide;
         patches["workspace.incident"] = new() { ["visible"] = controls && (readiness.Label == "Stopped" || currentRecoveryGuide) };
         var recoveryView = RecoveryWorkspaceState.Inspect(device, state?["motion"]?["active"]?.GetValue<bool>() == true, recoveryInProgress || currentSupportedRecovery);
@@ -240,6 +241,12 @@ public sealed partial class PipersPlugin
             string[] canChoices = ["Unassigned", ..knownCanIds.Select(CanFriendlyName)];
             var devices = PikaChoices(profile);
             var armChoices = settingsRobotChoices[profile.Id];
+            string[] pikaChoices = ["Unassigned", .. devices.Select(device =>
+            {
+                string bus = device["bus_id"]?.GetValue<string>() ?? "";
+                string label = bus.Length > 0 ? "Pika · USB " + bus : device["name"]?.GetValue<string>() ?? "Saved Pika";
+                return label + (device["available"]?.GetValue<bool>() == true ? " · connected" : " · setup needed");
+            })];
             // Stack labeled fields rather than requiring a wide device grid.
             // With no fixed field width, native columns use the available pane.
             rows.Add(Widget.Column(id + ".row",
@@ -248,7 +255,7 @@ public sealed partial class PipersPlugin
                 Widget.Column(id + ".can.field", Widget.Label(id + ".can.caption", "Arm connection") with { Height = 20 },
                     new Widget("dropdown", id + ".can") { Height = 30, Options = canChoices, Value = Array.IndexOf(knownCanIds, profile.CanDeviceId) + 1 }) with { Spacing = 2 },
                 Widget.Column(id + ".pika.field", Widget.Label(id + ".pika.caption", "Gripper connection") with { Height = 20 },
-                    new Widget("dropdown", id + ".pika") { Height = 30, Options = new[] { "Unassigned" }.Concat(devices.Select(d => PikaFriendlyName(d))).ToArray(),
+                    new Widget("dropdown", id + ".pika") { Height = 30, Options = pikaChoices,
                         Value = Array.FindIndex(devices, d => d["device"]?.GetValue<string>() == profile.PikaDevice || d["aliases"]?.AsArray().Any(a => a?.GetValue<string>() == profile.PikaDevice) == true) + 1 }) with { Spacing = 2 },
                 Widget.Column(id + ".scene.field", Widget.Label(id + ".scene.caption", "Simulation arm") with { Height = 20 },
                     new Widget("dropdown", id + ".scene") { Height = 30, Options = new[] { "Unassigned" }.Concat(armChoices.Select(r => r.Name)).ToArray(),
@@ -270,13 +277,6 @@ public sealed partial class PipersPlugin
     {
         var d = state?["devices"]?.AsArray().FirstOrDefault(d => d?["id"]?.GetValue<string>() == id);
         return (d?["name"]?.GetValue<string>() ?? "USB-CAN") + " · …" + id[^Math.Min(3, id.Length)..] + (d?["present"]?.GetValue<bool>() == true ? "" : " (offline)");
-    }
-
-    private static string PikaFriendlyName(JsonObject device)
-    {
-        string bus = device["bus_id"]?.GetValue<string>() ?? "";
-        string label = bus.Length > 0 ? "Pika · USB " + bus : device["name"]?.GetValue<string>() ?? "Saved Pika";
-        return label + (device["available"]?.GetValue<bool>() == true ? " · connected" : " · setup needed");
     }
 
     private JsonObject[] PikaChoices(RobotProfile profile)

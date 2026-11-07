@@ -29,25 +29,14 @@ public sealed partial class PipersPlugin
 
     private void AddWorkspacePatches(Dictionary<string, JsonObject> patches, JsonObject? device)
     {
-        patches["workspace.connection"] = new() { ["text"] = CompactConnectionStatus(device), ["hint"] = message };
         string fullStatus = calibrationOpen ? "Calibration reads the measured pose. Use the physical teach button only when the guide asks."
             : device?["range_recovery"]?["required"]?.GetValue<bool>() == true ? device["range_recovery"]!["reason"]?.GetValue<string>() ?? message : message;
         patches["status"] = new() { ["text"] = device is null ? "Waiting for fresh controller feedback" : device["recovery_required"]?.GetValue<bool>() == true ? "Stopped · review recovery above" : fullStatus.Length > 110 ? fullStatus[..107] + "…" : fullStatus, ["hint"] = fullStatus };
-        patches["workspace.incident"] = new() { ["visible"] = device?["recovery_required"]?.GetValue<bool>() == true || device?["reset_pending"]?.GetValue<bool>() == true };
         var power = RobotPowerState.Inspect(device);
         var teachingMode = TeachingState.Inspect(device);
-        bool pikaNeedsEnable = pikaTeachingDisableRequest.Length == 0 && PikaMatchesProfile() &&
-            state?["pika"]?["configured"]?.GetValue<bool>() == true && (!pikaOwned ||
-                state["pika"]?["enabled"]?.GetValue<bool>() != true || state["pika"]?["armed"]?.GetValue<bool>() != true);
         patches["workspace.power"] = new() { ["text"] = power.Label, ["hint"] = power.AllEnabled
             ? "All six motors report enabled. " + (teachingMode.BlocksTargets ? teachingMode.Label + ". " + teachingMode.NextStep : approved ? "This session can use the controls." : "Use controls to acknowledge the workspace for this session.")
             : "Motor power comes from fresh feedback, independently of this session's control permission." };
-        patches["enable"] = new() {
-            ["text"] = power.AllEnabled ? "Use controls" : "Enable robot",
-            ["visible"] = !teachingMode.BlocksTargets && !(power.AllEnabled && approved && !pikaNeedsEnable),
-            ["enabled"] = workspacePage == "controls" && power.EnabledCount.HasValue && !switchingProfile && !teachingMode.BlocksTargets,
-            ["hint"] = power.AllEnabled ? "Motors are already enabled. Activate this session's controls after the workspace-clear confirmation." : "Enable the arm and assigned Pika controls after one workspace-clear confirmation." };
-        patches["disable"] = new() { ["enabled"] = device is not null && !TeachingState.Inspect(device).BlocksTargets, ["hint"] = TeachingState.Inspect(device).BlocksTargets ? "Finish the physical teaching return before changing power here. STOP remains available." : "Support the arm. This action removes holding torque." };
         patches["link.status"] = new() { ["text"] = link is null ? "Not linked" : teleoperating ? "Leader target + measured ghost" : "Measured pose linked", ["hint"] = link is null ? "Link the selected scene and physical robot" : $"Joint error {linkErrorDegrees?.ToString("F4") ?? "—"}° · {link.GripperStatus} · {sceneTrackingStatus}. Physical, camera and time calibration require separate verification." };
         patches["speed.value"] = new() { ["text"] = $"{preferences.Speed:F0}%" };
         patches["step.value"] = new() { ["text"] = $"{preferences.Step:F1}°" };

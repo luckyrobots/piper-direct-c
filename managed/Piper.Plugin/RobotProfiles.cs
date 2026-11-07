@@ -147,11 +147,12 @@ public sealed partial class PipersPlugin
     private string CameraImageId(string id) => id == "bench" ? id : "piper-" + ActiveProfile.CameraSlot + "." + id;
     private bool CameraFrameReady(string id) => cameras.TryGetValue(id, out var camera) && camera.PublishedFrame is { } frame &&
         DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - frame.TimestampUnixMicroseconds / 1000 < 2000;
-    private string ScopeWidgetId(string id) => WorkspaceEventScope.Wrap(PublishedWorkspaceEpoch, ActiveProfile.Id, id);
     private static Widget ScopeRobotWidget(Widget widget, long epoch, string profileId) => widget with {
         Id = WorkspaceEventScope.Wrap(epoch, profileId, widget.Id), Children = widget.Children?.Select(child => ScopeRobotWidget(child, epoch, profileId)).ToArray() };
-    private Task Patch(Dictionary<string, JsonObject> patches, CancellationToken cancellation) => engine.PatchAsync(Panel,
-        patches.ToDictionary(p => ScopeWidgetId(p.Key), p => p.Value), cancellation);
+    private Task Patch(Dictionary<string, JsonObject> patches, CancellationToken cancellation) =>
+        engine.PatchAsync(Panel, patches.ToDictionary(
+            patch => WorkspaceEventScope.Wrap(PublishedWorkspaceEpoch, ActiveProfile.Id, patch.Key),
+            patch => patch.Value), cancellation);
     private string UnscopeEvent(string id) => UnscopePublishedWorkspaceEvent(id);
 
     private Widget RobotSidebar()
@@ -174,13 +175,6 @@ public sealed partial class PipersPlugin
             GroupFollowIncludes(profile.Id) ? "In follower group" : "connected";
         return profile.Name + "\n" + status;
     }
-
-    private int CanIndex() => Array.IndexOf(knownCanIds, ActiveProfile.CanDeviceId) + 1;
-    private string[] CanOptions() => new[] { "Unassigned" }.Concat(knownCanIds.Select(id =>
-    {
-        var device = state?["devices"]?.AsArray().FirstOrDefault(d => d?["id"]?.GetValue<string>() == id);
-        return (device?["name"]?.GetValue<string>() ?? "Adapter") + (device?["present"]?.GetValue<bool>() == true ? "" : " (offline)") + " · " + id;
-    })).ToArray();
 
     private async Task ObserveProfileRouting(JsonObject snapshot, CancellationToken cancellation)
     {
@@ -222,10 +216,26 @@ public sealed partial class PipersPlugin
         {
             try
             {
-                var patches = new Dictionary<string, JsonObject> { ["profiles.can"] = new() { ["options"] = JsonSerializer.SerializeToNode(CanOptions()), ["value"] = CanIndex() } };
+                var adapterIds = knownCanIds;
+                string[] adapterOptions = ["Unassigned", .. adapterIds.Select(id =>
+                {
+                    var device = state?["devices"]?.AsArray().FirstOrDefault(d => d?["id"]?.GetValue<string>() == id);
+                    string name = device?["name"]?.GetValue<string>() ?? "Adapter";
+                    string offline = device?["present"]?.GetValue<bool>() == true ? "" : " (offline)";
+                    return name + offline + " · " + id;
+                })];
+                var patches = new Dictionary<string, JsonObject>
+                {
+                    ["profiles.can"] = new()
+                    {
+                        ["options"] = JsonSerializer.SerializeToNode(adapterOptions),
+                        ["value"] = Array.IndexOf(adapterIds, ActiveProfile.CanDeviceId) + 1
+                    }
+                };
+                string[] settingsOptions = ["Unassigned", .. adapterIds.Select(CanFriendlyName)];
                 foreach (var p in preferences.Robots!) patches["global.robot." + p.Id + ".can"] = new() {
-                    ["options"] = JsonSerializer.SerializeToNode(new[] { "Unassigned" }.Concat(knownCanIds.Select(CanFriendlyName))),
-                    ["value"] = Array.IndexOf(knownCanIds, p.CanDeviceId) + 1 };
+                    ["options"] = JsonSerializer.SerializeToNode(settingsOptions),
+                    ["value"] = Array.IndexOf(adapterIds, p.CanDeviceId) + 1 };
                 await Patch(patches, cancellation); canInventoryRenderPending = false;
             }
             finally { commands.Release(); }
@@ -402,9 +412,13 @@ public sealed partial class PipersPlugin
         finally { switchingProfile = false; }
     }
 
-    private bool PikaMatchesProfile() => PikaMatchesProfile(state?["pika"] as JsonObject);
-    private bool PikaMatchesProfile(JsonObject? pika) => ActiveProfile.PikaDevice.Length > 0 && pika?["device"]?.GetValue<string>() == ActiveProfile.PikaDevice &&
-        (!OperatingSystem.IsWindows() || pika?["distribution"]?.GetValue<string>() == ActiveProfile.WslDistribution);
+    private bool PikaMatchesProfile()
+    {
+        var pika = state?["pika"] as JsonObject;
+        var profile = ActiveProfile;
+        return profile.PikaDevice.Length > 0 && pika?["device"]?.GetValue<string>() == profile.PikaDevice &&
+            (!OperatingSystem.IsWindows() || pika?["distribution"]?.GetValue<string>() == profile.WslDistribution);
+    }
 
     private async Task ConfigureProfilePika(CancellationToken cancellation)
     {

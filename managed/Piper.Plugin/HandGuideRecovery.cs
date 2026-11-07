@@ -134,8 +134,6 @@ public sealed partial class PipersPlugin
     private string RecoveryConnectionIdentity(JsonObject device) => token + ":" + ActiveProfile.Id + ":" +
         device["id"]?.GetValue<string>() + ":" + device["generation"]?.GetValue<long>();
 
-    private bool RecoveryGuideMatches(JsonObject? device) => device is not null && recoveryGuideOpen && recoveryGuideScope == RecoveryConnectionIdentity(device);
-
     private async Task RunRecoveryCard(CancellationToken cancellation)
     {
         if (workspacePage != "controls" || calibrationOpen) throw new InvalidOperationException("Return to Controls to use the recovery guide.");

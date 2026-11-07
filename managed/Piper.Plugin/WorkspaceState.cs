@@ -125,11 +125,4 @@ public sealed partial class PipersPlugin
         if (!value.TryGetDouble(out double number) || !double.IsFinite(number)) throw new InvalidOperationException(label + " must be a finite number.");
         return number;
     }
-
-    private string CompactConnectionStatus(JsonObject? device) => device is null ? "Waiting for feedback"
-        : device["recovery_required"]?.GetValue<bool>() == true ? "Recovery required"
-        : device["range_recovery"]?["required"]?.GetValue<bool>() == true ? "Range entry needed"
-        : TeachingState.Inspect(device).HandGuiding ? "Hand guiding"
-        : TeachingState.Inspect(device).Active ? "Onboard playback"
-        : "Connected";
 }
