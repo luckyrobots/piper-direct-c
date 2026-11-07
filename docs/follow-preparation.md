@@ -1,5 +1,8 @@
 # Shared follower preparation
 
+The [control state machine inventory](control-state-machines.md) maps this flow
+to the plugin, Host, native controller, and gripper workflows.
+
 The sidebar evaluates every checked robot, including robots whose controls are
 not currently visible. It shows the robot's name and the next required action:
 for example, **Piper 1: Use Resume controls** and **Piper 1: Use Enable robot to

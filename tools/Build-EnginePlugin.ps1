@@ -52,6 +52,7 @@ $taskDocuments=@(
     'simplified-controls.md'
     'backend-maintenance.md'
     'follow-preparation.md'
+    'control-state-machines.md'
 )
 foreach($taskDocument in $taskDocuments) {
     Copy-Item -LiteralPath (Join-Path $taskRepo ('docs/'+$taskDocument)) -Destination (Join-Path $taskPackage 'docs') -Force
