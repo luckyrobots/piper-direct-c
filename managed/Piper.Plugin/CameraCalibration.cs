@@ -60,7 +60,7 @@ public sealed partial class PipersPlugin
             calibrationStatus = "New capture session ready. Previous captures and the active profile are preserved.";
             return;
         }
-        var frame = cameras.GetValueOrDefault(id)?.LatestFrame ?? throw new InvalidOperationException("Wait for a camera frame first.");
+        var frame = cameras.Get(id)?.LatestFrame ?? throw new InvalidOperationException("Wait for a camera frame first.");
         if (DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - frame.TimestampUnixMicroseconds / 1000 > 1000)
             throw new InvalidOperationException("The camera frame is stale. Reconnect the camera first.");
         if (action == "calibrationcapture")

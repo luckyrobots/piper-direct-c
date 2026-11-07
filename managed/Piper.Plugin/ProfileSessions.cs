@@ -44,12 +44,15 @@ public sealed partial class PipersPlugin
         var profile = ActiveProfile;
         string backend = token;
         var device = Device(expectedToken: backend);
-        var approval = new FollowControlApproval(backend, device["id"]!.GetValue<string>(), device["generation"]!.GetValue<long>(),
-            profile.RobotId, profile.RobotJointPrefix, profile.PikaDevice, profile.WslDistribution);
+        var approval = ControlScope(profile, backend, device);
         if (ActiveProfile.Id != profile.Id || !CommandAuthority.TrySaveApproval(epoch, profile.Id, approval,
             activate ? () => { approved = true; linkCommandsEnabled = link is not null; } : null))
             throw new InvalidOperationException("Control permission changed before the robot connection could be confirmed.");
     }
+
+    private static FollowControlApproval ControlScope(RobotProfile profile, string backend, JsonObject device) =>
+        new(backend, device["id"]!.GetValue<string>(), device["generation"]!.GetValue<long>(), profile.RobotId,
+            profile.RobotJointPrefix, profile.PikaDevice, profile.WslDistribution);
 
     private void ForgetControlApproval() => CommandAuthority.ForgetApproval(ActiveProfile.Id);
 
@@ -59,8 +62,7 @@ public sealed partial class PipersPlugin
         var profile = ActiveProfile;
         if (switchingProfile || calibrationOpen || !HasFreshControlTelemetry(out var receipt) || !permission.Approvals.TryGetValue(profile.Id, out var saved)) return;
         var d = Device(sourceReceipt: receipt);
-        if (saved != new FollowControlApproval(receipt!.BackendToken, d["id"]!.GetValue<string>(), d["generation"]!.GetValue<long>(),
-            profile.RobotId, profile.RobotJointPrefix, profile.PikaDevice, profile.WslDistribution))
+        if (saved != ControlScope(profile, receipt!.BackendToken, d))
         { CommandAuthority.ForgetApproval(profile.Id, saved); return; }
         var teaching = TeachingState.Inspect(d);
         // A previously approved operator can use the physical button to recover

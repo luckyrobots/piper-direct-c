@@ -61,13 +61,14 @@ coordinator now runs both one and multiple selected robots; the parallel legacy
 single-robot executor has been removed. Viewport dragging remains a separate
 input mode because its gesture/commit contract differs from an ordered episode.
 
-The coordinator owns arming, user Play, first-frame matching, native admission,
-source publication and cleanup as one worker lifetime. A late engine or native
-acknowledgement cannot release the captured identity or let a replacement group
-start before all requests retire and final holds finish. STOP also retires
-read-only discovery before a session has been allocated. Measured Edit feedback
-keeps the current jaws visible while merely Armed; runtime takeover ends that
-Edit lease. Native control guards and source deadlines are unchanged.
+The coordinator enforces its phases from Edit arming through first-frame
+matching, native admission, activation, priming drain, and ordered publication.
+Stop Following cancels input immediately. The coordinator retains the group
+until all requests retire and final holds finish, including when an engine or
+native acknowledgement arrives late. Emergency STOP also retires read-only
+discovery before a session has been allocated. Measured Edit feedback keeps the
+current jaws visible while Armed. Runtime takeover ends that Edit lease.
+Native control guards and source deadlines still apply during startup.
 
 Every participant retains bounded publication timings and an independently
 scoped first-failure diagnostic, including negative Pika acknowledgements and

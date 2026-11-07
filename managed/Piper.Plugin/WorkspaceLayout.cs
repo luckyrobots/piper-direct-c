@@ -7,7 +7,7 @@ public sealed partial class PipersPlugin
 {
     private Task Render(CancellationToken cancellation) => PublishWorkspaceView(cancellation);
 
-    private Widget BuildWorkspaceView()
+    private Widget BuildWorkspaceView(bool showClearanceConfirmation)
     {
         Widget body = workspacePage switch {
             "settings" => SettingsPage(), "calibration" => CalibrationSheetControls(),
@@ -24,7 +24,7 @@ public sealed partial class PipersPlugin
                 new Widget("checkbox", "global.ghosts") { Text = "Show real robot ghosts", Value = preferences.ShowMeasuredGhosts ? 1 : 0,
                     Hint = "Measured hardware pose, visible in Edit and Play. Ghosts are excluded from camera recordings." },
             Widget.Row("safety", Widget.Label("safety.text", "Make sure it is safe to move the robot."),
-                Widget.Button("safety.accept", "Enable robot") with { Appearance = "primary" }, Widget.Button("safety.cancel", "Cancel")) with { Visible = false, Padding = 12, Appearance = "panel" },
+                Widget.Button("safety.accept", "Enable robot") with { Appearance = "primary" }, Widget.Button("safety.cancel", "Cancel")) with { Visible = showClearanceConfirmation, Padding = 12, Appearance = "panel" },
             Widget.Column("workspace.incident", Widget.Label("incident", "") with { Height = 56 },
                 Widget.Label("recovery.next", "") with { Height = 88 },
                 Widget.Label("recovery.requirements", "") with { Height = 96 },

@@ -74,7 +74,8 @@ public sealed partial class PipersPlugin
                 lock (group.Gate)
                     if (lane.Execution is { } execution && lane.LastHardware is { } observed)
                         ordered = SimulationFollowFailureOrdered.Capture(execution, observed, lane.LastStationary, lane.LastGripperSpeed, lane.LastGripperFeedback);
-                lane.Diagnostics?.Capture(new(DateTimeOffset.UtcNow, group.Stage, "group:" + group.Stage,
+                string phase = group.Phase.ToString().ToLowerInvariant();
+                lane.Diagnostics?.Capture(new(DateTimeOffset.UtcNow, phase, "group:" + phase,
                     error.GetType().Name, reason, lane.ArmRequest, Interlocked.Read(ref lane.Sequence),
                     new(group.Scene, group.RunId, group.Entity, group.Asset, group.Revision, lane.Robot.DeviceId,
                         lane.Robot.Generation, lane.Profile.PikaDevice, receipt?.State["backend_process_id"]?.GetValue<long>(), lane.Robot.JointPrefix),

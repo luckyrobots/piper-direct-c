@@ -71,7 +71,7 @@ internal static partial class SimulationFollowingTests
             refresh.SetGroupSceneEvidence(scenario == "missing cache" ? null : cached, current);
             check(!refresh.Preparation().Ready, "The cached scene did not exercise a refreshable blocker: " + scenario);
             await refresh.Click("group.follow.toggle");
-            await WaitFor(() => refresh.GroupStage == "armed" || refresh.Get<string>("groupFollowFailure").Length > 0,
+            await WaitFor(() => refresh.GroupPhase == GroupFollowPhase.Armed || refresh.Get<string>("groupFollowFailure").Length > 0,
                 "Follow did not finish checking current scene evidence: " + scenario);
             check(refresh.EngineRequests.Any(r => r.Method == "scene.robots") && refresh.Rpc.Requests.IsEmpty && refresh.Mode == "edit",
                 "Scene refresh was skipped or sent a hardware command: " + scenario);
@@ -139,7 +139,7 @@ internal static partial class SimulationFollowingTests
             arm["status"]!["control"] = 1; arm["status"]!["teach_state"] = 0; blocked.Snapshot["pikas"]![0]!["enabled"] = true; blocked.Refresh();
             check(blocked.SidebarStatus().Contains("Follow not armed"), "Telemetry erased the retained setup error before an explicit retry");
             await blocked.Click("group.follow.toggle");
-            await WaitFor(() => blocked.GroupStage == "armed" || blocked.EngineRequests.Any(r => r.Action == "arm-next-play"), "The ready retry never reached the engine arm latch");
+            await WaitFor(() => blocked.GroupPhase == GroupFollowPhase.Armed || blocked.EngineRequests.Any(r => r.Action == "arm-next-play"), "The ready retry never reached the engine arm latch");
             check(blocked.GroupActive && blocked.Mode == "edit" && blocked.EngineRequests.Count(r => r.Action == "arm-next-play") == 1 && blocked.Rpc.Requests.IsEmpty,
                 "Retrying a ready group failed to arm exactly once in Edit or retained a superseded setup failure");
         }
@@ -172,6 +172,7 @@ internal static partial class SimulationFollowingTests
             try
             {
                 await armed.ClickSidebarGroupStop().WaitAsync(TimeSpan.FromSeconds(2));
+                await WaitFor(() => !armed.GroupActive, "An armed group did not retire outside the command gate");
                 check(!armed.GroupActive && armed.Commands.CurrentCount == 0 && armed.Mode == "edit",
                     "The visible sidebar Stop waited for the command semaphore instead of retiring an armed group immediately");
                 check(armed.Rpc.Requests.IsEmpty && armed.EngineRequests.Count(r => r.Action == "arm-next-play") == 1 &&
@@ -193,7 +194,7 @@ internal static partial class SimulationFollowingTests
             long began = Stopwatch.GetTimestamp();
             while (!test()) { if (Stopwatch.GetElapsedTime(began).TotalSeconds > 8) throw new InvalidOperationException(why + " / " + f.Get<string>("GroupFollowStatus")); await Task.Delay(10); }
         }
-        await Until(() => f.GroupStage == "following" || !f.GroupActive, "The grouped preparation never activated");
+        await Until(() => f.GroupPhase == GroupFollowPhase.Following || !f.GroupActive, "The grouped preparation never activated");
         check(f.GroupActive && f.Mode == "play", "The group did not activate one shared user-requested Play run: " + f.Get<string>("GroupFollowStatus"));
         check(f.Rpc.Requests.Where(r => r.Body["action"]?.GetValue<string>() == "follow-start").Select(r => r.Body["device_id"]!.GetValue<string>()).Order().SequenceEqual(new[] { "can-a", "can-b" }),
             "Both native device lanes were not independently admitted");
@@ -242,7 +243,7 @@ internal static partial class SimulationFollowingTests
         await using var expired = new Fixture(); expired.ConfigureGroup();
         await expired.GroupEvent("toggle"); expired.RequestGroupPlay();
         long started = Stopwatch.GetTimestamp();
-        while (expired.GroupStage != "following")
+        while (expired.GroupPhase != GroupFollowPhase.Following)
         { if (!expired.GroupActive || Stopwatch.GetElapsedTime(started).TotalSeconds > 5) throw new InvalidOperationException("Group expiry fixture did not activate"); await Task.Delay(10); }
         expired.LoseNextOrderedReply = true;
         await expired.OrderedReplyLost.Task.WaitAsync(TimeSpan.FromSeconds(3));
@@ -384,7 +385,7 @@ internal static partial class SimulationFollowingTests
             await confirmed.Click("safety.accept");
             var result = await WaitPrimary(confirmed, failConfirmation ? "failed" : "complete", initial["id"]!.GetValue<string>());
             check(!confirmed.Get<bool>("primaryActionBusy") && (failConfirmation
-                ? confirmed.Get<string>("primaryActionStatus").StartsWith("Could not start:", StringComparison.Ordinal) && result["failure"]!.GetValue<string>().Contains("hand guiding", StringComparison.Ordinal)
+                ? !confirmed.Get<bool>("approved") && confirmed.Get<string>("primaryActionStatus").StartsWith("Could not start:", StringComparison.Ordinal) && result["failure"]!.GetValue<string>().Contains("hand guiding", StringComparison.OrdinalIgnoreCase)
                 : confirmed.Get<string>("primaryActionStatus").Length == 0 && result["failure"] is null && confirmed.Get<string>("message").StartsWith("Ready ·", StringComparison.Ordinal)),
                 "Safety confirmation did not complete its shared progress/failure lifecycle");
             check(confirmed.Session is null && !confirmed.EngineRequests.Any(r => r.Action == "prepare-start") && confirmed.Rpc.Requests.IsEmpty,
@@ -407,10 +408,18 @@ internal static partial class SimulationFollowingTests
             }
         }
     }
+    private sealed class FollowTestClock : TimeProvider
+    {
+        private long offset;
+        public override long GetTimestamp() => Stopwatch.GetTimestamp() + Interlocked.Read(ref offset);
+        public void Advance(TimeSpan elapsed) => Interlocked.Add(ref offset, (long)(elapsed.TotalSeconds * TimestampFrequency));
+    }
+
     private sealed class Fixture : IAsyncDisposable
     {
         private const BindingFlags Fields = BindingFlags.Instance | BindingFlags.NonPublic;
-        private readonly PipersPlugin plugin = new();
+        private readonly PipersPlugin plugin;
+        private readonly TimeProvider followClock;
         private readonly object resumeFrameGate = new();
         private bool publishResumeFrameCopies;
         public readonly FakeCalls Rpc = new();
@@ -453,7 +462,7 @@ internal static partial class SimulationFollowingTests
         private readonly List<JsonObject> sourceFrames = [];
         public bool Ready => readyGate;
         private volatile bool startRequested, activated;
-        public bool PlayStarted => GroupStage == "following";
+        public bool PlayStarted => GroupPhase == GroupFollowPhase.Following;
         public bool TryUserPlay() { if (!readyGate || Mode != "pause") return false; startRequested = true; return true; }
         public TaskCompletionSource RuntimeReached { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public TaskCompletionSource ReleaseRuntime { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -466,7 +475,7 @@ internal static partial class SimulationFollowingTests
         public string PrimaryReceipt => Path.Combine(settingsDirectory, "diagnostics", "primary-action", "latest.json");
         public object? Session => Get<object?>("groupSimulation");
         public bool GroupActive => Get<object?>("groupSimulation") is not null;
-        public string GroupStage => Get<object?>("groupSimulation")?.GetType().GetField("Stage")!.GetValue(Get<object?>("groupSimulation")) as string ?? "";
+        public GroupFollowPhase? GroupPhase => Session is { } group ? (GroupFollowPhase)group.GetType().GetProperty("Phase")!.GetValue(group)! : null;
         public async Task GroupEvent(string action)
         { await (Task)typeof(PipersPlugin).GetMethod("GroupFollowEvent", Fields)!.Invoke(plugin, [action, CancellationToken.None])!; }
         public FollowPreparationReport Preparation() => (FollowPreparationReport)typeof(PipersPlugin).GetMethod("GroupPreparation", Fields)!
@@ -567,7 +576,6 @@ internal static partial class SimulationFollowingTests
             }
             return pose;
         }
-        public bool Ending => GroupStage == "stopping";
         public SemaphoreSlim Commands => Get<SemaphoreSlim>("commands");
         public T Get<T>(string field) => (T)typeof(PipersPlugin).GetField(field, Fields)!.GetValue(plugin)!;
         public void SetSpeed(double speed) => Set("preferences", Get<Preferences>("preferences") with { Speed = speed });
@@ -660,8 +668,10 @@ internal static partial class SimulationFollowingTests
         }
         private void Set(string field, object? value) => typeof(PipersPlugin).GetField(field, Fields)!.SetValue(plugin, value);
 
-        public Fixture(bool mismatch = false)
+        public Fixture(bool mismatch = false, TimeProvider? followClock = null)
         {
+            this.followClock = followClock ?? TimeProvider.System;
+            plugin = new("http://127.0.0.1:8766", this.followClock);
             Set("client", new PiperControl.PiperControlClient(Rpc));
             Set("preferences", RobotProfileRouting.Normalize(new Preferences(Robots:
                 [new("piper-1", "Fixture", "can-a", RobotId: "robot-a", PikaDevice: "/dev/pika-a")], ActiveRobotId: "piper-1")));
@@ -946,7 +956,7 @@ internal static partial class SimulationFollowingTests
             Publish(Snapshot);
 
             void Publish(JsonObject frame) => Get<LatestTelemetry>("telemetry").Publish(
-                new(frame, "fixture-backend", Interlocked.Increment(ref sequence), Stopwatch.GetTimestamp(), EnvelopeAgeMs));
+                new(frame, "fixture-backend", Interlocked.Increment(ref sequence), followClock.GetTimestamp(), EnvelopeAgeMs));
         }
         public void RemoveMeasuredLink(int editorDelayMilliseconds) { Set("link", null); LinkEditorDelayMilliseconds = editorDelayMilliseconds; }
         public void UseUiDispatcher() => Set("uiEvents", new UiEventDispatch((input, cancellation) => Invoke("HandleEventCoreAsync", input, cancellation),
@@ -974,8 +984,8 @@ internal static partial class SimulationFollowingTests
             Rpc.ReleaseDelayed.TrySetResult();
             ReleaseRuntime.TrySetResult();
             if (GroupActive)
-                await (Task)typeof(PipersPlugin).GetMethod("StopGroupSimulationFollowing", Fields, [typeof(CancellationToken)])!
-                    .Invoke(plugin, [CancellationToken.None])!;
+                await (Task)typeof(PipersPlugin).GetMethod("StopGroupSimulationFollowing", Fields)!
+                    .Invoke(plugin, ["Fixture disposed", CancellationToken.None])!;
             groupTelemetryStop.Cancel(); if (groupTelemetryWorker is not null) await groupTelemetryWorker;
             if (Get<UiEventDispatch?>("uiEvents") is { } dispatch) await dispatch.DisposeAsync();
             Get<CancellationTokenSource>("shutdown").Cancel();

@@ -12,6 +12,59 @@ internal static class EmergencyStopTests
 {
     public static async Task Run(Action<bool, string> check)
     {
+        foreach (string invalidation in new[] { "cancel", "stop", "profile", "generation" })
+        {
+            using var fixture = new Fixture();
+            await fixture.Invoke("Render", CancellationToken.None);
+            string Wire(string action) => WorkspaceEventScope.Wrap(fixture.Get<long>("workspaceViewEpoch"), "piper-1", action);
+            await fixture.Event(Wire("safety.accept"), default);
+            check(!fixture.Get<bool>("approved") && fixture.Rpc.Routes.IsEmpty,
+                "An Enable acknowledgement without a presented prompt reached the hardware transport");
+            await fixture.Event(Wire("enable"), default);
+            var opened = fixture.Authority.Current.Confirmation;
+            string oldAccept = Wire("safety.accept");
+            check(opened is not null && !fixture.Get<bool>("approved") && fixture.Rpc.Routes.IsEmpty,
+                "Opening a clearance prompt approved or sent an action");
+            switch (invalidation)
+            {
+                case "cancel":
+                    await fixture.Event(Wire("safety.cancel"), default);
+                    break;
+                case "stop":
+                    await fixture.Event("robot.piper-1.stop", default);
+                    break;
+                case "profile":
+                    var preferences = fixture.Get<Preferences>("preferences");
+                    var second = new RobotProfile("piper-2", "Second", "can-two");
+                    fixture.Set("preferences", RobotProfileRouting.Activate(preferences with { Robots = [.. preferences.Robots!, second] }, second.Id));
+                    await fixture.Invoke("Render", CancellationToken.None);
+                    break;
+                case "generation":
+                    const string backend = "fake-backend-session";
+                    var telemetry = fixture.Get<LatestTelemetry>("telemetry");
+                    var first = telemetry.Latest!;
+                    var next = first.State.DeepClone().AsObject();
+                    next["devices"]![0]!["generation"] = 2L;
+                    var replacementReceipt = first with { State = next, Sequence = 2 };
+                    fixture.Set("telemetryScope", new TelemetryScope(backend, "can-one", 1));
+                    fixture.InvokeSync("ApplyIncomingScope", replacementReceipt);
+                    fixture.Set("state", next);
+                    telemetry.Publish(replacementReceipt);
+                    break;
+            }
+            await fixture.Event(oldAccept, default);
+            check(fixture.Authority.Current.Confirmation is null && !fixture.Get<bool>("approved") &&
+                fixture.Rpc.Routes.All(route => route == "/api/stop/coordinated"),
+                "An old workspace confirmation survived " + invalidation);
+            if (invalidation != "cancel") continue;
+            await fixture.Event(Wire("enable"), default);
+            var reopened = fixture.Authority.Current.Confirmation;
+            await fixture.Event(oldAccept, default);
+            check(reopened is not null && !ReferenceEquals(opened, reopened) &&
+                ReferenceEquals(reopened, fixture.Authority.Current.Confirmation) && !fixture.Get<bool>("approved") && fixture.Rpc.Routes.IsEmpty,
+                "A delayed Accept consumed a newly opened prompt");
+        }
+
         var authority = new RobotCommandAuthority();
         var original = new RobotCommandScope("piper-1", "original-backend", "can-one", 1);
         long originalEpoch = authority.Epoch;
@@ -28,6 +81,13 @@ internal static class EmergencyStopTests
             "Retiring the old command cleared a different connection's reused request number");
         var approved = new FollowControlApproval(replacement.Backend, replacement.Device, replacement.Generation, "sim", "", "pika-a", "");
         var partner = approved with { Device = "can-two", PikaDevice = "pika-b" };
+        check(authority.TryOpenConfirmation(nextEpoch, "piper-1", approved), "Current authority could not open a workspace confirmation");
+        var confirmation = authority.Current.Confirmation!;
+        int activations = 0;
+        check(!authority.TryConsumeConfirmation(confirmation, "piper-2", partner, () => activations++) &&
+            authority.TryConsumeConfirmation(confirmation, "piper-1", approved, () => activations++) &&
+            !authority.TryConsumeConfirmation(confirmation, "piper-1", approved, () => activations++) && activations == 1,
+            "Workspace clearance was accepted for another scope or consumed more than once");
         check(authority.TrySaveApproval(nextEpoch, "piper-1", approved) && authority.TrySaveApproval(nextEpoch, "piper-2", partner),
             "Approvals for independent robots could not coexist");
         authority.Revoke("piper-1");
@@ -135,7 +195,7 @@ internal static class EmergencyStopTests
             fixture.Rpc.DelayConnect = true;
             fixture.Set("approved", true);
             await fixture.Commands.WaitAsync();
-            Task enable = fixture.Invoke("Enable", CancellationToken.None, true, null, null, null);
+            Task enable = fixture.Invoke("Enable", CancellationToken.None, true, null, null, null, null);
             try
             {
                 await fixture.Rpc.ConnectReached.Task.WaitAsync(TimeSpan.FromSeconds(1));
@@ -162,6 +222,35 @@ internal static class EmergencyStopTests
                 "Missing coordinated-stop support prevented the independent arm STOP fallback");
             check(fixture.Get<string>("message").Contains("Arm STOP acknowledged") && fixture.Get<string>("message").Contains("gripper state unverified"),
                 "Legacy fallback claimed a verified Pika hold");
+        }
+        foreach (string change in new[] { "physical STOP", "hand guiding" })
+        {
+            using var fixture = new Fixture();
+            fixture.Rpc.DelayConnect = true;
+            await fixture.Invoke("Render", CancellationToken.None);
+            string Wire(string action) => WorkspaceEventScope.Wrap(fixture.Get<long>("workspaceViewEpoch"), "piper-1", action);
+            await fixture.Event(Wire("enable"), default);
+            Task accept = fixture.Event(Wire("safety.accept"), default);
+            try
+            {
+                await fixture.Rpc.ConnectReached.Task.WaitAsync(TimeSpan.FromSeconds(2));
+                var telemetry = fixture.Get<LatestTelemetry>("telemetry");
+                var receipt = telemetry.Latest!;
+                var changed = receipt.State.DeepClone().AsObject();
+                var status = changed["devices"]![0]!["status"]!;
+                if (change == "physical STOP") status["arm_status"] = 1;
+                else status["teach_state"] = 1;
+                var newReceipt = receipt with { State = changed, Sequence = 2 };
+                fixture.InvokeSync("ApplyIncomingScope", newReceipt);
+                telemetry.Publish(newReceipt);
+                fixture.Set("state", changed);
+                fixture.Rpc.ConnectReply.TrySetResult(new ControlReply { Status = 200, Json = "{\"ok\":true}" });
+                await accept.WaitAsync(TimeSpan.FromSeconds(2));
+                check(fixture.Rpc.Routes.SequenceEqual(new[] { "/api/pika/connect" }) &&
+                    fixture.Authority.Current.Confirmation is null && fixture.Authority.Current.Approvals.Count == 0,
+                    "A delayed Enable powered Pika after fresh feedback showed " + change);
+            }
+            finally { fixture.Rpc.ConnectReply.TrySetCanceled(); }
         }
         foreach (StatusCode status in new[] { StatusCode.InvalidArgument, StatusCode.Unimplemented })
         {

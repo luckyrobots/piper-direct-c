@@ -6,6 +6,8 @@ using LuckyEngine.PluginSdk;
 
 namespace LuckyRobots.Piper.Plugin;
 
+internal enum GroupFollowPhase { Arming, Armed, Matching, Admitting, Activating, DrainingPrimer, Following, Retiring, Retired }
+
 public sealed partial class PipersPlugin
 {
     private sealed class GroupLane(RobotProfile profile, RobotLink robot, FollowControlApproval approval, double? reference,
@@ -48,13 +50,65 @@ public sealed partial class PipersPlugin
         public readonly object Gate = new();
         public readonly GroupSimulationPhaseBarrier Barrier = new();
         public string RunId = "", FirstFailure = "", AcknowledgedEpisode = "", EndReason = "";
-        public volatile string Stage = "arming";
         public double OriginalScale = 1;
         public long EnvelopeTicks;
-        public volatile bool PrimingComplete;
         public Task? Publisher, Heartbeats, Primer;
         public OrderedSimulationObservation? Observation;
-        public bool SourcePaused;
+        private int phase = (int)GroupFollowPhase.Arming;
+        public GroupFollowPhase Phase => (GroupFollowPhase)Volatile.Read(ref phase);
+        public bool IsRetiring => Phase is GroupFollowPhase.Retiring or GroupFollowPhase.Retired;
+        public bool CanPrime => Phase is GroupFollowPhase.Admitting or GroupFollowPhase.Activating;
+
+        public void Advance(GroupFollowPhase next)
+        {
+            var expected = next switch
+            {
+                GroupFollowPhase.Armed => GroupFollowPhase.Arming,
+                GroupFollowPhase.Matching => GroupFollowPhase.Armed,
+                GroupFollowPhase.Admitting => GroupFollowPhase.Matching,
+                GroupFollowPhase.Activating => GroupFollowPhase.Admitting,
+                GroupFollowPhase.DrainingPrimer => GroupFollowPhase.Activating,
+                GroupFollowPhase.Following => GroupFollowPhase.DrainingPrimer,
+                GroupFollowPhase.Retired => GroupFollowPhase.Retiring,
+                _ => throw new ArgumentOutOfRangeException(nameof(next))
+            };
+            var before = (GroupFollowPhase)Interlocked.CompareExchange(ref phase, (int)next, (int)expected);
+            if (before != expected) RejectPhase(before, next.ToString());
+        }
+
+        public void Require(GroupFollowPhase expected)
+        {
+            var current = Phase;
+            if (current != expected) RejectPhase(current, expected.ToString());
+        }
+
+        public void RequireTargetPublication()
+        {
+            var current = Phase;
+            // A priming batch already admitted to the write gate can finish
+            // while the coordinator joins it, but no new batch starts there.
+            if (current is not (GroupFollowPhase.Admitting or GroupFollowPhase.Activating or GroupFollowPhase.DrainingPrimer or GroupFollowPhase.Following))
+                RejectPhase(current, "target publication");
+        }
+
+        private void RejectPhase(GroupFollowPhase current, string operation)
+        {
+            if (current is GroupFollowPhase.Retiring or GroupFollowPhase.Retired)
+                throw new OperationCanceledException("Grouped following was disarmed.", Stop.Token);
+            throw new InvalidOperationException($"Cannot enter {operation} while Follow is {current}.");
+        }
+
+        public void BeginRetirement()
+        {
+            while (true)
+            {
+                var current = Phase;
+                if (current is GroupFollowPhase.Retiring or GroupFollowPhase.Retired) return;
+                if (Interlocked.CompareExchange(ref phase, (int)GroupFollowPhase.Retiring, (int)current) != (int)current) continue;
+                Stop.Cancel();
+                return;
+            }
+        }
     }
 
     private readonly TimeProvider followClock;
@@ -66,26 +120,20 @@ public sealed partial class PipersPlugin
     private string GroupFollowStatus = "Simulation only";
     private string GroupFollowDetail = "Choose the robots that should follow, then arm Follow simulation. Playback begins only when you press the editor's Play button.";
     private bool GroupFollowIncludes(string profileId) => Volatile.Read(ref groupSimulation)?.Lanes.Any(l => l.Profile.Id == profileId) == true;
-    private bool GroupWaitingForUserPlay(GroupSession group) => GroupScopeCurrent(group) && group.RunId.Length == 0;
+    private bool GroupWaitingForUserPlay(GroupSession group) =>
+        group.Phase is GroupFollowPhase.Arming or GroupFollowPhase.Armed && group.RunId.Length == 0 && GroupScopeCurrent(group);
 
-    private void CancelGroupSimulationFollowingInput(string reason = "Following canceled")
+    private GroupSession? CancelGroupSimulationFollowingInput(string reason = "Following canceled")
     {
         Interlocked.Increment(ref groupInputEpoch); // Also retires read-only discovery before a session exists.
-        if (Volatile.Read(ref groupSimulation) is not { } group) return;
+        if (Volatile.Read(ref groupSimulation) is not { } group) return null;
         GroupFollowStatus = reason;
-        group.Stop.Cancel();
+        group.BeginRetirement();
+        return group;
     }
 
-    private async Task StopGroupSimulationFollowing(CancellationToken cancellation)
-    {
-        var group = Volatile.Read(ref groupSimulation);
-        if (group is null) return;
-        group.Stop.Cancel();
-        await group.Retired.Task.WaitAsync(cancellation);
-    }
-
-    private Task StopGroupSimulationFollowing(string reason, CancellationToken cancellation)
-    { CancelGroupSimulationFollowingInput(reason); return StopGroupSimulationFollowing(cancellation); }
+    private Task StopGroupSimulationFollowing(string reason, CancellationToken cancellation) =>
+        CancelGroupSimulationFollowingInput(reason)?.Retired.Task.WaitAsync(cancellation) ?? Task.CompletedTask;
 
     private static void ValidateSimulationTimeMode(JsonObject snapshot)
     {
@@ -97,7 +145,7 @@ public sealed partial class PipersPlugin
     {
         if (action is not ("toggle" or "cancel")) throw new InvalidOperationException("Unknown grouped follow action.");
         if (GroupFollowActive)
-        { CancelGroupSimulationFollowingInput("Stopping all selected followers · holding"); await StopGroupSimulationFollowing(cancellation); return; }
+        { await StopGroupSimulationFollowing("Stopping all selected followers · holding", cancellation); return; }
         if (action == "cancel") return;
         groupFollowFailure = "";
         Volatile.Write(ref groupRetirement, null);
@@ -182,14 +230,18 @@ public sealed partial class PipersPlugin
     }
 
     private bool GroupScopeCurrent(GroupSession group) => ReferenceEquals(Volatile.Read(ref groupSimulation), group) &&
-        !group.Stop.IsCancellationRequested && group.InputEpoch == Interlocked.Read(ref groupInputEpoch) && group.Backend == token && group.Lanes.All(l =>
+        !group.IsRetiring && group.InputEpoch == Interlocked.Read(ref groupInputEpoch) && group.Backend == token && group.Lanes.All(l =>
             preferences.Robots?.Any(p => p.Id == l.Profile.Id && p.CanDeviceId == l.Profile.CanDeviceId && p.RobotId == l.Profile.RobotId &&
                 p.RobotJointPrefix == l.Profile.RobotJointPrefix && p.PikaDevice == l.Profile.PikaDevice && p.WslDistribution == l.Profile.WslDistribution) == true &&
             controlApprovals.TryGetValue(l.Profile.Id, out var approval) && approval == l.Approval);
 
     private FollowLaneObservation GroupObservation(GroupSession group, GroupLane lane, TelemetryReceipt? source = null)
     {
-        if (!GroupScopeCurrent(group)) throw new InvalidOperationException("A selected follower assignment, confirmation or backend changed; previous targets were discarded.");
+        if (!GroupScopeCurrent(group))
+        {
+            if (group.IsRetiring) throw new OperationCanceledException("Grouped following was disarmed.", group.Stop.Token);
+            throw new InvalidOperationException("A selected follower assignment, confirmation or backend changed; previous targets were discarded.");
+        }
         return lane.Feedback.Read(group.Backend, source);
     }
 
@@ -203,6 +255,17 @@ public sealed partial class PipersPlugin
     private async Task<JsonObject> GroupEngine(GroupSession group, string method, string? action, CancellationToken cancellation,
         JsonObject? properties = null, bool release = false)
     {
+        cancellation.ThrowIfCancellationRequested();
+        GroupFollowPhase? required = release ? GroupFollowPhase.Retiring : action switch
+        {
+            "arm-next-play" => GroupFollowPhase.Arming,
+            "pause" or "claim-episode-follower" or "start" or "mark-start-ready" => GroupFollowPhase.Matching,
+            "activate-start" => GroupFollowPhase.Activating,
+            "pause-follower-source" or "resume-follower-source" or "ack-episode" => GroupFollowPhase.Following,
+            _ when method == "robot.runtime.frames" => GroupFollowPhase.Following,
+            _ => null
+        };
+        if (required is { } phase) group.Require(phase);
         if (!release && !GroupScopeCurrent(group)) throw new InvalidOperationException("Grouped following was disarmed.");
         var request = new JsonObject { ["sceneId"] = group.Scene, ["entityId"] = group.Entity, ["expectedModelAssetId"] = group.Asset,
             ["expectedModelRevision"] = group.Revision, ["prepareId"] = group.PrepareId };
@@ -217,19 +280,33 @@ public sealed partial class PipersPlugin
         return JsonNode.Parse(reply.GetRawText())!.AsObject();
     }
 
-    private async Task<JsonObject> GroupArmCommand(GroupSession group, GroupLane lane, FollowArmAction action, JsonObject? fields = null, bool release = false)
+    private async Task<JsonObject> GroupArmCommand(GroupSession group, GroupLane lane, FollowArmAction action, JsonObject? fields = null)
     {
-        if (!release) _ = GroupHardware(group, lane);
-        bool admission = !release && action is FollowArmAction.MatchPose or FollowArmAction.Start;
+        switch (action)
+        {
+            case FollowArmAction.MatchPose: group.Require(GroupFollowPhase.Matching); break;
+            case FollowArmAction.Start: group.Require(GroupFollowPhase.Admitting); break;
+            case FollowArmAction.Update: group.RequireTargetPublication(); break;
+            case FollowArmAction.Hold: group.Require(GroupFollowPhase.Retiring); break;
+        }
+        if (action != FollowArmAction.Hold) _ = GroupHardware(group, lane);
+        bool admission = action is FollowArmAction.MatchPose or FollowArmAction.Start;
         if (admission) lane.ArmTouched = true;
         try { return await lane.Controller.Arm(action, fields); }
         finally { if (admission) Volatile.Write(ref lane.ArmAdmissionRetiredTicks, group.Clock.GetTimestamp()); }
     }
 
-    private async Task<JsonObject> GroupPika(GroupSession group, GroupLane lane, FollowPikaAction action, JsonObject? fields = null, bool release = false)
+    private async Task<JsonObject> GroupPika(GroupSession group, GroupLane lane, FollowPikaAction action, JsonObject? fields = null)
     {
-        if (!release) _ = GroupHardware(group, lane);
-        if (!release && action is FollowPikaAction.MatchOpening or FollowPikaAction.Start) lane.PikaTouched = true;
+        switch (action)
+        {
+            case FollowPikaAction.MatchOpening: group.Require(GroupFollowPhase.Matching); break;
+            case FollowPikaAction.Start: group.Require(GroupFollowPhase.Admitting); break;
+            case FollowPikaAction.Update: group.RequireTargetPublication(); break;
+            case FollowPikaAction.Hold: group.Require(GroupFollowPhase.Retiring); break;
+        }
+        if (action != FollowPikaAction.Hold) _ = GroupHardware(group, lane);
+        if (action is FollowPikaAction.MatchOpening or FollowPikaAction.Start) lane.PikaTouched = true;
         return await lane.Controller.Pika(action, fields);
     }
 }

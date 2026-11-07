@@ -8,7 +8,8 @@ public sealed partial class PipersPlugin
     private readonly SemaphoreSlim workspacePublicationGate = new(1, 1);
     private long nextWorkspaceViewEpoch;
     private int workspacePublicationUncertain;
-    private sealed record PublishedWorkspaceView(long Epoch, WorkspaceViewContext Context, RobotProfile StopProfile);
+    private sealed record PublishedWorkspaceView(long Epoch, WorkspaceViewContext Context, RobotProfile StopProfile,
+        WorkspaceClearConfirmation? Confirmation);
     private readonly record struct WorkspaceViewContext(string Profile, string Page, string SettingsCategory,
         string SettingsCamera, string CameraDetail, bool Calibration);
     private sealed record WorkspacePatchScope(PublishedWorkspaceView? View, long Epoch, WorkspaceViewContext Context, Preferences Preferences);
@@ -22,6 +23,38 @@ public sealed partial class PipersPlugin
         var visible = Volatile.Read(ref publishedWorkspaceView)?.StopProfile;
         if (visible is not null && wireId == WorkspaceEventScope.Wrap(0, visible.Id, "stop")) return visible;
         return wireId == WorkspaceEventScope.Wrap(0, selected.Id, "stop") ? selected : null;
+    }
+
+    private WorkspaceClearConfirmation? DisplayedConfirmation(string wireId, string action)
+    {
+        var view = Volatile.Read(ref publishedWorkspaceView);
+        return view is not null && Volatile.Read(ref workspacePublicationUncertain) == 0 &&
+            view.Context == CurrentWorkspaceViewContext && wireId == WorkspaceEventScope.Wrap(view.Epoch, view.Context.Profile, action)
+            ? view.Confirmation : null;
+    }
+
+    private async Task<WorkspaceClearConfirmation> AcceptWorkspaceClearance(string wireId, CancellationToken cancellation)
+    {
+        await workspacePublicationGate.WaitAsync(cancellation);
+        try
+        {
+            var confirmation = DisplayedConfirmation(wireId, "safety.accept") ??
+                throw new InvalidOperationException("Open Enable robot and confirm that the workspace is clear.");
+            try
+            {
+                var profile = ActiveProfile;
+                string backend = token;
+                var device = Device(expectedToken: backend);
+                var readiness = Readiness(device);
+                if (!PrimaryActionAvailable || readiness.NextAction != RobotPrimaryAction.Enable)
+                    throw new InvalidOperationException("Enable robot is no longer available. " + readiness.Label + ". " + readiness.Detail);
+                if (!CommandAuthority.TryConsumeConfirmation(confirmation, profile.Id, ControlScope(profile, backend, device), () => approved = true))
+                    throw new InvalidOperationException("The workspace confirmation expired. Click Enable robot to confirm the current connection.");
+                return confirmation;
+            }
+            finally { CommandAuthority.DismissConfirmation(confirmation); }
+        }
+        finally { workspacePublicationGate.Release(); }
     }
 
     private WorkspacePatchScope? CaptureWorkspacePatchScope()
@@ -106,15 +139,21 @@ public sealed partial class PipersPlugin
             ct.ThrowIfCancellationRequested();
             var context = CurrentWorkspaceViewContext;
             var profile = ActiveProfile;
+            var confirmation = CommandAuthority.Current.Confirmation;
+            if (confirmation is not null && (context.Page != "controls" || context.Calibration || confirmation.ProfileId != profile.Id))
+            {
+                CommandAuthority.DismissConfirmation(confirmation);
+                confirmation = null;
+            }
             long candidate = Math.Max(nextWorkspaceViewEpoch, Interlocked.Read(ref workspaceViewEpoch)) + 1;
             nextWorkspaceViewEpoch = candidate;
-            var tree = ScopeRobotWidget(BuildWorkspaceView(), candidate, context.Profile);
+            var tree = ScopeRobotWidget(BuildWorkspaceView(confirmation is not null), candidate, context.Profile);
             await engine.PublishViewAsync(Panel, tree, ct);
             var current = ActiveProfile;
             if (context != CurrentWorkspaceViewContext || profile.Id != context.Profile || profile.Id != current.Id ||
                 profile.CanDeviceId != current.CanDeviceId || profile.PikaDevice != current.PikaDevice || profile.WslDistribution != current.WslDistribution)
                 throw new InvalidOperationException("The workspace changed while publishing its controls; refreshing the current view.");
-            Volatile.Write(ref publishedWorkspaceView, new(candidate, context, profile));
+            Volatile.Write(ref publishedWorkspaceView, new(candidate, context, profile, confirmation));
             Interlocked.Exchange(ref workspaceViewEpoch, candidate);
             Volatile.Write(ref workspacePublicationUncertain, 0);
         }

@@ -60,7 +60,6 @@ public sealed record RobotReadiness(string Label, string Action, bool Enabled, s
 
 public sealed partial class PipersPlugin
 {
-    private bool followAfterEnable;
     private bool primaryActionBusy;
     private bool resumeControlsBusy;
     private string primaryActionStatus = "", primaryActionId = "";
@@ -111,7 +110,10 @@ public sealed partial class PipersPlugin
     private async Task RunPrimaryRobotAction(CancellationToken cancellation)
     {
         if (!PrimaryActionAvailable) { message = "Wait for the current robot action to finish."; return; }
-        var device = Device();
+        long epoch = CommandAuthority.Epoch;
+        var profile = ActiveProfile;
+        string backend = token;
+        var device = Device(expectedToken: backend);
         var readiness = Readiness(device);
         switch (readiness.NextAction)
         {
@@ -126,9 +128,14 @@ public sealed partial class PipersPlugin
                 await ResumeControls(cancellation);
                 break;
             case RobotPrimaryAction.Enable:
-                followAfterEnable = false;
-                if (!approved) await Patch(new() { ["safety"] = new() { ["visible"] = true } }, cancellation);
-                else await CompleteRobotEnable(cancellation);
+                var scope = ControlScope(profile, backend, device);
+                if (!approved)
+                {
+                    if (!CommandAuthority.TryOpenConfirmation(epoch, profile.Id, scope))
+                        throw new InvalidOperationException("Control permission changed. Click Enable robot to confirm the current connection.");
+                    await Render(cancellation);
+                }
+                else await CompleteRobotEnable(epoch, scope, cancellation);
                 break;
             case RobotPrimaryAction.StopFollowing:
                 await StopGroupSimulationFollowing("Operator stopped the follower group", cancellation);
@@ -139,18 +146,21 @@ public sealed partial class PipersPlugin
         }
     }
 
-    private async Task CompleteRobotEnable(CancellationToken cancellation)
+    private async Task CompleteRobotEnable(long expectedPermission, FollowControlApproval scope, CancellationToken cancellation)
     {
-        long expectedPermission = CommandAuthority.Epoch;
         await PrimaryActionProgress("enable", "Verifying arm and gripper control…", cancellation);
-        await Enable(cancellation);
+        var device = Device(scope.Device, scope.Generation, scope.Backend);
+        if (scope != ControlScope(ActiveProfile, scope.Backend, device))
+            throw new InvalidOperationException("Robot assignments changed during Enable. Confirm the current connection.");
+        await Enable(cancellation, expectedDeviceId: scope.Device, expectedGeneration: scope.Generation,
+            expectedToken: scope.Backend, expectedPermissionEpoch: expectedPermission);
         if (link is null)
         {
             await PrimaryActionProgress("link-scene", "Matching measured feedback to the selected scene robot…", cancellation);
+            if (expectedPermission != CommandAuthority.Epoch) throw new InvalidOperationException("The previous Enable action was retired.");
             await StartMeasuredLink(automatic: false, cancellation);
         }
         RememberControlApproval(expectedPermission);
-        followAfterEnable = false;
         message = "Ready · arm and gripper enabled. Select follower robots, then use Follow simulation in the left sidebar.";
     }
 
@@ -179,7 +189,7 @@ public sealed partial class PipersPlugin
             var receipt = new { id = primaryActionId, stage, atUtc = DateTimeOffset.UtcNow,
                 profileId = ActiveProfile.Id, robotId = ActiveProfile.RobotId, jointPrefix = ActiveProfile.RobotJointPrefix,
                 canDeviceId = ActiveProfile.CanDeviceId, approved, pikaOwned, linked = link is not null,
-                following = SimulationFollowingActive, followAfterEnable, failure,
+                following = SimulationFollowingActive, followAfterEnable = false, failure,
                 pikaFeedbackAgeMilliseconds = double.IsFinite(pikaAge) ? (double?)pikaAge : null,
                 pikaDevice = pika?["device"]?.GetValue<string>(), pikaPending = pika?["pending"]?.GetValue<bool>(),
                 pikaSpeed = pika?["telemetry"]?["motor"]?["Speed"]?.GetValue<double>() };

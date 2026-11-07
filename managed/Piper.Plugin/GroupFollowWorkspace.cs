@@ -67,7 +67,6 @@ public sealed partial class PipersPlugin
             await Update(cancellation);
             return;
         }
-        if (action is not ("toggle" or "cancel")) throw new InvalidOperationException("Unknown follower group action.");
         await GroupFollowEvent(action, cancellation);
         await Update(cancellation);
     }

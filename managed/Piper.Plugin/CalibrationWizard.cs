@@ -360,26 +360,4 @@ public sealed partial class PipersPlugin
         await CalibrationEvent(WizardValidation ? "validate" : "capture", default, cancellation);
         calibrationWizard = CalibrationWizardFlow.NextPoint(Wizard, WizardTrainingCount, WizardValidationCount);
     }
-
-    private void AddWizardPatches(Dictionary<string, JsonObject> patches, JsonObject? device)
-    {
-        if (!calibrationOpen || calibrationWizard is null || wizardProfile != ActiveProfile.Id) return;
-        AddCalibrationSheetPatches(patches, device);
-        patches["wizard.status"] = new() { ["text"] = wizardMessage.Length > 0 ? wizardMessage : robotCalibrationStatus };
-        bool captureReady = device is not null && TeachingState.Inspect(device).HandGuiding && device["status"]?["stationary_s"]?.GetValue<double>() is >= .4;
-        bool sameScope = calibrationIdentity is null || link is not null && calibrationIdentity == CurrentCalibrationIdentity();
-        patches[WizardId("capture")] = new() { ["enabled"] = Wizard.Step == CalibrationWizardStep.Capture && captureReady && sameScope && !calibrationPlacementUnverified };
-        patches[WizardId("next")] = new() { ["enabled"] = Wizard.Step is not (CalibrationWizardStep.Capture or CalibrationWizardStep.Review or CalibrationWizardStep.Complete or CalibrationWizardStep.InspectSaved) };
-        if (WizardReferenceStep)
-        {
-            bool shown = WizardReferenceShown();
-            patches[WizardId("next")] = new() { ["enabled"] = shown };
-            patches["wizard.edge.status"] = new() { ["text"] = shown ? "Pointer shown. Confirm only if it marks the matching desk edge." : "Waiting for the simulation pointer. Use Show edge to retry; confirmation stays unavailable." };
-        }
-        patches[WizardId("back")] = new() { ["enabled"] = Wizard.History.Length > 0 };
-        patches[WizardId("fit")] = new() { ["enabled"] = WizardTrainingCount >= 4 && !calibrationPlacementUnverified };
-        patches[WizardId("apply")] = new() { ["enabled"] = captureReady && sameScope && calibrationFit?.CanApply == true && calibrationApplied is null && !calibrationPlacementUnverified };
-        patches[WizardId("rollback")] = new() { ["enabled"] = sameScope && calibrationApplied is not null && !calibrationPlacementUnverified };
-        patches["wizard.camera.image"] = new() { ["visible"] = CameraFrameReady(Wizard.HelpCamera) };
-    }
 }

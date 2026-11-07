@@ -38,7 +38,7 @@ public sealed partial class PipersPlugin : ILuckyPlugin
     private JsonObject? scene;
     private Task? worker;
     private UiEventDispatch? uiEvents;
-    private readonly Dictionary<string, CameraCapture> cameras = [];
+    private readonly CameraPreviewSlots<CameraCapture> cameras = new();
     private readonly ConcurrentDictionary<string, string> cameraStatus = new();
     private readonly ConcurrentDictionary<string, (int Width, int Height)> cameraDimensions = new();
 
@@ -198,10 +198,10 @@ public sealed partial class PipersPlugin : ILuckyPlugin
         }
         if (GroupFollowActive && eventId is "simulation.stop" or "motion.hold" or "group.follow.cancel")
         {
-            CancelGroupSimulationFollowingInput("Stopped · holding all selected robots");
-            using var release = new CancellationTokenSource(TimeSpan.FromSeconds(4));
-            await StopGroupSimulationFollowing("Stopped · holding all selected robots", release.Token);
-            await Update(cancellation); return;
+            // The SDK delivers button events serially. Leave retirement with
+            // the coordinator so a queued emergency STOP can run immediately.
+            CancelGroupSimulationFollowingInput("Stopping all selected followers · holding");
+            return;
         }
         if (uiEvents is { } dispatch)
         {
@@ -314,8 +314,16 @@ public sealed partial class PipersPlugin : ILuckyPlugin
             {
                 await PrimaryRobotAction(cancellation);
             }
-            else if (id == "safety.accept") { approved = true; await RunPrimaryAction(CompleteRobotEnable, cancellation); await Render(cancellation); }
-            else if (id == "safety.cancel") await Patch(new Dictionary<string, JsonObject> { ["safety"] = new() { ["visible"] = false } }, cancellation);
+            else if (id == "safety.accept")
+            {
+                await RunPrimaryAction(async ct =>
+                {
+                    var confirmation = await AcceptWorkspaceClearance(input.WidgetId, ct);
+                    await CompleteRobotEnable(confirmation.Epoch, confirmation.Scope, ct);
+                }, cancellation);
+                await Render(cancellation);
+            }
+            else if (id == "safety.cancel") CommandAuthority.DismissConfirmation(DisplayedConfirmation(input.WidgetId, id));
             else if (id == "disable")
             {
                 try { await FinishAlignment("Robot disabled", cancellation); }
@@ -475,24 +483,26 @@ public sealed partial class PipersPlugin : ILuckyPlugin
         finally { commands.Release(); }
     }
 
-    private async Task Enable(CancellationToken cancellation, bool includePika = true, string? expectedDeviceId = null, long? expectedGeneration = null, string? expectedToken = null)
+    private async Task Enable(CancellationToken cancellation, bool includePika = true, string? expectedDeviceId = null,
+        long? expectedGeneration = null, string? expectedToken = null, long? expectedPermissionEpoch = null)
     {
-        long enableEpoch = CommandAuthority.Epoch;
+        long enableEpoch = expectedPermissionEpoch ?? CommandAuthority.Epoch;
         expectedToken ??= token;
         if (calibrationOpen) throw new InvalidOperationException("Calibrate robot is read-only. Use Back to robot controls before enabling motors.");
         var device = Device(expectedDeviceId, expectedGeneration, expectedToken);
         expectedDeviceId ??= device["id"]!.GetValue<string>();
         expectedGeneration ??= device["generation"]!.GetValue<long>();
-        void CheckEnableScope()
+        JsonObject CheckEnableScope()
         {
             if (!approved || enableEpoch != CommandAuthority.Epoch)
                 throw new InvalidOperationException("Enable was cancelled by STOP or a control-scope change. No later power action will resume.");
-            Device(expectedDeviceId, expectedGeneration, expectedToken);
+            var current = Device(expectedDeviceId, expectedGeneration, expectedToken);
+            var teaching = TeachingState.Inspect(current);
+            if (teaching.BlocksTargets) throw new InvalidOperationException(teaching.NextStep);
+            return current;
         }
         CheckEnableScope();
-        if (TeachingState.Inspect(device).BlocksTargets)
-            throw new InvalidOperationException("End hand guiding/playback and return to CAN control before enabling plugin targets.");
-        if (includePika) { await ConfigureProfilePika(cancellation); CheckEnableScope(); }
+        if (includePika) { await ConfigureProfilePika(expectedToken, cancellation); CheckEnableScope(); }
         if (device["recovery_required"]?.GetValue<bool>() == true)
             await Command(device["reset_pending"]?.GetValue<bool>() == true ? "verify-reset" : "verify-current", null, cancellation,
                 expectedDeviceId: expectedDeviceId, expectedGeneration: expectedGeneration, expectedToken: expectedToken, expectedPermissionEpoch: enableEpoch);
@@ -504,13 +514,11 @@ public sealed partial class PipersPlugin : ILuckyPlugin
             long started = Stopwatch.GetTimestamp();
             while (true)
             {
-                CheckEnableScope();
-                if (TeachingState.Inspect(Device(expectedDeviceId, expectedGeneration, expectedToken)).BlocksTargets) throw new InvalidOperationException("Teaching took control during enable. Previous targets were discarded; finish the teaching return flow first.");
+                var current = CheckEnableScope();
                 var motion = state?["motion"];
                 if (motion?["request_id"]?.GetValue<long>() == request && motion["active"]?.GetValue<bool>() == false)
                 {
-                    var enabledDevice = Device(expectedDeviceId, expectedGeneration, expectedToken);
-                    if (enabledDevice["joints"]!.AsArray().All(j => j?["enabled"]?.GetValue<bool>() == true) && enabledDevice["recovery_required"]?.GetValue<bool>() != true) break;
+                    if (current["joints"]!.AsArray().All(j => j?["enabled"]?.GetValue<bool>() == true) && current["recovery_required"]?.GetValue<bool>() != true) break;
                     throw new InvalidOperationException(state?["message"]?.GetValue<string>() ?? "The robot did not enable all six motors.");
                 }
                 if (Stopwatch.GetElapsedTime(started).TotalSeconds > 10)
@@ -525,21 +533,24 @@ public sealed partial class PipersPlugin : ILuckyPlugin
                 state["pika"]?["owner"]?.GetValue<string>() == owner && state["pika"]?["enabled"]?.GetValue<bool>() == true && state["pika"]?["armed"]?.GetValue<bool>() == true;
             if (!gripperAlreadyReady)
             {
-            await Call("/api/pika/connect", new JsonObject { ["owner"] = owner, ["take_over"] = true }, cancellation, expectedToken);
-            CheckEnableScope();
-            pikaOwned = pikaMonitoring = true;
-            pikaMonitorStatus = "Pika control session active.";
-            long started = Stopwatch.GetTimestamp();
-            while (state?["pika"]?["fresh"]?.GetValue<bool>() != true)
-            {
+                await Call("/api/pika/connect", new JsonObject { ["owner"] = owner, ["take_over"] = true }, cancellation, expectedToken);
                 CheckEnableScope();
-                if (Stopwatch.GetElapsedTime(started).TotalSeconds > 3)
-                    throw new InvalidOperationException("Pika connected but fresh motor feedback has not arrived. Enable again when feedback is live.");
-                await Task.Delay(25, cancellation);
-            }
-            CheckEnableScope();
-            await Call("/api/pika/enable", new JsonObject { ["owner"] = owner, ["clear"] = true }, cancellation, expectedToken);
-            CheckEnableScope();
+                pikaOwned = pikaMonitoring = true;
+                pikaMonitorStatus = "Pika control session active.";
+                long started = Stopwatch.GetTimestamp();
+                while (state?["pika"]?["fresh"]?.GetValue<bool>() != true)
+                {
+                    CheckEnableScope();
+                    if (Stopwatch.GetElapsedTime(started).TotalSeconds > 3)
+                        throw new InvalidOperationException("Pika connected but fresh motor feedback has not arrived. Enable again when feedback is live.");
+                    await Task.Delay(25, cancellation);
+                }
+                var current = CheckEnableScope();
+                if (current["recovery_required"]?.GetValue<bool>() == true ||
+                    current["reset_pending"]?.GetValue<bool>() == true || !RobotPowerState.Inspect(current).AllEnabled)
+                    throw new InvalidOperationException("Arm holding control changed before the gripper could be enabled. Check the robot status.");
+                await Call("/api/pika/enable", new JsonObject { ["owner"] = owner, ["clear"] = true }, cancellation, expectedToken);
+                CheckEnableScope();
             }
         }
         message = !includePika ? "Six arm motors enabled · Pika power unchanged" : pikaTeachingDisableRequest.Length > 0 ? "Arm controls ready · Pika remains free; use Hold jaws here to resume at its measured opening" : PikaMatchesProfile() ? "Controls enabled · robot and assigned Pika use the same controller session" : "Robot controls enabled · no Pika assigned to this robot";
@@ -560,9 +571,8 @@ public sealed partial class PipersPlugin : ILuckyPlugin
         _ => throw new ArgumentException("Unknown camera")
     };
 
-    private async Task RestartCamera(string id)
+    private Task RestartCamera(string id) => cameras.ReplaceAsync(id, () =>
     {
-        if (cameras.Remove(id, out var previous)) await previous.DisposeAsync();
         if (id == "depth")
         {
             // Color and depth can share a serial/resolution but not intrinsics.
@@ -573,8 +583,9 @@ public sealed partial class PipersPlugin : ILuckyPlugin
         var camera = new CameraCapture(engine, id, CameraSettings(id), (key, value) => cameraStatus[key] = value, preferences.DepthSerial,
             (key, width, height) => cameraDimensions[key] = (width, height),
             (key, profile) => { Materialize(profile); cameraCalibration[key] = profile; }, CameraImageId(id));
-        cameras[id] = camera; camera.Start();
-    }
+        camera.Start();
+        return camera;
+    });
 
     private bool ManualPikaControlAllowed(JsonObject? device) => approved && device?["fresh"]?.GetValue<bool>() == true &&
         device["status"]?["arm_status"]?.GetValue<int>() != 1 && device["status"]?["error"]?.GetValue<int>() == 0 &&
@@ -593,6 +604,8 @@ public sealed partial class PipersPlugin : ILuckyPlugin
             ["status"] = new() { ["text"] = ownedBackend is null ? message : message + " · controller closes with Pipers" }, ["link"] = new() { ["text"] = link is null ? "Link robot" : "Unlink robot" },
             ["link.status"] = new() { ["text"] = link is null ? "Unlinked · use Edit mode · calibration not verified" : $"{(linkCommandsEnabled ? "Linked" : "Tracking only — motion blocked")} · joint error {linkErrorDegrees?.ToString("F4") ?? "—"}° · {link.GripperStatus} · {sceneTrackingStatus} · calibration unverified" }
         };
+        patches["safety"] = new() { ["visible"] = scope.View?.Confirmation is { } presented &&
+            ReferenceEquals(CommandAuthority.Current.Confirmation, presented) };
         patches["backend.setup"] = new() { ["visible"] = backendSetupOpen || snapshot is null || scope.Context.Page == "settings" && scope.Context.SettingsCategory is "controller" or "diagnostics" };
         patches["backend.restart.confirmation"] = new() { ["visible"] = backendRestartConfirmation };
         patches["backend.status"] = new() { ["text"] = backendStatus };
@@ -664,8 +677,6 @@ public sealed partial class PipersPlugin : ILuckyPlugin
         }
         patches["camera.gripper.calibration.status"] = new() { ["text"] = calibrationStatus };
         AddTeachingPatches(patches, device);
-        AddAlignmentPatches(patches);
-        AddCalibrationPatches(patches, device);
         AddHeightCheckPatches(patches, device);
         AddCameraComparisonPatches(patches);
         AddResetAssistedPatches(patches, device);
@@ -680,8 +691,8 @@ public sealed partial class PipersPlugin : ILuckyPlugin
 
     public async ValueTask DisposeAsync()
     {
+        var cameraRetirement = cameras.DisposeAsync();
         passiveMeasuredTrackingStarted = false;
-        CancelGroupSimulationFollowingInput("Plugin closed");
         using (var groupTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(8)))
         {
             try { await StopGroupSimulationFollowing("Plugin closed · following stopped", groupTimeout.Token); }
@@ -754,7 +765,8 @@ public sealed partial class PipersPlugin : ILuckyPlugin
         await shutdown.CancelAsync();
         if (wizardHighlightMaintenance is not null) { try { await wizardHighlightMaintenance; } catch (OperationCanceledException) { } }
         if (calibrationWorker is not null) { try { await calibrationWorker; } catch (OperationCanceledException) { } }
-        foreach (var camera in cameras.Values) await camera.DisposeAsync();
+        try { await cameraRetirement; }
+        catch (Exception error) { Trace.TraceWarning("Camera shutdown: {0}", error.Message); }
         if (worker is not null) { try { await worker; } catch (OperationCanceledException) { } catch (RpcException error) when (error.StatusCode == StatusCode.Cancelled) { } }
         await StopOwnedBackend();
         // An externally managed server keeps running; its existing lease expiry handles a lost client.

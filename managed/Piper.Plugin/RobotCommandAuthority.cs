@@ -6,8 +6,10 @@ internal sealed record RobotCommandScope(string ProfileId, string Backend, strin
 
 internal sealed record TrackedRobotCommand(RobotCommandScope Scope, long Request);
 
+internal sealed record WorkspaceClearConfirmation(long Epoch, string ProfileId, FollowControlApproval Scope);
+
 internal sealed record RobotCommandState(long Epoch, TrackedRobotCommand? Lease, TrackedRobotCommand? LastCommand,
-    ImmutableDictionary<string, FollowControlApproval> Approvals);
+    ImmutableDictionary<string, FollowControlApproval> Approvals, WorkspaceClearConfirmation? Confirmation = null);
 
 // Owns the local permission epoch and acknowledgement bookkeeping. The controller
 // independently authorizes commands and owns the physical lease and STOP latch.
@@ -41,6 +43,35 @@ internal sealed class RobotCommandAuthority
             Volatile.Write(ref state, state with { Lease = lease, LastCommand = command });
             return true;
         }
+    }
+
+    public bool TryOpenConfirmation(long epoch, string profile, FollowControlApproval scope)
+    {
+        lock (gate)
+        {
+            if (epoch != state.Epoch) return false;
+            Volatile.Write(ref state, state with { Confirmation = new(epoch, profile, scope) });
+            return true;
+        }
+    }
+
+    public bool TryConsumeConfirmation(WorkspaceClearConfirmation confirmation, string profile, FollowControlApproval scope, Action approve)
+    {
+        lock (gate)
+        {
+            if (!ReferenceEquals(state.Confirmation, confirmation) || confirmation.Epoch != state.Epoch ||
+                confirmation.ProfileId != profile || confirmation.Scope != scope) return false;
+            approve();
+            Volatile.Write(ref state, state with { Confirmation = null });
+            return true;
+        }
+    }
+
+    public void DismissConfirmation(WorkspaceClearConfirmation? confirmation)
+    {
+        lock (gate)
+            if (confirmation is not null && ReferenceEquals(state.Confirmation, confirmation))
+                Volatile.Write(ref state, state with { Confirmation = null });
     }
 
     public bool TrySaveApproval(long epoch, string profile, FollowControlApproval approval, Action? activate = null)

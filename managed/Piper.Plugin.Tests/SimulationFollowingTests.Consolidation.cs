@@ -27,16 +27,31 @@ internal static partial class SimulationFollowingTests
                 [f.Get<string>("token"), "source-a", "robot-a", "asset-a", "model-a", lanes, f.Get<long>("groupInputEpoch"),
                     f.Get<TimeProvider>("followClock")], null);
             typeof(PipersPlugin).GetField("groupSimulation", fields)!.SetValue(plugin, session);
+            bool activationRejected = false;
+            try
+            {
+                await (Task)typeof(PipersPlugin).GetMethod("GroupEngine", fields)!.Invoke(plugin,
+                    [session, "robot.runtime.control", "activate-start", CancellationToken.None, null, false])!;
+            }
+            catch (InvalidOperationException error) when (error.Message.Contains("while Follow is Arming", StringComparison.Ordinal))
+            { activationRejected = true; }
             Task stop = f.ClickSidebarGroupStop();
-            bool waitedBeforeWorker = !stop.IsCompleted && f.GroupActive;
+            bool returnedBeforeWorker = stop.IsCompletedSuccessfully && f.GroupPhase == GroupFollowPhase.Retiring && ReferenceEquals(f.Session, session);
+            bool lateArmingRejected = false;
+            try { sessionType.GetMethod("Advance")!.Invoke(session, [GroupFollowPhase.Armed]); }
+            catch (TargetInvocationException error) when (error.InnerException is OperationCanceledException) { lateArmingRejected = true; }
             var worker = (Task)typeof(PipersPlugin).GetMethod("RunGroupSimulation", fields)!.Invoke(plugin, [session])!;
             await f.RuntimeReached.Task.WaitAsync(TimeSpan.FromSeconds(2));
-            bool waitedDuringCleanup = !stop.IsCompleted && f.GroupActive;
+            Task retry = f.GroupEvent("toggle");
+            bool admissionWaited = !retry.IsCompleted && ReferenceEquals(f.Session, session);
             f.ReleaseRuntime.TrySetResult();
-            await Task.WhenAll(stop, worker).WaitAsync(TimeSpan.FromSeconds(2));
-            check(waitedBeforeWorker && waitedDuringCleanup && !f.GroupActive && f.Rpc.Requests.IsEmpty &&
-                f.EngineRequests.Count(r => r.Action == "cancel-start") == 1 && !f.EngineRequests.Any(r => r.Action == "arm-next-play"),
-                "Stop escaped the published group's retirement barrier before its worker or editor cleanup completed");
+            await Task.WhenAll(stop, retry, worker).WaitAsync(TimeSpan.FromSeconds(2));
+            check(activationRejected && lateArmingRejected && !f.EngineRequests.Any(r => r.Action is "arm-next-play" or "activate-start"),
+                "An illegal activation or late arm acknowledgement advanced the Follow phase");
+            check(returnedBeforeWorker && admissionWaited && !f.GroupActive && f.Rpc.Requests.IsEmpty &&
+                (GroupFollowPhase)sessionType.GetProperty("Phase")!.GetValue(session)! == GroupFollowPhase.Retired &&
+                f.EngineRequests.Count(r => r.Action == "cancel-start") == 1,
+                "Stop blocked the dispatcher or another Follow bypassed the original group's retirement barrier");
         }
         foreach (string selected in new[] { "piper-1", "piper-2" })
         {
@@ -46,7 +61,7 @@ internal static partial class SimulationFollowingTests
             check(f.Mode == "edit" && f.Rpc.Requests.IsEmpty && f.EngineRequests.Count(r => r.Action == "arm-next-play") == 1,
                 "Single-participant arming entered Play or sent a target before user Play");
             f.RequestGroupPlay();
-            await Until(() => f.GroupStage == "following" || !f.GroupActive, "One grouped participant did not start");
+            await Until(() => f.GroupPhase == GroupFollowPhase.Following || !f.GroupActive, "One grouped participant did not start");
             check(f.GroupActive && f.Mode == "play", "The shared executor rejected a single selected participant: " + f.Get<string>("GroupFollowStatus"));
             string can = selected == "piper-1" ? "can-a" : "can-b", pika = selected == "piper-1" ? "/dev/pika-a" : "/dev/pika-b";
             check(f.Rpc.Requests.Where(r => r.Body["action"]?.GetValue<string>() == "follow-start").All(r => r.Body["device_id"]?.GetValue<string>() == can) &&
@@ -60,6 +75,36 @@ internal static partial class SimulationFollowingTests
             check(f.GroupActive && f.EngineRequests.Count(r => r.Action == "ack-episode") == 1,
                 "Single-participant phase completion did not use the shared episode acknowledgement");
         }
+        foreach (bool expiredPrimer in new[] { false, true })
+        {
+            var clock = new FollowTestClock();
+            await using var f = new Fixture(followClock: clock);
+            f.ConfigureGroup(); f.SelectGroupFollowers("piper-1"); f.UseUiDispatcher();
+            f.Rpc.DelayedOperation = "follow-update";
+            await f.Click("group.follow.toggle");
+            await Until(() => f.GroupArmedForPlay, "Primer-drain fixture did not arm");
+            f.RequestGroupPlay();
+            await f.Rpc.DelayedReached.Task.WaitAsync(TimeSpan.FromSeconds(3));
+            await Until(() => f.GroupPhase == GroupFollowPhase.DrainingPrimer || !f.GroupActive,
+                "Activation did not enter the explicit primer drain");
+            bool waited = f.GroupPhase == GroupFollowPhase.DrainingPrimer &&
+                f.EngineRequests.Count(r => r.Action == "activate-start") == 1 &&
+                !f.EngineRequests.Any(r => r.Method == "robot.runtime.frames" && r.Action.Length == 0) &&
+                f.Rpc.Requests.Count(r => r.Body["action"]?.GetValue<string>() == "follow-update") == 1;
+            if (expiredPrimer) { clock.Advance(TimeSpan.FromMilliseconds(300)); f.Refresh(); }
+            f.Rpc.ReleaseDelayed.TrySetResult();
+            await Until(() => f.GroupPhase == GroupFollowPhase.Following || !f.GroupActive,
+                "Retiring the priming update did not release ordered publication");
+            check(waited, "Ordered publication overlapped the pending priming acknowledgement");
+            if (expiredPrimer)
+                check(!f.GroupActive && f.SidebarStatus().Contains("source expired after 250 ms", StringComparison.Ordinal) &&
+                    !f.EngineRequests.Any(r => r.Method == "robot.runtime.frames" && r.Action.Length == 0) &&
+                    f.Rpc.Requests.Count(r => r.Body["action"]?.GetValue<string>() == "follow-update") == 1 &&
+                    f.Rpc.Requests.Any(r => r.Body["action"]?.GetValue<string>() == "hold"),
+                    "A late primer ACK granted a fresh source lease or escaped retirement holds");
+            else check(f.GroupPhase == GroupFollowPhase.Following,
+                "A valid priming ACK retired the active group before ordered publication");
+        }
         foreach (string delayed in new[] { "arm-start", "pika-start" })
         {
             await using var f = new Fixture(); f.ConfigureGroup(); f.SelectGroupFollowers("piper-1"); f.UseUiDispatcher();
@@ -67,11 +112,10 @@ internal static partial class SimulationFollowingTests
             await f.Click("group.follow.toggle"); await Until(() => f.GroupArmedForPlay, "Late-admission fixture did not arm");
             f.RequestGroupPlay(); await f.Rpc.DelayedReached.Task.WaitAsync(TimeSpan.FromSeconds(3));
             var old = f.Get<object>("groupSimulation");
-            Task stop = f.ClickSidebarGroupStop();
-            await Task.Delay(50);
-            check(f.GroupActive && ReferenceEquals(old, f.Get<object>("groupSimulation")) && !f.EngineRequests.Any(r => r.Action == "activate-start"),
-                "An in-flight admission released its identity or activated after Stop before the acknowledgement retired");
-            f.Rpc.ReleaseDelayed.TrySetResult(); await stop.WaitAsync(TimeSpan.FromSeconds(3));
+            await f.ClickSidebarGroupStop().WaitAsync(TimeSpan.FromSeconds(1));
+            check(f.GroupPhase == GroupFollowPhase.Retiring && ReferenceEquals(old, f.Session) && !f.EngineRequests.Any(r => r.Action == "activate-start"),
+                "Stop blocked the dispatcher, or an in-flight admission released its identity or activated after Stop");
+            f.Rpc.ReleaseDelayed.TrySetResult();
             await Until(() => !f.GroupActive, "A late admission did not drain and retire");
             var sent = f.Rpc.Events.ToArray();
             int accepted = Array.IndexOf(sent, "accepted:" + delayed);
@@ -161,7 +205,9 @@ internal static partial class SimulationFollowingTests
             jaws.DelayedRuntimeAction = "mark-start-ready";
             await jaws.Click("group.follow.toggle"); await Until(() => jaws.GroupArmedForPlay, "Pika-only matching fixture did not arm");
             jaws.RequestGroupPlay(); await jaws.RuntimeReached.Task.WaitAsync(TimeSpan.FromSeconds(3));
-            var stop = jaws.ClickSidebarGroupStop(); jaws.ReleaseRuntime.TrySetResult(); await stop;
+            await jaws.ClickSidebarGroupStop().WaitAsync(TimeSpan.FromSeconds(1));
+            jaws.ReleaseRuntime.TrySetResult();
+            await Until(() => !jaws.GroupActive, "Start-matching cancellation did not retire");
             check(!jaws.GroupActive && !jaws.Rpc.Requests.Any(r => r.Body["action"]?.GetValue<string>() == "hold") &&
                 jaws.Rpc.Requests.Any(r => r.Route == "/api/pika/hold") &&
                 jaws.Rpc.Requests.Any(r => r.Body["action"]?.GetValue<string>() == "pose") == matchArm &&
@@ -173,7 +219,7 @@ internal static partial class SimulationFollowingTests
             await using var f = new Fixture(); f.ConfigureGroup(); f.SelectGroupFollowers("piper-1"); f.UseUiDispatcher();
             await f.Click("group.follow.toggle"); await Until(() => f.GroupArmedForPlay, "Pika-audit fixture did not arm");
             var group = f.Get<object>("groupSimulation");
-            f.RequestGroupPlay(); await Until(() => f.GroupStage == "following", "Pika-audit fixture did not start");
+            f.RequestGroupPlay(); await Until(() => f.GroupPhase == GroupFollowPhase.Following, "Pika-audit fixture did not start");
             var stream = new PikaFollowSession(_ => { }); string id = stream.Start(0); stream.Update(id, 12, 20, .01); stream.Tick(.27, PikaProtocol.Angle(20), true);
             f.Rpc.FailArmWithPikaAudit = both; f.Rpc.PikaFailureAudit = stream.Audit;
             await Until(() => !f.GroupActive, "A negative arm/Pika ACK retained publication authority");
@@ -200,7 +246,7 @@ internal static partial class SimulationFollowingTests
         {
             await using var f = new Fixture(); f.ConfigureGroup(); f.UseUiDispatcher();
             await f.Click("group.follow.toggle"); await Until(() => f.GroupArmedForPlay, "Malformed-inventory fixture did not arm");
-            f.RequestGroupPlay(); await Until(() => f.GroupStage == "following", "Malformed-inventory fixture did not start");
+            f.RequestGroupPlay(); await Until(() => f.GroupPhase == GroupFollowPhase.Following, "Malformed-inventory fixture did not start");
             f.Snapshot[broken]!.AsArray().Add(f.Snapshot[broken]![0]!.DeepClone()); f.Refresh();
             await Until(() => !f.GroupActive, "An ambiguous lane prevented whole-session retirement");
             check(f.Rpc.Requests.Any(r => r.Body["action"]?.GetValue<string>() == "hold" && r.Body["device_id"]?.GetValue<string>() == "can-b") &&
@@ -233,10 +279,10 @@ internal static partial class SimulationFollowingTests
             await f.RuntimeReached.Task.WaitAsync(TimeSpan.FromSeconds(3));
             object original = f.Get<object>("groupSimulation");
             if (backendChanged) typeof(PipersPlugin).GetField("token", fields)!.SetValue(Plugin(f), "replacement-backend");
-            Task stop = f.ClickSidebarGroupStop(); await Task.Delay(50);
-            check(f.GroupActive && ReferenceEquals(original, f.Get<object>("groupSimulation")),
-                "A pending editor ACK released the preparation identity before retiring: " + action);
-            f.ReleaseRuntime.TrySetResult(); await stop.WaitAsync(TimeSpan.FromSeconds(3));
+            await f.ClickSidebarGroupStop().WaitAsync(TimeSpan.FromSeconds(1));
+            check(f.GroupPhase == GroupFollowPhase.Retiring && ReferenceEquals(original, f.Session),
+                "Stop blocked the dispatcher or a pending editor ACK released the preparation identity before retiring: " + action);
+            f.ReleaseRuntime.TrySetResult();
             await Until(() => !f.GroupActive, "A late editor ACK failed to finish cleanup: " + action);
             check(f.EngineRequests.Count(r => r.Action == "arm-next-play") == 1 && f.EngineRequests.Any(r => r.Action == "cancel-start") &&
                 f.Mode == (action == "arm-next-play" ? "edit" : "pause"),
@@ -254,14 +300,14 @@ internal static partial class SimulationFollowingTests
             await using var f = new Fixture(); f.ConfigureGroup(); f.SelectGroupFollowers("piper-1"); f.UseUiDispatcher();
             f.DelayNativeAdmissionTelemetry = true;
             await f.Click("group.follow.toggle"); await Until(() => f.GroupArmedForPlay, "Native-reference fixture did not arm");
-            f.RequestGroupPlay(); await Until(() => f.GroupStage == "admitting" && f.Rpc.Requests.Any(r => r.Body["action"]?.GetValue<string>() == "follow-update"),
+            f.RequestGroupPlay(); await Until(() => f.GroupPhase == GroupFollowPhase.Admitting && f.Rpc.Requests.Any(r => r.Body["action"]?.GetValue<string>() == "follow-update"),
                 "Native-reference admission was not primed at the frozen first frame");
             await Task.Delay(40);
             check(f.GroupActive && f.Mode == "pause" && !f.EngineRequests.Any(r => r.Action == "activate-start"),
                 "A successful native start ACK activated Play using cached pre-admission telemetry");
             if (publish)
             {
-                f.PublishNativeAdmissionReference(); await Until(() => f.GroupStage == "following" || !f.GroupActive, "Fresh native-reference evidence did not release admission");
+                f.PublishNativeAdmissionReference(); await Until(() => f.GroupPhase == GroupFollowPhase.Following || !f.GroupActive, "Fresh native-reference evidence did not release admission");
                 check(f.GroupActive && f.EngineRequests.Count(r => r.Action == "activate-start") == 1,
                     "An exact fresh native reference failed to release the existing admission once");
             }

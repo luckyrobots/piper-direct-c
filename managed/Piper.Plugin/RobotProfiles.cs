@@ -145,7 +145,7 @@ public sealed partial class PipersPlugin
     private bool canInventoryRenderPending;
     private RobotProfile ActiveProfile => RobotProfileRouting.Active(preferences);
     private string CameraImageId(string id) => id == "bench" ? id : "piper-" + ActiveProfile.CameraSlot + "." + id;
-    private bool CameraFrameReady(string id) => cameras.TryGetValue(id, out var camera) && camera.PublishedFrame is { } frame &&
+    private bool CameraFrameReady(string id) => cameras.Get(id)?.PublishedFrame is { } frame &&
         DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - frame.TimestampUnixMicroseconds / 1000 < 2000;
     private static Widget ScopeRobotWidget(Widget widget, long epoch, string profileId) => widget with {
         Id = WorkspaceEventScope.Wrap(epoch, profileId, widget.Id), Children = widget.Children?.Select(child => ScopeRobotWidget(child, epoch, profileId)).ToArray() };
@@ -217,21 +217,7 @@ public sealed partial class PipersPlugin
             try
             {
                 var adapterIds = knownCanIds;
-                string[] adapterOptions = ["Unassigned", .. adapterIds.Select(id =>
-                {
-                    var device = state?["devices"]?.AsArray().FirstOrDefault(d => d?["id"]?.GetValue<string>() == id);
-                    string name = device?["name"]?.GetValue<string>() ?? "Adapter";
-                    string offline = device?["present"]?.GetValue<bool>() == true ? "" : " (offline)";
-                    return name + offline + " · " + id;
-                })];
-                var patches = new Dictionary<string, JsonObject>
-                {
-                    ["profiles.can"] = new()
-                    {
-                        ["options"] = JsonSerializer.SerializeToNode(adapterOptions),
-                        ["value"] = Array.IndexOf(adapterIds, ActiveProfile.CanDeviceId) + 1
-                    }
-                };
+                var patches = new Dictionary<string, JsonObject>();
                 string[] settingsOptions = ["Unassigned", .. adapterIds.Select(CanFriendlyName)];
                 foreach (var p in preferences.Robots!) patches["global.robot." + p.Id + ".can"] = new() {
                     ["options"] = JsonSerializer.SerializeToNode(settingsOptions),
@@ -383,7 +369,7 @@ public sealed partial class PipersPlugin
             await FinishPikaTeaching("Robot profile or hardware assignment changed", cancellation);
             StorePikaTeachingWorkspace(ActiveProfile);
             preferences = RobotProfileRouting.Capture(preferences);
-            foreach (string id in new[] { "gripper", "depth" }) if (cameras.Remove(id, out var camera)) await camera.DisposeAsync();
+            foreach (string id in new[] { "gripper", "depth" }) await cameras.ReplaceAsync(id, startReplacement: null);
             var profiles = append ? preferences.Robots!.Append(profile).ToArray() : preferences.Robots!.Select(p => p.Id == profile.Id ? profile : p).ToArray();
             preferences = RobotProfileRouting.Activate(preferences with { Robots = profiles }, profile.Id);
             RestorePikaTeachingWorkspace(ActiveProfile);
@@ -419,12 +405,12 @@ public sealed partial class PipersPlugin
         profile.PikaDevice.Length > 0 && pika?["device"]?.GetValue<string>() == profile.PikaDevice &&
         (!OperatingSystem.IsWindows() || pika?["distribution"]?.GetValue<string>() == profile.WslDistribution);
 
-    private async Task ConfigureProfilePika(CancellationToken cancellation)
+    private async Task ConfigureProfilePika(string expectedToken, CancellationToken cancellation)
     {
         if (ActiveProfile.PikaDevice.Length == 0 || PikaMatchesProfile()) return;
         if (state?["motion"]?["active"]?.GetValue<bool>() == true) throw new InvalidOperationException("Finish arm movement before changing the Pika assignment.");
         await Call("/api/pika/configure", new JsonObject { ["owner"] = owner, ["device"] = ActiveProfile.PikaDevice,
-            ["distribution"] = OperatingSystem.IsWindows() ? ActiveProfile.WslDistribution : null }, cancellation);
+            ["distribution"] = OperatingSystem.IsWindows() ? ActiveProfile.WslDistribution : null }, cancellation, expectedToken);
         long started = Stopwatch.GetTimestamp();
         while (!PikaMatchesProfile())
         {

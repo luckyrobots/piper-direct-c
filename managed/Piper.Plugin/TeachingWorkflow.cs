@@ -17,7 +17,6 @@ public sealed partial class PipersPlugin
     private AlignmentCheck? alignmentCheck;
     private string? alignmentPath;
     private AlignmentFrame? alignmentPending;
-    private string alignmentStatus = "No alignment observations. Joint linking does not establish spatial calibration.";
     private bool alignmentOpen;
     private double alignmentGapMm;
     private AlignmentReference AlignmentOptions => ActiveProfile.Alignment ?? new();
@@ -27,8 +26,6 @@ public sealed partial class PipersPlugin
         string directory = Path.Combine(engine.Start.SettingsDirectory, "alignment-checks", ActiveProfile.Id);
         alignmentPath = Directory.Exists(directory) ? Directory.EnumerateFiles(directory, "*.json").OrderByDescending(File.GetLastWriteTimeUtc).FirstOrDefault() : null;
         alignmentPending = null; alignmentGapMm = 0;
-        alignmentStatus = alignmentPath is null ? "No alignment observations for this robot. Joint linking does not establish spatial calibration."
-            : "A saved visual-check report is available for this robot. Metric calibration and exposure synchronization remain unverified.";
     }
 
     private async Task ObserveTeaching(CancellationToken cancellation)
@@ -193,7 +190,6 @@ public sealed partial class PipersPlugin
             Directory.CreateDirectory(directory);
             alignmentPath = Path.Combine(directory, DateTime.UtcNow.ToString("yyyyMMdd-HHmmss") + "-" + Guid.NewGuid().ToString("N")[..8] + ".json");
             alignmentPending = null;
-            alignmentStatus = "Local check started. Single-click the physical teach button, guide the named tool point to the reference, and hold still before Capture. Onboard playback is separate and is not started.";
             await PersistAlignment(cancellation); await Render(cancellation); return;
         }
         if (action == "open")
@@ -209,7 +205,6 @@ public sealed partial class PipersPlugin
             if (!TeachingState.Inspect(device).HandGuiding) throw new InvalidOperationException("Capture this observation while hand guiding with the physical teach light solid green.");
             if (device["status"]?["stationary_s"]?.GetValue<double>() is not >= .4) throw new InvalidOperationException("Hold the tool point still for at least 0.4 seconds before capturing.");
             alignmentPending = ReadAlignmentFrame(session, device);
-            alignmentStatus = "Pose captured; confirm the physical tool point and simulated point against the reference. A zero joint-error number alone is not independent spatial evidence.";
             await Render(cancellation); return;
         }
         if (action is "match" or "mismatch")
@@ -223,7 +218,6 @@ public sealed partial class PipersPlugin
                 throw new InvalidOperationException("That observation is over 30 seconds old. Capture the current stationary pose again.");
             session.Observe(captured, action == "match", alignmentGapMm > 0 ? alignmentGapMm : null);
             alignmentPending = null;
-            alignmentStatus = $"Saved {session.Observations} operator observations and {session.Samples} local hand-guided frames. Use a different approach pose for another check. Metric calibration and camera timing remain unverified.";
             await PersistAlignment(cancellation); await Render(cancellation);
         }
     }
@@ -252,17 +246,6 @@ public sealed partial class PipersPlugin
     {
         if (alignmentCheck is not { } session) return;
         await WriteAlignmentReport(session.Finish(reason), cancellation);
-        alignmentStatus = $"Saved {session.Observations} visual observations and {session.Samples} local frames. Metric calibration remains unverified. {reason}.";
         alignmentCheck = null; alignmentPending = null;
-    }
-    private void AddAlignmentPatches(Dictionary<string, JsonObject> patches)
-    {
-        patches["alignment.status"] = new() { ["text"] = alignmentCheck is { } current ? alignmentStatus + $" Local trace: {current.Samples}/1800 frames; {current.Observations}/24 visual observations." : alignmentStatus };
-        patches["alignment.capture"] = new() { ["enabled"] = alignmentCheck is not null && teaching.HandGuiding && link is not null };
-        patches["alignment.start"] = new() { ["enabled"] = alignmentCheck is null && link is not null };
-        patches["alignment.finish"] = new() { ["enabled"] = alignmentCheck is not null };
-        patches["alignment.open"] = new() { ["enabled"] = alignmentPath is not null };
-        foreach (string field in new[] { "name", "tool", "x", "y", "z", "height" })
-            patches["alignment." + field] = new() { ["enabled"] = alignmentCheck is null };
     }
 }

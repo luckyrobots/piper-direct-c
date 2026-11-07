@@ -162,6 +162,7 @@ public sealed partial class PipersPlugin
     private async Task RunRecoveryCard(CancellationToken cancellation)
     {
         if (workspacePage != "controls" || calibrationOpen) throw new InvalidOperationException("Return to Controls to use the recovery guide.");
+        long permissionEpoch = CommandAuthority.Epoch;
         var device = Device();
         var view = RecoveryCardState(device);
         if (!RecoveryCardCanRun(view)) throw new InvalidOperationException(view.CanAct ? "Wait for the current robot action to finish before continuing recovery." : view.NextStep);
@@ -179,8 +180,10 @@ public sealed partial class PipersPlugin
                     handGuideRecoveryMessage = "Disable requested. Keep supporting the arm until all six motors report off; the next recovery action appears here.";
                     break;
                 case RecoveryWorkspaceAction.EnableHold:
-                    followAfterEnable = false; approved = true;
-                    await RunPrimaryAction(CompleteRobotEnable, cancellation);
+                    var scope = ControlScope(ActiveProfile, token, device);
+                    if (!CommandAuthority.TryInEpoch(permissionEpoch, () => approved = true))
+                        throw new InvalidOperationException("Holding setup was cancelled by STOP or a control-scope change.");
+                    await RunPrimaryAction(ct => CompleteRobotEnable(permissionEpoch, scope, ct), cancellation);
                     CancelHandGuideRecovery();
                     break;
                 case RecoveryWorkspaceAction.TeachReturn:

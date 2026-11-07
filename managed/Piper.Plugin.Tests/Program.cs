@@ -157,6 +157,7 @@ var reusedSlot = RobotProfileRouting.Normalize(twoProfiles with { Robots = [twoP
 Check(reusedSlot.Robots!.All(p => p.CameraSlot is >= 0 and < RobotProfileRouting.MaximumProfiles) && reusedSlot.Robots!.Select(p => p.CameraSlot).Distinct().Count() == 2, "Deleted profile's camera slot was not bounded/reusable");
 var lensProfile = JsonNode.Parse("""{"schema":1,"device":"camera-a","width":640,"height":480,"model":"kannala-brandt","fx":250,"fy":251,"cx":317,"cy":238,"coefficients":[0.01,-0.001,0,0]}""")!.AsObject();
 SimulationCameraRoutingTests.Run(Check);
+await CameraPreviewSlotsTests.Run(Check);
 Check(CameraProfile.Matches(lensProfile, "camera-a", 640, 480, false), "Valid fisheye profile rejected");
 Check(!CameraProfile.Matches(lensProfile, "camera-b", 640, 480, false), "Lens calibration leaked to another camera");
 Check(!CameraProfile.Matches(lensProfile, "camera-a", 1280, 720, false), "Calibration accepted at wrong resolution");

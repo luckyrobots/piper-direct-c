@@ -52,7 +52,11 @@ public sealed partial class PipersPlugin
             patches["camera." + id + ".empty"] = new() { ["visible"] = !ready, ["text"] = cameraStatus.GetValueOrDefault(id, "Connecting camera…") };
             patches["camera." + id + ".title"] = new() { ["hint"] = cameraStatus.GetValueOrDefault(id, "Waiting for a fresh frame") };
         }
-        AddWizardPatches(patches, device);
+        if (calibrationOpen && calibrationWizard is { } wizard && wizardProfile == ActiveProfile.Id)
+        {
+            AddCalibrationSheetPatches(patches, device);
+            patches["wizard.camera.image"] = new() { ["visible"] = CameraFrameReady(wizard.HelpCamera) };
+        }
         AddReplayPatches(patches, device);
     }
 }
