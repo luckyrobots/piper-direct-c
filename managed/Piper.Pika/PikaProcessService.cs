@@ -5,6 +5,8 @@ using System.Text.Json.Nodes;
 
 namespace LuckyRobots.Piper.Pika;
 
+internal enum PikaHoldOwnership { Unowned, Owned, Unverified }
+
 /// <summary>Reusable C# owner of a Linux serial agent, local or through WSL.
 /// The Windows process never opens a WCH COM port.</summary>
 public sealed class PikaProcessService : IPikaSession
@@ -36,8 +38,16 @@ public sealed class PikaProcessService : IPikaSession
     private bool connected;
     private string error = "Not connected";
     private long stateAt;
-    private TaskCompletionSource ready = new(TaskCreationOptions.RunContinuationsAsynchronously);
     public bool Configured => !string.IsNullOrWhiteSpace(device);
+
+    internal PikaHoldOwnership GetHoldOwnership(string requestedOwner)
+    {
+        lock (stateGate)
+        {
+            if (owner == requestedOwner && process is not null) return PikaHoldOwnership.Owned;
+            return unresolvedOwner == requestedOwner ? PikaHoldOwnership.Unverified : PikaHoldOwnership.Unowned;
+        }
+    }
 
     public JsonObject Snapshot(bool includeRawEvidence = false)
     {
@@ -133,7 +143,7 @@ public sealed class PikaProcessService : IPikaSession
                     // Ownership changes never replay a position target.
                     await CloseAsync();
                 }
-                owner = requestedOwner;
+                lock (stateGate) owner = requestedOwner;
                 try
                 {
                     // Setup failures, including WSL path resolution before process
@@ -154,10 +164,10 @@ public sealed class PikaProcessService : IPikaSession
                     }
                     info.ArgumentList.Add("--device"); info.ArgumentList.Add(device);
                     info.ArgumentList.Add("--command-period-ms"); info.ArgumentList.Add((commandPeriodSeconds * 1000).ToString(System.Globalization.CultureInfo.InvariantCulture));
-                    ready = new(TaskCreationOptions.RunContinuationsAsynchronously);
-                    lock (stateGate) processConfirmedExited = false;
-                    process = Process.Start(info) ?? throw new IOException("Could not start the Pika serial agent");
-                    _ = PumpAsync(process, ready);
+                    var ready = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                    var agent = Process.Start(info) ?? throw new IOException("Could not start the Pika serial agent");
+                    lock (stateGate) { process = agent; processConfirmedExited = false; }
+                    _ = PumpAsync(agent, ready);
                     await ready.Task.WaitAsync(TimeSpan.FromSeconds(15), cancellation);
                 }
                 catch { await CloseAsync(); throw; }
@@ -387,40 +397,9 @@ public sealed class PikaProcessService : IPikaSession
         {
             while (await agent.StandardOutput.ReadLineAsync() is { } line)
             {
-                if (!ReferenceEquals(process, agent)) return;
                 if (line.Length > 32768) continue;
                 using var document = JsonDocument.Parse(line);
-                var data = document.RootElement;
-                switch (data.GetProperty("type").GetString())
-                {
-                    case "ready":
-                        lock (stateGate) { connected = true; error = ""; }
-                        sessionReady.TrySetResult(); break;
-                    case "state":
-                        lock (stateGate)
-                        {
-                            RetainFollowAudit(data);
-                            state = JsonNode.Parse(line)!.AsObject(); stateAt = Stopwatch.GetTimestamp();
-                            if (state["fresh"]?.GetValue<bool>() == true)
-                            {
-                                if (KnownDisabled()) unresolvedOwner = null;
-                                else if (sessionPowerRequested) unresolvedOwner = owner;
-                                // Observing externally enabled hardware is not an
-                                // enable request and creates no power ownership.
-                            }
-                        }
-                        break;
-                    case "ack":
-                        lock (stateGate) RetainFollowAudit(data);
-                        if (pending.TryRemove(data.GetProperty("id").GetString() ?? "", out var completion)) completion.TrySetResult(data.Clone());
-                        break;
-                    case "driver_fault_evidence":
-                        lock (stateGate) RetainDriverFaultEvidence(data);
-                        break;
-                    case "error":
-                        lock (stateGate) { RetainFollowAudit(data); error = data.GetProperty("message").GetString() ?? "Pika agent failed"; }
-                        break;
-                }
+                if (!PublishAgentMessage(agent, sessionReady, document.RootElement)) return;
             }
             string details = await stderr;
             await agent.WaitForExitAsync();
@@ -438,37 +417,83 @@ public sealed class PikaProcessService : IPikaSession
                 RetireVerifiedEndedPower();
                 if (!string.IsNullOrWhiteSpace(details)) error = details.Length > 2048 ? details[..2048] : details;
                 if (string.IsNullOrEmpty(error)) error = "Pika agent disconnected; reconnect explicitly";
+                FailAgentRequests(sessionReady, new IOException(error));
             }
-            sessionReady.TrySetException(new IOException(error));
-            foreach (var item in pending) item.Value.TrySetException(new IOException(error));
         }
         catch (Exception e)
         {
-            if (!ReferenceEquals(process, agent)) return;
-            lock (stateGate) { connected = false; error = e.Message; }
-            sessionReady.TrySetException(e);
-            foreach (var item in pending) item.Value.TrySetException(e);
+            lock (stateGate)
+            {
+                if (!ReferenceEquals(process, agent)) return;
+                connected = false; error = e.Message;
+                FailAgentRequests(sessionReady, e);
+            }
         }
+    }
+
+    private bool PublishAgentMessage(Process agent, TaskCompletionSource sessionReady, JsonElement data)
+    {
+        lock (stateGate)
+        {
+            // The Process instance is the generation. Detach and publication
+            // share this lock, including ACKs and terminal request failures.
+            if (!ReferenceEquals(process, agent)) return false;
+            switch (data.GetProperty("type").GetString())
+            {
+                case "ready":
+                    connected = true; error = ""; sessionReady.TrySetResult();
+                    break;
+                case "state":
+                    RetainFollowAudit(data);
+                    state = JsonNode.Parse(data.GetRawText())!.AsObject(); stateAt = Stopwatch.GetTimestamp();
+                    if (state["fresh"]?.GetValue<bool>() == true)
+                    {
+                        if (KnownDisabled()) unresolvedOwner = null;
+                        else if (sessionPowerRequested) unresolvedOwner = owner;
+                        // Observing externally enabled hardware creates no power ownership.
+                    }
+                    break;
+                case "ack":
+                    RetainFollowAudit(data);
+                    if (pending.TryRemove(data.GetProperty("id").GetString() ?? "", out var completion)) completion.TrySetResult(data.Clone());
+                    break;
+                case "driver_fault_evidence":
+                    RetainDriverFaultEvidence(data);
+                    break;
+                case "error":
+                    RetainFollowAudit(data); error = data.GetProperty("message").GetString() ?? "Pika agent failed";
+                    break;
+            }
+            return true;
+        }
+    }
+
+    private void FailAgentRequests(TaskCompletionSource sessionReady, Exception failure)
+    {
+        sessionReady.TrySetException(failure);
+        foreach (var item in pending) item.Value.TrySetException(failure);
     }
 
     private async Task CloseAsync()
     {
+        Process? agent;
         lock (stateGate)
         {
             if (KnownDisabled()) unresolvedOwner = null;
             else if (sessionPowerRequested) unresolvedOwner ??= owner;
-        }
-        if (process is { } agent)
-        {
+            agent = process;
             process = null;
+            connected = false;
+        }
+        if (agent is not null)
+        {
             // EOF makes the agent disable a gripper it enabled, then close.
             try { agent.StandardInput.Close(); await agent.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(3)); }
             catch (Exception) { if (!agent.HasExited) agent.Kill(); }
             agent.Dispose();
         }
-        owner = null;
-        lock (stateGate) { sessionPowerRequested = false; motorRequestId = ""; motorRequestAcknowledged = processConfirmedExited = false; followAudit = null; driverFaultEvidence.Clear();
-            connected = false; state = null; stateAt = 0; error = "Disconnected"; }
+        lock (stateGate) { owner = null; sessionPowerRequested = false; motorRequestId = ""; motorRequestAcknowledged = processConfirmedExited = false;
+            followAudit = null; driverFaultEvidence.Clear(); state = null; stateAt = 0; error = "Disconnected"; }
     }
     public async ValueTask DisposeAsync()
     {

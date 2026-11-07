@@ -45,21 +45,30 @@ public sealed class PikaSessionRegistry : IPikaSession
         if (!Guid.TryParse(owner, out _)) throw new ArgumentException("A dashboard Pika owner ID is required");
         // Freeze identities before dispatch. Every owned session gets an
         // independent attempt, even when another USB device fails to reply.
-        var owned = Snapshots().OfType<JsonObject>().Where(p => p["owner"]?.GetValue<string>() == owner).ToArray();
-        var results = await Task.WhenAll(owned.Select(async p => {
-            string device = p["device"]!.GetValue<string>();
+        Entry[] entries; lock (gate) entries = sessions.Values.ToArray();
+        var owned = entries.Select(entry => (entry, ownership: entry.Session is PikaProcessService process
+            ? process.GetHoldOwnership(owner)
+            : entry.Session.Snapshot()["owner"]?.GetValue<string>() == owner ? PikaHoldOwnership.Owned : PikaHoldOwnership.Unowned))
+            .Where(item => item.ownership != PikaHoldOwnership.Unowned).ToArray();
+        var results = await Task.WhenAll(owned.Select(async item => {
+            var (entry, ownership) = item;
+            string device = entry.Device;
+            if (ownership == PikaHoldOwnership.Unverified)
+                return new JsonObject { ["device"] = device, ["ok"] = false, ["message"] = "Pika power is unverified and this owner has no live session to hold." };
             try
             {
-                using var input = JsonDocument.Parse(new JsonObject { ["owner"] = owner, ["pika_device"] = device,
-                    ["pika_distribution"] = p["distribution"]?.DeepClone() }.ToJsonString());
-                var result = await ExecuteAsync("hold", input.RootElement, cancellation);
+                var input = JsonSerializer.SerializeToElement(new { owner, pika_device = device, pika_distribution = entry.Distribution });
+                var result = await entry.Session.ExecuteAsync("hold", input, cancellation);
                 return new JsonObject { ["device"] = device, ["ok"] = result["ok"]?.GetValue<bool>() == true,
                     ["message"] = result["message"]?.DeepClone() };
             }
             catch (Exception error) { return new JsonObject { ["device"] = device, ["ok"] = false, ["message"] = error.Message }; }
         }));
         bool ok = results.All(r => r["ok"]!.GetValue<bool>());
-        return new() { ["ok"] = ok, ["message"] = ok ? "All owned Pika holds acknowledged." : "One or more Pika holds could not be verified.",
+        string message = ok ? "All owned Pika holds acknowledged." : "Pika hold unverified: " +
+            string.Join("; ", results.Where(result => result["ok"]?.GetValue<bool>() != true)
+                .Select(result => result["device"]?.GetValue<string>() + " — " + result["message"]?.GetValue<string>()));
+        return new() { ["ok"] = ok, ["message"] = message,
             ["sessions"] = new JsonArray(results.Select(r => (JsonNode)r).ToArray()) };
     }
 
@@ -83,9 +92,15 @@ public sealed class PikaSessionRegistry : IPikaSession
         }
     }
 
-    public async Task<JsonObject> DiscoverAsync(string? distribution, CancellationToken cancellation)
+    public Task<JsonObject> DiscoverAsync(string? distribution, CancellationToken cancellation)
     {
-        var result = await discovery.DiscoverAsync(distribution ?? defaultDistribution, cancellation);
+        lock (gate) distribution ??= defaultDistribution;
+        return DiscoverAssignedAsync(distribution, cancellation);
+    }
+
+    private async Task<JsonObject> DiscoverAssignedAsync(string? distribution, CancellationToken cancellation)
+    {
+        var result = await discovery.DiscoverAsync(distribution, cancellation);
         lock (gate)
             if (result["devices"] is JsonArray devices)
                 foreach (var item in devices.OfType<JsonObject>())
@@ -104,36 +119,39 @@ public sealed class PikaSessionRegistry : IPikaSession
     {
         bool explicitDevice = input.TryGetProperty("pika_device", out var selector);
         if (explicitDevice && selector.ValueKind != JsonValueKind.String) throw new ArgumentException("pika_device must be a Linux device identity.");
-        string device = explicitDevice ? selector.GetString()! : defaultDevice;
-        string? distribution = ReadDistribution(input, "pika_distribution", defaultDistribution);
-        if (action == "devices") return await DiscoverAsync(distribution, cancellation);
-        if (!input.TryGetProperty("owner", out var owner) || owner.ValueKind != JsonValueKind.String || !Guid.TryParse(owner.GetString(), out _))
-            throw new ArgumentException("A dashboard Pika owner ID is required");
-        if (action == "configure")
-        {
-            if (!input.TryGetProperty("device", out var configured) || configured.ValueKind != JsonValueKind.String)
-                throw new ArgumentException("device must be a Linux device identity.");
-            device = configured.GetString()!;
-            distribution = ReadDistribution(input, "distribution", distribution);
-        }
-        PikaProcessService.ValidateConfiguration(device, distribution);
-        if (device.Length == 0)
-        {
-            if (action != "configure") throw new InvalidOperationException("No Pika is assigned to this robot. Choose a gripper in Settings.");
-            if (!explicitDevice)
-            {
-                if (Snapshot()["configuration_blocked"]?.GetValue<bool>() == true)
-                    throw new InvalidOperationException("Verify disabled feedback and disconnect the assigned Pika before clearing its assignment.");
-                lock (gate) { defaultDevice = device; defaultDistribution = distribution; }
-            }
-            return new JsonObject { ["ok"] = true, ["device"] = device, ["distribution"] = distribution, ["message"] = "No gripper assigned; no transport changed." };
-        }
         // Serialize only connection admission, not serial updates: two grippers
         // continue processing independently even if one agent's ACK is slow.
         bool needsAdmission = action is "connect" or "configure";
         if (needsAdmission) await admission.WaitAsync(cancellation);
         try
         {
+            (string device, string? distribution) assignment;
+            lock (gate) assignment = (defaultDevice, defaultDistribution);
+            string device = explicitDevice ? selector.GetString()! : assignment.device;
+            string? distribution = ReadDistribution(input, "pika_distribution", assignment.distribution);
+            if (action == "devices") return await DiscoverAssignedAsync(distribution ?? assignment.distribution, cancellation);
+            if (!input.TryGetProperty("owner", out var owner) || owner.ValueKind != JsonValueKind.String || !Guid.TryParse(owner.GetString(), out _))
+                throw new ArgumentException("A dashboard Pika owner ID is required");
+            if (action == "configure")
+            {
+                if (!input.TryGetProperty("device", out var configured) || configured.ValueKind != JsonValueKind.String)
+                    throw new ArgumentException("device must be a Linux device identity.");
+                device = configured.GetString()!;
+                distribution = ReadDistribution(input, "distribution", distribution);
+            }
+            PikaProcessService.ValidateConfiguration(device, distribution);
+            if (device.Length == 0)
+            {
+                if (action != "configure") throw new InvalidOperationException("No Pika is assigned to this robot. Choose a gripper in Settings.");
+                if (!explicitDevice)
+                    lock (gate)
+                    {
+                        if (Snapshot()["configuration_blocked"]?.GetValue<bool>() == true)
+                            throw new InvalidOperationException("Verify disabled feedback and disconnect the assigned Pika before clearing its assignment.");
+                        defaultDevice = device; defaultDistribution = distribution;
+                    }
+                return new JsonObject { ["ok"] = true, ["device"] = device, ["distribution"] = distribution, ["message"] = "No gripper assigned; no transport changed." };
+            }
             string canonical = await CanonicalizeAsync(device, distribution, cancellation);
             if (!explicitDevice && action == "configure")
             {

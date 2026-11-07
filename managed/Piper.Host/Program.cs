@@ -107,10 +107,8 @@ app.Run(async context => {
             response.StatusCode = restarting.Ok ? 202 : 409;
             await response.WriteAsJsonAsync(restarting); return;
         }
-        if (route=="/api/shutdown") {
-            var current = JsonNode.Parse(controller.Snapshot());
-            if (ControllerActivity.AnyMotion(current) || ControllerActivity.AnyQuery(current)) { await Error(409,"Stop active arm actions and finish queries before restarting the server"); return; }
-            response.OnCompleted(() => { app.Lifetime.StopApplication(); return Task.CompletedTask; });
+        if (admission.Shutdown) {
+            response.OnCompleted(() => { maintenance.CommitShutdown(app.Lifetime.StopApplication); return Task.CompletedTask; });
             await response.WriteAsJsonAsync(new {ok=true,message="Closing USB transports before shutdown"}); return;
         }
         if (route=="/api/camera") {

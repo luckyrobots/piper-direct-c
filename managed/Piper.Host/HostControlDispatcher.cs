@@ -7,7 +7,7 @@ namespace LuckyRobots.Piper.Host;
 internal enum HostControlTransport { Http, Grpc }
 
 internal readonly record struct HostControlAdmission(IDisposable? Lease = null, string? Error = null,
-    BackendRestartResult? Restart = null) : IDisposable
+    BackendRestartResult? Restart = null, bool Shutdown = false) : IDisposable
 {
     public void Dispose() => Lease?.Dispose();
 }
@@ -45,8 +45,10 @@ internal sealed class HostControlDispatcher(ControllerService controller, PikaSe
             if (restart.Ok) maintenance.Commit();
             return new(Restart: restart);
         }
-        return maintenance.TryEnterControl(route, out var lease)
-            ? new(Lease: lease) : new(Error: BackendMaintenance.PendingMessage);
+        if (route == "/api/shutdown")
+            return maintenance.PrepareShutdown() is { } error ? new(Error: error) : new(Shutdown: true);
+        return maintenance.TryEnterControl(route, out var lease, out var denied)
+            ? new(Lease: lease) : new(Error: denied);
     }
 
     internal async Task<HostControlResult> ExecuteAsync(string route, string body, JsonElement input,

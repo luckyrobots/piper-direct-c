@@ -75,6 +75,33 @@ internal static class BackendMaintenanceTests
         });
         Check(!foreignPlugin.Prepare(foreignInput).Ok, "Another plugin acquired a directly owned backend restart");
 
+        var shutdownArm = Arm();
+        var shutdownPika = Pika(owner);
+        var shutdownGate = new BackendMaintenance(() => shutdownArm, () => new JsonArray(shutdownPika.DeepClone()),
+            () => throw new Exception("Shutdown selected the restart exit action"), 123);
+        int shutdownCalls = 0;
+        void Shutdown() => ++shutdownCalls;
+        Check(shutdownGate.TryEnterControl("/api/pika/position", out var gripperWrite), "Fixture could not admit gripper write");
+        Check(shutdownGate.PrepareShutdown() is not null, "Shutdown raced an already admitted gripper command");
+        gripperWrite!.Dispose();
+        Check(shutdownGate.PrepareShutdown() is null, "Legacy shutdown rejected an idle backend");
+        Check(!shutdownGate.TryEnterControl("/api/command", out _) && !shutdownGate.TryEnterControl("/api/pika/enable", out _),
+            "Shutdown admitted a new arm target or gripper power request before response completion");
+        Check(shutdownGate.TryEnterControl("/api/stop/coordinated", out var shutdownStop), "Shutdown blocked coordinated STOP");
+        shutdownStop!.Dispose();
+        shutdownArm["motion"]!["active"] = true;
+        shutdownGate.CommitShutdown(Shutdown);
+        Check(shutdownCalls == 0 && shutdownGate.Snapshot()["last_failure"]?.GetValue<string>().StartsWith("Shutdown cancelled", StringComparison.Ordinal) == true,
+            "Shutdown did not recheck after its response");
+        shutdownArm["motion"]!["active"] = false;
+        shutdownPika["following"] = true;
+        Check(shutdownGate.PrepareShutdown() is not null, "Shutdown interrupted active gripper following");
+        shutdownPika["following"] = false;
+        Check(shutdownGate.PrepareShutdown() is null, "Cancelled shutdown did not unfreeze the next attempt");
+        shutdownGate.CommitShutdown(Shutdown);
+        shutdownGate.CommitShutdown(Shutdown);
+        Check(shutdownCalls == 1, "Legacy shutdown callback did not run exactly once");
+
         void Reject(Action<JsonObject, JsonArray> mutate, string label)
         {
             var arm = Arm(); var grippers = new JsonArray(Pika(owner)); mutate(arm, grippers);

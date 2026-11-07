@@ -45,6 +45,27 @@ internal static class HostControlDispatchTests
         Check(stopped.Status == HttpStatusCode.OK && stopped.Body["ok"]?.GetValue<bool>() == true &&
             stopped.Body["arm"]?["ok"]?.GetValue<bool>() == true && stopped.Body["pika"]?["ok"]?.GetValue<bool>() == true,
             "HTTP coordinated STOP lost an independent simulated channel outcome");
+        var emptyScope = JsonNode.Parse(owner)!.AsObject();
+        emptyScope["device_id"] = "";
+        var empty = await Execute("/api/stop/coordinated", emptyScope.ToJsonString());
+        Check(empty.Status == 200 && JsonNode.Parse(empty.Json)?["pika"]?["ok"]?.GetValue<bool>() == true,
+            "An empty legacy arm selector stopped all arms but did not hold all owned Pikas");
+        emptyScope["generation"] = device["generation"]?.DeepClone();
+        var staleScope = await Post("/api/stop/coordinated", emptyScope.ToJsonString());
+        Check(staleScope.Status == HttpStatusCode.Conflict && staleScope.Body["arm"]?["ok"]?.GetValue<bool>() == false &&
+            staleScope.Body["pika"]?["ok"]?.GetValue<bool>() == false, "Malformed scoped cleanup became a global STOP");
+        emptyScope.Remove("generation");
+        emptyScope["device_id"] = null;
+        var malformed = await Post("/api/stop/coordinated", emptyScope.ToJsonString());
+        Check(malformed.Status == HttpStatusCode.Conflict && malformed.Body["arm"]?["ok"]?.GetValue<bool>() == false &&
+            malformed.Body["pika"]?["message"]?.GetValue<string>().Contains("device_id", StringComparison.Ordinal) == true,
+            "Malformed arm selector fell back to an unrelated Pika");
+        emptyScope["device_id"] = device["id"]?.DeepClone();
+        var scoped = await Execute("/api/stop/coordinated", emptyScope.ToJsonString());
+        var scopeResult = JsonNode.Parse(scoped.Json);
+        Check(scoped.Status == 409 && scopeResult?["arm"]?["ok"]?.GetValue<bool>() == true &&
+            scopeResult?["pika"]?["message"]?.GetValue<string>().Contains("explicit pika_device", StringComparison.Ordinal) == true,
+            "Missing Pika identity blocked the independent arm STOP or resolved through default Pika");
         Console.WriteLine("Host dispatch passed: common snapshots, simulated Pika rejection, legacy HTTP routes, gRPC route rejection and independent STOP results.");
 
         async Task<(HttpStatusCode Status, JsonObject Body)> Post(string route, string json)

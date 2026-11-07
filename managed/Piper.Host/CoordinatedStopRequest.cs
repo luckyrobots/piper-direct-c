@@ -22,7 +22,16 @@ internal static class CoordinatedStopRequest
             },
             async cancellation =>
             {
-                var result = command.TryGetProperty("device_id", out _) ? await pika.ExecuteAsync("hold", command, cancellation) :
+                bool hasArm = command.TryGetProperty("device_id", out var arm);
+                if (hasArm && arm.ValueKind != JsonValueKind.String)
+                    return new(false, "Pika hold unverified: device_id must be an explicit adapter identity.");
+                bool scoped = hasArm && arm.GetString()!.Length > 0;
+                if (!scoped && (command.TryGetProperty("generation", out _) || command.TryGetProperty("request_id", out _)))
+                    return new(false, "A scoped Pika hold requires its explicit arm and gripper identities.");
+                if (scoped && (!command.TryGetProperty("pika_device", out var gripper) ||
+                    gripper.ValueKind != JsonValueKind.String || string.IsNullOrWhiteSpace(gripper.GetString())))
+                    return new(false, "A scoped STOP requires an explicit pika_device to verify the gripper hold.");
+                var result = scoped ? await pika.ExecuteAsync("hold", command, cancellation) :
                     await pika.HoldOwnedAsync(command.GetProperty("owner").GetString()!, cancellation);
                 return new(result["ok"]?.GetValue<bool>() == true,
                     result["message"]?.GetValue<string>() ?? "Pika hold command acknowledged.");
