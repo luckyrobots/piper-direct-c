@@ -1,5 +1,4 @@
 using System.Net;
-using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -48,6 +47,7 @@ maintenance = new BackendMaintenance(() => JsonNode.Parse(controller.Snapshot())
     () => { Environment.ExitCode = BackendMaintenance.RestartExitCode; app.Lifetime.StopApplication(); },
     Environment.ProcessId, supervisorPid, supervisorPid.HasValue ? supervisorIdentity : null,
     pluginOwner: sessionOwner.Length > 0 ? sessionOwner : null);
+var control = app.Services.GetRequiredService<PiperRpcContext>().Control;
 app.MapWhen(context => context.Connection.LocalPort == grpcPort, grpc => {
     grpc.UseRouting();
     grpc.UseEndpoints(endpoints => endpoints.MapGrpcService<PiperGrpcService>());
@@ -72,13 +72,7 @@ app.Run(async context => {
     try {
         if (HttpMethods.IsGet(request.Method)) {
             if (route=="/api/state") {
-                var state=JsonNode.Parse(controller.Snapshot())!.AsObject();
-                state["backend"]=OperatingSystem.IsWindows()?"dotnet-windows":"dotnet-linux";
-                state["pika"]=pika.Snapshot();
-                state["pikas"]=pika.Snapshots();
-                state["backend_process_id"]=Environment.ProcessId;
-                state["backend_instance_id"]=maintenance.InstanceId;
-                state["backend_restart"]=maintenance.Snapshot();
+                var state = control.ReadState(OperatingSystem.IsWindows() ? "dotnet-windows" : "dotnet-linux");
                 state["camera"]=new JsonObject { ["configured"]=false,["running"]=false,["fresh"]=false,["error"]="Use local browser camera selection",["name"]="Local USB camera",["sequence"]=0 };
                 await response.WriteAsJsonAsync(state); return;
             }
@@ -89,9 +83,9 @@ app.Run(async context => {
                 await response.WriteAsJsonAsync(selected); return;
             }
             if (route=="/api/pika/devices") {
-                if (simulated) { await response.WriteAsJsonAsync(new { ok=true, devices=Array.Empty<object>(), message="Pika hardware discovery is disabled in simulation." }); return; }
+                if (simulated) { await response.WriteAsJsonAsync(HostControlDispatcher.EmptySimulatedInventory); return; }
                 try { await response.WriteAsJsonAsync(await pika.DiscoverAsync(request.Query.TryGetValue("distribution", out var inventoryDistribution) ? inventoryDistribution.ToString() : pikaDistribution, context.RequestAborted)); }
-                catch (Exception e) when (e is InvalidOperationException or IOException or TimeoutException or ArgumentException) { await Error(409,e.Message); }
+                catch (Exception e) when (HostControlDispatcher.IsControlOperationError(e)) { await Error(409,e.Message); }
                 return;
             }
             if (route=="/api/camera/frame") { await Error(409,"Use local browser camera preview"); return; }
@@ -106,21 +100,12 @@ app.Run(async context => {
         if (body.Contains("\\u",StringComparison.Ordinal)||body.Contains('\0')) { await Error(400,"Unicode escapes and NUL are unsupported in control requests"); return; }
         using var json=JsonDocument.Parse(body,new JsonDocumentOptions {MaxDepth=32});
         if (json.RootElement.ValueKind!=JsonValueKind.Object||!ControlJson.HasUniqueKeys(json.RootElement)) { await Error(400,"Expected one JSON object with unique keys"); return; }
-        if (!SessionOwnerGuard.Allows(sessionOwner,route,json.RootElement)) { await Error(409,SessionOwnerGuard.Denied); return; }
-        if (route == BackendMaintenance.RestartRoute)
+        using var admission = control.Admit(route, json.RootElement);
+        if (admission.Error is { } denied) { await Error(409, denied); return; }
+        if (admission.Restart is { } restarting)
         {
-            var restarting = maintenance.Prepare(json.RootElement);
             response.StatusCode = restarting.Ok ? 202 : 409;
-            if (restarting.Ok) maintenance.Commit();
             await response.WriteAsJsonAsync(restarting); return;
-        }
-        if (!maintenance.TryEnterControl(route, out var controlAdmission)) { await Error(409,BackendMaintenance.PendingMessage); return; }
-        using var admission = controlAdmission;
-        if (route == CoordinatedStopRequest.Route)
-        {
-            var stopped = await CoordinatedStopRequest.ExecuteAsync(controller, pika, json.RootElement);
-            response.StatusCode = stopped.Ok ? 200 : 409;
-            await response.WriteAsJsonAsync(stopped); return;
         }
         if (route=="/api/shutdown") {
             var current = JsonNode.Parse(controller.Snapshot());
@@ -128,20 +113,28 @@ app.Run(async context => {
             response.OnCompleted(() => { app.Lifetime.StopApplication(); return Task.CompletedTask; });
             await response.WriteAsJsonAsync(new {ok=true,message="Closing USB transports before shutdown"}); return;
         }
-        if (route.StartsWith("/api/pika/",StringComparison.Ordinal)) {
-            if (simulated) { await Error(409,"Pika hardware is disabled in simulation"); return; }
-            if (route=="/api/pika/configure" && ControllerActivity.AnyMotion(JsonNode.Parse(controller.Snapshot()))) { await Error(409,"Finish active arm movements before changing Pika assignment"); return; }
-            try { await response.WriteAsJsonAsync(await pika.ExecuteAsync(route[10..],json.RootElement,context.RequestAborted)); }
-            catch (PikaFollowRejectedException e) { response.StatusCode=409; await response.WriteAsJsonAsync(new { error=e.Message, pika_follow_audit=e.Audit }); }
-            catch (Exception e) when (e is InvalidOperationException or IOException or TimeoutException or ArgumentException) { await Error(409,e.Message); }
-            return;
-        }
         if (route=="/api/camera") {
             if (!json.RootElement.TryGetProperty("enabled",out var enabled)||enabled.ValueKind is not (JsonValueKind.True or JsonValueKind.False)) { await Error(400,"enabled must be true or false"); return; }
             if (enabled.GetBoolean()) { await Error(409,"Use local browser camera preview"); return; }
             await response.WriteAsJsonAsync(new {running=false}); return;
         }
-        var result=controller.Execute(route,body,context.RequestAborted); response.StatusCode=result.Status; response.ContentType="application/json"; await response.WriteAsync(result.Json);
+        var result = await control.ExecuteAsync(route, body, json.RootElement, HostControlTransport.Http, context.RequestAborted);
+        response.StatusCode = result.Status;
+        if (result.PikaAudit is { } audit)
+            await response.WriteAsJsonAsync(new { error = result.Error, pika_follow_audit = audit });
+        else if (result.Error is { } error)
+            await Error(result.Status, error);
+        else if (result.RawJson is { } raw)
+        {
+            response.ContentType = "application/json";
+            await response.WriteAsync(raw);
+        }
+        else if (result.Payload is JsonObject gripper)
+        {
+            try { await response.WriteAsJsonAsync(gripper); }
+            catch (Exception e) when (HostControlDispatcher.IsControlOperationError(e)) { await Error(409, e.Message); }
+        }
+        else await response.WriteAsJsonAsync(result.Payload);
     }
     catch (JsonException) { await Error(400,"Invalid JSON body"); }
     catch (BadHttpRequestException e) { await Error(e.StatusCode,e.Message); }

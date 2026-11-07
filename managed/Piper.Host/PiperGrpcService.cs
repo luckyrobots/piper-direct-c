@@ -17,14 +17,10 @@ public sealed class PiperRpcContext(ControllerService controller, PikaSessionReg
     public bool Simulated { get; } = simulated;
     public string SessionOwner { get; } = sessionOwner;
     public BackendMaintenance Maintenance { get; } = maintenance;
+    internal HostControlDispatcher Control { get; } = new(controller, pika, simulated, sessionOwner, maintenance);
     public StateFrame Snapshot()
     {
-        var state = JsonNode.Parse(Controller.Snapshot())!.AsObject();
-        state["pika"] = Pika.Snapshot();
-        state["pikas"] = Pika.Snapshots();
-        state["backend_process_id"] = Environment.ProcessId;
-        state["backend_instance_id"] = Maintenance.InstanceId;
-        state["backend_restart"] = Maintenance.Snapshot();
+        var state = Control.ReadState();
         return new StateFrame
         {
             Json = state.ToJsonString(), Sequence = Interlocked.Increment(ref sequence),
@@ -36,6 +32,8 @@ public sealed class PiperRpcContext(ControllerService controller, PikaSessionReg
 
 public sealed class PiperGrpcService(PiperRpcContext state, IHostApplicationLifetime lifetime) : PiperControl.PiperControlBase
 {
+    private static readonly JsonSerializerOptions WebJson = new(JsonSerializerDefaults.Web);
+
     public override Task<StateFrame> GetState(StateRequest request, ServerCallContext context) => Task.FromResult(state.Snapshot());
 
     public override async Task WatchState(StateRequest request, IServerStreamWriter<StateFrame> stream, ServerCallContext context)
@@ -66,42 +64,24 @@ public sealed class PiperGrpcService(PiperRpcContext state, IHostApplicationLife
             using var json = JsonDocument.Parse(request.Json, new JsonDocumentOptions { MaxDepth = 32 });
             if (json.RootElement.ValueKind != JsonValueKind.Object || !ControlJson.HasUniqueKeys(json.RootElement))
                 throw new JsonException("Expected an object with unique keys.");
-            if (!SessionOwnerGuard.Allows(state.SessionOwner, request.Route, json.RootElement))
-                return new ControlReply { Status = 409, Json = JsonSerializer.Serialize(new { error = SessionOwnerGuard.Denied }) };
-            if (request.Route == BackendMaintenance.RestartRoute)
-            {
-                var restarting = state.Maintenance.Prepare(json.RootElement);
-                if (restarting.Ok) state.Maintenance.Commit();
-                return new ControlReply { Status = restarting.Ok ? 202 : 409,
-                    Json = JsonSerializer.Serialize(restarting, new JsonSerializerOptions(JsonSerializerDefaults.Web)) };
-            }
-            if (!state.Maintenance.TryEnterControl(request.Route, out var controlAdmission))
-                return new ControlReply { Status = 409, Json = JsonSerializer.Serialize(new { error = BackendMaintenance.PendingMessage }) };
-            using var admission = controlAdmission;
-            if (request.Route == CoordinatedStopRequest.Route)
-            {
-                var stopped = await CoordinatedStopRequest.ExecuteAsync(state.Controller, state.Pika, json.RootElement);
-                return new ControlReply { Status = stopped.Ok ? 200 : 409, Json = JsonSerializer.Serialize(stopped, new JsonSerializerOptions(JsonSerializerDefaults.Web)) };
-            }
-            if (request.Route.StartsWith("/api/pika/", StringComparison.Ordinal))
-            {
-                if (request.Route == "/api/pika/devices" && state.Simulated)
-                    return new ControlReply { Status = 200, Json = "{\"ok\":true,\"devices\":[],\"message\":\"Pika hardware discovery is disabled in simulation.\"}" };
-                if (state.Simulated) return new ControlReply { Status = 409, Json = "{\"error\":\"Pika hardware is disabled in simulation\"}" };
-                if (request.Route == "/api/pika/configure" && ControllerActivity.AnyMotion(JsonNode.Parse(state.Controller.Snapshot())))
-                    throw new InvalidOperationException("Finish the active arm movement before changing Pika assignment");
-                var result = await state.Pika.ExecuteAsync(request.Route[10..], json.RootElement, context.CancellationToken);
-                return new ControlReply { Status = 200, Json = result.ToJsonString() };
-            }
-            if (request.Route is not ("/api/command" or "/api/select" or "/api/stop" or "/api/heartbeat" or "/api/query" or "/api/reconnect"))
+            using var admission = state.Control.Admit(request.Route, json.RootElement);
+            if (admission.Error is { } denied)
+                return new ControlReply { Status = 409, Json = JsonSerializer.Serialize(new { error = denied }) };
+            if (admission.Restart is { } restarting)
+                return new ControlReply { Status = restarting.Ok ? 202 : 409, Json = JsonSerializer.Serialize(restarting, WebJson) };
+            if (request.Route is not ("/api/command" or "/api/select" or "/api/stop" or "/api/heartbeat" or "/api/query" or "/api/reconnect" or CoordinatedStopRequest.Route) &&
+                !request.Route.StartsWith("/api/pika/", StringComparison.Ordinal))
                 throw new RpcException(new Status(StatusCode.InvalidArgument, "Unsupported control route."));
-            var reply = state.Controller.Execute(request.Route, request.Json, context.CancellationToken);
-            return new ControlReply { Status = reply.Status, Json = reply.Json };
+            var result = await state.Control.ExecuteAsync(request.Route, request.Json, json.RootElement,
+                HostControlTransport.Grpc, context.CancellationToken);
+            string reply;
+            if (result.PikaAudit is { } audit) reply = JsonSerializer.Serialize(new { error = result.Error, pika_follow_audit = audit });
+            else if (result.Error is { } error) reply = JsonSerializer.Serialize(new { error });
+            else reply = result.RawJson ?? (result.Payload is JsonNode node ? node.ToJsonString() : JsonSerializer.Serialize(result.Payload, WebJson));
+            return new ControlReply { Status = result.Status, Json = reply };
         }
         catch (JsonException error) { throw new RpcException(new Status(StatusCode.InvalidArgument, error.Message)); }
-        catch (PikaFollowRejectedException error)
-        { return new ControlReply { Status = 409, Json = JsonSerializer.Serialize(new { error = error.Message, pika_follow_audit = error.Audit }) }; }
-        catch (Exception error) when (error is InvalidOperationException or IOException or TimeoutException or ArgumentException)
+        catch (Exception error) when (HostControlDispatcher.IsControlOperationError(error))
         {
             return new ControlReply { Status = 409, Json = JsonSerializer.Serialize(new { error = error.Message }) };
         }
