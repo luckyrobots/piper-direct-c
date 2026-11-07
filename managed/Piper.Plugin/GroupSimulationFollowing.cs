@@ -1,4 +1,3 @@
-using System.Globalization;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using LuckyRobots.Piper.Pika;
@@ -49,14 +48,22 @@ public sealed partial class PipersPlugin
         public readonly object Gate = new();
         public readonly GroupSimulationPhaseBarrier Barrier = new();
         public string RunId = "", FirstFailure = "", AcknowledgedEpisode = "", EndReason = "";
-        public double OriginalScale = 1;
-        public long EnvelopeTicks;
+        private long sourceObservedAt;
         public Task? Publisher, Heartbeats, Primer;
         public OrderedSimulationObservation? Observation;
         private int phase = (int)GroupFollowPhase.Arming;
         public GroupFollowPhase Phase => (GroupFollowPhase)Volatile.Read(ref phase);
         public bool IsRetiring => Phase is GroupFollowPhase.Retiring or GroupFollowPhase.Retired;
         public bool CanPrime => Phase is GroupFollowPhase.Admitting or GroupFollowPhase.Activating;
+
+        public void RecordValidatedSource(long observedAt) => Volatile.Write(ref sourceObservedAt, observedAt);
+
+        public void RequireOrderedSourceLease()
+        {
+            var age = Clock.GetElapsedTime(Volatile.Read(ref sourceObservedAt));
+            if (age >= TimeSpan.Zero && age < TimeSpan.FromMilliseconds(SimulationFollowPolicy.MaximumSourceAgeMilliseconds)) return;
+            throw new InvalidOperationException("The shared simulation source expired after 250 ms; all follower targets were retired.");
+        }
 
         public void Advance(GroupFollowPhase next)
         {
@@ -88,7 +95,7 @@ public sealed partial class PipersPlugin
             // while the coordinator joins it, but no new batch starts there.
             if (current is not (GroupFollowPhase.Admitting or GroupFollowPhase.Activating or GroupFollowPhase.DrainingPrimer or GroupFollowPhase.Following))
                 RejectPhase(current, "target publication");
-            if (current == GroupFollowPhase.Following) RequireOrderedSourceLease(this);
+            if (current == GroupFollowPhase.Following) RequireOrderedSourceLease();
         }
 
         private void RejectPhase(GroupFollowPhase current, string operation)
@@ -153,12 +160,6 @@ public sealed partial class PipersPlugin
 
     private Task StopGroupSimulationFollowing(string reason, CancellationToken cancellation) =>
         CancelGroupSimulationFollowingInput(reason)?.Retired.Task.WaitAsync(cancellation) ?? Task.CompletedTask;
-
-    private static void ValidateSimulationTimeMode(JsonObject snapshot)
-    {
-        if (snapshot["timeMode"]?.GetValue<string>() is not ("deterministic-realtime" or "realtime"))
-            throw new InvalidOperationException("Following requires Deterministic real-time or Real-time scene mode. Select one in scene settings before following the real robot.");
-    }
 
     private async Task GroupFollowEvent(string action, CancellationToken cancellation)
     {
@@ -267,34 +268,6 @@ public sealed partial class PipersPlugin
         var observation = GroupObservation(group, lane, source);
         return observation.Hardware(owner, group.Clock.GetTimestamp(), native ? lane.ArmRequest : null,
             native ? Interlocked.Read(ref lane.Sequence) : 0);
-    }
-
-    private async Task<JsonObject> GroupEngine(GroupSession group, string method, string? action, CancellationToken cancellation,
-        JsonObject? properties = null, bool release = false)
-    {
-        cancellation.ThrowIfCancellationRequested();
-        GroupFollowPhase? required = release ? GroupFollowPhase.Retiring : action switch
-        {
-            "arm-next-play" => GroupFollowPhase.Arming,
-            "pause" or "claim-episode-follower" or "start" or "mark-start-ready" => GroupFollowPhase.Matching,
-            "activate-start" => GroupFollowPhase.Activating,
-            "pause-follower-source" or "resume-follower-source" or "ack-episode" => GroupFollowPhase.Following,
-            _ when method == "robot.runtime.frames" => GroupFollowPhase.Following,
-            _ => null
-        };
-        if (required is { } phase) group.Require(phase);
-        if (!release && !GroupScopeCurrent(group)) throw new InvalidOperationException("Grouped following was disarmed.");
-        var request = new JsonObject { ["sceneId"] = group.Scene, ["entityId"] = group.Entity, ["expectedModelAssetId"] = group.Asset,
-            ["expectedModelRevision"] = group.Revision, ["prepareId"] = group.PrepareId };
-        if (group.RunId.Length > 0) request["runId"] = group.RunId;
-        if (action is not null) request["action"] = action;
-        if (action == "arm-next-play") request["activationHandshake"] = true;
-        if (properties is not null) foreach (var property in properties) request[property.Key] = property.Value?.DeepClone();
-        using var timeout = release ? CancellationTokenSource.CreateLinkedTokenSource(cancellation) : CancellationTokenSource.CreateLinkedTokenSource(cancellation, group.Stop.Token);
-        timeout.CancelAfter(method == "robot.runtime.frames" && action != "start" ? 150 : 1000);
-        var reply = await engine.RequestAsync(method, request, timeout.Token);
-        if (!release && !GroupScopeCurrent(group)) throw new OperationCanceledException("Following was canceled while the editor request retired.");
-        return JsonNode.Parse(reply.GetRawText())!.AsObject();
     }
 
     private async Task<JsonObject> GroupArmCommand(GroupSession group, GroupLane lane, FollowArmAction action, JsonObject? fields = null)

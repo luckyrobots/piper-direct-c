@@ -104,77 +104,78 @@ internal static partial class SimulationFollowingTests
                 try { await worker; } catch (OperationCanceledException) { }
             }
         }
-        await using (var f = new Fixture(followClock: new FollowTestClock()))
         {
+            var clock = new FollowTestClock();
+            await using var f = new Fixture(followClock: clock);
             f.ConfigureGroup(); f.SelectGroupFollowers("piper-1"); f.UseUiDispatcher();
-            await f.GroupEvent("toggle");
-            var plugin = Plugin(f);
-            var original = f.Session!;
-            var sessionType = original.GetType();
-            var lanes = (Array)sessionType.GetField("Lanes")!.GetValue(original)!;
-            await f.ClickSidebarGroupStop();
-            await Until(() => !f.GroupActive, "Write-expiry fixture did not retire its initial Edit latch");
-            var clock = (FollowTestClock)f.Get<TimeProvider>("followClock");
-            var session = Activator.CreateInstance(sessionType, fields | BindingFlags.Public, null,
-                [f.Get<string>("token"), "source-a", "robot-a", "asset-a", "model-a", lanes, f.Get<long>("groupInputEpoch"), clock], null)!;
-            var advance = sessionType.GetMethod("Advance")!;
-            foreach (var phase in new[] { GroupFollowPhase.Armed, GroupFollowPhase.Matching, GroupFollowPhase.Admitting,
-                GroupFollowPhase.Activating, GroupFollowPhase.DrainingPrimer, GroupFollowPhase.Following })
-                advance.Invoke(session, [phase]);
-            sessionType.GetField("EnvelopeTicks")!.SetValue(session, clock.GetTimestamp());
-            clock.Advance(TimeSpan.FromMilliseconds(251));
-            f.Refresh(); // Hardware evidence remains fresh while the already-planned source batch expires.
-            var groupField = typeof(PipersPlugin).GetField("groupSimulation", fields)!;
-            groupField.SetValue(plugin, session);
-            bool rejected = false;
+            f.FreezeClockAtActivation = true;
+            f.Rpc.DelayedOperation = "follow-update";
+            await f.Click("group.follow.toggle");
+            await Until(() => f.GroupArmedForPlay, "Write-expiry fixture did not arm");
+            f.RequestGroupPlay();
+            int primingPikaUpdates = 0, advanced = 0;
             try
             {
-                var targets = new Dictionary<string, OrderedSimulationTarget> { ["piper-1"] = new(new double[6], 20) };
-                await (Task)typeof(PipersPlugin).GetMethod("SendGroupTargets", fields)!.Invoke(plugin,
-                    [session, targets, CancellationToken.None, false])!;
+                await f.Rpc.DelayedReached.Task.WaitAsync(TimeSpan.FromSeconds(3));
+                await Until(() => f.GroupPhase == GroupFollowPhase.DrainingPrimer || !f.GroupActive,
+                    "Write-expiry fixture did not reach primer drain");
+                long primingSequence = f.Rpc.Requests.Single(r => r.Body["action"]?.GetValue<string>() == "follow-update")
+                    .Body["sequence"]!.GetValue<long>();
+                primingPikaUpdates = f.Rpc.Requests.Count(r => r.Route == "/api/pika/follow-update");
+                f.Rpc.Accepted += (route, body) =>
+                {
+                    if (route != "/api/command" || body["action"]?.GetValue<string>() != "follow-update" ||
+                        body["sequence"]!.GetValue<long>() <= primingSequence) return;
+                    if (Interlocked.Exchange(ref advanced, 1) == 0)
+                    {
+                        // Both targets have been planned. Expire the source during the
+                        // arm send while keeping hardware telemetry fresh for the next send.
+                        clock.Advance(TimeSpan.FromMilliseconds(250));
+                        f.Refresh();
+                    }
+                };
             }
-            catch (InvalidOperationException error) when (error.Message.Contains("source expired after 250 ms", StringComparison.Ordinal))
-            { rejected = true; }
-            finally { groupField.SetValue(plugin, null); }
-            check(rejected && f.Rpc.Requests.IsEmpty,
-                "An ordered batch reached the arm after its source lease expired between planning and transport");
+            finally { f.Rpc.ReleaseDelayed.TrySetResult(); }
+            await Until(() => !f.GroupActive, "An expired source did not retire the follower");
+            check(advanced == 1 && f.Rpc.Requests.Count(r => r.Route == "/api/pika/follow-update") == primingPikaUpdates &&
+                f.SidebarStatus().Contains("source expired after 250 ms", StringComparison.Ordinal) &&
+                f.Rpc.Requests.Any(r => r.Body["action"]?.GetValue<string>() == "hold") &&
+                f.Rpc.Requests.Any(r => r.Route == "/api/pika/hold"),
+                "The gripper target was sent at the source deadline or expiry skipped a retirement hold");
         }
         await using (var f = new Fixture())
         {
-            f.ConfigureGroup(); f.UseUiDispatcher(); f.DelayedRuntimeAction = "cancel-start";
-            var plugin = Plugin(f);
-            var sessionType = typeof(PipersPlugin).GetNestedType("GroupSession", BindingFlags.NonPublic)!;
-            var lanes = Array.CreateInstance(sessionType.GetField("Lanes")!.FieldType.GetElementType()!, 0);
-            // Expose the real publication window without a production timing hook.
-            var session = Activator.CreateInstance(sessionType, fields | BindingFlags.Public, null,
-                [f.Get<string>("token"), "source-a", "robot-a", "asset-a", "model-a", lanes, f.Get<long>("groupInputEpoch"),
-                    f.Get<TimeProvider>("followClock")], null);
-            typeof(PipersPlugin).GetField("groupSimulation", fields)!.SetValue(plugin, session);
-            bool activationRejected = false;
+            f.ConfigureGroup(); f.DelayedRuntimeAction = "cancel-start";
+            await f.Click("group.follow.toggle");
+            await Until(() => f.GroupArmedForPlay, "The Edit latch did not arm before retirement");
+            await f.ClickSidebarGroupStop().WaitAsync(TimeSpan.FromSeconds(1));
+            await f.RuntimeReached.Task.WaitAsync(TimeSpan.FromSeconds(2));
+            var retry = f.Click("group.follow.toggle");
             try
             {
-                await (Task)typeof(PipersPlugin).GetMethod("GroupEngine", fields)!.Invoke(plugin,
-                    [session, "robot.runtime.control", "activate-start", CancellationToken.None, null, false])!;
+                check(!retry.IsCompleted && f.EngineRequests.Count(r => r.Action == "arm-next-play") == 1 &&
+                    f.Mode == "edit" && f.Rpc.Requests.IsEmpty,
+                    "Stop blocked the sidebar or a new Follow bypassed the pending engine retirement");
             }
-            catch (InvalidOperationException error) when (error.Message.Contains("while Follow is Arming", StringComparison.Ordinal))
-            { activationRejected = true; }
-            Task stop = f.ClickSidebarGroupStop();
-            bool returnedBeforeWorker = stop.IsCompletedSuccessfully && f.GroupPhase == GroupFollowPhase.Retiring && ReferenceEquals(f.Session, session);
-            bool lateArmingRejected = false;
-            try { sessionType.GetMethod("Advance")!.Invoke(session, [GroupFollowPhase.Armed]); }
-            catch (TargetInvocationException error) when (error.InnerException is OperationCanceledException) { lateArmingRejected = true; }
-            var worker = (Task)typeof(PipersPlugin).GetMethod("RunGroupSimulation", fields)!.Invoke(plugin, [session])!;
-            await f.RuntimeReached.Task.WaitAsync(TimeSpan.FromSeconds(2));
-            Task retry = f.GroupEvent("toggle");
-            bool admissionWaited = !retry.IsCompleted && ReferenceEquals(f.Session, session);
-            f.ReleaseRuntime.TrySetResult();
-            await Task.WhenAll(stop, retry, worker).WaitAsync(TimeSpan.FromSeconds(2));
-            check(activationRejected && lateArmingRejected && !f.EngineRequests.Any(r => r.Action is "arm-next-play" or "activate-start"),
-                "An illegal activation or late arm acknowledgement advanced the Follow phase");
-            check(returnedBeforeWorker && admissionWaited && !f.GroupActive && f.Rpc.Requests.IsEmpty &&
-                (GroupFollowPhase)sessionType.GetProperty("Phase")!.GetValue(session)! == GroupFollowPhase.Retired &&
-                f.EngineRequests.Count(r => r.Action == "cancel-start") == 1,
-                "Stop blocked the dispatcher or another Follow bypassed the original group's retirement barrier");
+            finally { f.ReleaseRuntime.TrySetResult(); }
+            await retry.WaitAsync(TimeSpan.FromSeconds(2));
+            var retired = f.EngineRequests.Single(r => r.Action == "cancel-start").Body;
+            check(!f.GroupActive && f.Rpc.Requests.IsEmpty && !retired.ContainsKey("runId") &&
+                retired["prepareId"]?.GetValue<string>() == f.EngineRequests.Single(r => r.Action == "arm-next-play").Body["prepareId"]?.GetValue<string>(),
+                "Retiring an Edit latch sent hardware requests or replaced its original preparation scope");
+        }
+        await using (var f = new Fixture())
+        {
+            f.ConfigureGroup(); f.WrongPlayPreparation = true;
+            await f.Click("group.follow.toggle");
+            await Until(() => f.GroupArmedForPlay, "The preparation mismatch fixture did not arm");
+            f.RequestGroupPlay();
+            await Until(() => !f.GroupActive, "A mismatched Play acknowledgement retained Follow");
+            var retired = f.EngineRequests.Single(r => r.Action == "cancel-start").Body;
+            check(f.Rpc.Requests.IsEmpty && !retired.ContainsKey("runId") &&
+                retired["prepareId"]?.GetValue<string>() == f.EngineRequests.Single(r => r.Action == "arm-next-play").Body["prepareId"]?.GetValue<string>() &&
+                !f.EngineRequests.Any(r => r.Action is "pause" or "activate-start"),
+                "A mismatched Play acknowledgement redirected cleanup or admitted hardware");
         }
         foreach (string selected in new[] { "piper-1", "piper-2" })
         {

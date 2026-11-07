@@ -72,7 +72,10 @@ internal static class HostPikaBoundaryTests
             Check(rejected.Status == 409 && rejected.Error == "Finish active arm movements before changing Pika assignment" &&
                 registry.Snapshot()["device"]?.GetValue<string>() == first && !agents.ContainsKey(replacement),
                 "Pika configuration committed after an arm started moving.");
-            Check((await Send("/api/stop", new { owner, device_id = arm })).Status == 200, "Simulator STOP failed after denied configuration.");
+            var stopped = await Send(CoordinatedStopRequest.Route, new { owner });
+            Check(stopped.Status == 200 && stopped.Payload is CoordinatedStopResult { Ok: true } &&
+                agents[peer].Actions.Count(action => action == "hold") == 1 && !agents[first].Actions.Contains("hold"),
+                "Coordinated STOP after denied configuration did not hold only the owned gripper.");
 
             var accepted = await Send("/api/pika/configure", new { owner, device = alias });
             Check(accepted.Status == 200 && registry.Snapshot()["device"]?.GetValue<string>() == replacement &&
@@ -96,8 +99,19 @@ internal static class HostPikaBoundaryTests
                     var latest = ArmState();
                     if (ready(latest)) return;
                     if (requestId is { } id && ControllerActivity.AnyMotion(latest))
-                        Check((await Send("/api/heartbeat", new { owner, device_id = arm, generation, request_id = id })).Status == 200,
-                            "Simulator heartbeat rejected.");
+                    {
+                        var heartbeat = await Send("/api/heartbeat", new { owner, device_id = arm, generation, request_id = id });
+                        if (heartbeat.Status != 200)
+                        {
+                            // The simulator can finish Enable between the snapshot and the renewal.
+                            var motion = ArmState()["devices"]![0]?["motion"];
+                            Check(heartbeat.Status == 409 && heartbeat.RawJson is { } reply &&
+                                JsonNode.Parse(reply)?["error"]?.GetValue<string>() == "No matching active control lease." &&
+                                motion?["request_id"]?.GetValue<long>() == id && motion["active"]?.GetValue<bool>() == false &&
+                                motion["phase"]?.GetValue<string>() == "complete",
+                                $"Simulator heartbeat rejected ({heartbeat.Status}): {heartbeat.RawJson ?? heartbeat.Error}");
+                        }
+                    }
                     await Task.Delay(10, deadline.Token);
                 }
             }
@@ -132,6 +146,7 @@ internal static class HostPikaBoundaryTests
 
     private sealed class FakeSession(Action? onSnapshot) : IPikaSession
     {
+        private string? owner;
         internal int Snapshots;
         internal List<string> Actions { get; } = [];
 
@@ -143,8 +158,17 @@ internal static class HostPikaBoundaryTests
 
         public Task<JsonObject> ExecuteAsync(string action, JsonElement input, CancellationToken cancellation)
         {
+            if (action == "connect") owner = input.GetProperty("owner").GetString();
+            if (action == "disconnect") owner = null;
             Actions.Add(action);
             return Task.FromResult(new JsonObject { ["ok"] = true });
+        }
+
+        public Task<PikaHoldResult> HoldForOwnerAsync(string requestedOwner, CancellationToken cancellation)
+        {
+            if (owner != requestedOwner) return Task.FromResult(new PikaHoldResult(PikaHoldOutcome.Skipped));
+            Actions.Add("hold");
+            return Task.FromResult(new PikaHoldResult(PikaHoldOutcome.Acknowledged));
         }
 
         public ValueTask DisposeAsync() => ValueTask.CompletedTask;

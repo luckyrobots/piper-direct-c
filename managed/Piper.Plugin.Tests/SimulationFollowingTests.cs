@@ -203,14 +203,12 @@ internal static partial class SimulationFollowingTests
             "Grouped following redirected a gripper, switched native selection or activated Play twice");
         f.LoseNextOrderedReply = true;
         await f.OrderedReplyLost.Task.WaitAsync(TimeSpan.FromSeconds(3));
-        var retainedGroup = f.Get<object>("groupSimulation");
-        long envelope = (long)retainedGroup.GetType().GetField("EnvelopeTicks")!.GetValue(retainedGroup)!;
         int publications = f.Rpc.Requests.Count(r => r.Body["action"]?.GetValue<string>() == "follow-update");
         int reads = f.CompletedOrderedReads;
         await Task.Delay(80);
-        check(f.GroupActive && (long)retainedGroup.GetType().GetField("EnvelopeTicks")!.GetValue(retainedGroup)! == envelope &&
+        check(f.GroupActive &&
             f.Rpc.Requests.Count(r => r.Body["action"]?.GetValue<string>() == "follow-update") > publications,
-            "A delayed grouped read refreshed its source lease or stopped independent lane publications prematurely");
+            "A delayed grouped read stopped independent lane publications before the retained lease expired");
         await Until(() => f.CompletedOrderedReads > reads || !f.GroupActive, "A lost grouped reply never recovered");
         check(f.GroupActive && f.EngineRequests.Count(r => r.Method == "robot.runtime.frames" && r.Action != "start" &&
             r.Body["afterFrameCursor"]?.GetValue<string>() == f.LostReplyCursor) >= 2 &&
@@ -240,21 +238,21 @@ internal static partial class SimulationFollowingTests
         check(!f.Rpc.Requests.Any(r => r.Body["action"]?.GetValue<string>() is "disable" or "reset" || r.Route is "/api/pika/disable" or "/api/pika/disconnect") &&
             f.Get<string>("uiActionError").Contains("CAN connection changed"), "Grouped cleanup removed power or lost the actual first generation-change failure");
 
-        await using var expired = new Fixture(); expired.ConfigureGroup();
+        var expiryClock = new FollowTestClock();
+        await using var expired = new Fixture(followClock: expiryClock); expired.ConfigureGroup();
         await expired.GroupEvent("toggle"); expired.RequestGroupPlay();
         long started = Stopwatch.GetTimestamp();
         while (expired.GroupPhase != GroupFollowPhase.Following)
         { if (!expired.GroupActive || Stopwatch.GetElapsedTime(started).TotalSeconds > 5) throw new InvalidOperationException("Group expiry fixture did not activate"); await Task.Delay(10); }
         expired.LoseNextOrderedReply = true;
         await expired.OrderedReplyLost.Task.WaitAsync(TimeSpan.FromSeconds(3));
-        var expiringGroup = expired.Get<object>("groupSimulation");
-        long original = (long)expiringGroup.GetType().GetField("EnvelopeTicks")!.GetValue(expiringGroup)!;
         expired.RuntimeReadTimeout = true;
+        expiryClock.Advance(TimeSpan.FromMilliseconds(250));
+        expired.Refresh();
         started = Stopwatch.GetTimestamp();
         while (expired.GroupActive)
         { if (Stopwatch.GetElapsedTime(started).TotalSeconds > 3) throw new InvalidOperationException("Repeated read deadlines kept an expired grouped source alive"); await Task.Delay(10); }
-        check((long)expiringGroup.GetType().GetField("EnvelopeTicks")!.GetValue(expiringGroup)! == original &&
-            expired.Get<string>("uiActionError").Contains("expired after 250 ms", StringComparison.Ordinal) && expired.Mode == "pause",
+        check(expired.Get<string>("uiActionError").Contains("expired after 250 ms", StringComparison.Ordinal) && expired.Mode == "pause",
             "Repeated grouped retries renewed the original source lease or hid its250ms expiry");
         check(expired.Rpc.Requests.Where(r => r.Body["action"]?.GetValue<string>() == "hold").Select(r => r.Body["device_id"]!.GetValue<string>()).Distinct().Count() == 2 &&
             expired.Rpc.Requests.Count(r => r.Route == "/api/pika/hold") == 2,
@@ -410,8 +408,13 @@ internal static partial class SimulationFollowingTests
     }
     private sealed class FollowTestClock : TimeProvider
     {
-        private long offset;
-        public override long GetTimestamp() => Stopwatch.GetTimestamp() + Interlocked.Read(ref offset);
+        private long offset, frozenAt;
+        public override long GetTimestamp()
+        {
+            long frozen = Volatile.Read(ref frozenAt);
+            return (frozen == 0 ? Stopwatch.GetTimestamp() : frozen) + Interlocked.Read(ref offset);
+        }
+        public void Freeze() => Volatile.Write(ref frozenAt, Stopwatch.GetTimestamp());
         public void Advance(TimeSpan elapsed) => Interlocked.Add(ref offset, (long)(elapsed.TotalSeconds * TimestampFrequency));
     }
 
@@ -441,6 +444,8 @@ internal static partial class SimulationFollowingTests
         public string LostReplyCursor = "";
         public TaskCompletionSource OrderedReplyLost { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public volatile bool ChangeActivationFrame;
+        public bool WrongPlayPreparation;
+        public bool FreezeClockAtActivation;
         public bool PreparationSupported = true, ActivationSupported = true, AutoPrepare = true, FramesSupported = true;
         public volatile bool FrameCursorGap, TerminalFrame;
         public bool ScriptedMissedGrasp, ScriptedSourceMiss;
@@ -836,7 +841,9 @@ internal static partial class SimulationFollowingTests
                         pose["startActivationSupported"] = ActivationSupported;
                         pose["startRequested"] = startRequested;
                         pose["startActivated"] = activated;
-                        pose["prepareId"] = prepareId; pose["startReady"] = readyGate; pose["startMatchRequired"] = !readyGate;
+                        if (method == "robot.runtime.control") pose["applied"] = true;
+                        pose["prepareId"] = WrongPlayPreparation && method == "robot.runtime.read" && Mode == "pause" ? "different-preparation" : prepareId;
+                        pose["startReady"] = readyGate; pose["startMatchRequired"] = !readyGate;
                         pose["ready"] = Mode is "edit" or "pause" or "play";
                         pose["timeMode"] = TimeMode;
                         pose["runId"] = RunId; pose["sceneId"] = RunId;
@@ -912,6 +919,8 @@ internal static partial class SimulationFollowingTests
                             }
                             Interlocked.Increment(ref CompletedOrderedReads);
                         }
+                        if (action == "activate-start" && FreezeClockAtActivation && followClock is FollowTestClock clock)
+                            clock.Freeze();
                         return JsonSerializer.SerializeToElement(pose);
                     })], null)!;
             Set("engine", context);

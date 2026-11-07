@@ -208,6 +208,19 @@ internal static class CalibrationSheetIntegrationTests
                     "A stale Save entry click committed a correction inside the 50 mm check spacing");
                 await Event("move." + row);
             }
+            foreach (var (row, other) in new[] { (1, 3), (3, 1) })
+            {
+                await Event("move." + row);
+                await Event($"field.p{row}left", marks[other].Left.ToString(System.Globalization.CultureInfo.InvariantCulture));
+                await Event($"field.p{row}back", marks[other].Back.ToString(System.Globalization.CultureInfo.InvariantCulture));
+                check(!CaptureEnabled(row) && Status(".sheet.row.status." + row).Contains($"overlaps P{other + 1}", StringComparison.Ordinal),
+                    "Editing a reference to overlap an earlier or later captured reference did not disable Save entry with the overlap reason");
+                await Event("capture." + row);
+                check(File.ReadAllText(report) == reportBeforeBlockedCorrection && Get<CalibrationFit>("calibrationFit") == fit &&
+                    Get<int>("sheetEditingRow") == row,
+                    "A stale Save entry click committed a duplicate reference correction");
+                await Event("move." + row);
+            }
             long editPage = Get<long>("workspaceViewEpoch");
             await Event("move.1"); await Event("field.p1left", "780");
             check(Get<List<CalibrationSample>>("calibrationSamples")[1] == originalP2 &&
@@ -219,9 +232,6 @@ internal static class CalibrationSheetIntegrationTests
             await Event("move.1"); await Event("field.p1left", "-1"); await Event("capture.1");
             check(Get<List<CalibrationSample>>("calibrationSamples")[1] == originalP2 && Get<CalibrationFit>("calibrationFit") == fit,
                 "An out-of-desk correction replaced the captured observation");
-            await Event("field.p1left", "800"); await Event("field.p1back", "440"); await Event("capture.1");
-            check(Get<List<CalibrationSample>>("calibrationSamples")[1] == originalP2,
-                "A correction duplicating an already captured reference was saved");
             await Event("field.p1back", "450"); await Event("field.p1left", "780"); await Event("capture.1");
             var correctedP2 = Get<List<CalibrationSample>>("calibrationSamples")[1];
             check(correctedP2.Measurement.LeftMm == 780 && correctedP2.Measurement.BackMm == 450 &&

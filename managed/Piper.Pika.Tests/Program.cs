@@ -170,6 +170,11 @@ if (OperatingSystem.IsLinux())
         Check(failed && !ended["connected"]!.GetValue<bool>() && ended["power_requested"]!.GetValue<bool>() &&
             ended["power_uncertain"]!.GetValue<bool>() && ended["owner"]!.GetValue<string>() == owner,
             "A pre-enable disabled packet erased an unacknowledged power write");
+        var unverified = await failedEnable.HoldForOwnerAsync(owner, default);
+        Check(unverified.Outcome == PikaHoldOutcome.Unverified &&
+            failedEnable.Snapshot()["power_uncertain"]?.GetValue<bool>() == true &&
+            (await failedEnable.HoldForOwnerAsync(other, default)).Outcome == PikaHoldOutcome.Skipped,
+            "Global hold lost uncertainty from an exited owner or acted on it for a different owner");
         await Reject(() => failedEnable.ExecuteAsync("connect", Input(other), default), "Lost enable result allowed passive foreign takeover");
         await Reject(() => failedEnable.ExecuteAsync("configure", Configure(other, "/dev/pika-other"), default), "Lost enable result allowed serial reassignment");
     }
@@ -198,6 +203,8 @@ if (OperatingSystem.IsLinux())
     await service.ExecuteAsync("enable", Input(owner, true), default);
     await service.ExecuteAsync("heartbeat", Input(owner), default);
     Check(service.Snapshot()["connected"]!.GetValue<bool>() && service.Snapshot()["fresh"]!.GetValue<bool>(), "agent feedback not received");
+    Check((await service.HoldForOwnerAsync(owner, default)).Outcome == PikaHoldOutcome.Acknowledged,
+        "The owned live gripper did not acknowledge its hold");
     await service.ExecuteAsync("connect", JsonSerializer.SerializeToElement(new { owner=other, take_over=true }), default);
     await Reject(() => service.ExecuteAsync("position", JsonSerializer.SerializeToElement(new { owner, value=.5 }), default), "old owner moved after takeover");
     await service.ExecuteAsync("heartbeat", Input(other), default);

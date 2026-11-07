@@ -5,7 +5,7 @@ namespace LuckyRobots.Piper.Pika;
 
 /// <summary>Independent per-device agents. Selecting a robot never changes,
 /// closes or transfers another robot's gripper connection or power evidence.</summary>
-public sealed class PikaSessionRegistry : IPikaSession
+public sealed class PikaSessionRegistry : IAsyncDisposable
 {
     private sealed record Entry(string Device, string? Distribution, IPikaSession Session);
     private readonly object gate = new();
@@ -64,30 +64,26 @@ public sealed class PikaSessionRegistry : IPikaSession
         // Freeze identities before dispatch. Every owned session gets an
         // independent attempt, even when another USB device fails to reply.
         Entry[] entries; lock (gate) entries = sessions.Values.ToArray();
-        var owned = entries.Select(entry => (entry, ownership: entry.Session is PikaProcessService process
-            ? process.GetHoldOwnership(owner)
-            : entry.Session.Snapshot()["owner"]?.GetValue<string>() == owner ? PikaHoldOwnership.Owned : PikaHoldOwnership.Unowned))
-            .Where(item => item.ownership != PikaHoldOwnership.Unowned).ToArray();
-        var results = await Task.WhenAll(owned.Select(async item => {
-            var (entry, ownership) = item;
-            string device = entry.Device;
-            if (ownership == PikaHoldOwnership.Unverified)
-                return new JsonObject { ["device"] = device, ["ok"] = false, ["message"] = "Pika power is unverified and this owner has no live session to hold." };
-            try
-            {
-                var input = JsonSerializer.SerializeToElement(new { owner, pika_device = device, pika_distribution = entry.Distribution });
-                var result = await entry.Session.ExecuteAsync("hold", input, cancellation);
-                return new JsonObject { ["device"] = device, ["ok"] = result["ok"]?.GetValue<bool>() == true,
-                    ["message"] = result["message"]?.DeepClone() };
-            }
-            catch (Exception error) { return new JsonObject { ["device"] = device, ["ok"] = false, ["message"] = error.Message }; }
-        }));
+        var results = (await Task.WhenAll(entries.Select(Hold))).OfType<JsonObject>().ToArray();
         bool ok = results.All(r => r["ok"]!.GetValue<bool>());
         string message = ok ? "All owned Pika holds acknowledged." : "Pika hold unverified: " +
             string.Join("; ", results.Where(result => result["ok"]?.GetValue<bool>() != true)
                 .Select(result => result["device"]?.GetValue<string>() + " — " + result["message"]?.GetValue<string>()));
         return new() { ["ok"] = ok, ["message"] = message,
             ["sessions"] = new JsonArray(results.Select(r => (JsonNode)r).ToArray()) };
+
+        async Task<JsonObject?> Hold(Entry entry)
+        {
+            PikaHoldResult hold;
+            try { hold = await entry.Session.HoldForOwnerAsync(owner, cancellation); }
+            catch (Exception error) { hold = new(PikaHoldOutcome.Unverified, error.Message); }
+            return hold.Outcome == PikaHoldOutcome.Skipped ? null : new()
+            {
+                ["device"] = entry.Device,
+                ["ok"] = hold.Outcome == PikaHoldOutcome.Acknowledged,
+                ["message"] = hold.Message
+            };
+        }
     }
 
     public JsonObject Snapshot(string device, string? distribution, bool includeRawEvidence = false)

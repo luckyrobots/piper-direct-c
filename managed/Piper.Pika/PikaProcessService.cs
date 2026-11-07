@@ -5,8 +5,6 @@ using System.Text.Json.Nodes;
 
 namespace LuckyRobots.Piper.Pika;
 
-internal enum PikaHoldOwnership { Unowned, Owned, Unverified }
-
 /// <summary>Reusable C# owner of a Linux serial agent, local or through WSL.
 /// The Windows process never opens a WCH COM port.</summary>
 public sealed class PikaProcessService : IPikaSession
@@ -40,13 +38,35 @@ public sealed class PikaProcessService : IPikaSession
     private long stateAt;
     public bool Configured => !string.IsNullOrWhiteSpace(device);
 
-    internal PikaHoldOwnership GetHoldOwnership(string requestedOwner)
+    public async Task<PikaHoldResult> HoldForOwnerAsync(string requestedOwner, CancellationToken cancellation)
     {
+        if (!Guid.TryParse(requestedOwner, out _)) throw new ArgumentException("A dashboard Pika owner ID is required");
+        const string noLiveSession = "Pika power is unverified and this owner has no live session to hold.";
+        Process? agent;
         lock (stateGate)
         {
-            if (owner == requestedOwner && process is not null) return PikaHoldOwnership.Owned;
-            return unresolvedOwner == requestedOwner ? PikaHoldOwnership.Unverified : PikaHoldOwnership.Unowned;
+            // Skip unrelated devices without waiting for their operations. Pin
+            // the matching process so a queued STOP cannot reach its replacement.
+            agent = owner == requestedOwner ? process : null;
+            if (agent is null)
+                return unresolvedOwner == requestedOwner
+                    ? new(PikaHoldOutcome.Unverified, noLiveSession)
+                    : new(PikaHoldOutcome.Skipped);
         }
+
+        await operations.WaitAsync(cancellation);
+        try
+        {
+            if (!ReferenceEquals(process, agent) || owner != requestedOwner || agent.HasExited)
+                return new(PikaHoldOutcome.Unverified, noLiveSession);
+            var reply = await ExecuteAgentAsync(agent, "hold", default, requestedOwner, cancellation);
+            return new(PikaHoldOutcome.Acknowledged, reply["message"]?.GetValue<string>());
+        }
+        catch (Exception error) when (error is not OperationCanceledException)
+        {
+            return new(PikaHoldOutcome.Unverified, error.Message);
+        }
+        finally { operations.Release(); }
     }
 
     public JsonObject Snapshot(bool includeRawEvidence = false)
@@ -173,86 +193,93 @@ public sealed class PikaProcessService : IPikaSession
                 catch { await CloseAsync(); throw; }
                 return new JsonObject { ["ok"] = true, ["message"] = "Linux serial connected; reading only" };
             }
-            if (owner != requestedOwner || process is null) throw new InvalidOperationException("This dashboard does not own the Pika session");
-            if (action is not ("heartbeat" or "enable" or "disable" or "position" or "disconnect" or "hold" or "follow-start" or "follow-update" or "resume-hold")) throw new ArgumentException("Unsupported Pika action");
-            if (action == "disconnect" && process.HasExited)
-            {
-                if (unresolvedOwner is not null || sessionPowerRequested && !KnownDisabled())
-                    throw new InvalidOperationException("The Pika agent exited without verified disabled feedback. Reconnect the same device, disable it and verify feedback before changing its assignment.");
-                await CloseAsync(); return new JsonObject { ["ok"] = true, ["message"] = "Disconnected" };
-            }
-            // Coordinated STOP uses this same hold action. Do not turn an
-            // already verified free-jaw state into a failed servo command or a
-            // new unresolved power reservation. Both ownership and the private
-            // acknowledged-request evidence remain serialized with mutations.
-            if (action == "hold" && KnownDisabled() && PikaDisabledEvidence.Confirmed(Snapshot(), requestedOwner))
-                return new JsonObject { ["ok"] = true, ["state"] = "disabled",
-                    ["message"] = "Pika already verified disabled; no motor command sent." };
-            string id = Guid.NewGuid().ToString("N");
-            var command = new JsonObject { ["id"] = id, ["action"] = action };
-            if (action == "enable") command["clear"] = input.TryGetProperty("clear", out var clear) && clear.ValueKind == JsonValueKind.True;
-            if (action == "resume-hold")
-            {
-                if (!KnownDisabled() || !input.TryGetProperty("clear", out var supported) || supported.ValueKind != JsonValueKind.True ||
-                    !input.TryGetProperty("expected_angle_rad", out var expected) || !expected.TryGetDouble(out double angle) || !double.IsFinite(angle) ||
-                    !input.TryGetProperty("expected_feedback_time_s", out var expectedTime) || !expectedTime.TryGetDouble(out double feedbackTime) || !double.IsFinite(feedbackTime))
-                    throw new InvalidOperationException("Confirm a stationary measured hold with verified disabled Pika feedback before resuming.");
-                command["clear"] = true; command["expected_angle_rad"] = angle; command["expected_feedback_time_s"] = feedbackTime;
-            }
-            if (action == "position")
-            {
-                if (!input.TryGetProperty("value", out var target) || target.ValueKind != JsonValueKind.Number ||
-                    !target.TryGetDouble(out double position) || !double.IsFinite(position))
-                    throw new ArgumentException("Pika position requires a finite numeric value.");
-                command["value"] = position;
-            }
-            if (action == "follow-update")
-            {
-                if (!input.TryGetProperty("follow_session", out var session) || session.ValueKind != JsonValueKind.String ||
-                    !input.TryGetProperty("sequence", out var sequence) || sequence.ValueKind != JsonValueKind.Number || !sequence.TryGetInt64(out long nextSequence) || nextSequence <= 0 ||
-                    !input.TryGetProperty("opening_mm", out var opening) || opening.ValueKind != JsonValueKind.Number || !opening.TryGetDouble(out double nextOpening) || !double.IsFinite(nextOpening) || nextOpening is < 0 or > 90)
-                    throw new ArgumentException("Pika follow-update needs its session, a positive integer sequence and an opening within 0–90 mm.");
-                command["follow_session"] = session.GetString();
-                command["sequence"] = nextSequence;
-                command["opening_mm"] = nextOpening;
-            }
-            var completion = new TaskCompletionSource<JsonElement>(TaskCreationOptions.RunContinuationsAsynchronously);
-            pending[id] = completion;
-            bool motorRequest = action is "enable" or "position" or "disable" or "hold" or "follow-update" or "resume-hold";
-            bool disconnected = false;
-            try
-            {
-                if (motorRequest)
-                    lock (stateGate) { sessionPowerRequested = true; unresolvedOwner = requestedOwner; motorRequestId = id; motorRequestAcknowledged = false; }
-                await process.StandardInput.WriteLineAsync(command.ToJsonString().AsMemory(), cancellation);
-                await process.StandardInput.FlushAsync(cancellation);
-                var response = await completion.Task.WaitAsync(TimeSpan.FromSeconds(3), cancellation);
-                bool ok = response.GetProperty("ok").GetBoolean();
-                if (!ok)
-                {
-                    PikaFollowAudit? rejected;
-                    lock (stateGate) { RetainFollowAudit(response); rejected = followAudit; }
-                    string reason = response.GetProperty("message").GetString() ?? "Pika request rejected";
-                    if (rejected is not null) throw new PikaFollowRejectedException(reason, rejected);
-                    throw new InvalidOperationException(reason);
-                }
-                cancellation.ThrowIfCancellationRequested();
-                if (motorRequest)
-                    lock (stateGate)
-                    {
-                        motorRequestAcknowledged = motorRequestId == id;
-                        if (KnownDisabled()) unresolvedOwner = null;
-                        RetireVerifiedEndedPower();
-                    }
-                disconnected = action == "disconnect";
-                var result = new JsonObject { ["ok"] = true, ["message"] = response.GetProperty("message").GetString() };
-                if (motorRequest) result["motor_request_id"] = id;
-                if (response.TryGetProperty("follow_session", out var followSession)) result["follow_session"] = followSession.GetString();
-                return result;
-            }
-            finally { pending.TryRemove(id, out _); if (disconnected) await CloseAsync(); }
+            if (owner != requestedOwner || process is not { } currentAgent) throw new InvalidOperationException("This dashboard does not own the Pika session");
+            return await ExecuteAgentAsync(currentAgent, action, input, requestedOwner, cancellation);
         }
         finally { operations.Release(); }
+    }
+
+    // Caller holds the operation gate and has verified ownership of this agent.
+    private async Task<JsonObject> ExecuteAgentAsync(Process agent, string action, JsonElement input, string requestedOwner,
+        CancellationToken cancellation)
+    {
+        if (action is not ("heartbeat" or "enable" or "disable" or "position" or "disconnect" or "hold" or "follow-start" or "follow-update" or "resume-hold")) throw new ArgumentException("Unsupported Pika action");
+        if (action == "disconnect" && agent.HasExited)
+        {
+            if (unresolvedOwner is not null || sessionPowerRequested && !KnownDisabled())
+                throw new InvalidOperationException("The Pika agent exited without verified disabled feedback. Reconnect the same device, disable it and verify feedback before changing its assignment.");
+            await CloseAsync(); return new JsonObject { ["ok"] = true, ["message"] = "Disconnected" };
+        }
+        // Coordinated STOP uses this same hold action. Do not turn an
+        // already verified free-jaw state into a failed servo command or a
+        // new unresolved power reservation. Both ownership and the private
+        // acknowledged-request evidence remain serialized with mutations.
+        if (action == "hold" && KnownDisabled() && PikaDisabledEvidence.Confirmed(Snapshot(), requestedOwner))
+            return new JsonObject { ["ok"] = true, ["state"] = "disabled",
+                ["message"] = "Pika already verified disabled; no motor command sent." };
+        string id = Guid.NewGuid().ToString("N");
+        var command = new JsonObject { ["id"] = id, ["action"] = action };
+        if (action == "enable") command["clear"] = input.TryGetProperty("clear", out var clear) && clear.ValueKind == JsonValueKind.True;
+        if (action == "resume-hold")
+        {
+            if (!KnownDisabled() || !input.TryGetProperty("clear", out var supported) || supported.ValueKind != JsonValueKind.True ||
+                !input.TryGetProperty("expected_angle_rad", out var expected) || !expected.TryGetDouble(out double angle) || !double.IsFinite(angle) ||
+                !input.TryGetProperty("expected_feedback_time_s", out var expectedTime) || !expectedTime.TryGetDouble(out double feedbackTime) || !double.IsFinite(feedbackTime))
+                throw new InvalidOperationException("Confirm a stationary measured hold with verified disabled Pika feedback before resuming.");
+            command["clear"] = true; command["expected_angle_rad"] = angle; command["expected_feedback_time_s"] = feedbackTime;
+        }
+        if (action == "position")
+        {
+            if (!input.TryGetProperty("value", out var target) || target.ValueKind != JsonValueKind.Number ||
+                !target.TryGetDouble(out double position) || !double.IsFinite(position))
+                throw new ArgumentException("Pika position requires a finite numeric value.");
+            command["value"] = position;
+        }
+        if (action == "follow-update")
+        {
+            if (!input.TryGetProperty("follow_session", out var session) || session.ValueKind != JsonValueKind.String ||
+                !input.TryGetProperty("sequence", out var sequence) || sequence.ValueKind != JsonValueKind.Number || !sequence.TryGetInt64(out long nextSequence) || nextSequence <= 0 ||
+                !input.TryGetProperty("opening_mm", out var opening) || opening.ValueKind != JsonValueKind.Number || !opening.TryGetDouble(out double nextOpening) || !double.IsFinite(nextOpening) || nextOpening is < 0 or > 90)
+                throw new ArgumentException("Pika follow-update needs its session, a positive integer sequence and an opening within 0–90 mm.");
+            command["follow_session"] = session.GetString();
+            command["sequence"] = nextSequence;
+            command["opening_mm"] = nextOpening;
+        }
+        var completion = new TaskCompletionSource<JsonElement>(TaskCreationOptions.RunContinuationsAsynchronously);
+        pending[id] = completion;
+        bool motorRequest = action is "enable" or "position" or "disable" or "hold" or "follow-update" or "resume-hold";
+        bool disconnected = false;
+        try
+        {
+            if (motorRequest)
+                lock (stateGate) { sessionPowerRequested = true; unresolvedOwner = requestedOwner; motorRequestId = id; motorRequestAcknowledged = false; }
+            await agent.StandardInput.WriteLineAsync(command.ToJsonString().AsMemory(), cancellation);
+            await agent.StandardInput.FlushAsync(cancellation);
+            var response = await completion.Task.WaitAsync(TimeSpan.FromSeconds(3), cancellation);
+            bool ok = response.GetProperty("ok").GetBoolean();
+            if (!ok)
+            {
+                PikaFollowAudit? rejected;
+                lock (stateGate) { RetainFollowAudit(response); rejected = followAudit; }
+                string reason = response.GetProperty("message").GetString() ?? "Pika request rejected";
+                if (rejected is not null) throw new PikaFollowRejectedException(reason, rejected);
+                throw new InvalidOperationException(reason);
+            }
+            cancellation.ThrowIfCancellationRequested();
+            if (motorRequest)
+                lock (stateGate)
+                {
+                    motorRequestAcknowledged = motorRequestId == id;
+                    if (KnownDisabled()) unresolvedOwner = null;
+                    RetireVerifiedEndedPower();
+                }
+            disconnected = action == "disconnect";
+            var result = new JsonObject { ["ok"] = true, ["message"] = response.GetProperty("message").GetString() };
+            if (motorRequest) result["motor_request_id"] = id;
+            if (response.TryGetProperty("follow_session", out var followSession)) result["follow_session"] = followSession.GetString();
+            return result;
+        }
+        finally { pending.TryRemove(id, out _); if (disconnected) await CloseAsync(); }
     }
 
     // Caller holds stateGate. Cached public booleans cannot grant takeover:

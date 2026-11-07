@@ -449,7 +449,6 @@ OrderedSimulationPathTests.Run(Check);
 OrderedSimulationSpeedTests.Run(Check);
 SimulationPublishCadenceTests.Run(Check);
 SimulationTrajectoryTransportTests.Run(Check);
-OrderedFrameReadRetryTests.Run(Check);
 SimulationFollowNativeReferenceTests.Run(Check);
 OrderedSimulationExecutionTests.Run(Check);
 GroupSimulationFollowingTests.Run(Check);

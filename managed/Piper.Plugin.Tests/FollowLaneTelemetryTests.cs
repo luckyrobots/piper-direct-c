@@ -46,7 +46,8 @@ internal static class FollowLaneTelemetryTests
             sent[0].Body["device_id"]?.GetValue<string>() == "can-b" && sent[0].Body["generation"]?.GetValue<long>() == 7 &&
             sent[0].Body["sequence"]?.GetValue<long>() == 13 && sent[0].Body["speed_percent"]?.GetValue<double>() == 35 &&
             sent[1] is { Route: "/api/pika/hold", Cancelable: false } && sent[1].Body["pika_device"]?.GetValue<string>() == "/dev/pika-b-alias" &&
-            sent[1].Body["pika_distribution"]?.GetValue<string>() == "Pika-WSL" && sent[2] is { Route: "/api/heartbeat", Cancelable: true } &&
+            sent[1].Body["pika_distribution"]?.GetValue<string>() == (OperatingSystem.IsWindows() ? "Pika-WSL" : null) &&
+            sent[2] is { Route: "/api/heartbeat", Cancelable: true } &&
             sent[2].Body["request_id"]?.GetValue<long>() == 77, "Typed controller changed lane routing, request sequence or cancellation policy");
 
         clock.AdvanceMilliseconds(2);

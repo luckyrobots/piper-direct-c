@@ -49,7 +49,8 @@ public sealed partial class PipersPlugin
 
     private string SheetMeasurementBlocker(int row)
     {
-        if (SheetSample(row) is not null && sheetEditingRow != row) return "";
+        if (SheetSample(row) is { } sample)
+            return sheetEditingRow == row ? ValidateSheetCorrection(row, sample).Blocker : "";
         if (SheetPoint(row) is not { } point) return "Enter BACK and LEFT distances for this cross, within the desk edges (mm).";
         if (row < 4 && SheetSample(4) is { } check && point.PlanarDistance(check.MeasuredWorld) < CheckSpacingMetres)
             return "Keep each reference point at least 50 mm from the captured check cross.";
@@ -57,14 +58,15 @@ public sealed partial class PipersPlugin
         for (int previous = 0; previous < row; previous++)
             if (SheetPoint(previous) is { } other && point.PlanarDistance(other) < (row == 4 ? CheckSpacingMetres : CalibrationSolver.ReferenceDuplicateDistanceMetres))
                 return row == 4 ? "Use a check cross at least 50 mm from every reference point." : $"This overlaps {SheetPointName(previous)} (within 1 mm). Use a distinct physical cross.";
-        if (row < 4 && WizardCross() is { } cross)
-        {
-            double left = CalibrationWizardFlow.Number(Wizard, $"p{row}left", 0, 10000), back = CalibrationWizardFlow.Number(Wizard, $"p{row}back", 0, 10000);
-            if (Math.Sqrt(Math.Pow(left - cross.LeftMm, 2) + Math.Pow(back - cross.BackMm, 2)) < 50)
-                return "Keep the centre cross and the 50 mm around it for the final independent check. Choose another reference cross.";
-        }
-        return "";
+        if (row == 4) return "";
+        double left = CalibrationWizardFlow.Number(Wizard, $"p{row}left", 0, 10000), back = CalibrationWizardFlow.Number(Wizard, $"p{row}back", 0, 10000);
+        return SheetReservedCrossBlocker(left, back);
     }
+
+    private string SheetReservedCrossBlocker(double left, double back) =>
+        WizardCross() is { } cross && Math.Sqrt(Math.Pow(left - cross.LeftMm, 2) + Math.Pow(back - cross.BackMm, 2)) < CheckSpacingMetres * 1000
+            ? "Keep the centre cross and the 50 mm around it for the final independent check. Choose another reference cross."
+            : "";
 
     private string SheetCaptureBlocker(int row, JsonObject? device)
     {

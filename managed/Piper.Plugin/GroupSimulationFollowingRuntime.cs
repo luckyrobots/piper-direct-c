@@ -1,5 +1,4 @@
 using System.Diagnostics;
-using System.Globalization;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using LuckyRobots.Piper.Pika;
@@ -32,44 +31,30 @@ public sealed partial class PipersPlugin
     {
         using var cancellation = CancellationTokenSource.CreateLinkedTokenSource(shutdown.Token, group.Stop.Token);
         var ct = cancellation.Token;
+        var prepared = new PreparedFollowRun(this, group);
         try
         {
             ct.ThrowIfCancellationRequested();
             if (GroupStartConflict() is { } conflict) throw new InvalidOperationException(conflict);
             foreach (var lane in group.Lanes) _ = GroupHardware(group, lane);
-            var edit = await GroupEngine(group, "robot.runtime.read", null, ct);
-            if (edit["mode"]?.GetValue<string>() != "edit") throw new InvalidOperationException("Stop Play before arming followers.");
-            ValidateSimulationTimeMode(edit);
-            var armed = await GroupEngine(group, "robot.runtime.control", "arm-next-play", ct);
-            if (armed["mode"]?.GetValue<string>() != "edit" || armed["startArmedForNextPlay"]?.GetValue<bool>() != true ||
-                armed["prepareId"]?.GetValue<string>() != group.PrepareId)
-                throw new InvalidOperationException("The engine did not acknowledge an unchanged Edit-mode arm-next-play latch.");
+            await prepared.ArmAsync(ct);
             group.Advance(GroupFollowPhase.Armed);
             GroupFollowStatus = $"Armed · {group.Lanes.Length} robot(s) · press Play";
             GroupFollowDetail = "The editor is still in Edit mode. Your next Play pauses at its first frame, matches every selected robot and gripper, then starts the shared episode.";
             group.Armed.TrySetResult();
             group.Heartbeats = GroupHeartbeats(group, ct);
-            JsonObject raw;
             while (true)
             {
                 foreach (var lane in group.Lanes) _ = GroupHardware(group, lane);
-                raw = await GroupEngine(group, "robot.runtime.read", null, ct);
-                string mode = raw["mode"]?.GetValue<string>() ?? "";
-                if (mode == "pause" && raw["ready"]?.GetValue<bool>() == true) break;
-                if (mode is not ("edit" or "preparing" or "loading")) throw new InvalidOperationException("The armed scene did not pause at its prepared first frame.");
+                if (await prepared.TryBindPlayAsync(ct)) break;
                 await Task.Delay(TimeSpan.FromMilliseconds(80), group.Clock, ct);
             }
-            group.RunId = raw["runId"]!.GetValue<string>();
-            if (group.RunId.Length == 0 || raw["prepareId"]?.GetValue<string>() != group.PrepareId || raw["startRequested"]?.GetValue<bool>() != true)
-                throw new InvalidOperationException("The user-requested Play run did not match this grouped preparation.");
-            group.OriginalScale = raw["timeScale"]!.GetValue<double>();
             if (GroupStartConflict() is { } matchingConflict) throw new InvalidOperationException(matchingConflict);
             group.Advance(GroupFollowPhase.Matching);
-            await GroupEngine(group, "robot.runtime.control", "pause", ct, new() { ["timeScale"] = .2 });
-            raw = await GroupEngine(group, "robot.runtime.read", null, ct);
+            var raw = await prepared.PauseForMatchingAsync(ct);
             GroupFollowStatus = "Matching all selected robots to the first frame";
             await MatchGroupStart(group, raw, ct);
-            raw = await GroupEngine(group, "robot.runtime.read", null, ct);
+            raw = await prepared.ReadMatchingFrameAsync(ct);
             foreach (var lane in group.Lanes)
             {
                 var sample = SimulationFollowSample.Read(raw, lane.Robot.JointPrefix);
@@ -78,20 +63,13 @@ public sealed partial class PipersPlugin
                 lane.Policy = SimulationFollowPolicy.Start(sample, sample.Identity, hardware, group.Clock.GetUtcNow().ToUnixTimeMilliseconds(), 0);
                 lane.Execution = new(sample, hardware, lane.Profile.Speed / 100, preserveSemanticPhases: true);
             }
-            await GroupEngine(group, "robot.runtime.control", "claim-episode-follower", ct,
-                new() { ["episodeId"] = raw["episodeId"]?.GetValue<string>() ?? "" });
-            var mappings = new JsonArray(group.Lanes.Select(l =>
-            { var mapping = l.Robot.OrderedCaptureMapping(raw); mapping["id"] = l.Profile.Id; return (JsonNode)mapping; }).ToArray());
-            var initial = await GroupEngine(group, "robot.runtime.frames", "start", ct,
-                new() { ["tracks"] = mappings, ["afterFrameCursor"] = "0", ["maxFrames"] = 128 });
+            var initial = await prepared.OpenFramesAsync(raw, ct);
             AppendGroupFrames(group, initial, initial: true);
-            await GroupEngine(group, "robot.runtime.control", "mark-start-ready", ct);
+            await prepared.MarkReadyAsync(ct);
             await AdmitGroup(group, ct);
             group.Advance(GroupFollowPhase.Activating);
-            var activation = await GroupEngine(group, "robot.runtime.control", "activate-start", ct, new() { ["timeScale"] = group.OriginalScale });
+            var activation = await prepared.ActivateAsync(ct);
             long activationObserved = group.Clock.GetTimestamp();
-            if (activation["prepareId"]?.GetValue<string>() != group.PrepareId || activation["startActivated"]?.GetValue<bool>() != true)
-                throw new InvalidOperationException("The shared Play activation acknowledgement changed its request.");
             foreach (var lane in group.Lanes)
             {
                 var sample = SimulationFollowSample.Read(activation, lane.Robot.JointPrefix);
@@ -102,9 +80,8 @@ public sealed partial class PipersPlugin
             if (group.Primer is { } primer) await primer;
             ct.ThrowIfCancellationRequested();
             group.Require(GroupFollowPhase.DrainingPrimer);
-            if (group.Clock.GetElapsedTime(activationObserved).TotalMilliseconds > SimulationFollowPolicy.MaximumSourceAgeMilliseconds)
-                throw new InvalidOperationException("The shared simulation source expired after 250 ms while waiting for the first-frame acknowledgement; all follower targets were retired.");
-            Volatile.Write(ref group.EnvelopeTicks, activationObserved);
+            group.RecordValidatedSource(activationObserved);
+            group.RequireOrderedSourceLease();
             group.Advance(GroupFollowPhase.Following);
             group.Publisher = PublishGroupTargets(group, ct);
             while (!ct.IsCancellationRequested)
@@ -119,34 +96,28 @@ public sealed partial class PipersPlugin
                 long began = group.Clock.GetTimestamp();
                 try
                 {
-                    raw = await GroupEngine(group, "robot.runtime.frames", null, ct, new()
-                        { ["afterFrameCursor"] = after.ToString(CultureInfo.InvariantCulture), ["maxFrames"] = Math.Min(space, 128) });
+                    raw = await prepared.ReadFramesAsync(after, space, ct);
                 }
-                catch (OperationCanceledException) when (!ct.IsCancellationRequested && OrderedFrameReadRetry.Allowed(
-                    group.Clock.GetElapsedTime(Volatile.Read(ref group.EnvelopeTicks)).TotalMilliseconds, false,
-                    GroupScopeCurrent(group), group.Publisher is { IsCompleted: false }))
+                catch (OperationCanceledException) when (!ct.IsCancellationRequested)
                 {
-                    // A lost read response consumes no source nodes and grants
-                    // no new authority. Retry the SAME cursor while the original
-                    // validated envelope's independent250ms lease is still live.
+                    group.RequireOrderedSourceLease();
+                    if (!GroupScopeCurrent(group) || group.Publisher is not { IsCompleted: false }) throw;
+                    // A lost reply consumes no frames and grants no new lease.
                     GroupFollowStatus = "Simulation view delayed · retrying retained group frames";
                     continue;
                 }
-                catch (OperationCanceledException) when (!ct.IsCancellationRequested &&
-                    group.Clock.GetElapsedTime(Volatile.Read(ref group.EnvelopeTicks)).TotalMilliseconds >= 250)
-                { throw new InvalidOperationException("The shared simulation source expired after 250 ms; all follower targets were retired."); }
                 var sample = SimulationFollowSample.Read(raw, group.Lanes[0].Robot.JointPrefix);
                 bool paused = raw["sourcePausedForFollower"]?.GetValue<bool>() == true;
                 group.Observation.Validate(sample, group.Clock.GetUtcNow().ToUnixTimeMilliseconds(), group.Clock.GetElapsedTime(began).TotalMilliseconds,
                     paused, raw["episodeComplete"]?.GetValue<bool>() == true, raw["episodeId"]?.GetValue<string>() ?? "", group.AcknowledgedEpisode.Length > 0);
                 AppendGroupFrames(group, raw);
-                if (await CompleteGroupEpisode(group, ct)) break;
+                if (await CompleteGroupEpisode(group, prepared, ct)) break;
                 int buffered;
                 lock (group.Gate) buffered = group.Lanes.Max(l => l.Execution!.Path.FrameCount);
                 if (!paused && buffered >= OrderedSimulationPath.HighWaterFrames)
-                    await GroupEngine(group, "robot.runtime.control", "pause-follower-source", ct);
+                    await prepared.SetSourcePausedAsync(true, ct);
                 else if (paused && buffered <= OrderedSimulationPath.LowWaterFrames)
-                    await GroupEngine(group, "robot.runtime.control", "resume-follower-source", ct);
+                    await prepared.SetSourcePausedAsync(false, ct);
                 await Task.Delay(TimeSpan.FromMilliseconds(30), group.Clock, ct);
             }
         }
@@ -162,6 +133,7 @@ public sealed partial class PipersPlugin
                 foreach (var worker in new[] { group.Primer, group.Publisher, group.Heartbeats })
                     if (worker is not null) try { await worker; } catch (Exception error) { FailGroup(group, error); }
                 var lanes = await ReleaseGroup(group);
+                await prepared.RetireAsync();
                 string heading = group.FirstFailure.Length > 0 ? "Following stopped\n" + group.FirstFailure :
                     group.EndReason.Length > 0 ? group.EndReason : "Following stopped";
                 GroupFollowStatus = heading;
@@ -289,12 +261,11 @@ public sealed partial class PipersPlugin
 
     private void AppendGroupFrames(GroupSession group, JsonObject response, bool initial = false)
     {
-        if (response["prepareId"]?.GetValue<string>() != group.PrepareId || response["runId"]?.GetValue<string>() != group.RunId)
-            throw new InvalidOperationException("The grouped tape preparation or Play run changed.");
         var frames = GroupSimulationFrames.Read(response, group.Lanes.Select(l => l.Profile.Id).ToArray());
         lock (group.Gate)
         {
             group.Require(initial ? GroupFollowPhase.Matching : GroupFollowPhase.Following);
+            if (!initial) group.RequireOrderedSourceLease();
             foreach (var lane in group.Lanes)
             {
                 var sample = SimulationFollowSample.Read(response, lane.Robot.JointPrefix);
@@ -308,14 +279,8 @@ public sealed partial class PipersPlugin
             }
             try { foreach (var lane in group.Lanes) lane.Execution!.Path.Append(frames[lane.Profile.Id]); }
             catch { group.BeginRetirement(); throw; } // No publisher may consume a partially rejected atomic batch.
-            Volatile.Write(ref group.EnvelopeTicks, group.Clock.GetTimestamp());
+            if (!initial) group.RecordValidatedSource(group.Clock.GetTimestamp());
         }
-    }
-
-    private static void RequireOrderedSourceLease(GroupSession group)
-    {
-        if (group.Clock.GetElapsedTime(Volatile.Read(ref group.EnvelopeTicks)).TotalMilliseconds > SimulationFollowPolicy.MaximumSourceAgeMilliseconds)
-            throw new InvalidOperationException("The shared simulation source expired after 250 ms; all follower targets were retired.");
     }
 
     private async Task PublishGroupTargets(GroupSession group, CancellationToken ct)
@@ -325,7 +290,7 @@ public sealed partial class PipersPlugin
             var cadence = new SimulationPublishCadence(group.Clock.GetTimestamp(), group.Clock.TimestampFrequency, TimeSpan.FromMilliseconds(30));
             while (!ct.IsCancellationRequested)
             {
-                RequireOrderedSourceLease(group);
+                group.RequireOrderedSourceLease();
                 var source = telemetry.Latest!;
                 var hardware = group.Lanes.ToDictionary(l => l.Profile.Id, l => GroupHardware(group, l, native: true, source: source));
                 var targets = new Dictionary<string, OrderedSimulationTarget>(StringComparer.Ordinal);
@@ -424,7 +389,7 @@ public sealed partial class PipersPlugin
         catch (Exception error) { FailGroup(group, error); group.BeginRetirement(); }
     }
 
-    private async Task<bool> CompleteGroupEpisode(GroupSession group, CancellationToken ct)
+    private async Task<bool> CompleteGroupEpisode(GroupSession group, PreparedFollowRun prepared, CancellationToken ct)
     {
         OrderedSimulationFrame? complete; bool missed;
         lock (group.Gate)
@@ -452,8 +417,7 @@ public sealed partial class PipersPlugin
         if (!complete.EpisodeSucceeded) throw new InvalidOperationException("The source episode failed; all selected followers stopped.");
         if (group.AcknowledgedEpisode != complete.EpisodeId)
         {
-            await GroupEngine(group, "robot.runtime.control", "ack-episode", ct, new() { ["episodeId"] = complete.EpisodeId,
-                ["episodeOrdinal"] = complete.EpisodeOrdinal, ["finalFrameCursor"] = complete.Cursor.ToString(CultureInfo.InvariantCulture) });
+            await prepared.AcknowledgeEpisodeAsync(complete, ct);
             group.AcknowledgedEpisode = complete.EpisodeId;
         }
         return false;
@@ -470,11 +434,6 @@ public sealed partial class PipersPlugin
             var pika = ReleasePika(lane);
             return new GroupLaneRetirement(lane.Profile.Name, await arm, await pika);
         }));
-        try { await GroupEngine(group, "robot.runtime.control", "cancel-start", CancellationToken.None, release: true); }
-        catch (Exception error) { FailGroup(group, error); }
-        if (group.RunId.Length > 0)
-            try { await GroupEngine(group, "robot.runtime.control", "pause", CancellationToken.None, new() { ["timeScale"] = group.OriginalScale }, release: true); }
-            catch (Exception error) { FailGroup(group, error); }
         return outcomes;
 
         async Task<GroupReleaseEvidence> ReleaseArm(GroupLane lane)

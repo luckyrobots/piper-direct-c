@@ -1,4 +1,3 @@
-using System.Reflection;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using LuckyRobots.Piper.Pika;
@@ -114,17 +113,17 @@ internal static class PikaMultiDeviceTests
         int actionsBefore = stopAgents.Values.Sum(s => s.Actions.Count);
         check((await stopRegistry.HoldOwnedAsync(ownerB, default))["ok"]!.GetValue<bool>() && stopAgents.Values.Sum(s => s.Actions.Count) == actionsBefore,
             "Global hold changed another owner's grippers");
-        var uncertain = new PikaProcessService(a, "never-launched", "Ubuntu");
-        typeof(PikaProcessService).GetField("unresolvedOwner", BindingFlags.Instance | BindingFlags.NonPublic)!.SetValue(uncertain, ownerA);
+        var uncertain = new Session(a, "Ubuntu") { UnresolvedOwner = ownerA };
         var independent = new Session(b, "Ubuntu") { Owner = ownerA };
         await using var uncertainRegistry = new PikaSessionRegistry(a, "unused", "Ubuntu", discovery: discovery,
             factory: (path, _) => path == a ? uncertain : independent);
         foreach (string path in new[] { a, b })
             await uncertainRegistry.ExecuteAsync("configure", JsonSerializer.SerializeToElement(new { owner = ownerA, pika_device = path, device = path }), default);
         var uncertainStop = await uncertainRegistry.HoldOwnedAsync(ownerA, default);
-        check(uncertain.Snapshot()["owner"] is null && uncertainStop["ok"]?.GetValue<bool>() == false &&
-            uncertainStop["message"]?.GetValue<string>().Contains(a, StringComparison.Ordinal) == true &&
-            uncertainStop["sessions"] is JsonArray { Count: 2 } && independent.Actions.SequenceEqual(["hold"]),
+        var outcomes = uncertainStop["sessions"]!.AsArray().ToDictionary(result => result!["device"]!.GetValue<string>());
+        check(uncertainStop["ok"]?.GetValue<bool>() == false && outcomes.Count == 2 &&
+            outcomes[a]!["ok"]?.GetValue<bool>() == false && outcomes[b]!["ok"]?.GetValue<bool>() == true &&
+            uncertain.Actions.Count == 0 && independent.Actions.SequenceEqual(["hold"]),
             "An unresolved owned gripper was silently omitted, or prevented another gripper from holding");
 
         var connecting = new Session(a, "Ubuntu")
@@ -198,7 +197,7 @@ internal static class PikaMultiDeviceTests
 
     private sealed class Session(string path, string? distribution) : IPikaSession
     {
-        public string? Owner;
+        public string? Owner, UnresolvedOwner;
         public List<string> Actions = [];
         public TaskCompletionSource? PendingHeartbeat;
         public TaskCompletionSource? ConnectEntered, PendingConnect;
@@ -211,12 +210,22 @@ internal static class PikaMultiDeviceTests
             result["configuration_blocked"] = Owner is not null || State["power_uncertain"]?.GetValue<bool>() == true;
             return result;
         }
+        public Task<PikaHoldResult> HoldForOwnerAsync(string owner, CancellationToken cancellation)
+        {
+            if (Owner != owner)
+                return Task.FromResult(UnresolvedOwner == owner
+                    ? new PikaHoldResult(PikaHoldOutcome.Unverified, "Fixture power is unverified.")
+                    : new PikaHoldResult(PikaHoldOutcome.Skipped));
+            Actions.Add("hold");
+            return FailHold
+                ? Task.FromException<PikaHoldResult>(new IOException("Fixture USB hold failure"))
+                : Task.FromResult(new PikaHoldResult(PikaHoldOutcome.Acknowledged));
+        }
         public async Task<JsonObject> ExecuteAsync(string action, JsonElement input, CancellationToken cancellation)
         {
             string owner = input.GetProperty("owner").GetString()!;
             if (Owner is not null && Owner != owner) throw new InvalidOperationException("Another owner.");
             Actions.Add(action);
-            if (action == "hold" && FailHold) throw new IOException("Fixture USB hold failure");
             if (action == "connect")
             {
                 ConnectEntered?.TrySetResult();
