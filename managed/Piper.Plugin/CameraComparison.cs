@@ -14,17 +14,6 @@ public sealed partial class PipersPlugin
     private JsonObject? pendingSimulationCameraDiscovery;
     private readonly CancellationTokenSource cameraDiscoveryShutdown = new();
 
-    private async Task StopCameraDiscoveryOnDispose()
-    {
-        await cameraDiscoveryShutdown.CancelAsync();
-        var tasks = new[] { simulationCameraRefreshWorker, cameraDeviceDiscoveryWorker }.OfType<Task>().ToArray();
-        try { await Task.WhenAll(tasks); }
-        catch (OperationCanceledException) { }
-        Interlocked.Exchange(ref pendingSimulationCameraDiscovery, null);
-        Interlocked.Exchange(ref pendingCameraDeviceInventory, null);
-        cameraDiscoveryShutdown.Dispose();
-    }
-
     private async Task RefreshSimulationCameraBindings(CancellationToken cancellation)
     {
         QueueSimulationCameraRefresh(cancellation);

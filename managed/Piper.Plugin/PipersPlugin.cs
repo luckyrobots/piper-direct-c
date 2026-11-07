@@ -652,9 +652,25 @@ public sealed partial class PipersPlugin : ILuckyPlugin
             try { await StopGroupSimulationFollowing("Plugin closed · following stopped", groupTimeout.Token); }
             catch (Exception error) { Trace.TraceWarning("Group following shutdown: {0}", error.Message); }
         }
-        await StopSupportedRecoveryOnDispose();
+        {
+            try { supportedRecoveryCancellation?.Cancel(); } catch (ObjectDisposedException) { }
+            if (supportedRecoveryWorker is { } supportedWorker)
+            {
+                try { await supportedWorker.WaitAsync(TimeSpan.FromSeconds(5)); }
+                catch (Exception error) { Trace.TraceWarning("Supported recovery shutdown: {0}", error.Message); }
+            }
+            supportedRecoveryCancellation?.Dispose();
+        }
         if (uiEvents is { } dispatch) await dispatch.DisposeAsync();
-        await StopCameraDiscoveryOnDispose();
+        {
+            await cameraDiscoveryShutdown.CancelAsync();
+            var discoveryWorkers = new[] { simulationCameraRefreshWorker, cameraDeviceDiscoveryWorker }.OfType<Task>().ToArray();
+            try { await Task.WhenAll(discoveryWorkers); }
+            catch (OperationCanceledException) { }
+            Interlocked.Exchange(ref pendingSimulationCameraDiscovery, null);
+            Interlocked.Exchange(ref pendingCameraDeviceInventory, null);
+            cameraDiscoveryShutdown.Dispose();
+        }
         using (var markerTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(1)))
         {
             try { await StopHeightCheck(markerTimeout.Token); }
@@ -662,9 +678,23 @@ public sealed partial class PipersPlugin : ILuckyPlugin
             try { await ClearWizardHighlight(markerTimeout.Token); }
             catch (Exception error) { Trace.TraceWarning("Calibration marker shutdown: {0}", error.Message); }
         }
-        await StopPikaMonitorRetries();
-        await StopResetAssistedOnDispose();
-        await StopRecoveryHomeOnDispose();
+        {
+            pikaMonitorStopping = true;
+            await CancelPikaMonitorAttempt();
+            pikaMonitorCancellation?.Dispose();
+        }
+        if (teachingResetWorker is { IsCompleted: false } resetWorker)
+        {
+            CancelResetAssisted();
+            try { await resetWorker.WaitAsync(TimeSpan.FromSeconds(4)); }
+            catch (Exception error) { Trace.TraceWarning("Reset-assisted shutdown: {0}", error.Message); }
+        }
+        if (recoveryHomeWorker is { IsCompleted: false } homeWorker)
+        {
+            CancelRecoveryHome();
+            try { await homeWorker.WaitAsync(TimeSpan.FromSeconds(4)); }
+            catch (Exception error) { Trace.TraceWarning("Recovery shutdown: {0}", error.Message); }
+        }
         using (var saveTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(1)))
         {
             try { await FinishAlignment("Plugin closed", saveTimeout.Token); }

@@ -330,13 +330,4 @@ public sealed partial class PipersPlugin
             }
         }, CancellationToken.None);
     }
-
-    private async Task StopSupportedRecoveryOnDispose()
-    {
-        try { supportedRecoveryCancellation?.Cancel(); } catch (ObjectDisposedException) { }
-        if (supportedRecoveryWorker is { } worker)
-            try { await worker.WaitAsync(TimeSpan.FromSeconds(5)); }
-            catch (Exception error) { System.Diagnostics.Trace.TraceWarning("Supported recovery shutdown: {0}", error.Message); }
-        supportedRecoveryCancellation?.Dispose();
-    }
 }

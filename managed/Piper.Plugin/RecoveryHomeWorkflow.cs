@@ -151,12 +151,4 @@ public sealed partial class PipersPlugin
             id.StartsWith("backend.", StringComparison.Ordinal))).ToArray())
             patches[id]["enabled"] = false;
     }
-
-    private async Task StopRecoveryHomeOnDispose()
-    {
-        if (recoveryHomeWorker is not { IsCompleted: false } worker) return;
-        CancelRecoveryHome();
-        try { await worker.WaitAsync(TimeSpan.FromSeconds(4)); }
-        catch (Exception error) { Trace.TraceWarning("Recovery shutdown: {0}", error.Message); }
-    }
 }

@@ -65,13 +65,6 @@ public sealed partial class PipersPlugin
         await pikaMonitorWorker;
     }
 
-    private async Task StopPikaMonitorRetries()
-    {
-        pikaMonitorStopping = true;
-        await CancelPikaMonitorAttempt();
-        pikaMonitorCancellation?.Dispose();
-    }
-
     private async Task MonitorLinkedPika(CancellationToken cancellation)
     {
         var expectedLink = link;

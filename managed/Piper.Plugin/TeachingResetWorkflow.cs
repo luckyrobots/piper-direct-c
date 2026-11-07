@@ -142,12 +142,4 @@ public sealed partial class PipersPlugin
         foreach (var profile in preferences.Robots!) patches["profiles.select." + profile.Id] = new() { ["enabled"] = false };
         for (int i = 1; i <= 6; i++) foreach (string suffix in new[] { "minus", "plus", "target", "zero" }) patches[$"joint.{i}.{suffix}"] = new() { ["enabled"] = false };
     }
-
-    private async Task StopResetAssistedOnDispose()
-    {
-        if (teachingResetWorker is not { IsCompleted: false } worker) return;
-        CancelResetAssisted();
-        try { await worker.WaitAsync(TimeSpan.FromSeconds(4)); }
-        catch (Exception error) { System.Diagnostics.Trace.TraceWarning("Reset-assisted shutdown: {0}", error.Message); }
-    }
 }

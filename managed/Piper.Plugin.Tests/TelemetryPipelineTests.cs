@@ -223,7 +223,30 @@ internal static class TelemetryPipelineTests
             await lifetime.CancelAsync(); await feeding.CancelAsync();
             try { await producer; } catch (OperationCanceledException) { }
             try { await watching; } catch (OperationCanceledException) { }
-            await plugin.DisposeAsync();
+
+            // An inactive reset stage must let shutdown reach active recovery.
+            // Keep its worker pending until we can verify it is being drained.
+            using var recoveryCancellation = new CancellationTokenSource();
+            var recoveryCancelled = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var recoveryFinished = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            using var registration = recoveryCancellation.Token.Register(() => recoveryCancelled.TrySetResult());
+            var shutdown = Get<CancellationTokenSource>("shutdown");
+            Set("teachingResetWorker", Task.CompletedTask);
+            Set("recoveryHomeCancellation", recoveryCancellation);
+            Set("recoveryHomeWorker", recoveryFinished.Task);
+            Task disposal = plugin.DisposeAsync().AsTask();
+            try
+            {
+                await recoveryCancelled.Task.WaitAsync(TimeSpan.FromSeconds(2));
+                check(!disposal.IsCompleted && !shutdown.IsCancellationRequested,
+                    "Plugin shutdown advanced before the active recovery worker drained");
+            }
+            finally
+            {
+                recoveryFinished.TrySetResult();
+                await disposal;
+            }
+            check(shutdown.IsCancellationRequested, "Disposal did not finish shutdown after recovery drained");
         }
     }
 
