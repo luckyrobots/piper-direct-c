@@ -28,9 +28,10 @@ internal static class HostControlDispatchTests
             browserEnable.Body["error"]?.GetValue<string>() == "Pika hardware is disabled in simulation" &&
             JsonNode.DeepEquals(browserEnable.Body["error"], grpcError["error"]), "Pika simulation rejection or an adapter's error shape changed");
 
+        await UnsupportedGrpc("/api/shutdown", "{}");
         var camera = await Post("/api/camera", """{"enabled":false}""");
         Check(camera.Status == HttpStatusCode.OK && JsonNode.DeepEquals(camera.Body, new JsonObject { ["running"] = false }),
-            "Legacy HTTP camera disable response changed");
+            "Rejected gRPC shutdown froze HTTP controls or changed the legacy camera disable response");
         await UnsupportedGrpc("/api/camera", """{"enabled":false}""");
 
         var device = dashboard["devices"]![0]!;

@@ -199,7 +199,13 @@ public sealed class PikaProcessService : IPikaSession
                     throw new InvalidOperationException("Confirm a stationary measured hold with verified disabled Pika feedback before resuming.");
                 command["clear"] = true; command["expected_angle_rad"] = angle; command["expected_feedback_time_s"] = feedbackTime;
             }
-            if (action == "position") command["value"] = input.GetProperty("value").GetDouble();
+            if (action == "position")
+            {
+                if (!input.TryGetProperty("value", out var target) || target.ValueKind != JsonValueKind.Number ||
+                    !target.TryGetDouble(out double position) || !double.IsFinite(position))
+                    throw new ArgumentException("Pika position requires a finite numeric value.");
+                command["value"] = position;
+            }
             if (action == "follow-update")
             {
                 if (!input.TryGetProperty("follow_session", out var session) || session.ValueKind != JsonValueKind.String ||

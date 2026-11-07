@@ -36,7 +36,7 @@ internal sealed class HostControlDispatcher(ControllerService controller, PikaSe
         return state;
     }
 
-    internal HostControlAdmission Admit(string route, JsonElement input)
+    internal HostControlAdmission Admit(string route, JsonElement input, HostControlTransport transport)
     {
         if (!SessionOwnerGuard.Allows(sessionOwner, route, input)) return new(Error: SessionOwnerGuard.Denied);
         if (route == BackendMaintenance.RestartRoute)
@@ -45,7 +45,7 @@ internal sealed class HostControlDispatcher(ControllerService controller, PikaSe
             if (restart.Ok) maintenance.Commit();
             return new(Restart: restart);
         }
-        if (route == "/api/shutdown")
+        if (transport == HostControlTransport.Http && route == "/api/shutdown")
             return maintenance.PrepareShutdown() is { } error ? new(Error: error) : new(Shutdown: true);
         return maintenance.TryEnterControl(route, out var lease, out var denied)
             ? new(Lease: lease) : new(Error: denied);

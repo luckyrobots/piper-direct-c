@@ -64,7 +64,7 @@ public sealed class PiperGrpcService(PiperRpcContext state, IHostApplicationLife
             using var json = JsonDocument.Parse(request.Json, new JsonDocumentOptions { MaxDepth = 32 });
             if (json.RootElement.ValueKind != JsonValueKind.Object || !ControlJson.HasUniqueKeys(json.RootElement))
                 throw new JsonException("Expected an object with unique keys.");
-            using var admission = state.Control.Admit(request.Route, json.RootElement);
+            using var admission = state.Control.Admit(request.Route, json.RootElement, HostControlTransport.Grpc);
             if (admission.Error is { } denied)
                 return new ControlReply { Status = 409, Json = JsonSerializer.Serialize(new { error = denied }) };
             if (admission.Restart is { } restarting)

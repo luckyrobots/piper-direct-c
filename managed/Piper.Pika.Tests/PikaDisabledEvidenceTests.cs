@@ -64,6 +64,20 @@ internal static class PikaDisabledEvidenceTests
             check(result["ok"]?.GetValue<bool>() == true && result["state"]?.GetValue<string>() == "disabled" &&
                 after["last_motor_request"]?.GetValue<string>() == "verified-disable" && after["power_uncertain"]?.GetValue<bool>() == false,
                 "Already-disabled service hold wrote/reserved new motor power instead of returning its verified state");
+            foreach (string value in new[] { "", ",\"value\":null", ",\"value\":\"0.5\"", ",\"value\":1e1000" })
+            {
+                using var malformedPosition = JsonDocument.Parse("{\"owner\":" + JsonSerializer.Serialize(owner) + value + "}");
+                bool rejected = false;
+                try { await service.ExecuteAsync("position", malformedPosition.RootElement, default); }
+                catch (ArgumentException error) when (error.Message == "Pika position requires a finite numeric value.") { rejected = true; }
+                check(rejected, "Malformed Pika position did not return the actionable input rejection: " + value);
+            }
+            bool foreignRejected = false;
+            try { await service.ExecuteAsync("position", JsonSerializer.SerializeToElement(new { owner = Guid.NewGuid() }), default); }
+            catch (InvalidOperationException error) when (error.Message.Contains("does not own", StringComparison.Ordinal)) { foreignRejected = true; }
+            check(foreignRejected && service.Snapshot()["post_request_feedback_verified"]?.GetValue<bool>() == true &&
+                service.Snapshot()["power_uncertain"]?.GetValue<bool>() == false,
+                "Malformed Pika positions bypassed ownership or changed verified motor evidence");
         }
         finally
         {

@@ -100,7 +100,7 @@ app.Run(async context => {
         if (body.Contains("\\u",StringComparison.Ordinal)||body.Contains('\0')) { await Error(400,"Unicode escapes and NUL are unsupported in control requests"); return; }
         using var json=JsonDocument.Parse(body,new JsonDocumentOptions {MaxDepth=32});
         if (json.RootElement.ValueKind!=JsonValueKind.Object||!ControlJson.HasUniqueKeys(json.RootElement)) { await Error(400,"Expected one JSON object with unique keys"); return; }
-        using var admission = control.Admit(route, json.RootElement);
+        using var admission = control.Admit(route, json.RootElement, HostControlTransport.Http);
         if (admission.Error is { } denied) { await Error(409, denied); return; }
         if (admission.Restart is { } restarting)
         {
