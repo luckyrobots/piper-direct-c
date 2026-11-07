@@ -8,17 +8,20 @@ public sealed partial class PipersPlugin
 {
     // This path deliberately does not wait for the ordinary UI command gate or
     // for editor requests. The backend attempts the two channels independently.
-    private async Task StopImmediately(CancellationToken ignoredCallerCancellation)
+    private async Task StopImmediately(RobotProfile profile, string expectedToken, bool groupActive)
     {
-        bool groupActive = GroupFollowActive;
         CancelGroupSimulationFollowingInput("Operator STOP · follower group discarded");
-        string deviceId = ActiveProfile.CanDeviceId, expectedToken = token;
-        bool ownPika = groupActive || PikaMatchesProfile() && state?["pika"]?["owner"]?.GetValue<string>() == owner;
+        string deviceId = profile.CanDeviceId;
+        bool ownPika = groupActive;
+        if (!ownPika && state is { } snapshot)
+        {
+            try { ownPika = ProfilePikaRouting.Find(snapshot, profile)?["owner"]?.GetValue<string>() == owner; }
+            catch (InvalidOperationException) { } // Ambiguous Pika evidence cannot block arm STOP.
+        }
         if (teachingResetBusy) CancelResetAssisted();
         CancelRecoveryHome();
         CancelHandGuideRecovery();
-        ForgetControlApproval();
-        DisarmTelemetryTargets("Operator STOP; previous actions discarded", clearLink: false);
+        DisarmTelemetryTargets("Operator STOP; previous actions discarded", clearLink: false, forgetApproval: profile.Id, forgetAllApprovals: groupActive);
         uiEvents?.InvalidateControlEvents();
         recoveryInProgress = false;
         message = "STOP requested · previous targets discarded · verifying hardware";
@@ -27,7 +30,7 @@ public sealed partial class PipersPlugin
         {
             if (!groupActive && deviceId.Length == 0) throw new InvalidOperationException("Assign this robot's CAN adapter before sending its STOP.");
             var body = new JsonObject { ["owner"] = owner, ["device_id"] = deviceId,
-                ["pika_device"] = ActiveProfile.PikaDevice, ["pika_distribution"] = ActiveProfile.WslDistribution };
+                ["pika_device"] = profile.PikaDevice, ["pika_distribution"] = profile.WslDistribution };
             if (groupActive) { body.Remove("device_id"); body.Remove("pika_device"); body.Remove("pika_distribution"); }
             ControlReply reply;
             bool legacyCoordinator = false;

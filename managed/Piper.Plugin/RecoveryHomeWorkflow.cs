@@ -16,7 +16,7 @@ public sealed partial class PipersPlugin
     private RecoveryHomeSnapshot HomeSnapshot(bool enforceScope = true)
     {
         if (enforceScope && (token != recoveryHomeToken || ActiveProfile.Id != recoveryHomeProfile ||
-            recoveryHomeEpoch != Interlocked.Read(ref targetPermissionEpoch)))
+            recoveryHomeEpoch != CommandAuthority.Epoch))
             throw new InvalidOperationException("Recovery was cancelled by STOP, a control-permission change or a different robot/backend. No remaining stage will run.");
         var receipt = telemetry.Latest ?? throw new InvalidOperationException("Waiting for controller feedback.");
         var device = RobotProfileRouting.Device(preferences, receipt.State);
@@ -42,11 +42,11 @@ public sealed partial class PipersPlugin
         // This labelled action acknowledges a securely resting arm and a clear
         // zero path. It does not infer support from joint angles or power bits.
         CancelGroupSimulationFollowingInput("Recovery to zero requested · previous follower targets discarded");
-        recoveryHomeEpoch = Interlocked.Increment(ref targetPermissionEpoch);
+        recoveryHomeEpoch = CommandAuthority.Revoke();
         // The actor drops previously queued controls by epoch at dequeue. Do
         // not cancel its currently executing event: it starts this operation.
         approved = linkCommandsEnabled = teleoperating = recoveryInProgress = false;
-        lease = lastCommand = followRequest = 0; followInput.End();
+        followRequest = 0; followInput.End();
         recoveryHomeBusy = true; recoveryHomeProgress = "Preparing recovery to zero · previous movement discarded";
         recoveryHomeCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellation, shutdown.Token);
         recoveryHomeCancellation.CancelAfter(TimeSpan.FromSeconds(90));
@@ -110,7 +110,8 @@ public sealed partial class PipersPlugin
             finally
             {
                 recoveryHomeBusy = recoveryHomeResetting = false;
-                lease = lastCommand = followRequest = 0;
+                CommandAuthority.ClearTracked();
+                followRequest = 0;
                 operation.Dispose();
                 if (ReferenceEquals(recoveryHomeCancellation, operation)) recoveryHomeCancellation = null;
                 if (entered) commands.Release();

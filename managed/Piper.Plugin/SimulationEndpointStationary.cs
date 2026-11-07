@@ -20,7 +20,11 @@ public static class SimulationEndpointStationary
             device["status"]?["control"]?.GetValue<int>() != 1 ||
             device["joints"]!.AsArray().Any(j => j?["enabled"]?.GetValue<bool>() != true || j["fault"]?.GetValue<int>() != 0)) return false;
 
-        var status = device["status"]!.AsObject();
+        return PoseDwellSatisfied(device["status"]!.AsObject());
+    }
+
+    internal static bool PoseDwellSatisfied(JsonObject status)
+    {
         // Do not OR the timers: an explicitly reset pose window means real
         // movement, even if the legacy velocity timer still reports quiet.
         JsonNode? seconds = status.ContainsKey("pose_stationary_s") ? status["pose_stationary_s"] : status["stationary_s"];

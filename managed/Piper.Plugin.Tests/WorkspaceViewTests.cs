@@ -208,7 +208,9 @@ internal static class WorkspaceViewTests
                         "Teaching hid the distinction between powered motors and blocked plugin controls");
             }
             Set("preferences", prefs); Set("link", null); Set("pikaOwned", false);
-            Set("state", null); Set("token", ""); Set("approved", false);
+            // A real disconnect invalidates the receipt while leaving its last
+            // complete snapshot available to the settings projection.
+            Get<LatestTelemetry>("telemetry").Disconnect(); Set("approved", false);
             foreach (string category in new[] { "robot", "controller", "diagnostics" }) await CheckView("settings", category);
             foreach (string camera in new[] { "bench", "depth", "gripper" })
             {
@@ -273,15 +275,16 @@ internal static class WorkspaceViewTests
             Set("client", new PiperControl.PiperControlClient(calls)); Set("state", state); Set("token", "fixture-session");
             Get<LatestTelemetry>("telemetry").Publish(new(state, "fixture-session", 1, Stopwatch.GetTimestamp(), 0));
             Set("workspacePage", "controls"); Set("calibrationOpen", false); Set("approved", true); Set("linkCommandsEnabled", true);
-            Set("approvalBeforeTeaching", true); Set("teleoperating", true); Set("followRequest", 7L); Set("lease", 7L);
+            Set("approvalBeforeTeaching", true); Set("teleoperating", true); Set("followRequest", 7L);
+            plugin.CommandAuthority.TryAcknowledge(plugin.CommandAuthority.Epoch, new("piper-1", "fixture-session", binding.DeviceId, binding.Generation), 7);
             Set("link", binding); Set("linkBackendToken", "fixture-session");
-            long previousPermission = Get<long>("targetPermissionEpoch");
+            long previousPermission = plugin.CommandAuthority.Epoch;
             await Invoke("WorkspaceEvent", "settings.robot", CancellationToken.None);
             check(calls.Requests.Count == 1 && calls.Requests[0].Route == "/api/command" &&
                 JsonNode.Parse(calls.Requests[0].Json)?["action"]?.GetValue<string>() == "follow-end", "Leaving Controls replayed a target or failed to end its gesture");
             check(Get<bool>("approved") && Get<bool>("approvalBeforeTeaching") && Get<bool>("linkCommandsEnabled") && !Get<bool>("teleoperating") && Get<long>("followRequest") == 0,
                 "Browsing settings revoked readiness or retained a live viewport gesture");
-            check(ReferenceEquals(Get<RobotLink>("link"), binding) && Get<long>("targetPermissionEpoch") == previousPermission,
+            check(ReferenceEquals(Get<RobotLink>("link"), binding) && plugin.CommandAuthority.Epoch == previousPermission,
                 "Browsing settings dropped the measured binding or revoked healthy idle approval");
             check(engineRequests.Any(r => r.Method == "robot.teleoperate" && r.Arguments["enabled"]?.GetValue<bool>() == false),
                 "Navigation left the native viewport teleoperation tool enabled");

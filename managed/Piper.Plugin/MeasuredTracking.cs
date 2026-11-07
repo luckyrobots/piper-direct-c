@@ -55,7 +55,7 @@ public sealed partial class PipersPlugin
     {
         var profile = ActiveProfile;
         string expectedToken = token, expectedRobot = preferences.RobotId;
-        long permissionEpoch = Interlocked.Read(ref targetPermissionEpoch);
+        long permissionEpoch = CommandAuthority.Epoch;
         var initial = Device(expectedToken: expectedToken);
         string deviceId = initial["id"]!.GetValue<string>();
         long generation = initial["generation"]!.GetValue<long>();
@@ -66,7 +66,7 @@ public sealed partial class PipersPlugin
             if (current.Id != profile.Id || current.CanDeviceId != profile.CanDeviceId ||
                 current.PikaDevice != profile.PikaDevice || current.WslDistribution != profile.WslDistribution ||
                 current.RobotJointPrefix != profile.RobotJointPrefix ||
-                preferences.RobotId != expectedRobot || permissionEpoch != Interlocked.Read(ref targetPermissionEpoch) ||
+                preferences.RobotId != expectedRobot || permissionEpoch != CommandAuthority.Epoch ||
                 automatic && (!passiveMeasuredTrackingStarted || !MeasuredTrackingPolicy.Enabled(current)))
                 throw new InvalidOperationException("Robot assignment or permission changed while linking measured feedback.");
             var device = Device(deviceId, generation, expectedToken);

@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Reflection;
 using System.Text.Json.Nodes;
 using LuckyRobots.Piper.Plugin;
 using LuckyRobots.Piper.Pika;
@@ -7,11 +8,35 @@ internal static partial class SimulationFollowingTests
 {
     internal static async Task RunUnifiedFollowing(Action<bool, string> check)
     {
+        const BindingFlags fields = BindingFlags.Instance | BindingFlags.NonPublic;
+        static PipersPlugin Plugin(Fixture fixture) => (PipersPlugin)typeof(Fixture).GetField("plugin", fields)!.GetValue(fixture)!;
         static async Task Until(Func<bool> condition, string reason)
         {
             long began = Stopwatch.GetTimestamp();
             while (!condition())
             { if (Stopwatch.GetElapsedTime(began).TotalSeconds > 5) throw new InvalidOperationException(reason); await Task.Delay(10); }
+        }
+        await using (var f = new Fixture())
+        {
+            f.ConfigureGroup(); f.UseUiDispatcher(); f.DelayedRuntimeAction = "cancel-start";
+            var plugin = Plugin(f);
+            var sessionType = typeof(PipersPlugin).GetNestedType("GroupSession", BindingFlags.NonPublic)!;
+            var lanes = Array.CreateInstance(sessionType.GetField("Lanes")!.FieldType.GetElementType()!, 0);
+            // Expose the real publication window without a production timing hook.
+            var session = Activator.CreateInstance(sessionType, fields | BindingFlags.Public, null,
+                [f.Get<string>("token"), "source-a", "robot-a", "asset-a", "model-a", lanes, f.Get<long>("groupInputEpoch"),
+                    f.Get<TimeProvider>("followClock")], null);
+            typeof(PipersPlugin).GetField("groupSimulation", fields)!.SetValue(plugin, session);
+            Task stop = f.ClickSidebarGroupStop();
+            bool waitedBeforeWorker = !stop.IsCompleted && f.GroupActive;
+            var worker = (Task)typeof(PipersPlugin).GetMethod("RunGroupSimulation", fields)!.Invoke(plugin, [session])!;
+            await f.RuntimeReached.Task.WaitAsync(TimeSpan.FromSeconds(2));
+            bool waitedDuringCleanup = !stop.IsCompleted && f.GroupActive;
+            f.ReleaseRuntime.TrySetResult();
+            await Task.WhenAll(stop, worker).WaitAsync(TimeSpan.FromSeconds(2));
+            check(waitedBeforeWorker && waitedDuringCleanup && !f.GroupActive && f.Rpc.Requests.IsEmpty &&
+                f.EngineRequests.Count(r => r.Action == "cancel-start") == 1 && !f.EngineRequests.Any(r => r.Action == "arm-next-play"),
+                "Stop escaped the published group's retirement barrier before its worker or editor cleanup completed");
         }
         foreach (string selected in new[] { "piper-1", "piper-2" })
         {
@@ -112,16 +137,36 @@ internal static partial class SimulationFollowingTests
                 openings.Contains(10) && openings.Last() == 20 && f.Mode == "pause" && f.Snapshot["devices"]![0]!["joints"]!.AsArray().All(j => j!["enabled"]!.GetValue<bool>()),
                 "Source/physical grasp failure skipped home, claimed success, or disabled the arm");
         }
-        await using (var jaws = new Fixture())
+        foreach (bool matchArm in new[] { false, true })
         {
+            await using var jaws = new Fixture();
             jaws.ConfigureGroup(); jaws.SelectGroupFollowers("piper-1"); jaws.UseUiDispatcher(); jaws.Rpc.RejectIdleHold = true;
             jaws.Snapshot["pikas"]![0]!["telemetry"]!["motor"]!["Position"] = LuckyRobots.Piper.Pika.PikaProtocol.Angle(30);
+            if (matchArm)
+            {
+                jaws.Snapshot["devices"]![0]!["joints"]![0]!["actual_deg"] = 5d;
+                var accepted = jaws.Rpc.Accepted;
+                jaws.Rpc.Accepted = (route, body) =>
+                {
+                    if (route == "/api/command" && body["action"]?.GetValue<string>() == "pose")
+                    {
+                        var arm = jaws.Snapshot["devices"]![0]!;
+                        for (int i = 0; i < 6; i++) arm["joints"]![i]!["actual_deg"] = body["degrees"]![i]!.DeepClone();
+                        arm["motion"]!["request_id"] = 77L;
+                        arm["motion"]!["active"] = false;
+                    }
+                    accepted?.Invoke(route, body);
+                };
+            }
             jaws.DelayedRuntimeAction = "mark-start-ready";
             await jaws.Click("group.follow.toggle"); await Until(() => jaws.GroupArmedForPlay, "Pika-only matching fixture did not arm");
             jaws.RequestGroupPlay(); await jaws.RuntimeReached.Task.WaitAsync(TimeSpan.FromSeconds(3));
             var stop = jaws.ClickSidebarGroupStop(); jaws.ReleaseRuntime.TrySetResult(); await stop;
             check(!jaws.GroupActive && !jaws.Rpc.Requests.Any(r => r.Body["action"]?.GetValue<string>() == "hold") &&
-                jaws.Rpc.Requests.Any(r => r.Route == "/api/pika/hold"), "Pika-only matching emitted an unsupported hold on an untouched idle arm");
+                jaws.Rpc.Requests.Any(r => r.Route == "/api/pika/hold") &&
+                jaws.Rpc.Requests.Any(r => r.Body["action"]?.GetValue<string>() == "pose") == matchArm &&
+                jaws.SidebarStatus().Contains(matchArm ? "First: arm already idle, gripper hold acknowledged" : "First: arm untouched, gripper hold acknowledged"),
+                "Start matching failed to distinguish measured idle from an untouched arm or issued an unnecessary hold");
         }
         foreach (bool both in new[] { false, true })
         {
@@ -163,6 +208,9 @@ internal static partial class SimulationFollowingTests
                 "One lane's ambiguous evidence suppressed its healthy partner's independent arm/Pika holds: " + broken);
             check(f.EngineRequests.Any(r => r.Action == "cancel-start") && f.EngineRequests.Any(r => r.Action == "pause") && f.Mode == "pause",
                 "An evidence lookup failure skipped engine cancel/pause: " + broken);
+            string first = broken == "devices" ? "First: arm hold unverified, gripper hold acknowledged" : "First: arm hold acknowledged, gripper hold unverified";
+            check(f.SidebarStatus().Contains(first) && f.SidebarStatus().Contains("Second: arm hold acknowledged, gripper hold acknowledged"),
+                "The retirement result conflated a failed channel with its acknowledged partner holds: " + broken);
             check(!f.Rpc.Requests.Any(r => r.Body["action"]?.GetValue<string>() is "reset" or "disable"),
                 "Malformed release evidence reset or disabled another participant");
         }
@@ -176,7 +224,7 @@ internal static partial class SimulationFollowingTests
                 !discovery.Rpc.Requests.Any(r => r.Body["action"]?.GetValue<string>() is "pose" or "follow-start" or "follow-update"),
                 "STOP during discovery later armed the unchecked/view-independent participant");
         }
-        foreach (string action in new[] { "arm-next-play", "activate-start" })
+        foreach (var (action, backendChanged) in new[] { ("arm-next-play", false), ("activate-start", false), ("activate-start", true) })
         {
             await using var f = new Fixture(); f.ConfigureGroup(); f.SelectGroupFollowers("piper-1"); f.UseUiDispatcher();
             f.DelayedRuntimeAction = action;
@@ -184,6 +232,7 @@ internal static partial class SimulationFollowingTests
             if (action == "activate-start") { await Until(() => f.GroupArmedForPlay, "Delayed activation did not arm"); f.RequestGroupPlay(); }
             await f.RuntimeReached.Task.WaitAsync(TimeSpan.FromSeconds(3));
             object original = f.Get<object>("groupSimulation");
+            if (backendChanged) typeof(PipersPlugin).GetField("token", fields)!.SetValue(Plugin(f), "replacement-backend");
             Task stop = f.ClickSidebarGroupStop(); await Task.Delay(50);
             check(f.GroupActive && ReferenceEquals(original, f.Get<object>("groupSimulation")),
                 "A pending editor ACK released the preparation identity before retiring: " + action);
@@ -194,6 +243,11 @@ internal static partial class SimulationFollowingTests
                 "A late editor ACK revived Play, admitted a replacement or escaped final cancellation: " + action);
             check(action != "arm-next-play" || f.Rpc.Requests.IsEmpty,
                 "Cancelled Edit arming sent hardware targets after its delayed ACK");
+            string expected = action == "arm-next-play" ? "First: arm untouched, gripper untouched" :
+                backendChanged ? "First: arm hold unverified, gripper hold unverified" : "First: arm hold acknowledged, gripper hold acknowledged";
+            check(f.SidebarStatus().Contains(expected) && (!backendChanged || !f.Rpc.Requests.Any(r =>
+                r.Body["action"]?.GetValue<string>() == "hold" || r.Route == "/api/pika/hold")),
+                "The sidebar lost a release outcome or a replacement backend received the prior session's hold: " + action);
         }
         foreach (bool publish in new[] { true, false })
         {

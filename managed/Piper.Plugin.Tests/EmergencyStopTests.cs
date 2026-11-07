@@ -12,19 +12,83 @@ internal static class EmergencyStopTests
 {
     public static async Task Run(Action<bool, string> check)
     {
+        var authority = new RobotCommandAuthority();
+        var original = new RobotCommandScope("piper-1", "original-backend", "can-one", 1);
+        long originalEpoch = authority.Epoch;
+        check(authority.TryAcknowledge(originalEpoch, original, 17), "A current acknowledgement could not publish its lease");
+        var previous = authority.Current.Lease!;
+        long nextEpoch = authority.Revoke();
+        var replacement = original with { Backend = "replacement-backend", Generation = 2 };
+        check(!authority.TryAcknowledge(originalEpoch, original, 17) && authority.Current is { Lease: null, LastCommand: null },
+            "An acknowledgement for a retired epoch republished a command");
+        check(authority.TryAcknowledge(nextEpoch, replacement, 17), "A new scoped request could not reuse the controller's request number");
+        authority.EndLease(previous);
+        authority.EndStatus(previous);
+        check(authority.Current.Lease?.Scope == replacement && authority.Current.LastCommand?.Scope == replacement,
+            "Retiring the old command cleared a different connection's reused request number");
+        var approved = new FollowControlApproval(replacement.Backend, replacement.Device, replacement.Generation, "sim", "", "pika-a", "");
+        var partner = approved with { Device = "can-two", PikaDevice = "pika-b" };
+        check(authority.TrySaveApproval(nextEpoch, "piper-1", approved) && authority.TrySaveApproval(nextEpoch, "piper-2", partner),
+            "Approvals for independent robots could not coexist");
+        authority.Revoke("piper-1");
+        bool restored = false;
+        check(!authority.TrySaveApproval(nextEpoch, "piper-1", approved) &&
+            !authority.TryRestoreApproval(authority.Epoch, "piper-1", approved, () => restored = true) &&
+            !restored && authority.Current.Approvals.TryGetValue("piper-2", out var retained) && retained == partner,
+            "A revoked robot approval returned, or revocation removed a different robot's approval");
+
+        using (var fixture = new Fixture())
+        {
+            const string backend = "fake-backend-session";
+            var telemetry = fixture.Get<LatestTelemetry>("telemetry");
+            var first = telemetry.Latest!;
+            var profile = RobotProfileRouting.Active(fixture.Get<Preferences>("preferences"));
+            fixture.Set("telemetryScope", new TelemetryScope(backend, "can-one", 1));
+            fixture.Authority.TrySaveApproval(fixture.Authority.Epoch, profile.Id,
+                new(backend, "can-one", 1, profile.RobotId, profile.RobotJointPrefix, profile.PikaDevice, profile.WslDistribution));
+            fixture.Set("approved", true);
+            var next = first.State.DeepClone().AsObject();
+            next["devices"]![0]!["generation"] = 2L;
+            var replacementReceipt = first with { State = next, Sequence = 2 };
+            fixture.InvokeSync("ApplyIncomingScope", replacementReceipt);
+            fixture.InvokeSync("RestoreControlApproval");
+            check(telemetry.Latest?.Connected == false && !fixture.Get<bool>("approved"),
+                "Old measured evidence restored approval between scope revocation and telemetry publication");
+            fixture.Set("state", next);
+            telemetry.Publish(replacementReceipt);
+            fixture.InvokeSync("RestoreControlApproval");
+            check(!fixture.Get<bool>("approved") && fixture.Authority.Current.Approvals.Count == 0,
+                "The replacement CAN generation inherited the old approval");
+        }
+
+        using (var fixture = new Fixture())
+        {
+            await fixture.Invoke("Render", CancellationToken.None);
+            var preferences = fixture.Get<Preferences>("preferences");
+            var captured = RobotProfileRouting.Active(preferences);
+            var second = new RobotProfile("piper-2", "Second", "can-two", PikaDevice: "/dev/pika-two");
+            fixture.Set("preferences", RobotProfileRouting.Activate(preferences with { Robots = [captured, second] }, second.Id));
+            await fixture.Event("robot.piper-1.stop", default);
+            var body = JsonNode.Parse(fixture.Rpc.RequestBodies.Single());
+            check(fixture.Rpc.Routes.SequenceEqual(new[] { "/api/stop/coordinated" }) &&
+                body?["device_id"]?.GetValue<string>() == "can-one" && body?["pika_device"]?.GetValue<string>() == "/dev/pika-one",
+                "STOP mixed captured arm/gripper identity with a newly selected profile");
+        }
+
         using (var fixture = new Fixture())
         {
             await fixture.Commands.WaitAsync();
-            long before = fixture.Get<long>("targetPermissionEpoch");
-            fixture.Set("approved", true); fixture.Set("lease", 17L);
+            long before = fixture.Authority.Epoch;
+            fixture.Set("approved", true);
+            fixture.Authority.TryAcknowledge(before, new("piper-1", "fake-backend-session", "can-one", 1), 17);
             using var cancelledCaller = new CancellationTokenSource(); cancelledCaller.Cancel();
             try
             {
                 await fixture.Event("robot.piper-1.stop", cancelledCaller.Token).WaitAsync(TimeSpan.FromSeconds(1));
                 check(fixture.Commands.CurrentCount == 0 && fixture.Rpc.Routes.SequenceEqual(new[] { "/api/stop/coordinated" }),
                     "Priority STOP waited for or released the ordinary UI command semaphore");
-                check(fixture.Rpc.RequestTokensWereLive && fixture.Get<long>("targetPermissionEpoch") > before &&
-                    !fixture.Get<bool>("approved") && fixture.Get<long>("lease") == 0,
+                check(fixture.Rpc.RequestTokensWereLive && fixture.Authority.Epoch > before &&
+                    !fixture.Get<bool>("approved") && fixture.Authority.Current.Lease is null,
                     "Caller cancellation or an old permission/lease defeated a requested STOP");
                 check(fixture.Get<string>("message").Contains("Arm STOP acknowledged") && fixture.Get<string>("message").Contains("Pika hold unverified"),
                     "Partial coordinated STOP reported failure of one channel as failure of both, or claimed an unverified gripper hold");
@@ -36,14 +100,34 @@ internal static class EmergencyStopTests
         {
             using var fixture = new Fixture();
             await fixture.Commands.WaitAsync();
-            long before = fixture.Get<long>("targetPermissionEpoch");
+            long before = fixture.Authority.Epoch;
             Task foreign = fixture.Event(wire, default);
             await Task.Delay(20);
-            check(fixture.Rpc.Routes.IsEmpty && fixture.Get<long>("targetPermissionEpoch") == before,
+            check(fixture.Rpc.Routes.IsEmpty && fixture.Authority.Epoch == before,
                 "A foreign, unscoped or malformed STOP entered the priority hardware path: " + wire);
             fixture.Commands.Release();
             await foreign.WaitAsync(TimeSpan.FromSeconds(1));
             check(fixture.Rpc.Routes.IsEmpty, "A rejected STOP reached transport after the UI gate became available");
+        }
+
+        using (var fixture = new Fixture())
+        {
+            fixture.Set("approved", true);
+            fixture.Rpc.DelayCommand = true;
+            Task pending = fixture.Invoke("Command", "jog", new JsonObject { ["joint"] = 6, ["delta_deg"] = 1.0 },
+                CancellationToken.None, false, false, null, null, null, null, null);
+            try
+            {
+                await fixture.Rpc.CommandReached.Task.WaitAsync(TimeSpan.FromSeconds(1));
+                await fixture.Event("robot.piper-1.stop", default).WaitAsync(TimeSpan.FromSeconds(1));
+                fixture.Rpc.CommandReply.TrySetResult(new ControlReply { Status = 202, Json = "{\"request_id\":17}" });
+                bool rejected = false;
+                try { await pending; } catch (InvalidOperationException) { rejected = true; }
+                check(rejected && fixture.Authority.Current is { Lease: null, LastCommand: null } &&
+                    fixture.Rpc.Routes.SequenceEqual(new[] { "/api/command", "/api/stop/coordinated" }),
+                    "A motion acknowledgement received after priority STOP revived its local lease or retried the command");
+            }
+            finally { fixture.Rpc.CommandReply.TrySetCanceled(); }
         }
 
         using (var fixture = new Fixture())
@@ -94,10 +178,12 @@ internal static class EmergencyStopTests
         private const BindingFlags Fields = BindingFlags.Instance | BindingFlags.NonPublic;
         private readonly PipersPlugin plugin = new();
         public FakeCalls Rpc { get; } = new();
+        public RobotCommandAuthority Authority => plugin.CommandAuthority;
         public SemaphoreSlim Commands => Get<SemaphoreSlim>("commands");
         public T Get<T>(string field) => (T)typeof(PipersPlugin).GetField(field, Fields)!.GetValue(plugin)!;
         public void Set(string field, object? value) => typeof(PipersPlugin).GetField(field, Fields)!.SetValue(plugin, value);
         public Task Invoke(string method, params object?[] arguments) => (Task)typeof(PipersPlugin).GetMethod(method, Fields)!.Invoke(plugin, arguments)!;
+        public void InvokeSync(string method, params object?[] arguments) => typeof(PipersPlugin).GetMethod(method, Fields)!.Invoke(plugin, arguments);
         public Task Event(string wire, CancellationToken cancellation) => plugin.HandleEventAsync(new("fixture", wire, "click", JsonSerializer.SerializeToElement(true)), cancellation);
 
         public Fixture()
@@ -148,19 +234,25 @@ internal static class EmergencyStopTests
     internal sealed class FakeCalls : CallInvoker
     {
         public ConcurrentQueue<string> Routes { get; } = new();
-        public bool DelayConnect, CoordinatedMissing;
+        public ConcurrentQueue<string> RequestBodies { get; } = new();
+        public bool DelayConnect, DelayCommand, CoordinatedMissing;
         public StatusCode? CoordinatedRpcFailure;
         public bool RequestTokensWereLive { get; private set; } = true;
         public TaskCompletionSource ConnectReached { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public TaskCompletionSource<ControlReply> ConnectReply { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource CommandReached { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource<ControlReply> CommandReply { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
         public override AsyncUnaryCall<TResponse> AsyncUnaryCall<TRequest, TResponse>(Method<TRequest, TResponse> method, string? host, CallOptions options, TRequest request)
         {
             var command = request as ControlRequest ?? throw new InvalidOperationException("Unexpected fake RPC");
-            Routes.Enqueue(command.Route); RequestTokensWereLive &= !options.CancellationToken.IsCancellationRequested;
+            Routes.Enqueue(command.Route); RequestBodies.Enqueue(command.Json);
+            RequestTokensWereLive &= !options.CancellationToken.IsCancellationRequested;
             Task<ControlReply> reply;
             if (command.Route == "/api/pika/connect" && DelayConnect)
             { ConnectReached.TrySetResult(); reply = ConnectReply.Task; }
+            else if (command.Route == "/api/command" && DelayCommand)
+            { CommandReached.TrySetResult(); reply = CommandReply.Task; }
             else if (command.Route == "/api/stop/coordinated" && CoordinatedRpcFailure is StatusCode failure)
                 reply = Task.FromException<ControlReply>(new RpcException(new Status(failure, "Synthetic legacy unsupported route")));
             else reply = Task.FromResult(command.Route == "/api/stop/coordinated"

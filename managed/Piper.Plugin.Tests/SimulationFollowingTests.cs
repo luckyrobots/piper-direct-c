@@ -498,8 +498,9 @@ internal static partial class SimulationFollowingTests
         {
             var current = Get<Preferences>("preferences");
             Set("preferences", current with { Robots = current.Robots!.Select(p => p.Id == "piper-2" ? p with { RobotId = robotId, RobotJointPrefix = prefix } : p).ToArray() });
-            var approvals = Get<ConcurrentDictionary<string, FollowControlApproval>>("controlApprovals");
-            approvals["piper-2"] = approvals["piper-2"] with { SceneRobot = robotId, JointPrefix = prefix };
+            var authority = plugin.CommandAuthority;
+            authority.TrySaveApproval(authority.Epoch, "piper-2",
+                authority.Current.Approvals["piper-2"] with { SceneRobot = robotId, JointPrefix = prefix });
         }
         public void FocusGroupSecond()
         { Set("preferences", RobotProfileRouting.Activate(Get<Preferences>("preferences"), "piper-2")); Snapshot["selected"] = "can-b"; Refresh(); }
@@ -521,11 +522,11 @@ internal static partial class SimulationFollowingTests
             }
             var firstPika = (JsonObject)Snapshot["pika"]!.DeepClone(); var secondPika = (JsonObject)firstPika.DeepClone(); secondPika["device"] = "/dev/pika-b";
             Snapshot["pikas"] = new JsonArray(firstPika, secondPika);
-            var approvals = Get<ConcurrentDictionary<string, FollowControlApproval>>("controlApprovals");
             for (int i = 0; i < profiles.Length; i++)
             {
                 var p = profiles[i];
-                approvals.TryAdd(p.Id, new("fixture-backend", p.CanDeviceId, i == 0 ? 7L : 8L, p.RobotId, p.RobotJointPrefix, p.PikaDevice, p.WslDistribution));
+                plugin.CommandAuthority.TrySaveApproval(plugin.CommandAuthority.Epoch, p.Id,
+                    new("fixture-backend", p.CanDeviceId, i == 0 ? 7L : 8L, p.RobotId, p.RobotJointPrefix, p.PikaDevice, p.WslDistribution));
             }
             Rpc.Accepted = (route, body) =>
             {
@@ -642,7 +643,7 @@ internal static partial class SimulationFollowingTests
             lock (resumeFrameGate)
             {
                 var device = Snapshot["devices"]![0]!;
-                if (kind == "permission") Set("targetPermissionEpoch", Get<long>("targetPermissionEpoch") + 1);
+                if (kind == "permission") plugin.CommandAuthority.Revoke();
                 if (kind == "generation") device["generation"] = 8L;
                 if (kind == "playback") device["teaching"]!["phase"] = "playback";
                 if (kind == "fault") device["joints"]![3]!["fault"] = 1;
@@ -949,7 +950,7 @@ internal static partial class SimulationFollowingTests
         }
         public void RemoveMeasuredLink(int editorDelayMilliseconds) { Set("link", null); LinkEditorDelayMilliseconds = editorDelayMilliseconds; }
         public void UseUiDispatcher() => Set("uiEvents", new UiEventDispatch((input, cancellation) => Invoke("HandleEventCoreAsync", input, cancellation),
-            () => Get<long>("targetPermissionEpoch"), input => WorkspaceCommandPolicy.RequiresControls(WorkspaceEventScope.Unwrap(Get<long>("workspaceViewEpoch"), "piper-1", input.WidgetId)),
+            () => plugin.CommandAuthority.Epoch, input => WorkspaceCommandPolicy.RequiresControls(WorkspaceEventScope.Unwrap(Get<long>("workspaceViewEpoch"), "piper-1", input.WidgetId)),
             error => throw new InvalidOperationException("Unexpected fixture UI actor failure", error)));
         public Task Navigate(string action) => Invoke("WorkspaceEvent", action, CancellationToken.None);
         public Task Click(string id)

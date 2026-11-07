@@ -120,7 +120,7 @@ public sealed partial class PipersPlugin
             throw new InvalidOperationException("The robot/control session changed. Choose Free Pika jaws and review its release confirmation again.");
         string expectedToken = token, expectedProfile = ActiveProfile.Id;
         string expectedDevice = device["id"]!.GetValue<string>(); long generation = device["generation"]!.GetValue<long>();
-        long permissionEpoch = Interlocked.Read(ref targetPermissionEpoch);
+        long permissionEpoch = CommandAuthority.Epoch;
         // Existing disable retires both following and ordinary position targets.
         // No new protocol command, automatic release, enable or target is added.
         var reply = await PikaTeachingMotorCall("/api/pika/disable", new JsonObject { ["owner"] = owner }, false, cancellation, expectedToken);
@@ -135,7 +135,7 @@ public sealed partial class PipersPlugin
         while (Stopwatch.GetElapsedTime(started).TotalSeconds < 3)
         {
             cancellation.ThrowIfCancellationRequested();
-            if (ActiveProfile.Id != expectedProfile || permissionEpoch != Interlocked.Read(ref targetPermissionEpoch))
+            if (ActiveProfile.Id != expectedProfile || permissionEpoch != CommandAuthority.Epoch)
                 throw new InvalidOperationException("Control session changed after freeing the jaws. No recording or re-enable was started.");
             device = Device(expectedDevice, generation, expectedToken);
             if (!TeachingState.Inspect(device).HandGuiding)
@@ -185,7 +185,7 @@ public sealed partial class PipersPlugin
             throw new InvalidOperationException("The measured raw jaw opening is outside the supported 0–90 mm hold range (with up to 1 mm closed-reading noise). Move the free jaws back into range by hand. No motor command was sent.");
         string expectedToken = token, expectedProfile = ActiveProfile.Id;
         string expectedDevice = device["id"]!.GetValue<string>(); long generation = device["generation"]!.GetValue<long>();
-        long permissionEpoch = Interlocked.Read(ref targetPermissionEpoch);
+        long permissionEpoch = CommandAuthority.Epoch;
         double expectedFeedback = pika["feedback_time_s"]!.GetValue<double>();
         var reply = await PikaTeachingMotorCall("/api/pika/resume-hold", new JsonObject { ["owner"] = owner, ["clear"] = true,
             ["expected_angle_rad"] = angle, ["expected_feedback_time_s"] = expectedFeedback }, true, cancellation, expectedToken);
@@ -195,7 +195,7 @@ public sealed partial class PipersPlugin
         while (Stopwatch.GetElapsedTime(started).TotalSeconds < 3)
         {
             cancellation.ThrowIfCancellationRequested();
-            if (ActiveProfile.Id != expectedProfile || permissionEpoch != Interlocked.Read(ref targetPermissionEpoch))
+            if (ActiveProfile.Id != expectedProfile || permissionEpoch != CommandAuthority.Epoch)
                 throw new InvalidOperationException("Control scope changed while verifying measured jaw hold; old targets will not resume.");
             device = Device(expectedDevice, generation, expectedToken);
             pika = telemetry.Latest!.State["pika"] as JsonObject;

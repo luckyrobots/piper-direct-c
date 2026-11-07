@@ -30,14 +30,14 @@ internal static class TelemetryConnectionPresentationTests
             if (input.WidgetId == "block") { entered.TrySetResult(); await release.Task.WaitAsync(cancellation); return; }
             executed.Enqueue(input.WidgetId);
             if (input.WidgetId == navigation.WidgetId) navigated.TrySetResult();
-        }, () => Get<long>("targetPermissionEpoch"), Permission, error => throw new InvalidOperationException("Unexpected navigation fixture error", error),
+        }, () => plugin.CommandAuthority.Epoch, Permission, error => throw new InvalidOperationException("Unexpected navigation fixture error", error),
             discarded: (input, _) => discarded.Enqueue(input.WidgetId)))
         {
             dispatch.Enqueue(new("fixture", "block", "click", default), 0);
             await entered.Task.WaitAsync(TimeSpan.FromSeconds(2));
             dispatch.Enqueue(navigation, 0); dispatch.Enqueue(target, 0);
             // Simulate the heartbeat's next disarm while CAN feedback stays stale.
-            Set("targetPermissionEpoch", 1L); release.TrySetResult();
+            plugin.CommandAuthority.Revoke(); release.TrySetResult();
             await navigated.Task.WaitAsync(TimeSpan.FromSeconds(2));
             long began = Stopwatch.GetTimestamp();
             while (discarded.IsEmpty)
@@ -47,7 +47,7 @@ internal static class TelemetryConnectionPresentationTests
             }
             check(executed.SequenceEqual([navigation.WidgetId]) && discarded.SequenceEqual([target.WidgetId]),
                 "CAN feedback loss discarded robot navigation or allowed an old queued movement to execute");
-            check(!Get<bool>("approved") && Get<long>("lease") == 0 && Get<long>("targetPermissionEpoch") == 1,
+            check(!Get<bool>("approved") && plugin.CommandAuthority.Current is { Lease: null, Epoch: 1 },
                 "Navigation eligibility restored power approval, an old lease or movement permission");
         }
         ((IDisposable)Get<object>("channel")).Dispose(); Get<SemaphoreSlim>("commands").Dispose(); Get<CancellationTokenSource>("shutdown").Dispose();
@@ -97,7 +97,7 @@ internal static class TelemetryConnectionPresentationTests
         public JsonObject State { get; }
         public string Message => Get<string>("message");
         public string Error { get => Get<string>("uiActionError"); set => Set("uiActionError", value); }
-        public long Permission => Get<long>("targetPermissionEpoch");
+        public long Permission => plugin.CommandAuthority.Epoch;
         public bool Stale { set { Device["fresh"] = !value; foreach (var joint in Device["joints"]!.AsArray()) joint!["fresh"] = !value; } }
         public Fixture()
         {

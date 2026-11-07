@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Text.Json.Nodes;
 
 namespace LuckyRobots.Piper.Plugin;
 
@@ -7,17 +8,64 @@ public sealed partial class PipersPlugin
     private readonly SemaphoreSlim workspacePublicationGate = new(1, 1);
     private long nextWorkspaceViewEpoch;
     private int workspacePublicationUncertain;
-    private sealed record PublishedWorkspaceView(long Epoch, WorkspaceViewContext Context);
+    private sealed record PublishedWorkspaceView(long Epoch, WorkspaceViewContext Context, RobotProfile StopProfile);
     private readonly record struct WorkspaceViewContext(string Profile, string Page, string SettingsCategory,
         string SettingsCamera, string CameraDetail, bool Calibration);
+    private sealed record WorkspacePatchScope(PublishedWorkspaceView? View, long Epoch, WorkspaceViewContext Context, Preferences Preferences);
+    private sealed record WorkspacePatchEvidence(TelemetryReceipt? Receipt, JsonObject? State, string Backend, long PermissionEpoch);
     private PublishedWorkspaceView? publishedWorkspaceView;
     private WorkspaceViewContext CurrentWorkspaceViewContext => new(ActiveProfile.Id, workspacePage, settingsCategory, settingsCamera, cameraDetail, calibrationOpen);
     private long PublishedWorkspaceEpoch => Volatile.Read(ref publishedWorkspaceView)?.Epoch ?? Interlocked.Read(ref workspaceViewEpoch);
 
-    private string UnscopePublishedWorkspaceEvent(string wireId)
+    private RobotProfile? CaptureStopProfile(string wireId, RobotProfile selected)
+    {
+        var visible = Volatile.Read(ref publishedWorkspaceView)?.StopProfile;
+        if (visible is not null && wireId == WorkspaceEventScope.Wrap(0, visible.Id, "stop")) return visible;
+        return wireId == WorkspaceEventScope.Wrap(0, selected.Id, "stop") ? selected : null;
+    }
+
+    private WorkspacePatchScope? CaptureWorkspacePatchScope()
     {
         var published = Volatile.Read(ref publishedWorkspaceView);
-        string id = WorkspaceEventScope.Unwrap(published?.Epoch ?? Interlocked.Read(ref workspaceViewEpoch), ActiveProfile.Id, wireId);
+        var settings = preferences;
+        var context = CurrentWorkspaceViewContext;
+        if (Volatile.Read(ref workspacePublicationUncertain) != 0 ||
+            published is not null && published.Context != context)
+            return null;
+        return new(published, published?.Epoch ?? Interlocked.Read(ref workspaceViewEpoch), context, settings);
+    }
+
+    private async Task PublishWorkspacePatch(WorkspacePatchScope scope, Dictionary<string, JsonObject> patches,
+        CancellationToken cancellation, WorkspacePatchEvidence? evidence = null)
+    {
+        await workspacePublicationGate.WaitAsync(cancellation);
+        try
+        {
+            if (Volatile.Read(ref workspacePublicationUncertain) != 0 ||
+                !ReferenceEquals(scope.View, Volatile.Read(ref publishedWorkspaceView)) ||
+                scope.Epoch != PublishedWorkspaceEpoch || scope.Context != CurrentWorkspaceViewContext ||
+                !ReferenceEquals(scope.Preferences, preferences))
+                return;
+            if (evidence is not null && (!ReferenceEquals(evidence.Receipt, telemetry.Latest) ||
+                !ReferenceEquals(evidence.State, state) || evidence.Backend != token ||
+                evidence.PermissionEpoch != CommandAuthority.Epoch))
+                return;
+
+            // A patch always carries the epoch that existed when its data was read.
+            // Serialize its send with full views so persistent widget IDs also
+            // cannot receive an old patch after a replacement tree was sent.
+            var scoped = patches.ToDictionary(
+                patch => WorkspaceEventScope.Wrap(scope.Epoch, scope.Context.Profile, patch.Key),
+                patch => patch.Value);
+            await engine.PatchAsync(Panel, scoped, cancellation);
+        }
+        finally { workspacePublicationGate.Release(); }
+    }
+
+    private string UnscopePublishedWorkspaceEvent(string wireId, string? profileId = null)
+    {
+        var published = Volatile.Read(ref publishedWorkspaceView);
+        string id = WorkspaceEventScope.Unwrap(published?.Epoch ?? Interlocked.Read(ref workspaceViewEpoch), profileId ?? ActiveProfile.Id, wireId);
         if (id.Length == 0) return "";
         // Persistent power-release/STOP/cancel actions retain their profile
         // identity. Native engine targets still require a confirmed current view.
@@ -57,13 +105,16 @@ public sealed partial class PipersPlugin
         {
             ct.ThrowIfCancellationRequested();
             var context = CurrentWorkspaceViewContext;
+            var profile = ActiveProfile;
             long candidate = Math.Max(nextWorkspaceViewEpoch, Interlocked.Read(ref workspaceViewEpoch)) + 1;
             nextWorkspaceViewEpoch = candidate;
             var tree = ScopeRobotWidget(BuildWorkspaceView(), candidate, context.Profile);
             await engine.PublishViewAsync(Panel, tree, ct);
-            if (context != CurrentWorkspaceViewContext)
+            var current = ActiveProfile;
+            if (context != CurrentWorkspaceViewContext || profile.Id != context.Profile || profile.Id != current.Id ||
+                profile.CanDeviceId != current.CanDeviceId || profile.PikaDevice != current.PikaDevice || profile.WslDistribution != current.WslDistribution)
                 throw new InvalidOperationException("The workspace changed while publishing its controls; refreshing the current view.");
-            Volatile.Write(ref publishedWorkspaceView, new(candidate, context));
+            Volatile.Write(ref publishedWorkspaceView, new(candidate, context, profile));
             Interlocked.Exchange(ref workspaceViewEpoch, candidate);
             Volatile.Write(ref workspacePublicationUncertain, 0);
         }

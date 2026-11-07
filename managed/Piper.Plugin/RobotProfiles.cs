@@ -150,9 +150,9 @@ public sealed partial class PipersPlugin
     private static Widget ScopeRobotWidget(Widget widget, long epoch, string profileId) => widget with {
         Id = WorkspaceEventScope.Wrap(epoch, profileId, widget.Id), Children = widget.Children?.Select(child => ScopeRobotWidget(child, epoch, profileId)).ToArray() };
     private Task Patch(Dictionary<string, JsonObject> patches, CancellationToken cancellation) =>
-        engine.PatchAsync(Panel, patches.ToDictionary(
-            patch => WorkspaceEventScope.Wrap(PublishedWorkspaceEpoch, ActiveProfile.Id, patch.Key),
-            patch => patch.Value), cancellation);
+        CaptureWorkspacePatchScope() is { } scope
+            ? PublishWorkspacePatch(scope, patches, cancellation)
+            : Task.CompletedTask;
     private string UnscopeEvent(string id) => UnscopePublishedWorkspaceEvent(id);
 
     private Widget RobotSidebar()
@@ -336,7 +336,8 @@ public sealed partial class PipersPlugin
         // Switching the visible robot does not release holding power on its
         // independent gripper session. All owned sessions keep heartbeating.
         if (link is not null) await engine.RequestAsync("robot.unsubscribe", cancellation: cancellation);
-        teleoperating = false; followInput.End(); followRequest = lease = lastCommand = 0;
+        CommandAuthority.Revoke();
+        teleoperating = false; followInput.End(); followRequest = 0;
         approved = pikaOwned = pikaMonitoring = linkCommandsEnabled = recoveryInProgress = false; link = null; linkErrorDegrees = null;
         CancelHandGuideRecovery();
     }
@@ -378,7 +379,7 @@ public sealed partial class PipersPlugin
         try
         {
             if (!groupViewOnly) await ReleaseProfileControl(cancellation);
-            else { link = null; approved = pikaOwned = pikaMonitoring = linkCommandsEnabled = false; lease = lastCommand = 0; }
+            else { CommandAuthority.Revoke(); link = null; approved = pikaOwned = pikaMonitoring = linkCommandsEnabled = false; }
             await FinishPikaTeaching("Robot profile or hardware assignment changed", cancellation);
             StorePikaTeachingWorkspace(ActiveProfile);
             preferences = RobotProfileRouting.Capture(preferences);
@@ -412,13 +413,11 @@ public sealed partial class PipersPlugin
         finally { switchingProfile = false; }
     }
 
-    private bool PikaMatchesProfile()
-    {
-        var pika = state?["pika"] as JsonObject;
-        var profile = ActiveProfile;
-        return profile.PikaDevice.Length > 0 && pika?["device"]?.GetValue<string>() == profile.PikaDevice &&
-            (!OperatingSystem.IsWindows() || pika?["distribution"]?.GetValue<string>() == profile.WslDistribution);
-    }
+    private bool PikaMatchesProfile() => PikaMatchesProfile(ActiveProfile, state?["pika"] as JsonObject);
+
+    private static bool PikaMatchesProfile(RobotProfile profile, JsonObject? pika) =>
+        profile.PikaDevice.Length > 0 && pika?["device"]?.GetValue<string>() == profile.PikaDevice &&
+        (!OperatingSystem.IsWindows() || pika?["distribution"]?.GetValue<string>() == profile.WslDistribution);
 
     private async Task ConfigureProfilePika(CancellationToken cancellation)
     {

@@ -33,8 +33,9 @@ public sealed partial class PipersPlugin
 
     private async Task ObserveTeaching(CancellationToken cancellation)
     {
+        long observedEpoch = CommandAuthority.Epoch;
         JsonObject? device = null;
-        try { device = RobotProfileRouting.Device(preferences, state!); } catch (InvalidOperationException) { }
+        try { device = Device(); } catch (InvalidOperationException) { }
         TeachingState next = TeachingState.Inspect(device);
         string currentDevice = device?["id"]?.GetValue<string>() ?? "";
         long generation = device?["generation"]?.GetValue<long>() ?? 0;
@@ -47,11 +48,14 @@ public sealed partial class PipersPlugin
         if (next.BlocksTargets)
         {
             bool ownershipChanged = !teachingSeen || next.Active && next.Phase != teaching.Phase;
-            if (!teachingSeen) { approvalBeforeTeaching = approved; teachingSeen = true; }
-            approved = linkCommandsEnabled = false;
+            if (!CommandAuthority.TryInEpoch(observedEpoch, () =>
+            {
+                if (!teachingSeen) { approvalBeforeTeaching = approved; teachingSeen = true; }
+                approved = linkCommandsEnabled = false;
+            })) return;
             // The controller has already yielded ownership to its physical teaching
             // mode. Discard the old gesture locally; do not inject a hold/STOP into it.
-            if (ownershipChanged) { lease = lastCommand = followRequest = 0; followInput.End(); }
+            if (ownershipChanged) { CommandAuthority.ClearTracked(); followRequest = 0; followInput.End(); }
             if (teleoperating)
             {
                 teleoperating = false;
@@ -65,12 +69,15 @@ public sealed partial class PipersPlugin
         {
             // Restore only a previous UI approval. This sends no enable, reset,
             // replay or position packet, and a new gesture is still required.
-            approved = approvalBeforeTeaching;
-            linkCommandsEnabled = approved && link is not null;
-            teachingSeen = approvalBeforeTeaching = false;
-            teachingReturnConfirmation = false;
-            message = approved ? "CAN control restored · previous targets discarded · measured scene tracking continues"
-                : "Teaching ended and CAN control is healthy. Use Enable robot when ready; no movement was resumed.";
+            if (!CommandAuthority.TryInEpoch(observedEpoch, () =>
+            {
+                approved = approvalBeforeTeaching;
+                linkCommandsEnabled = approved && link is not null;
+                teachingSeen = approvalBeforeTeaching = false;
+                teachingReturnConfirmation = false;
+                message = approved ? "CAN control restored · previous targets discarded · measured scene tracking continues"
+                    : "Teaching ended and CAN control is healthy. Use Enable robot when ready; no movement was resumed.";
+            })) return;
         }
         // Serialize with manual actions before consuming the one-attempt gate.
         // A busy UI action leaves this poll observational; it grants no request.
@@ -79,7 +86,7 @@ public sealed partial class PipersPlugin
             bool attempting = false;
             try
             {
-                long permissionEpoch = Interlocked.Read(ref targetPermissionEpoch);
+                long permissionEpoch = CommandAuthority.Epoch;
                 string expectedToken = token;
                 JsonObject current = Device(expectedToken: expectedToken);
                 string expectedDevice = current["id"]!.GetValue<string>();

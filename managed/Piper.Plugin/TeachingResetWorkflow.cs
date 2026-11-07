@@ -67,7 +67,8 @@ public sealed partial class PipersPlugin
             {
                 await commands.WaitAsync(operationCancellation.Token); entered = true;
                 await FinishAlignment("Reset-assisted teaching return", operationCancellation.Token);
-                teleoperating = false; followRequest = lease = lastCommand = 0; followInput.End();
+                CommandAuthority.ClearTracked();
+                teleoperating = false; followRequest = 0; followInput.End();
                 await TeachingResetAssisted.Run(true, deviceId, generation, () => ResetSnapshot(backendToken),
                     async (step, stepCancellation) =>
                     {
@@ -81,7 +82,7 @@ public sealed partial class PipersPlugin
                         {
                             approved = linkCommandsEnabled = false;
                             await Call("/api/stop", new JsonObject { ["device_id"] = deviceId, ["generation"] = generation, ["owner"] = owner }, stepCancellation, backendToken);
-                            lease = lastCommand = 0;
+                            CommandAuthority.ClearTracked();
                         }
                         else if (step == "enable")
                         {
@@ -100,7 +101,8 @@ public sealed partial class PipersPlugin
             catch (Exception error)
             {
                 approved = linkCommandsEnabled = recoveryInProgress = false;
-                lease = lastCommand = followRequest = 0; followInput.End();
+                CommandAuthority.ClearTracked();
+                followRequest = 0; followInput.End();
                 teachingResetProgress = error is OperationCanceledException ? "Reset-assisted return cancelled · keep the arm supported"
                     : "Reset-assisted return failed: " + error.Message;
                 message = teachingResetProgress + ". No step will retry automatically. Inspect live motor state and use the displayed recovery step.";

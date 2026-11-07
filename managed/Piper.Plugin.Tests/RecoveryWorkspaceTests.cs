@@ -31,18 +31,18 @@ internal static class RecoveryWorkspaceTests
     {
         var device = Stopped();
         var view = RecoveryWorkspaceState.Inspect(device, false);
-        check(view is { Action: "supported-stop", CanAct: true } && view.Cause.Contains("Unexpected joint movement", StringComparison.Ordinal) &&
+        check(view is { Action: "supported-stop", NextAction: RecoveryWorkspaceAction.SupportedStop, CanAct: true } && view.Cause.Contains("Unexpected joint movement", StringComparison.Ordinal) &&
             view.NextStep.Contains("cannot clear", StringComparison.Ordinal) && view.ActionText.Contains("supported", StringComparison.Ordinal),
             "A latched STOP did not provide its cause and one explicitly supported recovery acknowledgement");
         check(view.Requirements.Contains("J2: -1.339", StringComparison.Ordinal) && view.Requirements.Contains("J3: 18.901", StringComparison.Ordinal) &&
             view.Requirements.Contains("600.00", StringComparison.Ordinal), "Recovery hid the affected joints or confused stable position with strict power/return feedback");
         foreach (var joint in device["joints"]!.AsArray()) joint!["enabled"] = false;
         view = RecoveryWorkspaceState.Inspect(device, false);
-        check(view is { Action: "supported-stop", CanAct: true } && view.NextStep.Contains("One acknowledgement", StringComparison.Ordinal),
+        check(view is { Action: "supported-stop", NextAction: RecoveryWorkspaceAction.SupportedStop, CanAct: true } && view.NextStep.Contains("One acknowledgement", StringComparison.Ordinal),
             "All-six-off STOP required another reset/verify acknowledgement");
         device["status"]!["stationary_s"] = 0d;
         view = RecoveryWorkspaceState.Inspect(device, false);
-        check(view.Action == "supported-stop" && view.Requirements.Contains("0.00 s", StringComparison.Ordinal),
+        check(view.NextAction == RecoveryWorkspaceAction.SupportedStop && view.Requirements.Contains("0.00 s", StringComparison.Ordinal),
             "The recovery acknowledgement hid the strict stillness that its runner must wait for");
         device["status"]!["stationary_s"] = .54; device["status"]!["arm_status"] = 0;
         device["recovery_required"] = false; device["blocker"] = ""; device["teaching"]!["phase"] = "off";
@@ -50,13 +50,17 @@ internal static class RecoveryWorkspaceTests
         check(!view.CanAct && view.NextStep.Contains("green-light", StringComparison.Ordinal) && view.Requirements.Contains("J3", StringComparison.Ordinal),
             "Clearing STOP hid range correction or exposed enable at an illegal pose");
         device["joints"]![1]!["actual_deg"] = .5; device["joints"]![2]!["actual_deg"] = -.5;
-        check(RecoveryWorkspaceState.Inspect(device, false) is { Action: "enable", CanAct: true }, "A legal supported pose could not reach the holding-enable step");
+        check(RecoveryWorkspaceState.Inspect(device, false) is { Action: "enable", NextAction: RecoveryWorkspaceAction.EnableHold, CanAct: true },
+            "A legal supported pose could not reach the holding-enable step");
         device["recovery_required"] = true; device["status"]!["control"] = 2; device["status"]!["teach_state"] = 2;
         device["teaching"]!["phase"] = "ended"; device["teaching"]!["can_recover_at_pose"] = true;
         foreach (var joint in device["joints"]!.AsArray()) joint!["enabled"] = true;
-        check(RecoveryWorkspaceState.Inspect(device, false).Action != "recover-at-pose", "UI accepted a recovery capability without a completed native teaching cycle");
+        check(RecoveryWorkspaceState.Inspect(device, false).NextAction != RecoveryWorkspaceAction.RecoverAtPose, "UI accepted a recovery capability without a completed native teaching cycle");
         device["teaching"]!["recovery_teach_cycle_complete"] = true;
-        check(RecoveryWorkspaceState.Inspect(device, false) is { Action: "recover-at-pose", CanAct: true }, "A qualified completed guide cycle could not resume at its measured pose");
+        check(RecoveryWorkspaceState.Inspect(device, false) is { Action: "recover-at-pose", NextAction: RecoveryWorkspaceAction.RecoverAtPose, CanAct: true },
+            "A qualified completed guide cycle could not resume at its measured pose");
+        check(RecoveryWorkspaceState.Inspect(device, false, waiting: true) is { Action: null, NextAction: RecoveryWorkspaceAction.None },
+            "A recovery already waiting for an acknowledgement exposed another action");
         device["fresh"] = false;
         check(!RecoveryWorkspaceState.Inspect(device, false).CanAct, "Stale recovery feedback exposed a command");
     }
@@ -93,6 +97,10 @@ internal static class RecoveryWorkspaceTests
             device["teaching"]!["phase"] = "ended"; device["teaching"]!["can_recover_at_pose"] = true;
             device["teaching"]!["recovery_teach_cycle_complete"] = true;
             device["joints"]![1]!["actual_deg"] = .5; device["joints"]![2]!["actual_deg"] = -.5;
+            Set("recoveryHomeBusy", true);
+            Fresh(); await Click("recovery.card.run");
+            check(calls.Actions.Count == 0, "A queued recovery click ran while its card was disabled by another recovery action");
+            Set("recoveryHomeBusy", false);
             Fresh(); await Click("recovery.card.run");
             check(calls.Actions.SequenceEqual(["recover-at-pose"]) && Get<bool>("handGuideRecoveryCommandSent"),
                 "A qualified green/off cycle did not admit the explicit same-pose return");
@@ -108,7 +116,7 @@ internal static class RecoveryWorkspaceTests
                 "Reset's retired stop record closed the visible range/holding guide or reused old teaching proof");
             Set("supportedRecoveryBusy", true); Set("supportedRecoveryResetting", true);
             Set("supportedRecoveryBackend", "recovery-ui-fixture"); Set("supportedRecoveryDevice", "can-b"); Set("supportedRecoveryProfile", "piper-2");
-            Set("supportedRecoveryGeneration", 7L); Set("supportedRecoveryPermission", Get<long>("targetPermissionEpoch"));
+            Set("supportedRecoveryGeneration", 7L); Set("supportedRecoveryPermission", plugin.CommandAuthority.Epoch);
             Set("supportedRecoveryResetAt", Stopwatch.GetTimestamp());
             device["fresh"] = false; device["joints"]![0]!["fresh"] = false; Fresh();
             bool Gap() => (bool)typeof(PipersPlugin).GetMethod("SupportedRecoveryExpectedGap", flags)!.Invoke(plugin, [Get<LatestTelemetry>("telemetry").Latest])!;
@@ -121,9 +129,15 @@ internal static class RecoveryWorkspaceTests
             Set("supportedRecoveryResetAt", Stopwatch.GetTimestamp());
             Get<LatestTelemetry>("telemetry").Publish(new(snapshot, "recovery-ui-fixture", 1, Stopwatch.GetTimestamp() - Stopwatch.Frequency * 2, 0));
             check(!Gap(), "An old telemetry envelope was accepted as a fresh reset gap");
-            Fresh(); Set("targetPermissionEpoch", Get<long>("targetPermissionEpoch") + 1);
+            Fresh(); plugin.CommandAuthority.Revoke();
             check(!Gap(), "A STOP/permission change retained the reset-gap exception");
             Set("supportedRecoveryBusy", false); Set("supportedRecoveryResetting", false);
+            device["fresh"] = true; device["joints"]![0]!["fresh"] = true;
+            device["blocker"] = "Another controller is sending commands on this CAN bus.";
+            Set("approved", true);
+            Fresh(); await Click("enable");
+            check(calls.Actions.Count == 0 && Get<string>("primaryActionStatus").Contains("Another controller", StringComparison.Ordinal),
+                "A queued primary click sent Enable even though the current header reported a controller blocker");
         }
         finally
         {

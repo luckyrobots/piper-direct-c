@@ -44,7 +44,7 @@ public sealed partial class PipersPlugin
     private async Task ResumeControls(CancellationToken cancellation)
     {
         string expectedProfile = ActiveProfile.Id, expectedToken = token;
-        long expectedPermission = Interlocked.Read(ref targetPermissionEpoch);
+        long expectedPermission = CommandAuthority.Epoch;
         var first = Device(expectedToken: expectedToken);
         string expectedDevice = first["id"]!.GetValue<string>();
         long expectedGeneration = first["generation"]!.GetValue<long>();
@@ -52,7 +52,7 @@ public sealed partial class PipersPlugin
         {
             cancellation.ThrowIfCancellationRequested();
             if (ActiveProfile.Id != expectedProfile || workspacePage != "controls" || calibrationOpen ||
-                expectedPermission != Interlocked.Read(ref targetPermissionEpoch))
+                expectedPermission != CommandAuthority.Epoch)
                 throw new InvalidOperationException("Control permission or selected robot changed. Click Resume controls again for the current robot.");
             return Device(expectedDevice, expectedGeneration, expectedToken);
         }
@@ -132,14 +132,13 @@ public sealed partial class PipersPlugin
             }
             TeachingResumeCheck.CommitApproval(() => { _ = Current(); }, () =>
             {
-                approved = true; linkCommandsEnabled = link is not null;
                 teachingSeen = approvalBeforeTeaching = false;
-                RememberControlApproval();
+                RememberControlApproval(expectedPermission, activate: true);
             }, () =>
             {
                 // Urgent STOP/Disable can revoke permission during the local
                 // commit, including inside RememberControlApproval/Device.
-                controlApprovals.TryRemove(expectedProfile, out _);
+                CommandAuthority.ForgetApproval(expectedProfile);
                 approved = linkCommandsEnabled = false;
             });
             message = "Controls restored · holding this pose · previous movement discarded";

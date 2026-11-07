@@ -24,7 +24,7 @@ public static class ProfilePikaRouting
 
 public sealed partial class PipersPlugin
 {
-    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, FollowControlApproval> controlApprovals = new();
+    private IReadOnlyDictionary<string, FollowControlApproval> controlApprovals => CommandAuthority.Current.Approvals;
 
     private void ProjectProfilePika(JsonObject snapshot)
     {
@@ -39,22 +39,29 @@ public sealed partial class PipersPlugin
         ? sessions.OfType<JsonObject>() : snapshot["pika"] is JsonObject single ? new[] { single } : [])
         .Where(p => p["owner"]?.GetValue<string>() == owner && p["connected"]?.GetValue<bool>() == true && p["device"] is not null).ToArray();
 
-    private void RememberControlApproval()
+    private void RememberControlApproval(long epoch, bool activate = false)
     {
-        var d = Device();
-        controlApprovals[ActiveProfile.Id] = new(token, d["id"]!.GetValue<string>(), d["generation"]!.GetValue<long>(),
-            ActiveProfile.RobotId, ActiveProfile.RobotJointPrefix, ActiveProfile.PikaDevice, ActiveProfile.WslDistribution);
+        var profile = ActiveProfile;
+        string backend = token;
+        var device = Device(expectedToken: backend);
+        var approval = new FollowControlApproval(backend, device["id"]!.GetValue<string>(), device["generation"]!.GetValue<long>(),
+            profile.RobotId, profile.RobotJointPrefix, profile.PikaDevice, profile.WslDistribution);
+        if (ActiveProfile.Id != profile.Id || !CommandAuthority.TrySaveApproval(epoch, profile.Id, approval,
+            activate ? () => { approved = true; linkCommandsEnabled = link is not null; } : null))
+            throw new InvalidOperationException("Control permission changed before the robot connection could be confirmed.");
     }
 
-    private void ForgetControlApproval() => controlApprovals.TryRemove(ActiveProfile.Id, out _);
+    private void ForgetControlApproval() => CommandAuthority.ForgetApproval(ActiveProfile.Id);
 
     private void RestoreControlApproval()
     {
-        if (switchingProfile || calibrationOpen || !HasFreshControlTelemetry(out _) || !controlApprovals.TryGetValue(ActiveProfile.Id, out var saved)) return;
-        var d = Device();
-        if (saved != new FollowControlApproval(token, d["id"]!.GetValue<string>(), d["generation"]!.GetValue<long>(),
-            ActiveProfile.RobotId, ActiveProfile.RobotJointPrefix, ActiveProfile.PikaDevice, ActiveProfile.WslDistribution))
-        { ForgetControlApproval(); return; }
+        var permission = CommandAuthority.Current;
+        var profile = ActiveProfile;
+        if (switchingProfile || calibrationOpen || !HasFreshControlTelemetry(out var receipt) || !permission.Approvals.TryGetValue(profile.Id, out var saved)) return;
+        var d = Device(sourceReceipt: receipt);
+        if (saved != new FollowControlApproval(receipt!.BackendToken, d["id"]!.GetValue<string>(), d["generation"]!.GetValue<long>(),
+            profile.RobotId, profile.RobotJointPrefix, profile.PikaDevice, profile.WslDistribution))
+        { CommandAuthority.ForgetApproval(profile.Id, saved); return; }
         var teaching = TeachingState.Inspect(d);
         // A previously approved operator can use the physical button to recover
         // from an obstruction directly. Actual movement remains blocked until
@@ -63,10 +70,16 @@ public sealed partial class PipersPlugin
             BeginHandGuideRecovery(d);
         if (d["recovery_required"]?.GetValue<bool>() == true || d["reset_pending"]?.GetValue<bool>() == true || teaching.BlocksTargets ||
             !RobotPowerState.Inspect(d).AllEnabled || !string.IsNullOrEmpty(d["blocker"]?.GetValue<string>())) return;
-        approved = true;
-        linkCommandsEnabled = link is not null;
-        pikaOwned = PikaMatchesProfile() && state?["pika"]?["owner"]?.GetValue<string>() == owner && state["pika"]?["armed"]?.GetValue<bool>() == true;
-        pikaMonitoring = PikaMatchesProfile() && state?["pika"]?["owner"]?.GetValue<string>() == owner;
+        var pika = receipt.State["pika"] as JsonObject;
+        bool monitoring = PikaMatchesProfile(profile, pika) && pika?["owner"]?.GetValue<string>() == owner;
+        bool owns = monitoring && pika?["armed"]?.GetValue<bool>() == true;
+        CommandAuthority.TryRestoreApproval(permission.Epoch, profile.Id, saved, () =>
+        {
+            approved = true;
+            linkCommandsEnabled = link is not null;
+            pikaOwned = owns;
+            pikaMonitoring = monitoring;
+        });
     }
 
     private async Task MonitorAssignedPikas(CancellationToken cancellation)
