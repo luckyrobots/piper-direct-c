@@ -68,8 +68,18 @@ public sealed class PikaSessionRegistry : IPikaSession
         lock (gate)
         {
             string path = boundAliases.GetValueOrDefault(Key(device, distribution), device);
-            return sessions.TryGetValue(Key(path, distribution), out var entry)
-                ? Decorate(entry, includeRawEvidence) : Empty(device, distribution);
+            if (sessions.TryGetValue(Key(path, distribution), out var entry))
+                return Decorate(entry, includeRawEvidence);
+            return new()
+            {
+                ["configured"] = device.Length > 0, ["device"] = device, ["distribution"] = distribution,
+                ["connected"] = false, ["fresh"] = false, ["owner"] = null, ["enabled"] = false, ["pending"] = false,
+                ["power_requested"] = false, ["power_uncertain"] = false, ["configuration_blocked"] = false,
+                ["transport"] = distribution is null ? "linux-serial" : "wsl-linux-serial",
+                ["age_s"] = null, ["message"] = device.Length == 0 ? "No Pika assigned." : "Connect to read this gripper's telemetry.",
+                ["follow_minimum_command_period_s"] = commandPeriodSeconds, ["follow_maximum_command_hz"] = 1 / commandPeriodSeconds,
+                ["physical_replay_available"] = false, ["measured_hold_resume_supported"] = true
+            };
         }
     }
 
@@ -202,17 +212,6 @@ public sealed class PikaSessionRegistry : IPikaSession
             .Select(pair => (JsonNode)JsonValue.Create(pair.Key[(pair.Key.IndexOf('\n') + 1)..])!).ToArray());
         return result;
     }
-
-    private JsonObject Empty(string device, string? distribution) => new()
-    {
-        ["configured"] = device.Length > 0, ["device"] = device, ["distribution"] = distribution,
-        ["connected"] = false, ["fresh"] = false, ["owner"] = null, ["enabled"] = false, ["pending"] = false,
-        ["power_requested"] = false, ["power_uncertain"] = false, ["configuration_blocked"] = false,
-        ["transport"] = distribution is null ? "linux-serial" : "wsl-linux-serial",
-        ["age_s"] = null, ["message"] = device.Length == 0 ? "No Pika assigned." : "Connect to read this gripper's telemetry.",
-        ["follow_minimum_command_period_s"] = commandPeriodSeconds, ["follow_maximum_command_hz"] = 1 / commandPeriodSeconds,
-        ["physical_replay_available"] = false, ["measured_hold_resume_supported"] = true
-    };
 
     public async ValueTask DisposeAsync()
     {
