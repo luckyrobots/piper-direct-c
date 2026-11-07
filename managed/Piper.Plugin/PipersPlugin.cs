@@ -342,10 +342,10 @@ public sealed partial class PipersPlugin : ILuckyPlugin
                     await CameraCalibrationEvent(camera, parts[2], cancellation);
                 else
                 {
-                    if (parts[2] == "device") settings = settings with { Device = ResolveCameraDeviceValue(camera, input.Value), Enabled = true };
+                    if (parts[2] == "device") settings = settings with { Device = CameraDeviceChoices.Resolve(cameraDeviceChoices, input.Value, CameraSettings(camera).Device), Enabled = true };
                     if (parts[2] == "toggle") settings = settings with { Enabled = !settings.Enabled };
                     if (camera == "depth" && parts[2] is "view" or "selectcolor" or "selectdepth") settings = D405View.Select(settings, parts[2] == "view" ? input.Value.GetInt32() : parts[2] == "selectdepth" ? 1 : 0);
-                    if (parts[2] == "serial") preferences = preferences with { DepthSerial = ResolveDepthSerialValue(input.Value) };
+                    if (parts[2] == "serial") preferences = preferences with { DepthSerial = CameraDeviceChoices.Resolve(depthDeviceChoices, input.Value, "") };
                     preferences = camera switch { "bench" => preferences with { Bench = settings }, "gripper" => preferences with { Gripper = settings }, _ => preferences with { Depth = settings } };
                     await Save(cancellation); await RestartCamera(camera);
                     await Render(cancellation);

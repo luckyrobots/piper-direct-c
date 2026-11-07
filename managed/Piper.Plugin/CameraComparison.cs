@@ -71,18 +71,6 @@ public sealed partial class PipersPlugin
         }
     }
 
-    private string[] SimulationCameraNames() => new[] { "Automatic counterpart" }.Concat(
-        simulationCameras?["cameras"]?.AsArray().Select(c => c?["name"]?.GetValue<string>() ?? "Camera") ?? []).ToArray();
-
-    private int SimulationCameraIndex(string id)
-    {
-        var saved = preferences.SimulationCameras?.GetValueOrDefault(id);
-        if (saved is null || simulationCameras is null) return 0;
-        var cameras = simulationCameras["cameras"]!.AsArray();
-        for (int i = 0; i < cameras.Count; i++) if (cameras[i]?["entityId"]?.GetValue<string>() == saved.CameraId) return i + 1;
-        return 0;
-    }
-
     private async Task DiscoverSimulationCameras(CancellationToken cancellation)
     {
         var discovered = JsonNode.Parse((await engine.RequestAsync("scene.cameras", cancellation: cancellation)).GetRawText())!.AsObject();
