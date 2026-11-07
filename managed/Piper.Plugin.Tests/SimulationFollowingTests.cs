@@ -19,6 +19,48 @@ internal static partial class SimulationFollowingTests
             while (!condition())
             { if (Stopwatch.GetElapsedTime(began).TotalSeconds > 3) throw new InvalidOperationException(description); await Task.Delay(10); }
         }
+        foreach (var (profile, name, transport) in new[] { ("piper-1", "First", SimulationTrajectoryTransport.StreamedPosition),
+            ("piper-2", "Second", SimulationTrajectoryTransport.StreamedPosition), ("piper-2", "Second", "unknown-wire-mode") })
+        {
+            await using var unsupported = new Fixture(); unsupported.ConfigureGroup(); unsupported.UseUiDispatcher();
+            unsupported.SetProfileTransport(profile, transport);
+            // A backend capability advertisement cannot qualify a transport
+            // that this coordinator deliberately does not support.
+            unsupported.Snapshot["streamed_position_transport_supported"] = true;
+            unsupported.Snapshot["streamed_position_wire_validation_supported"] = true;
+            foreach (var device in unsupported.Snapshot["devices"]!.AsArray()) device!["streamed_position_supported"] = true;
+            unsupported.Refresh();
+            check(unsupported.Preparation().Issues.Any(i => i.ProfileId == profile && i.Code == "transport") &&
+                unsupported.SidebarStatus().Contains(name + ": Select position-velocity"),
+                "A selected robot's saved unsupported transport was silently ignored");
+            await unsupported.Click("group.follow.toggle");
+            await WaitFor(() => unsupported.Get<string>("groupFollowFailure").Length > 0, "Unsupported transport click did not finish");
+            check(!unsupported.GroupActive && unsupported.SidebarStatus().Contains(name + ": Select position-velocity") &&
+                unsupported.Rpc.Requests.IsEmpty && !unsupported.EngineRequests.Any(r => r.Action == "arm-next-play"),
+                "Unsupported transport armed the engine, enabled experimental control or emitted a target");
+            unsupported.SetProfileTransport(profile, SimulationTrajectoryTransport.PositionVelocity);
+            await unsupported.Click("group.follow.toggle"); await WaitFor(() => unsupported.GroupArmedForPlay, "Explicit PV correction did not arm");
+            check(unsupported.Mode == "edit" && unsupported.Rpc.Requests.IsEmpty && unsupported.EngineRequests.Count(r => r.Action == "arm-next-play") == 1,
+                "Restoring PV silently entered Play, sent a target or armed more than once");
+        }
+        foreach (string saved in new[] { "valid", "missing", "malformed", "other-profile", "other-device", "other-distribution" })
+        {
+            await using var reference = new Fixture(); reference.ConfigureGroup(); reference.SelectGroupFollowers("piper-2"); reference.UseUiDispatcher();
+            string distribution = OperatingSystem.IsWindows() ? "Ubuntu" : "";
+            var value = new PikaClosedDisplayReference(1, saved == "other-profile" ? "piper-1" : "piper-2",
+                saved == "other-device" ? "/dev/other" : "/dev/pika-b", saved == "other-distribution" ? "other" : distribution, -.0354, DateTimeOffset.UtcNow);
+            string path = Path.Combine(reference.Get<PluginContext>("engine").Start.SettingsDirectory, "gripper-reference", "piper-2.json");
+            Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+            if (saved != "missing") await File.WriteAllTextAsync(path, saved == "malformed" ? "not-json" : JsonSerializer.Serialize(value, PluginProtocol.Json));
+            await reference.Click("group.follow.toggle"); await WaitFor(() => reference.GroupArmedForPlay, "Saved-reference fixture did not arm: " + saved);
+            object lane = ((Array)reference.Get<object>("groupSimulation").GetType().GetField("Lanes")!.GetValue(reference.Get<object>("groupSimulation"))!).GetValue(0)!;
+            var captured = (double?)lane.GetType().GetField("ClosedReference")!.GetValue(lane);
+            check(captured == (saved == "valid" ? -.0354 : null) && reference.Rpc.Requests.IsEmpty,
+                "Inlined display-reference load changed missing/invalid fallback or exact profile/device/distribution matching: " + saved);
+            await File.WriteAllTextAsync(path, "not-json");
+            check((double?)lane.GetType().GetField("ClosedReference")!.GetValue(lane) == captured,
+                "An armed lane reread its captured display reference");
+        }
         // Exercise the same pure report used by admission and sidebar patches,
         // including a nonselected participant rather than only the visible arm.
         foreach (var (code, change) in new (string, Action<Fixture>)[] {
@@ -424,13 +466,11 @@ internal static partial class SimulationFollowingTests
             }
             var firstPika = (JsonObject)Snapshot["pika"]!.DeepClone(); var secondPika = (JsonObject)firstPika.DeepClone(); secondPika["device"] = "/dev/pika-b";
             Snapshot["pikas"] = new JsonArray(firstPika, secondPika);
-            Type approval = typeof(PipersPlugin).GetNestedType("ProfileApproval", BindingFlags.NonPublic)!;
-            var approvals = Get<object>("controlApprovals");
+            var approvals = Get<ConcurrentDictionary<string, FollowControlApproval>>("controlApprovals");
             for (int i = 0; i < profiles.Length; i++)
             {
                 var p = profiles[i];
-                var value = Activator.CreateInstance(approval, "fixture-backend", p.CanDeviceId, i == 0 ? 7L : 8L, p.RobotId, p.RobotJointPrefix, p.PikaDevice, p.WslDistribution)!;
-                approvals.GetType().GetMethod("TryAdd")!.Invoke(approvals, [p.Id, value]);
+                approvals.TryAdd(p.Id, new("fixture-backend", p.CanDeviceId, i == 0 ? 7L : 8L, p.RobotId, p.RobotJointPrefix, p.PikaDevice, p.WslDistribution));
             }
             Rpc.Accepted = (route, body) =>
             {
@@ -536,6 +576,13 @@ internal static partial class SimulationFollowingTests
             if (kind == "fault") device["joints"]![3]!["fault"] = 1;
         }
         public void SetTransport(string transport) => Set("preferences", Get<Preferences>("preferences") with { SimulationTransport = transport });
+        public void SetProfileTransport(string profile, string transport)
+        {
+            var current = RobotProfileRouting.Capture(Get<Preferences>("preferences"));
+            current = current with { Robots = current.Robots!.Select(p => p.Id == profile ? p with { SimulationTransport = transport } : p).ToArray() };
+            if (current.ActiveRobotId == profile) current = current with { SimulationTransport = transport };
+            Set("preferences", current); Refresh();
+        }
         private void Set(string field, object? value) => typeof(PipersPlugin).GetField(field, Fields)!.SetValue(plugin, value);
 
         public Fixture(bool mismatch = false)

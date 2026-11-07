@@ -40,6 +40,8 @@ public sealed record FollowPreparationReport(IReadOnlyList<FollowPreparationIssu
         {
             if (profiles.Count(other => other.Id == p.Id) != 1) Add(p, "profile", "Use a distinct robot profile.");
             if (!double.IsFinite(p.Speed) || p.Speed is <= 0 or > 100) Add(p, "speed", "Choose a speed above 0% and at most 100%.");
+            if (p.SimulationTransport != SimulationTrajectoryTransport.PositionVelocity)
+                Add(p, "transport", "Select position-velocity for simulation following; saved experimental or unknown transports are not supported by this follower.");
             if (p.CanDeviceId.Length == 0) Add(p, "can-assignment", "Assign this robot's CAN adapter in Settings.");
             else if (profiles.Any(other => other.Id != p.Id && other.CanDeviceId == p.CanDeviceId))
                 Add(p, "can-assignment", "Assign a different CAN adapter; another selected robot uses this one.");

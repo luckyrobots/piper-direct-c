@@ -9,11 +9,11 @@ namespace LuckyRobots.Piper.Plugin;
 
 public sealed partial class PipersPlugin
 {
-    private sealed class GroupLane(RobotProfile profile, RobotLink robot, ProfileApproval approval, double? reference)
+    private sealed class GroupLane(RobotProfile profile, RobotLink robot, FollowControlApproval approval, double? reference)
     {
         public readonly RobotProfile Profile = profile;
         public readonly RobotLink Robot = robot;
-        public readonly ProfileApproval Approval = approval;
+        public readonly FollowControlApproval Approval = approval;
         public readonly double? ClosedReference = reference;
         public SimulationFollowSample? First, LastSample;
         public SimulationFollowPolicy? Policy;
@@ -123,12 +123,24 @@ public sealed partial class PipersPlugin
             {
                 var device = receipt.State["devices"]!.AsArray().OfType<JsonObject>().Single(d => d["id"]?.GetValue<string>() == profile.CanDeviceId);
                 long generation = device["generation"]!.GetValue<long>();
-                var expected = new ProfileApproval(receipt.BackendToken, profile.CanDeviceId, generation, profile.RobotId, profile.RobotJointPrefix, profile.PikaDevice, profile.WslDistribution);
+                var expected = new FollowControlApproval(receipt.BackendToken, profile.CanDeviceId, generation, profile.RobotId, profile.RobotJointPrefix, profile.PikaDevice, profile.WslDistribution);
                 if (!controlApprovals.TryGetValue(profile.Id, out var approval) || approval != expected)
                     throw new InvalidOperationException(profile.Name + ": use Enable robot and confirm its workspace before selecting it as a follower.");
                 var robot = new RobotLink(sceneId, entity, model["joints"]!.AsArray(), device, profile.RobotJointPrefix);
                 var pika = ProfilePikaRouting.Find(receipt.State, profile);
-                lanes.Add(new(profile, robot, approval, GroupClosedReference(profile, pika)));
+                double? closedReference = null;
+                try
+                {
+                    string distribution = OperatingSystem.IsWindows() ? profile.WslDistribution : "";
+                    string path = Path.Combine(engine.Start.SettingsDirectory, "gripper-reference", profile.Id + ".json");
+                    if (File.Exists(path))
+                    {
+                        var saved = JsonSerializer.Deserialize<PikaClosedDisplayReference>(File.ReadAllText(path), PluginProtocol.Json);
+                        if (saved?.Matches(profile.Id, profile.PikaDevice, distribution, pika) == true) closedReference = saved.MotorAngle;
+                    }
+                }
+                catch (Exception error) when (error is IOException or JsonException) { }
+                lanes.Add(new(profile, robot, approval, closedReference));
             }
             var group = new GroupSession(receipt.BackendToken, sceneId, entity, model["modelAssetId"]!.GetValue<string>(), model["modelRevision"]!.GetValue<string>(), lanes.ToArray(), inputEpoch);
             foreach (var lane in group.Lanes)
@@ -153,19 +165,6 @@ public sealed partial class PipersPlugin
             GroupFollowDetail = reason;
             throw;
         }
-    }
-
-    private double? GroupClosedReference(RobotProfile profile, JsonObject? pika)
-    {
-        try
-        {
-            string distribution = OperatingSystem.IsWindows() ? profile.WslDistribution : "";
-            string path = Path.Combine(engine.Start.SettingsDirectory, "gripper-reference", profile.Id + ".json");
-            if (!File.Exists(path)) return null;
-            var saved = JsonSerializer.Deserialize<PikaClosedDisplayReference>(File.ReadAllText(path), PluginProtocol.Json);
-            return saved?.Matches(profile.Id, profile.PikaDevice, distribution, pika) == true ? saved.MotorAngle : null;
-        }
-        catch (Exception error) when (error is IOException or JsonException) { return null; }
     }
 
     private bool GroupScopeCurrent(GroupSession group) => ReferenceEquals(Volatile.Read(ref groupSimulation), group) &&
@@ -211,21 +210,15 @@ public sealed partial class PipersPlugin
             joints.Select(j => j!["actual_deg"]!.GetValue<double>()).ToArray(), limits, width, reference);
     }
 
-    private JsonObject GroupRequest(GroupSession group, string? action)
+    private async Task<JsonObject> GroupEngine(GroupSession group, string method, string? action, CancellationToken cancellation,
+        JsonObject? properties = null, bool release = false)
     {
+        if (!release && !GroupScopeCurrent(group)) throw new InvalidOperationException("Grouped following was disarmed.");
         var request = new JsonObject { ["sceneId"] = group.Scene, ["entityId"] = group.Entity, ["expectedModelAssetId"] = group.Asset,
             ["expectedModelRevision"] = group.Revision, ["prepareId"] = group.PrepareId };
         if (group.RunId.Length > 0) request["runId"] = group.RunId;
         if (action is not null) request["action"] = action;
         if (action == "arm-next-play") request["activationHandshake"] = true;
-        return request;
-    }
-
-    private async Task<JsonObject> GroupEngine(GroupSession group, string method, string? action, CancellationToken cancellation,
-        JsonObject? properties = null, bool release = false)
-    {
-        if (!release && !GroupScopeCurrent(group)) throw new InvalidOperationException("Grouped following was disarmed.");
-        var request = GroupRequest(group, action);
         if (properties is not null) foreach (var property in properties) request[property.Key] = property.Value?.DeepClone();
         using var timeout = release ? CancellationTokenSource.CreateLinkedTokenSource(cancellation) : CancellationTokenSource.CreateLinkedTokenSource(cancellation, group.Stop.Token);
         timeout.CancelAfter(method == "robot.runtime.frames" && action != "start" ? 150 : 1000);

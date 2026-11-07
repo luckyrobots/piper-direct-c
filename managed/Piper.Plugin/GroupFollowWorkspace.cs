@@ -28,8 +28,7 @@ public sealed partial class PipersPlugin
 
     private FollowPreparationReport GroupPreparation(RobotProfile[]? selected = null, TelemetryReceipt? receipt = null, JsonObject? discovered = null) =>
         FollowPreparationReport.Inspect(selected ?? SelectedFollowProfiles(), receipt ?? telemetry.Latest, token, owner,
-            controlApprovals.ToDictionary(p => p.Key, p => new FollowControlApproval(p.Value.Backend, p.Value.Device,
-                p.Value.Generation, p.Value.SceneRobot, p.Value.JointPrefix, p.Value.PikaDevice, p.Value.Distribution)),
+            controlApprovals.ToDictionary(p => p.Key, p => p.Value, StringComparer.Ordinal),
             discovered ?? scene, Stopwatch.GetTimestamp());
 
     private Widget GroupFollowControls()

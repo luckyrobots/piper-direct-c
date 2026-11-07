@@ -166,14 +166,15 @@ holds still use STOP. The transport field in state records the requested
 native transport; normal `0x2A1` MoveJ feedback does not independently prove
 the firmware's MIT/pass-through flag.
 
-The managed plugin pins the selected profile's `SimulationTransport` at
-preparation, validates native capability and firmware, propagates the explicit
-choice on follow-start, and requires its exact acknowledgement before
-admitting Pika or releasing Play. Its default is `position-velocity`; saved
-profiles lacking the field remain unchanged. Normal controls, homing and
-matching do not opt into JS. The physical qualification above failed, and
-there are no further physical JS comparisons or pickup attempts in this
-implementation.
+The shared simulation follower accepts only the qualified `position-velocity`
+transport. If any selected profile has a saved `streamed-position` or unknown
+`simulationTransport`, the sidebar names that robot and arming is rejected
+before any engine arm latch or hardware target. Explicitly change that saved
+profile choice to `position-velocity` before retrying. It is never silently
+ignored, rewritten or enabled based on a backend capability advertisement.
+Profiles lacking the field default to PV. The native experimental gate remains
+disabled; ordinary controls, matching and homing do not opt into JS. The failed
+physical qualification has not been replaced by another physical JS test.
 
 ## Where to tune speed
 
@@ -181,7 +182,7 @@ implementation.
    then prepare Follow simulation again. `Preferences.Speed` is a per-robot
    0–100 percentage in `managed/Piper.Plugin/PipersPlugin.cs` and
    `RobotProfiles.cs`. It is pinned at preparation in
-   `QueuedSimulationFollowing.PrepareOrderedSource`. Zero prevents admission.
+   the captured `GroupLane.Profile` and `RunGroupSimulation` execution. Zero prevents admission.
    A 100% setting requests the reported ceiling; the native tracking shaper can
    still be the bottleneck. Do not edit decoded caps or protection thresholds
    to tune ordinary speed.

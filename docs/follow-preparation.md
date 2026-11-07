@@ -24,6 +24,13 @@ discovery and subsequent native/engine admission still validate live identities.
 This report does not replace firmware handoff, lease, source expiry or endpoint
 guards, and it never interprets a failed check as permission to reset or enable.
 
+Only `position-velocity` is qualified for this follower. A profile saved with
+`streamed-position` or another transport is named in the same sidebar/admission
+report and prevents arming. Its saved choice is not silently ignored or rewritten;
+explicitly change that profile's `simulationTransport` to `position-velocity`
+before retrying. There is no experimental transport enable action here, and
+backend capability advertisements cannot override this restriction.
+
 The production call graph is:
 
 ```text

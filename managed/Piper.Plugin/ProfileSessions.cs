@@ -24,8 +24,7 @@ public static class ProfilePikaRouting
 
 public sealed partial class PipersPlugin
 {
-    private sealed record ProfileApproval(string Backend, string Device, long Generation, string SceneRobot, string JointPrefix, string PikaDevice, string Distribution);
-    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, ProfileApproval> controlApprovals = new();
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, FollowControlApproval> controlApprovals = new();
 
     private void ProjectProfilePika(JsonObject snapshot)
     {
@@ -53,7 +52,7 @@ public sealed partial class PipersPlugin
     {
         if (switchingProfile || calibrationOpen || !HasFreshControlTelemetry(out _) || !controlApprovals.TryGetValue(ActiveProfile.Id, out var saved)) return;
         var d = Device();
-        if (saved != new ProfileApproval(token, d["id"]!.GetValue<string>(), d["generation"]!.GetValue<long>(),
+        if (saved != new FollowControlApproval(token, d["id"]!.GetValue<string>(), d["generation"]!.GetValue<long>(),
             ActiveProfile.RobotId, ActiveProfile.RobotJointPrefix, ActiveProfile.PikaDevice, ActiveProfile.WslDistribution))
         { ForgetControlApproval(); return; }
         var teaching = TeachingState.Inspect(d);
