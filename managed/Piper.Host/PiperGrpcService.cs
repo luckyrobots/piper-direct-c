@@ -64,7 +64,7 @@ public sealed class PiperGrpcService(PiperRpcContext state, IHostApplicationLife
         try
         {
             using var json = JsonDocument.Parse(request.Json, new JsonDocumentOptions { MaxDepth = 32 });
-            if (json.RootElement.ValueKind != JsonValueKind.Object || !Unique(json.RootElement))
+            if (json.RootElement.ValueKind != JsonValueKind.Object || !ControlJson.HasUniqueKeys(json.RootElement))
                 throw new JsonException("Expected an object with unique keys.");
             if (!SessionOwnerGuard.Allows(state.SessionOwner, request.Route, json.RootElement))
                 return new ControlReply { Status = 409, Json = JsonSerializer.Serialize(new { error = SessionOwnerGuard.Denied }) };
@@ -107,16 +107,4 @@ public sealed class PiperGrpcService(PiperRpcContext state, IHostApplicationLife
         }
     }
 
-    private static bool Unique(JsonElement element)
-    {
-        if (element.ValueKind == JsonValueKind.Object)
-        {
-            var names = new HashSet<string>(StringComparer.Ordinal);
-            foreach (var member in element.EnumerateObject())
-                if (!names.Add(member.Name) || !Unique(member.Value)) return false;
-        }
-        if (element.ValueKind == JsonValueKind.Array)
-            foreach (var child in element.EnumerateArray()) if (!Unique(child)) return false;
-        return true;
-    }
 }

@@ -105,12 +105,7 @@ app.Run(async context => {
         if (Encoding.UTF8.GetByteCount(body)>16384) { await Error(413,"Request too large"); return; }
         if (body.Contains("\\u",StringComparison.Ordinal)||body.Contains('\0')) { await Error(400,"Unicode escapes and NUL are unsupported in control requests"); return; }
         using var json=JsonDocument.Parse(body,new JsonDocumentOptions {MaxDepth=32});
-        static bool Unique(JsonElement element) {
-            if (element.ValueKind==JsonValueKind.Object) { var keys=new HashSet<string>(StringComparer.Ordinal); foreach (var p in element.EnumerateObject()) if (!keys.Add(p.Name)||!Unique(p.Value)) return false; }
-            if (element.ValueKind==JsonValueKind.Array) foreach (var e in element.EnumerateArray()) if (!Unique(e)) return false;
-            return true;
-        }
-        if (json.RootElement.ValueKind!=JsonValueKind.Object||!Unique(json.RootElement)) { await Error(400,"Expected one JSON object with unique keys"); return; }
+        if (json.RootElement.ValueKind!=JsonValueKind.Object||!ControlJson.HasUniqueKeys(json.RootElement)) { await Error(400,"Expected one JSON object with unique keys"); return; }
         if (!SessionOwnerGuard.Allows(sessionOwner,route,json.RootElement)) { await Error(409,SessionOwnerGuard.Denied); return; }
         if (route == BackendMaintenance.RestartRoute)
         {

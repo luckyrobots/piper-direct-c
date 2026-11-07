@@ -52,6 +52,7 @@ try
     var inventoryReply = await grpcClient.ExecuteAsync(new ControlRequest { Route = "/api/pika/devices", Json = "{}" }, metadata);
     if (inventoryReply.Status != 200 || JsonNode.Parse(inventoryReply.Json)?["devices"] is not JsonArray { Count: 0 })
         throw new InvalidOperationException("gRPC inventory route differs from HTTP or opened simulated hardware.");
+    await ControlJsonValidationTests.Run(http, grpcClient, state["token"]!.GetValue<string>());
 
     observer = new PiperControl.PiperControlClient(channel).WatchState(new StateRequest());
     using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(5));
