@@ -30,6 +30,7 @@ bool __wrap_can_bus_send(struct can_bus *bus,struct can_device *d,unsigned gener
         assert(frames[0].data[0]==1); ++stops;
         /* A later failed STOP must not replace the original persisted cause. */
         strcpy(d->problem,"Later STOP transfer failed"); can_bus_record_tx_failure(d,generation,1,1,0x150,31,14);
+        d->tx_failure.at=clock_now;
         return false;
     }
     assert(batches<2); batch_at[batches]=clock_now; ++batches;
@@ -41,7 +42,10 @@ bool __wrap_can_bus_send(struct can_bus *bus,struct can_device *d,unsigned gener
         assert(frames[i].can_id==expected[i].can_id&&frames[i].len==8&&!memcmp(frames[i].data,expected[i].data,8));
         if (batches==fail_batch&&i+1==fail_frame) {
             strcpy(d->problem,"Windows USB-CAN send failed (transport 14, WinUSB 121)");
-            can_bus_record_tx_failure(d,generation,i+1,(unsigned)count,frames[i].can_id,121,14); return false;
+            can_bus_record_tx_failure(d,generation,i+1,(unsigned)count,frames[i].can_id,121,14);
+            /* piper_now in the recorder shares its translation unit and is not linker-wrapped. */
+            d->tx_failure.at=clock_now;
+            return false;
         }
         if (frames[i].can_id==0x151) d->feedback.arm[0].control=1;
         ++d->tx;
@@ -89,13 +93,15 @@ static void check_persisted_failure(struct controller *c,const char *directory,u
     char text[16384]; size_t n=fread(text,1,sizeof text-1,f); fclose(f); text[n]=0;
     cJSON *saved=cJSON_Parse(text),*device=cJSON_GetObjectItem(cJSON_GetObjectItem(saved,"devices"),d->id);
     cJSON *transport=cJSON_GetObjectItem(cJSON_GetObjectItem(device,"stop_event"),"transport");
-    assert(cJSON_GetObjectItem(transport,"failed_frame_index")->valueint==(int)index);
-    assert(cJSON_GetObjectItem(transport,"batch_frames")->valueint==(int)count);
-    assert(cJSON_GetObjectItem(transport,"failed_can_id")->valueint==(int)id);
-    assert(cJSON_GetObjectItem(transport,"os_error")->valueint==121&&cJSON_GetObjectItem(transport,"transport_error")->valueint==14);
-    assert(cJSON_GetObjectItem(transport,"failed_generation")->valueint==(int)d->generation-1);
-    assert(cJSON_GetObjectItem(transport,"rx_at_failure")->valueint==123&&cJSON_GetObjectItem(transport,"local_at_failure")->valueint==45);
-    assert(strstr(cJSON_GetObjectItem(transport,"failure")->valuestring,"WinUSB 121")); cJSON_Delete(saved);
+    assert(cJSON_IsObject(transport));
+    assert(cJSON_GetNumberValue(cJSON_GetObjectItem(transport,"failed_frame_index"))==index);
+    assert(cJSON_GetNumberValue(cJSON_GetObjectItem(transport,"batch_frames"))==count);
+    assert(cJSON_GetNumberValue(cJSON_GetObjectItem(transport,"failed_can_id"))==id);
+    assert(cJSON_GetNumberValue(cJSON_GetObjectItem(transport,"os_error"))==121&&cJSON_GetNumberValue(cJSON_GetObjectItem(transport,"transport_error"))==14);
+    assert(cJSON_GetNumberValue(cJSON_GetObjectItem(transport,"failed_generation"))==d->generation-1);
+    assert(cJSON_GetNumberValue(cJSON_GetObjectItem(transport,"rx_at_failure"))==123&&cJSON_GetNumberValue(cJSON_GetObjectItem(transport,"local_at_failure"))==45);
+    const char *problem=cJSON_GetStringValue(cJSON_GetObjectItem(transport,"failure"));
+    assert(problem&&strstr(problem,"WinUSB 121")); cJSON_Delete(saved);
 }
 int main(void)
 {
