@@ -194,7 +194,7 @@ public sealed partial class PipersPlugin
         for (int i = 0; i < 6; i++)
         {
             double minimum = limits[i].MinimumDegrees, maximum = limits[i].MaximumDegrees;
-            double actual = ReplayNumber(joints[i], "actual_deg");
+            double actual = EpisodeReplayReportedLimits.Number(joints[i], "actual_deg");
             poseMatches &= Math.Abs(actual - artifact.Samples[0].JointDegrees[i]) <= .5;
             if (artifact.HasPositionCommands)
                 firstCommandMatches &= Math.Abs(artifact.Samples[0].CommandedJointDegrees![i] - artifact.Samples[0].JointDegrees[i]) <= .5;
@@ -247,8 +247,6 @@ public sealed partial class PipersPlugin
         patches["replay.gripper.actual"] = new() { ["text"] = grip ? $"{actualOpening:F2} mm" : "—" };
         patches["replay.gripper.difference"] = new() { ["text"] = grip ? $"{actualOpening - artifact.Samples[0].GripperOpeningMm:+0.00;-0.00;0.00} mm" : "—" };
     }
-
-    private static double ReplayNumber(JsonNode? node, string key) => EpisodeReplayReportedLimits.Number(node, key);
 
     public static async Task<EpisodeReplayArtifact> ReadReplayFile(string path, CancellationToken cancellation)
     {
