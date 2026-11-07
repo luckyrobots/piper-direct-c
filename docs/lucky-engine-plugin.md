@@ -33,7 +33,7 @@ API; plugin authors still need only the published SDK, not engine source.
 2. Check **Follow simulation with this robot** for each participant. The saved
    checkboxes only select the group. The sidebar names every unready robot and
    its next action, including another selected robot's missing gripper
-   power or return from teaching.
+   power or return from teaching. See the [Follow readiness guide](follow-preparation.md).
 3. Check that every start-pose path is clear, then click the single sidebar
    **Follow simulation** button. The group becomes **Armed · press Play** while
    the editor stays in Edit. This action sends no arm or jaw target.
