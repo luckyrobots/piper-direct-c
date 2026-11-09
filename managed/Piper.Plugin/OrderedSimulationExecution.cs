@@ -4,6 +4,8 @@ namespace LuckyRobots.Piper.Plugin;
 /// of the source renderer's cadence. Endpoint barriers order every jaw event.</summary>
 public sealed class OrderedSimulationExecution
 {
+    /// <summary>Pika speed at or below which the jaws count as stationary.</summary>
+    public const double StationaryGripperSpeed = .02;
     public OrderedSimulationPath Path { get; }
     public OrderedSimulationPhase? ActivePhase { get; private set; }
     public OrderedSimulationTarget Target { get; private set; }
@@ -108,7 +110,7 @@ public sealed class OrderedSimulationExecution
         bool unconfirmedClose = ClosingContact(phase) && UnconfirmedOpening(hardware.GripperOpeningMm, phase.End.CommandOpeningMm);
         bool arrived = !QualifyingLostContact && ElapsedSeconds >= phase.DurationSeconds && armStationary &&
             Target.JointDegrees.Zip(hardware.JointDegrees, (target, actual) => Math.Abs(target - actual)).All(error => error <= .25) &&
-            Math.Abs(gripperSpeed) <= .02 && (unconfirmedClose ||
+            Math.Abs(gripperSpeed) <= StationaryGripperSpeed && (unconfirmedClose ||
                 Math.Abs(hardware.GripperOpeningMm - expected) <= OpeningArrivalToleranceMm &&
                 (!RequiresPhysicalContactCandidate || hardware.GripperOpeningMm - phase.End.CommandOpeningMm > 2));
         if (!arrived) settledBegan = double.NaN;
@@ -171,10 +173,10 @@ public sealed class OrderedSimulationExecution
             throw new InvalidOperationException("The jaw command changed before lost contact could be verified; following stopped.");
         if (now - contactLossBegan >= .250)
             throw new InvalidOperationException("Pika did not settle at its unchanged close command within 250ms after contact changed; following stopped.");
-        if (speed > .02 || opening > contactLossMinimum + 2 || opening < contactLossCommand - Pika.PikaProtocol.ArrivalToleranceMm)
+        if (speed > StationaryGripperSpeed || opening > contactLossMinimum + 2 || opening < contactLossCommand - Pika.PikaProtocol.ArrivalToleranceMm)
             throw new InvalidOperationException("Pika reversed away from its close endpoint or exceeded that endpoint while checking lost contact; following stopped.");
         contactLossMinimum = Math.Min(contactLossMinimum, opening);
-        bool settled = UnconfirmedOpening(opening, contactLossCommand) && Math.Abs(speed) <= .02;
+        bool settled = UnconfirmedOpening(opening, contactLossCommand) && Math.Abs(speed) <= StationaryGripperSpeed;
         if (!settled) contactLossSettledBegan = double.NaN;
         else if (double.IsNaN(contactLossSettledBegan))
         { contactLossSettledBegan = now; contactLossSettledFeedback = feedbackTime; }
@@ -193,7 +195,7 @@ public sealed class OrderedSimulationExecution
     public bool ReturnedHome(SimulationFollowHardware hardware, bool armStationary, double gripperSpeed) =>
         Path.Drained && CompletedCursor == Path.LastCursor && OrderedSimulationPath.PhaseKind(Path.LastSource?.Phase ?? "") == "finish" &&
         completedHomeCursor > 0 && completedHomeEpisode == Path.LastSource?.EpisodeId &&
-        hardware.FeedbackFresh && hardware.GripperFresh && armStationary && double.IsFinite(gripperSpeed) && Math.Abs(gripperSpeed) <= .02 &&
+        hardware.FeedbackFresh && hardware.GripperFresh && armStationary && double.IsFinite(gripperSpeed) && Math.Abs(gripperSpeed) <= StationaryGripperSpeed &&
         Target.JointDegrees.All(q => Math.Abs(q) <= .25) && hardware.JointDegrees.All(q => Math.Abs(q) <= .25) &&
         completedOpeningCommand is { } opened && lastClosingCommand is { } closed && opened > closed && Target.OpeningMm == opened &&
         resolvedOpening == opened && Math.Abs(hardware.GripperOpeningMm - opened) <= 2;

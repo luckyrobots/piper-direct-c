@@ -229,13 +229,16 @@ public static class SimulationFollowPolicy
             !sample.CommandDegrees.SequenceEqual(reference.CommandDegrees) || !sample.MeasuredDegrees.SequenceEqual(reference.MeasuredDegrees) ||
             sample.CommandOpeningMm != reference.CommandOpeningMm || sample.MeasuredOpeningMm != reference.MeasuredOpeningMm)
             throw new InvalidOperationException("The prepared first frame changed. Stop following and prepare a new start.");
-        if (!WithinStartTolerance(sample.CommandDegrees, sample.MeasuredDegrees, sample.CommandOpeningMm, sample.MeasuredOpeningMm))
+        if (!MatchesStart(sample.CommandDegrees, sample.MeasuredDegrees, sample.CommandOpeningMm, sample.MeasuredOpeningMm))
             throw new InvalidOperationException("The simulation's first-frame measurements do not match its actuator targets. Fix the simulated start pose before moving the real robot.");
     }
 
     /// <summary>Every joint within 1° and the jaws within 2 mm of a reference pose.</summary>
-    public static bool WithinStartTolerance(IReadOnlyList<double> joints, IReadOnlyList<double> reference, double openingMm, double referenceOpeningMm) =>
-        joints.Zip(reference, (a, b) => Math.Abs(a - b)).All(error => error <= StartJointToleranceDegrees) &&
+    public static bool MatchesStart(IReadOnlyList<double> joints, IReadOnlyList<double> reference, double openingMm, double referenceOpeningMm) =>
+        JointsMatchStart(joints, reference) && OpeningMatchesStart(openingMm, referenceOpeningMm);
+    public static bool JointsMatchStart(IReadOnlyList<double> joints, IReadOnlyList<double> reference) =>
+        joints.Zip(reference, (a, b) => Math.Abs(a - b)).All(error => error <= StartJointToleranceDegrees);
+    public static bool OpeningMatchesStart(double openingMm, double referenceOpeningMm) =>
         Math.Abs(openingMm - referenceOpeningMm) <= StartGripperToleranceMm;
 
     private static void ValidateFresh(SimulationFollowSample sample, long now, double requestDuration,
