@@ -8,7 +8,31 @@ namespace LuckyRobots.Piper.Plugin;
 
 public sealed partial class PipersPlugin
 {
-    private bool heightCheckActive, heightGuidePublished, heightStorageBlocked;
+    // Jaw-height check (Cal-D); heightFrozen is the pinned pose.
+    //   Inactive -> Live | Pinned | Saved   Check jaw height (a restored draft pose resumes)
+    //   Live -> Pinned                      Measure this pose, or a first tape entry
+    //   Pinned|Saved -> Pinned              Measure this pose again
+    //   Pinned -> Saved                     Save check
+    //   Pinned|Saved -> Live                Check another pose
+    //   any -> Inactive                     Stop height check, or a profile change
+    // Live has no pinned pose; Pinned and Saved have one. Inactive may keep the
+    // saved draft pose so the next Check jaw height resumes it.
+    private enum HeightCheckPhase { Inactive, Live, Pinned, Saved }
+    private HeightCheckPhase heightPhase;
+    // Kept under its old field name so the B3 workspace-page lines stay untouched.
+    private bool heightCheckActive => heightPhase != HeightCheckPhase.Inactive;
+    private void SetHeightPhase(HeightCheckPhase next)
+    {
+        Debug.Assert(next switch
+        {
+            HeightCheckPhase.Live => heightFrozen is null,
+            HeightCheckPhase.Pinned => heightFrozen is not null && !FrozenPoseInChecks,
+            HeightCheckPhase.Saved => heightFrozen is not null && FrozenPoseInChecks,
+            _ => true
+        }, "Jaw-height phase disagrees with its pinned pose.");
+        heightPhase = next;
+    }
+    private bool heightGuidePublished, heightStorageBlocked;
     private string heightProfile = "", heightMeasuredText = "", heightStatus = "Move to a few different heights and compare them with a tape measure.";
     private string heightIssue = "", heightGuideIssue = "", heightActionError = "";
     private sealed record LiveHeightPreview(HeightObservation Observation, long ReadAtTicks, double SourceAgeMilliseconds);
@@ -17,13 +41,16 @@ public sealed partial class PipersPlugin
     private long heightGuideAt, heightEpoch;
     private HeightCheck[] heightChecks = [];
     private Task? heightMaintenance;
+    // For DisposeAsync (B12): completes when no height-line request is in flight. Never faults.
+    private Task HeightMaintenanceIdle => heightMaintenance ?? Task.CompletedTask;
     private string HeightCheckPath => Path.Combine(RobotCalibrationDirectory, "height-checks.json");
-    private bool HeightFrozenSaved => heightFrozen is { } frozen && heightChecks.Any(c => c.Observation.CapturedAt == frozen.CapturedAt && c.Observation.Capture.PoseFingerprint == frozen.Capture.PoseFingerprint);
+    private bool HeightFrozenSaved => heightPhase == HeightCheckPhase.Saved || heightPhase == HeightCheckPhase.Inactive && FrozenPoseInChecks;
+    private bool FrozenPoseInChecks => heightFrozen is { } frozen && heightChecks.Any(c => c.Observation.CapturedAt == frozen.CapturedAt && c.Observation.Capture.PoseFingerprint == frozen.Capture.PoseFingerprint);
 
     private void LoadHeightChecks()
     {
         if (heightProfile == ActiveProfile.Id) return;
-        heightProfile = ActiveProfile.Id; heightChecks = []; heightLive = null; heightFrozen = null; heightMeasuredText = ""; heightCheckActive = heightStorageBlocked = false;
+        heightProfile = ActiveProfile.Id; heightChecks = []; heightLive = null; heightFrozen = null; heightMeasuredText = ""; heightStorageBlocked = false; SetHeightPhase(HeightCheckPhase.Inactive);
         heightIssue = heightGuideIssue = heightActionError = "";
         heightStatus = "Move to a few different heights and compare them with a tape measure.";
         try
@@ -105,6 +132,7 @@ public sealed partial class PipersPlugin
         var capture = await ReadCalibrationPose(identity, calibrationApplied, handGuiding: false, deadline.Token);
         if (!heightCheckActive || identity != HeightContext()) throw new InvalidOperationException("The robot changed while measuring. Check another pose.");
         heightFrozen = new(identity, calibrationDesk, capture, DateTimeOffset.UtcNow, Path.GetFileName(calibrationPath));
+        SetHeightPhase(HeightCheckPhase.Pinned);
         heightStatus = "Pose pinned. Keep it still and measure vertically from the desk to the midpoint where the closed jaw tips meet.";
         await SaveHeightChecks(cancellation);
     }
@@ -121,7 +149,8 @@ public sealed partial class PipersPlugin
                 if (heightCheckActive) await StopHeightCheck(cancellation);
                 else
                 {
-                    _ = HeightContext(); RequireCalibrationIdle(); heightCheckActive = true; heightLive = null; heightIssue = heightGuideIssue = "";
+                    _ = HeightContext(); RequireCalibrationIdle(); heightLive = null;
+                    SetHeightPhase(heightFrozen is null ? HeightCheckPhase.Live : FrozenPoseInChecks ? HeightCheckPhase.Saved : HeightCheckPhase.Pinned); heightIssue = heightGuideIssue = "";
                     Interlocked.Increment(ref heightEpoch);
                     if (!heightStorageBlocked) heightStatus = "Single-click the physical teach button for solid green, then move the arm by hand. Close the jaws and hold still when ready to measure.";
                 }
@@ -131,7 +160,7 @@ public sealed partial class PipersPlugin
             if (action == "pin") { heightMeasuredText = ""; await FreezeHeightPose(cancellation); }
             else if (action == "another")
             {
-                heightFrozen = null; heightMeasuredText = "";
+                heightFrozen = null; heightMeasuredText = ""; SetHeightPhase(HeightCheckPhase.Live);
                 heightStatus = "Live again. Move the arm by hand, then measure another pose.";
                 await SaveHeightChecks(cancellation);
             }
@@ -148,7 +177,7 @@ public sealed partial class PipersPlugin
             else if (action == "save")
             {
                 if (heightFrozen is not { } frozen) throw new InvalidOperationException("Hold still and Measure this pose first.");
-                if (HeightFrozenSaved) throw new InvalidOperationException("This check is already saved. Check another pose for a new measurement.");
+                if (heightPhase == HeightCheckPhase.Saved) throw new InvalidOperationException("This check is already saved. Check another pose for a new measurement.");
                 double measured = HeightValidation.ParseMeasurement(heightMeasuredText);
                 if (!HeightValidation.SameHeldPose(frozen, HeightContext(), Device()))
                     throw new InvalidOperationException("The arm moved after this pose was pinned. Return to that pose, or click Check another pose before measuring again.");
@@ -161,6 +190,7 @@ public sealed partial class PipersPlugin
                 heightChecks = [.. previous, check];
                 try { await SaveHeightChecks(cancellation); }
                 catch { heightChecks = previous; throw; }
+                SetHeightPhase(HeightCheckPhase.Saved);
                 double errorMm = check.ErrorMm;
                 double absoluteErrorMm = Math.Abs(errorMm);
                 double precisionMm = check.Observation.Desk.PrecisionMm;
@@ -299,7 +329,7 @@ public sealed partial class PipersPlugin
 
     private async Task StopHeightCheck(CancellationToken cancellation)
     {
-        heightCheckActive = false; heightLive = null; Interlocked.Increment(ref heightEpoch);
+        SetHeightPhase(HeightCheckPhase.Inactive); heightLive = null; Interlocked.Increment(ref heightEpoch);
         try { await ClearHeightGuide(cancellation); }
         catch (Exception error) when (!cancellation.IsCancellationRequested) { Trace.TraceWarning("Height line clear: {0}", error.Message); }
     }
