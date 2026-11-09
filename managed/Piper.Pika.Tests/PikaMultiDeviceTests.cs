@@ -90,6 +90,7 @@ internal static class PikaMultiDeviceTests
         var mapping = PikaSerialDevices.ParseVhciStatus(vhci);
         Check(mapping.Count == 2 && mapping["1-1"] == "11-4" && mapping["1-2"] == "15-4",
             "USBIP remote bus/port identity was confused with a local tty enumeration index.");
+        VerifyPikaUsbIdentity();
         if (OperatingSystem.IsLinux()) VerifySysfsFixture(vhci);
         using var usb = JsonDocument.Parse("""
             {"Devices":[{"InstanceId":"USB\\VID_1A86&PID_7522\\FIRST","BusId":"11-4","Description":"USB Serial (COM6)","IsForced":true,"ClientIPAddress":"192.168.1.2"},
@@ -232,6 +233,25 @@ internal static class PikaMultiDeviceTests
         }
     }
 
+    // The sysfs idVendor/idProduct pair, read from fake files on every OS.
+    private static void VerifyPikaUsbIdentity()
+    {
+        var directory = Directory.CreateTempSubdirectory("pika-usb-identity-");
+        try
+        {
+            string vendorFile = Path.Combine(directory.FullName, "idVendor"), productFile = Path.Combine(directory.FullName, "idProduct");
+            bool Matches(string vendor, string product)
+            {
+                File.WriteAllText(vendorFile, vendor); File.WriteAllText(productFile, product);
+                return PikaSerialDevices.IsPikaUsb(vendorFile, productFile);
+            }
+            Check(Matches("1a86\n", "7522\n") && Matches("1a86", "7522"), "The Pika CH340K sysfs identity was not recognized");
+            Check(!Matches("0403\n", "6001\n") && !Matches("1a86\n", "7523\n") && !Matches("1bcf\n", "7522\n") && !Matches("", ""),
+                "Another USB serial adapter was taken for a Pika gripper");
+        }
+        finally { directory.Delete(recursive: true); }
+    }
+
     private static void VerifySysfsFixture(string status)
     {
         string temporary = Path.Combine(Path.GetTempPath(), "pika-sysfs-test-" + Guid.NewGuid().ToString("N"));
@@ -243,13 +263,14 @@ internal static class PikaMultiDeviceTests
         Directory.CreateDirectory(controller); File.WriteAllText(Path.Combine(controller, "status"), status);
         try
         {
-            for (int i = 0; i < 2; i++)
+            // Two Pika CH340K adapters and one unrelated FTDI adapter (ttyUSB2).
+            for (int i = 0; i < 3; i++)
             {
                 string usb = Path.Combine(controller, "usb1", "1-" + (i + 1));
                 string tty = Path.Combine(usb, $"1-{i + 1}:1.0", "ttyUSB" + i, "tty", "ttyUSB" + i);
                 Directory.CreateDirectory(tty);
-                File.WriteAllText(Path.Combine(usb, "idVendor"), "1a86\n");
-                File.WriteAllText(Path.Combine(usb, "idProduct"), "7522\n");
+                File.WriteAllText(Path.Combine(usb, "idVendor"), i < 2 ? "1a86\n" : "0403\n");
+                File.WriteAllText(Path.Combine(usb, "idProduct"), i < 2 ? "7522\n" : "6001\n");
                 Directory.CreateSymbolicLink(Path.Combine(tty, "device"), "../../../ttyUSB" + i);
                 Directory.CreateSymbolicLink(Path.Combine(sys, "class/tty", "ttyUSB" + i), tty);
                 File.WriteAllText(Path.Combine(dev, "ttyUSB" + i), "fixture, not a serial port");
@@ -260,7 +281,7 @@ internal static class PikaMultiDeviceTests
             var found = PikaSerialDevices.EnumerateLinux(sys, dev).OrderBy(item => item.HostBusId).ToArray();
             Check(found.Length == 2 && found[0].Device == "/dev/pika/by-host/11-4" && found[1].Device == "/dev/pika/by-host/15-4" &&
                 found[0].SystemDevice.EndsWith("ttyUSB0", StringComparison.Ordinal) && found[1].SystemDevice.EndsWith("ttyUSB1", StringComparison.Ordinal),
-                "Real symlink/sysfs enumeration failed to preserve two physical host USB identities.");
+                "Real symlink/sysfs enumeration failed to preserve two physical host USB identities or listed a non-Pika adapter.");
             Check(!found[0].Aliases.Any(alias => alias.Contains("/by-id/", StringComparison.Ordinal)) &&
                 found[1].Aliases.Any(alias => alias.Contains("/by-id/", StringComparison.Ordinal)),
                 "Colliding by-id symlink was incorrectly assigned to both grippers.");
