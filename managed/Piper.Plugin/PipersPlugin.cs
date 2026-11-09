@@ -17,6 +17,12 @@ public sealed record Preferences(double Speed = 10, double Step = 1, double Tole
     RobotProfile[]? Robots = null, string ActiveRobotId = "", string SimulationTransport = SimulationTrajectoryTransport.PositionVelocity, bool ShowMeasuredGhosts = true,
     BenchReference? BenchReference = null);
 
+/// <summary>Why a /api/command is sent. Control needs this session's approval and the
+/// Controls page. Recovery covers the operator-acknowledged reset, verify and
+/// recover-at-pose steps; TeachingReturn covers teach-return. Each exemption applies
+/// only to those actions; any other action under them is checked as Control.</summary>
+internal enum CommandPurpose { Control, Recovery, TeachingReturn }
+
 public sealed partial class PipersPlugin : ILuckyPlugin
 {
     private const string Panel = "luckyrobots.pipers.controls";
@@ -107,6 +113,14 @@ public sealed partial class PipersPlugin : ILuckyPlugin
         return device;
     }
 
+    /// <summary>Fresh feedback for exactly the pinned profile, backend, CAN device and generation.</summary>
+    private JsonObject Device(RobotCommandScope expected, TelemetryReceipt? sourceReceipt = null)
+    {
+        if (ActiveProfile.Id != expected.ProfileId)
+            throw new InvalidOperationException("The selected robot changed; the previous confirmation no longer authorizes commands.");
+        return Device(expected.Device, expected.Generation, expected.Backend, sourceReceipt);
+    }
+
     private Task Watch(CancellationToken cancellation) => Task.WhenAll(
         ReadTelemetry(cancellation), ProcessTelemetry(cancellation),
         ArmHeartbeats(cancellation), PikaHeartbeats(cancellation), MonitorAssignedPikas(cancellation));
@@ -141,18 +155,20 @@ public sealed partial class PipersPlugin : ILuckyPlugin
         else if (node is JsonArray array) foreach (var child in array) Materialize(child);
     }
 
-    private async Task<JsonObject> Command(string action, JsonObject? fields, CancellationToken cancellation, bool recoveryAcknowledged = false, bool teachingAcknowledged = false,
-        string? expectedDeviceId = null, long? expectedGeneration = null, string? expectedToken = null, long? expectedPermissionEpoch = null, double? speedOverridePercent = null)
+    /// <param name="expected">The connection a prior confirmation authorized; null uses the current one.</param>
+    private async Task<JsonObject> Command(string action, JsonObject? fields, CancellationToken cancellation,
+        CommandPurpose purpose = CommandPurpose.Control, RobotCommandScope? expected = null, long? expectedPermissionEpoch = null,
+        double? speedOverridePercent = null)
     {
         long permissionEpoch = expectedPermissionEpoch ?? CommandAuthority.Epoch;
         cancellation.ThrowIfCancellationRequested();
-        expectedToken ??= token;
-        bool recoveryOnly = recoveryAcknowledged && action is "reset" or "verify-reset" or "verify-current" or "recover-at-pose";
+        string expectedToken = expected?.Backend ?? token;
+        bool recoveryOnly = purpose == CommandPurpose.Recovery && action is "reset" or "verify-reset" or "verify-current" or "recover-at-pose";
         bool releasingPower = action == "disable";
-        bool teachingOnly = teachingAcknowledged && action == "teach-return";
+        bool teachingOnly = purpose == CommandPurpose.TeachingReturn && action == "teach-return";
         if (Navigation.Page != WorkspacePage.Controls && !recoveryOnly && !teachingOnly && !releasingPower && action != "hold") throw new InvalidOperationException("Return to Controls before enabling or moving the real robot.");
         if (!approved && !recoveryOnly && !teachingOnly && !releasingPower) throw new InvalidOperationException("Use Enable robot and confirm the workspace is clear first.");
-        var device = Device(expectedDeviceId, expectedGeneration, expectedToken);
+        var device = expected is { } pinned ? Device(pinned) : Device(expectedToken: expectedToken);
         var scope = new RobotCommandScope(ActiveProfile.Id, expectedToken, device["id"]!.GetValue<string>(), device["generation"]!.GetValue<long>());
         if (GroupFollowActive && !releasingPower && action != "hold")
             throw new InvalidOperationException("Stop following in the left sidebar before changing arm control.");
@@ -461,20 +477,19 @@ public sealed partial class PipersPlugin : ILuckyPlugin
         finally { commands.Release(); }
     }
 
-    private async Task Enable(CancellationToken cancellation, bool includePika = true, string? expectedDeviceId = null,
-        long? expectedGeneration = null, string? expectedToken = null, long? expectedPermissionEpoch = null)
+    private async Task Enable(CancellationToken cancellation, bool includePika = true, RobotCommandScope? expected = null,
+        long? expectedPermissionEpoch = null)
     {
         long enableEpoch = expectedPermissionEpoch ?? CommandAuthority.Epoch;
-        expectedToken ??= token;
         if (calibrationOpen) throw new InvalidOperationException("Calibrate robot is read-only. Use Back to robot controls before enabling motors.");
-        var device = Device(expectedDeviceId, expectedGeneration, expectedToken);
-        expectedDeviceId ??= device["id"]!.GetValue<string>();
-        expectedGeneration ??= device["generation"]!.GetValue<long>();
+        var device = expected is { } pinned ? Device(pinned) : Device(expectedToken: token);
+        var scope = expected ?? new RobotCommandScope(ActiveProfile.Id, token, device["id"]!.GetValue<string>(), device["generation"]!.GetValue<long>());
+        string expectedToken = scope.Backend;
         JsonObject CheckEnableScope()
         {
             if (!approved || enableEpoch != CommandAuthority.Epoch)
                 throw new InvalidOperationException("Enable was cancelled by STOP or a control-scope change. No later power action will resume.");
-            var current = Device(expectedDeviceId, expectedGeneration, expectedToken);
+            var current = Device(scope);
             var teaching = TeachingState.Inspect(current);
             if (teaching.BlocksTargets) throw new InvalidOperationException(teaching.NextStep);
             return current;
@@ -483,11 +498,10 @@ public sealed partial class PipersPlugin : ILuckyPlugin
         if (includePika) { await ConfigureProfilePika(expectedToken, cancellation); CheckEnableScope(); }
         if (device["recovery_required"]?.GetValue<bool>() == true)
             await Command(device["reset_pending"]?.GetValue<bool>() == true ? "verify-reset" : "verify-current", null, cancellation,
-                expectedDeviceId: expectedDeviceId, expectedGeneration: expectedGeneration, expectedToken: expectedToken, expectedPermissionEpoch: enableEpoch);
+                expected: scope, expectedPermissionEpoch: enableEpoch);
         if (!device["joints"]!.AsArray().All(j => j?["enabled"]?.GetValue<bool>() == true))
         {
-            await Command("enable", null, cancellation, expectedDeviceId: expectedDeviceId, expectedGeneration: expectedGeneration,
-                expectedToken: expectedToken, expectedPermissionEpoch: enableEpoch);
+            await Command("enable", null, cancellation, expected: scope, expectedPermissionEpoch: enableEpoch);
             long request = CommandAuthority.Current.Lease?.Request ?? 0;
             long started = Stopwatch.GetTimestamp();
             while (true)

@@ -175,7 +175,7 @@ internal static class EmergencyStopTests
             fixture.Set("approved", true);
             fixture.Rpc.DelayCommand = true;
             Task pending = fixture.Invoke("Command", "jog", new JsonObject { ["joint"] = 6, ["delta_deg"] = 1.0 },
-                CancellationToken.None, false, false, null, null, null, null, null);
+                CancellationToken.None, CommandPurpose.Control, null, null, null);
             try
             {
                 await fixture.Rpc.CommandReached.Task.WaitAsync(TimeSpan.FromSeconds(1));
@@ -195,7 +195,7 @@ internal static class EmergencyStopTests
             fixture.Rpc.DelayConnect = true;
             fixture.Set("approved", true);
             await fixture.Commands.WaitAsync();
-            Task enable = fixture.Invoke("Enable", CancellationToken.None, true, null, null, null, null);
+            Task enable = fixture.Invoke("Enable", CancellationToken.None, true, null, null);
             try
             {
                 await fixture.Rpc.ConnectReached.Task.WaitAsync(TimeSpan.FromSeconds(1));
@@ -265,7 +265,7 @@ internal static class EmergencyStopTests
             telemetry.Publish(receipt with { State = snapshot, Sequence = 2 });
             fixture.Set("approved", true);
             fixture.Set("pikaOwned", true);
-            await fixture.Invoke("Enable", CancellationToken.None, true, null, null, null, null);
+            await fixture.Invoke("Enable", CancellationToken.None, true, null, null);
             check(fixture.Rpc.Routes.IsEmpty && fixture.Authority.Current.Approvals.Count == 1,
                 "An assigned Pika alias was found in telemetry but Enable reconfigured the already-owned canonical gripper");
         }

@@ -84,8 +84,7 @@ public sealed partial class PipersPlugin
             // await, without another UI round-trip before the one command.
             JsonObject current = await ReadyFrame();
             var result = await Command("teach-return", TeachingState.Inspect(current).ReturnFlags(), cancellation,
-                teachingAcknowledged: true, expectedDeviceId: expectedDevice, expectedGeneration: expectedGeneration,
-                expectedToken: expectedToken, expectedPermissionEpoch: expectedPermission);
+                CommandPurpose.TeachingReturn, new(expectedProfile, expectedToken, expectedDevice, expectedGeneration), expectedPermission);
             long request = result["request_id"]?.GetValue<long>() ?? 0;
             bool Completed(JsonObject device) => TeachingCanResume(device) && (request == 0 ||
                 device["motion"]?["request_id"]?.GetValue<long>() == request &&

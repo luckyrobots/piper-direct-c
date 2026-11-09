@@ -198,14 +198,13 @@ public sealed partial class PipersPlugin
                     bool teaching = view.NextAction == RecoveryWorkspaceAction.TeachReturn;
                     var flags = teaching ? TeachingState.Inspect(device).ReturnFlags()
                         : new JsonObject { ["button_off"] = true, ["same_pose_confirmed"] = true };
-                    await Command(view.Action!, flags, cancellation,
-                        recoveryAcknowledged: !teaching, teachingAcknowledged: teaching);
+                    await Command(view.Action!, flags, cancellation, teaching ? CommandPurpose.TeachingReturn : CommandPurpose.Recovery);
                     progress = "Restoring holding control at the measured pose. No homing, replay or power change.";
                     UpdateRecoveryGuide(guide => guide with { CommandSent = true });
                     break;
                 case RecoveryWorkspaceAction.VerifyReset:
                 case RecoveryWorkspaceAction.VerifyCurrent:
-                    await Command(view.Action!, null, cancellation, recoveryAcknowledged: true);
+                    await Command(view.Action!, null, cancellation, CommandPurpose.Recovery);
                     progress = "Controller recovery verification requested.";
                     break;
             }
@@ -269,7 +268,7 @@ public sealed partial class PipersPlugin
             if (GroupFollowActive || !ReferenceEquals(CurrentGuide?.Gate, gate) ||
                 !gate.Observe(RecoveryIdentity(device), TeachingState.Inspect(device), device["teaching"]?["can_recover_at_pose"]?.GetValue<bool>() == true)) return;
             await Command("recover-at-pose", new() { ["button_off"] = true, ["same_pose_confirmed"] = true }, cancellation,
-                recoveryAcknowledged: true, expectedPermissionEpoch: expectedPermission);
+                CommandPurpose.Recovery, expectedPermissionEpoch: expectedPermission);
             UpdateRecoveryGuide(current => current with { CommandSent = true, Message = "Restoring holding control at the measured pose · no power change, homing or replay" });
         }
         catch (InvalidOperationException error) { SetRecoveryGuideMessage(error.Message); }
@@ -320,17 +319,15 @@ public sealed partial class PipersPlugin
                     // Every command below still calls Device() and rejects stale
                     // evidence; only the runner's wait can consume a gap marker.
                     Volatile.Write(ref operation.ResetAt, action == "reset" ? Stopwatch.GetTimestamp() : 0);
-                    var result = await Command(action, null, ct, recoveryAcknowledged: action != "disable",
-                        expectedDeviceId: scope.Device, expectedGeneration: scope.Generation, expectedToken: scope.Backend,
-                        expectedPermissionEpoch: operation.Epoch);
+                    var result = await Command(action, null, ct, action == "disable" ? CommandPurpose.Control : CommandPurpose.Recovery,
+                        scope, operation.Epoch);
                     return new(result["request_id"]?.GetValue<long>() ?? 0, telemetry.Latest?.Sequence ?? 0, Stopwatch.GetTimestamp());
                 }
                 bool held = await SupportedStopRecovery.Run(Read, Send, async ct =>
                 {
                     _ = Read();
                     GrantRecoveryHolding(operation, ct);
-                    await Enable(ct, includePika: false, expectedDeviceId: scope.Device, expectedGeneration: scope.Generation,
-                        expectedToken: scope.Backend, expectedPermissionEpoch: operation.Epoch);
+                    await Enable(ct, includePika: false, scope, operation.Epoch);
                 }, Progress, operation.Token);
                 if (SameIdentity())
                 {

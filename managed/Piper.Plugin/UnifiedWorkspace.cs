@@ -159,8 +159,8 @@ public sealed partial class PipersPlugin
         var device = Device(scope.Device, scope.Generation, scope.Backend);
         if (scope != ControlScope(ActiveProfile, scope.Backend, device))
             throw new InvalidOperationException("Robot assignments changed during Enable. Confirm the current connection.");
-        await Enable(cancellation, expectedDeviceId: scope.Device, expectedGeneration: scope.Generation,
-            expectedToken: scope.Backend, expectedPermissionEpoch: expectedPermission);
+        await Enable(cancellation, expected: new(ActiveProfile.Id, scope.Backend, scope.Device, scope.Generation),
+            expectedPermissionEpoch: expectedPermission);
         if (link is null)
         {
             await PrimaryActionProgress("link-scene", "Matching measured feedback to the selected scene robot…", cancellation);

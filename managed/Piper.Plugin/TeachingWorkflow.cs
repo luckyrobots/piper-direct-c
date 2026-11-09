@@ -89,9 +89,8 @@ public sealed partial class PipersPlugin
                     expectedDevice + ":" + expectedGeneration + ":" + expectedToken))
                 {
                     attempting = true;
-                    await Command("teach-return", currentTeaching.ReturnFlags(), cancellation, teachingAcknowledged: true,
-                        expectedDeviceId: expectedDevice, expectedGeneration: expectedGeneration, expectedToken: expectedToken,
-                        expectedPermissionEpoch: permissionEpoch);
+                    await Command("teach-return", currentTeaching.ReturnFlags(), cancellation, CommandPurpose.TeachingReturn,
+                        new(ActiveProfile.Id, expectedToken, expectedDevice, expectedGeneration), permissionEpoch);
                     message = "Hand guiding finished · restoring CAN at the measured pose · previous targets discarded";
                 }
             }

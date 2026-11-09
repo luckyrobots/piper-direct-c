@@ -82,9 +82,9 @@ public sealed partial class PipersPlugin
                         if (step == "reset") Volatile.Write(ref operation.ResetAt, Stopwatch.GetTimestamp());
                         else if (step != "verify-reset") Volatile.Write(ref operation.ResetAt, 0);
                         if (step is "enable" or "move-to-zero") GrantRecoveryHolding(operation, stepCancellation);
-                        var reply = await Command(step, null, stepCancellation, recoveryAcknowledged: step is "reset" or "verify-reset" or "verify-current",
-                            expectedDeviceId: deviceId, expectedGeneration: generation, expectedToken: backend,
-                            expectedPermissionEpoch: operation.Epoch, speedOverridePercent: RecoveryHome.SpeedPercent);
+                        var reply = await Command(step, null, stepCancellation,
+                            step is "reset" or "verify-reset" or "verify-current" ? CommandPurpose.Recovery : CommandPurpose.Control,
+                            operation.Scope, operation.Epoch, RecoveryHome.SpeedPercent);
                         var receipt = telemetry.Latest;
                         long request = reply["request_id"]?.GetValue<long>() ?? before.Motion["request_id"]?.GetValue<long>() ?? 0;
                         return new(request, receipt?.Sequence ?? 0, Stopwatch.GetTimestamp(), reply["request_id"] is not null);

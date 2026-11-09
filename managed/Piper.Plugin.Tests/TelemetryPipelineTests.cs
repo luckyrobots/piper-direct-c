@@ -204,7 +204,7 @@ internal static class TelemetryPipelineTests
             await Until(() => Get<LatestTelemetry>("telemetry").Latest!.BackendToken == "session-b" && Get<LatestTelemetry>("telemetry").Latest!.IsFresh(Stopwatch.GetTimestamp()), "Fixture did not restore fresh input for acknowledgement test");
             rpc.DelayedCommand = new(TaskCreationOptions.RunContinuationsAsynchronously);
             var pending = (Task)typeof(PipersPlugin).GetMethod("Command", flags)!.Invoke(plugin,
-                ["jog", new JsonObject { ["joint"] = 6, ["delta_deg"] = 1.0 }, lifetime.Token, false, false, null, null, null, null, null])!;
+                ["jog", new JsonObject { ["joint"] = 6, ["delta_deg"] = 1.0 }, lifetime.Token, CommandPurpose.Control, null, null, null])!;
             await Until(() => rpc.CommandReached.Task.IsCompleted, "Synthetic authorized action did not reach the fake transport");
             typeof(PipersPlugin).GetMethod("DisarmTelemetryTargets", flags)!.Invoke(plugin, ["Fixture telemetry loss", false, null, false]);
             rpc.DelayedCommand.SetResult(new ControlReply { Status = 202, Json = "{\"request_id\":99,\"message\":\"accepted\"}" });
@@ -216,7 +216,7 @@ internal static class TelemetryPipelineTests
             long previousPermission = authority.Epoch - 1;
             pending = (Task)typeof(PipersPlugin).GetMethod("Command", flags)!.Invoke(plugin,
                 ["teach-return", new JsonObject { ["button_off"] = true, ["same_pose_confirmed"] = true }, lifetime.Token,
-                    false, true, null, null, null, previousPermission, null])!;
+                    CommandPurpose.TeachingReturn, null, previousPermission, null])!;
             discarded = false;
             try { await pending; } catch (InvalidOperationException) { discarded = true; }
             check(discarded && rpc.Routes.Count == sentBefore,
