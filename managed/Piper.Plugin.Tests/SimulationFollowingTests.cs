@@ -972,9 +972,8 @@ internal static partial class SimulationFollowingTests
         public void UseUiDispatcher()
         {
             var epoch = typeof(PipersPlugin).GetProperty("ControlInputEpoch", Fields)!;
-            var needsPermission = typeof(PipersPlugin).GetMethod("UiEventNeedsPermission", Fields)!;
             Set("uiEvents", new UiEventDispatch((input, cancellation) => Invoke("HandleEventCoreAsync", input, cancellation),
-                () => (long)epoch.GetValue(plugin)!, input => (bool)needsPermission.Invoke(plugin, [input])!,
+                () => (long)epoch.GetValue(plugin)!,
                 error => throw new InvalidOperationException("Unexpected fixture UI actor failure", error),
                 discarded: (input, _) => DiscardedUiEvents.Enqueue(input)));
         }

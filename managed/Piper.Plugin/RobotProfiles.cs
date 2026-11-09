@@ -156,7 +156,6 @@ public sealed partial class PipersPlugin
         CaptureWorkspacePatchScope() is { } scope
             ? PublishWorkspacePatch(scope, patches, cancellation)
             : Task.CompletedTask;
-    private string UnscopeEvent(string id) => UnscopePublishedWorkspaceEvent(id);
 
     private Widget RobotSidebar()
     {

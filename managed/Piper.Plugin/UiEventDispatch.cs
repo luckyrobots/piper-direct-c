@@ -7,6 +7,12 @@ namespace LuckyRobots.Piper.Plugin;
 
 /// <summary>Plugin-owned serial UI actor. Enqueue never awaits the previous action, so the
 /// SDK reader can deliver STOP through its separate immediate handler.</summary>
+/// <remarks>Plugin-6 states, all read and written under <c>gate</c>:
+/// Open (accepting) · Running(normal | urgent: <c>active</c>, <c>activeUrgent</c>) ·
+/// UrgentPending (<c>urgent</c>) · Closing (<c>stopTask</c> set, queue completed) ·
+/// Closed (<c>stopping</c> cancelled; the worker has exited or is exiting) · Disposed.
+/// Open → Closing happens only in <see cref="StopAsync"/>; an external cancellation
+/// goes straight to Closed. Work is accepted only while Open.</remarks>
 public sealed class UiEventDispatch : IAsyncDisposable
 {
     private sealed record Pending(UiEvent Event, long Epoch, bool PermissionBound, bool WakeOnly = false, bool Urgent = false);
@@ -14,29 +20,27 @@ public sealed class UiEventDispatch : IAsyncDisposable
     private readonly CancellationTokenSource stopping;
     private readonly Func<UiEvent, CancellationToken, Task> handler;
     private readonly Func<long> currentEpoch;
-    private readonly Func<UiEvent, bool> permissionBound;
     private readonly Action<Exception> reportError;
     private readonly Action<UiEvent, string>? discarded;
     private readonly object gate = new();
     private readonly Task worker;
     private CancellationTokenSource? active;
-    private bool activePermissionBound, activeUrgent, closed, disposed;
+    private bool activePermissionBound, activeUrgent, disposed;
     private long activeEpoch;
     private Task? stopTask;
     private Pending? urgent;
     private readonly TimeSpan actionTimeout;
 
     public UiEventDispatch(Func<UiEvent, CancellationToken, Task> handler, Func<long> currentEpoch,
-        Func<UiEvent, bool> permissionBound, Action<Exception> reportError,
+        Action<Exception> reportError,
         CancellationToken cancellation = default, int capacity = 32,
         Action<UiEvent, string>? discarded = null, TimeSpan? actionTimeout = null)
     {
         ArgumentNullException.ThrowIfNull(handler);
         ArgumentNullException.ThrowIfNull(currentEpoch);
-        ArgumentNullException.ThrowIfNull(permissionBound);
         ArgumentNullException.ThrowIfNull(reportError);
         if (capacity is < 1 or > 32) throw new ArgumentOutOfRangeException(nameof(capacity));
-        this.handler = handler; this.currentEpoch = currentEpoch; this.permissionBound = permissionBound;
+        this.handler = handler; this.currentEpoch = currentEpoch;
         this.reportError = reportError; this.discarded = discarded;
         this.actionTimeout = actionTimeout ?? TimeSpan.FromSeconds(60);
         if (this.actionTimeout <= TimeSpan.Zero || this.actionTimeout > TimeSpan.FromMinutes(5))
@@ -50,40 +54,37 @@ public sealed class UiEventDispatch : IAsyncDisposable
         worker = Task.Run(RunAsync);
     }
 
+    // Called under gate.
+    private bool Open => stopTask is null && !stopping.IsCancellationRequested;
+
+    // The SDK is free to retire its deserialization document when Enqueue returns.
+    private static UiEvent Own(UiEvent input) =>
+        input with { Value = input.Value.ValueKind == JsonValueKind.Undefined ? default : input.Value.Clone() };
+
     /// <summary>Returns false when full/stopped. The caller can report that the gesture was not
-    /// accepted. No producer waits or unbounded task is created for a queued event.</summary>
-    public bool Enqueue(UiEvent input, long capturedEpoch)
+    /// accepted. No producer waits or unbounded task is created for a queued event.
+    /// A <paramref name="permissionBound"/> event is discarded at dequeue if the control
+    /// epoch changed after <paramref name="capturedEpoch"/>.</summary>
+    public bool Enqueue(UiEvent input, long capturedEpoch, bool permissionBound)
     {
         ArgumentNullException.ThrowIfNull(input);
-        return Enqueue(input, capturedEpoch, permissionBound(input));
-    }
-
-    internal bool Enqueue(UiEvent input, long capturedEpoch, bool guarded)
-    {
-        lock (gate)
-        {
-            if (closed || stopping.IsCancellationRequested) return false;
-        }
-        // The SDK is free to retire its deserialization document when this call returns.
-        UiEvent owned = input with { Value = input.Value.ValueKind == JsonValueKind.Undefined ? default : input.Value.Clone() };
-        lock (gate)
-        {
-            if (closed || stopping.IsCancellationRequested) return false;
-            return queue.Writer.TryWrite(new(owned, capturedEpoch, guarded));
-        }
+        UiEvent owned = Own(input);
+        lock (gate) return Open && queue.Writer.TryWrite(new(owned, capturedEpoch, permissionBound));
     }
 
     /// <summary>Retire a pending operation before a power-release request. The same
-    /// worker still owns execution, so cancelled commands drain before Disable runs.</summary>
+    /// worker still owns execution, so cancelled commands drain before Disable runs.
+    /// Releasing power is never permission-bound: it must survive the epoch change
+    /// that retires the action it preempts.</summary>
     public bool EnqueueUrgent(UiEvent input, long capturedEpoch)
     {
         ArgumentNullException.ThrowIfNull(input);
-        UiEvent owned = input with { Value = input.Value.ValueKind == JsonValueKind.Undefined ? default : input.Value.Clone() };
+        UiEvent owned = Own(input);
         CancellationTokenSource? cancel;
         lock (gate)
         {
-            if (closed || stopping.IsCancellationRequested || urgent is not null || activeUrgent) return false;
-            urgent = new(owned, capturedEpoch, permissionBound(input), Urgent: true);
+            if (!Open || urgent is not null || activeUrgent) return false;
+            urgent = new(owned, capturedEpoch, PermissionBound: false, Urgent: true);
             cancel = active;
             // A full channel already wakes the worker. With an empty channel this
             // marker wakes it without executing a second copy of the urgent event.
@@ -117,7 +118,6 @@ public sealed class UiEventDispatch : IAsyncDisposable
         lock (gate)
         {
             if (stopTask is not null) return stopTask;
-            closed = true;
             queue.Writer.TryComplete();
             // Cancellation callbacks must never run while gate is held. A handler
             // must honor this token; release of motor ownership awaits the worker.
@@ -140,7 +140,7 @@ public sealed class UiEventDispatch : IAsyncDisposable
                     bool reject, preempt;
                     lock (gate)
                     {
-                        reject = closed || stopping.IsCancellationRequested;
+                        reject = !Open;
                         preempt = !pending.Urgent && urgent is not null;
                         if (!reject)
                         {
@@ -181,7 +181,8 @@ public sealed class UiEventDispatch : IAsyncDisposable
         catch (OperationCanceledException) when (stopping.IsCancellationRequested) { }
         finally
         {
-            lock (gate) { closed = true; urgent = null; }
+            // However the worker ended, the actor no longer accepts work.
+            lock (gate) { urgent = null; stopTask ??= Task.CompletedTask; }
             queue.Writer.TryComplete();
             while (queue.Reader.TryRead(out _)) { }
         }

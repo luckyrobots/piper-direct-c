@@ -101,7 +101,7 @@ public sealed partial class PipersPlugin
         finally { workspacePublicationGate.Release(); }
     }
 
-    private string UnscopePublishedWorkspaceEvent(string wireId, string? profileId = null)
+    internal string UnscopePublishedWorkspaceEvent(string wireId, string? profileId = null)
     {
         var published = Volatile.Read(ref publishedWorkspaceView);
         string id = WorkspaceEventScope.Unwrap(published?.Epoch ?? Interlocked.Read(ref workspaceViewEpoch), profileId ?? ActiveProfile.Id, wireId);

@@ -59,7 +59,7 @@ internal static class RecoveryHomeUiTests
         Task pump = Task.CompletedTask;
         await using var dispatch = new UiEventDispatch((input, cancellation) =>
                 (Task)typeof(PipersPlugin).GetMethod("HandleEventCoreAsync", fields)!.Invoke(plugin, [input, cancellation])!,
-            () => plugin.CommandAuthority.Epoch, _ => true, errors.Enqueue);
+            () => plugin.CommandAuthority.Epoch, errors.Enqueue);
         Set("uiEvents", dispatch);
         try
         {

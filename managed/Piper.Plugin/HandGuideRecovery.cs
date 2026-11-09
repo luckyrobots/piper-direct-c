@@ -176,10 +176,7 @@ public sealed partial class PipersPlugin
                     break;
                 case RecoveryWorkspaceAction.VerifyReset:
                 case RecoveryWorkspaceAction.VerifyCurrent:
-                    var result = await Command(view.Action!, null, cancellation, recoveryAcknowledged: true);
-                    Interlocked.Exchange(ref recoveryRequestId, result["request_id"]?.GetValue<long>() ?? 0);
-                    Interlocked.Exchange(ref recoveryAcknowledgedSequence, telemetry.Latest?.Sequence ?? 0);
-                    Interlocked.Exchange(ref recoveryAcknowledgedTicks, Stopwatch.GetTimestamp());
+                    await Command(view.Action!, null, cancellation, recoveryAcknowledged: true);
                     handGuideRecoveryMessage = "Controller recovery verification requested.";
                     break;
             }

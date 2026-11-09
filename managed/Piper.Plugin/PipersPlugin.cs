@@ -83,7 +83,7 @@ public sealed partial class PipersPlugin : ILuckyPlugin
         // during startup is queued instead of running a full handler inline on
         // the SDK reader thread, where it would delay a following STOP.
         uiEvents = new(HandleEventCoreAsync, () => ControlInputEpoch,
-            UiEventNeedsPermission, error => { uiActionError = message = error.Message; Trace.TraceWarning("UI action: {0}", error.Message); }, shutdown.Token);
+            error => { uiActionError = message = error.Message; Trace.TraceWarning("UI action: {0}", error.Message); }, shutdown.Token);
         await Render(cancellation);
         passiveMeasuredTrackingStarted = true;
         worker = Watch(shutdown.Token);
@@ -242,9 +242,7 @@ public sealed partial class PipersPlugin : ILuckyPlugin
         await HandleEventCoreAsync(input, cancellation);
     }
 
-    private bool UiEventNeedsPermission(UiEvent input) => ControlEventNeedsPermission(UnscopeEvent(input.WidgetId));
-
-    private static bool ControlEventNeedsPermission(string id)
+    internal static bool ControlEventNeedsPermission(string id)
     {
         // Releasing power is not a resumable movement target. It must survive
         // the epoch change used to retire an active simulation follower first.
@@ -256,7 +254,7 @@ public sealed partial class PipersPlugin : ILuckyPlugin
 
     private async Task HandleEventCoreAsync(UiEvent input, CancellationToken cancellation)
     {
-        string queued = UnscopeEvent(input.WidgetId);
+        string queued = UnscopePublishedWorkspaceEvent(input.WidgetId);
         if (queued.Length == 0) return;
         if (CurrentRecovery is not null && queued != "disable")
         {
@@ -267,7 +265,7 @@ public sealed partial class PipersPlugin : ILuckyPlugin
         await commands.WaitAsync(cancellation);
         try
         {
-            string id = UnscopeEvent(input.WidgetId);
+            string id = UnscopePublishedWorkspaceEvent(input.WidgetId);
             if (id.Length == 0) return; // Late gesture from a previously selected robot.
             uiActionError = "";
             if (id.StartsWith("group.follow.", StringComparison.Ordinal))
@@ -285,7 +283,6 @@ public sealed partial class PipersPlugin : ILuckyPlugin
                 throw new InvalidOperationException("Stop following in the left sidebar before changing robot controls or assignments.");
             if (id.StartsWith("global.", StringComparison.Ordinal))
             { await GlobalSettingsEvent(id[7..], input.Value, cancellation); await Update(cancellation); return; }
-            if (id == "recovery.guide.cancel") { CancelHandGuideRecovery(); await Update(cancellation); return; }
             if (Navigation.Page != WorkspacePage.Controls && WorkspaceCommandPolicy.RequiresControls(id)) throw new InvalidOperationException("Return to Controls before enabling or moving the robot.");
             if (id.StartsWith("workspace.", StringComparison.Ordinal))
             {
@@ -613,8 +610,7 @@ public sealed partial class PipersPlugin : ILuckyPlugin
         var profile = RobotProfileRouting.Active(settings);
         var patches = new Dictionary<string, JsonObject>
         {
-            ["status"] = new() { ["text"] = ownedBackend is null ? message : message + " · controller closes with Pipers" }, ["link"] = new() { ["text"] = link is null ? "Link robot" : "Unlink robot" },
-            ["link.status"] = new() { ["text"] = link is null ? "Unlinked · use Edit mode · calibration not verified" : $"{(linkCommandsEnabled ? "Linked" : "Tracking only — motion blocked")} · joint error {linkErrorDegrees?.ToString("F4") ?? "—"}° · {link.GripperStatus} · {sceneTrackingStatus} · calibration unverified" }
+            ["link"] = new() { ["text"] = link is null ? "Link robot" : "Unlink robot" }
         };
         patches["safety"] = new() { ["visible"] = scope.View?.Confirmation is { } presented &&
             ReferenceEquals(CommandAuthority.Current.Confirmation, presented) };
@@ -640,7 +636,7 @@ public sealed partial class PipersPlugin : ILuckyPlugin
             : device?["recovery_required"]?.GetValue<bool>() == true ? "Stopped · recovery required" : device?["range_recovery"]?["required"]?.GetValue<bool>() == true ? "Range overrun · move the affected joint inward or Move all to zero" : "Idle" };
         patches["motion.hold"] = new() { ["enabled"] = ownMove && joints?.Any(j => j?["target_deg"] is not null) == true };
         bool canTeleoperate = movable && link is not null && linkCommandsEnabled && device?["range_recovery"]?["required"]?.GetValue<bool>() != true && joints?.All(j => j?["enabled"]?.GetValue<bool>() == true) == true;
-        patches["teleoperate.toggle"] = new() { ["text"] = teleoperating ? "Pause Teleoperate" : "Start Teleoperate", ["enabled"] = teleoperating || canTeleoperate };
+        patches["teleoperate.toggle"] = new() { ["enabled"] = teleoperating || canTeleoperate };
         for (int i = 1; i <= 6; i++) patches["teleoperate.joint." + i] = new() {
             ["text"] = teleoperating && teleoperationJoint == (link?.JointPrefix ?? profile.RobotJointPrefix) + "joint" + i ? "[J" + i + "]" : "J" + i,
             ["enabled"] = teleoperating && canTeleoperate };
@@ -668,14 +664,8 @@ public sealed partial class PipersPlugin : ILuckyPlugin
         bool manualPika = scope.Context.Page == WorkspacePage.Controls && ManualPikaBlocker(device, pika as JsonObject) is null;
         patches["pika.target"] = new() { ["value"] = opening ?? 0, ["enabled"] = manualPika };
         patches["pika.monitor"] = new() { ["text"] = pikaMonitorStatus };
-        bool limitsFresh = joints?.All(j => j?["limits_fresh"]?.GetValue<bool>() == true && j["max_speed_rad_s"]?.GetValue<double>() > 0) == true;
-        double speed = limitsFresh ? joints!.Min(j => j!["max_speed_rad_s"]!.GetValue<double>()) * 180 / Math.PI : 0;
-        patches["speed.actual"] = new() { ["text"] = limitsFresh ? $"{settings.Speed:F0}% · {speed * settings.Speed / 100:F2}°/s target ceiling · measured per-joint limit · jog {settings.Step:F1}° · tolerance {settings.Tolerance:F1}°" : "Waiting for fresh robot speed limits" };
         bool needsRecovery = device?["recovery_required"]?.GetValue<bool>() == true || device?["reset_pending"]?.GetValue<bool>() == true;
         var recovery = needsRecovery ? RecoveryPlan.Inspect(device!, snapshot?["motion"]?["active"]?.GetValue<bool>() == true) : null;
-        patches["incident"] = new() { ["text"] = recovery?.Diagnosis ?? "" };
-        patches["recovery.next"] = new() { ["text"] = recovery?.NextStep ?? "" };
-        patches["recovery"] = new() { ["visible"] = needsRecovery };
         patches["recovery.run"] = new() { ["enabled"] = recovery?.Action is not null && !recoveryInProgress,
             ["text"] = recoveryInProgress ? "Verifying recovery…" : recovery?.ButtonText ?? "Verify current state (no movement)" };
         foreach (string id in new[] { "bench", "gripper", "depth" })

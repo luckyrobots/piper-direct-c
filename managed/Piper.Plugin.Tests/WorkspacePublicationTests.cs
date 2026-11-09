@@ -160,7 +160,7 @@ internal static class WorkspacePublicationTests
         public T Get<T>(string name) => (T)typeof(PipersPlugin).GetField(name, Flags)!.GetValue(plugin)!;
         public void Set(string name, object value) => typeof(PipersPlugin).GetField(name, Flags)!.SetValue(plugin, value);
         public string Wire(string id) => WorkspaceEventScope.Wrap(Epoch, RobotProfileRouting.Active(Get<Preferences>("preferences")).Id, id);
-        public string Unscope(string id) => (string)typeof(PipersPlugin).GetMethod("UnscopeEvent", Flags)!.Invoke(plugin, [id])!;
+        public string Unscope(string id) => plugin.UnscopePublishedWorkspaceEvent(id);
         public Task Render(CancellationToken ct = default) => (Task)typeof(PipersPlugin).GetMethod("Render", Flags)!.Invoke(plugin, [ct])!;
         public Task Navigate(string action, CancellationToken ct) => (Task)typeof(PipersPlugin).GetMethod("WorkspaceEvent", Flags)!.Invoke(plugin, [action, ct])!;
         public Task Update() => (Task)typeof(PipersPlugin).GetMethod("Update", Flags)!.Invoke(plugin, [CancellationToken.None])!;

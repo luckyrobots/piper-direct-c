@@ -75,7 +75,7 @@ public sealed partial class PipersPlugin
             {
                 await commands.WaitAsync(operation.Token); entered = true;
                 await SaveProgress(recoveryHomeProgress);
-                await RecoveryHome.Run(true, deviceId, generation, owner, () => HomeSnapshot(operation),
+                await RecoveryHome.Run(deviceId, generation, owner, () => HomeSnapshot(operation),
                     async (step, stepCancellation) =>
                     {
                         var before = HomeSnapshot(operation);

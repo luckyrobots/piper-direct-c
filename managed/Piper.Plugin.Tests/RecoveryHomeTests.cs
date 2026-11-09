@@ -58,11 +58,6 @@ internal static class RecoveryHomeTests
             check(fixture.Actions.SequenceEqual(["reset", "enable", "move-to-zero"]),
                 "Explicit recovery of retired STOP/residual-teach failed or retried a stage");
         }
-        {
-            var fixture = new Fixture();
-            check(await Failure(() => fixture.Run(acknowledged: false)) is InvalidOperationException && fixture.Actions.Count == 0,
-                "Recovery inferred physical support instead of requiring the one labelled resting/clear action");
-        }
         foreach (var (name, mutate) in new (string, Action<Fixture>)[]
         {
             ("stale arm", f => f.Device["fresh"] = false),
@@ -212,8 +207,8 @@ internal static class RecoveryHomeTests
             if (!FreezeAfterAcknowledgement) { ++sequence; ++ticks; }
             return new(Device, Motion, Phase, "Fixture controller stopped", sequence, ticks);
         }
-        public Task Run(bool acknowledged = true, CancellationToken cancellation = default, int timeout = 100) =>
-            RecoveryHome.Run(acknowledged, "resting-arm", 7, "recovery-fixture", Snapshot, (step, cancel) =>
+        public Task Run(CancellationToken cancellation = default, int timeout = 100) =>
+            RecoveryHome.Run("resting-arm", 7, "recovery-fixture", Snapshot, (step, cancel) =>
             {
                 cancel.ThrowIfCancellationRequested(); Actions.Add(step);
                 bool stateful = step is not ("verify-reset" or "verify-current");
@@ -236,6 +231,6 @@ internal static class RecoveryHomeTests
             {
                 if (ProgressFailure) throw new IOException("Fixture report storage unavailable");
                 Progress.Add(stage); return Task.CompletedTask;
-            }, cancellation, timeout, timeout, timeout);
+            }, cancellation, new(timeout, timeout, timeout));
     }
 }

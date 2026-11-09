@@ -6,6 +6,8 @@ namespace LuckyRobots.Piper.Plugin;
 public sealed record RecoveryHomeSnapshot(JsonObject Device, JsonObject Motion, string Phase, string Message,
     long Sequence, long CapturedTicks);
 public sealed record RecoveryHomeAcknowledgement(long RequestId, long Sequence, long Ticks, bool Stateful = true);
+/// <summary>Feedback deadlines per recovery stage; fixtures shorten them.</summary>
+public sealed record RecoveryHomeDeadlines(int ResetMilliseconds = 6000, int EnableMilliseconds = 10000, int HomeMilliseconds = 60000);
 
 /// <summary>One explicit resting-arm recovery goal. Never retries a stage or restores an interrupted target.</summary>
 public static class RecoveryHome
@@ -63,15 +65,17 @@ public static class RecoveryHome
                 j["fault"]?.GetValue<int>() == 0 && j["enabled"]?.GetValue<bool>() == enabled);
     }
 
-    public static async Task Run(bool restingAndClearAcknowledged, string deviceId, long generation, string owner,
+    /// <summary>Runs after the operator's labelled "arm resting, path clear"
+    /// action; that click is the physical-support acknowledgement.</summary>
+    public static async Task Run(string deviceId, long generation, string owner,
         Func<RecoveryHomeSnapshot> snapshot,
         Func<string, CancellationToken, Task<RecoveryHomeAcknowledgement>> action,
         Func<long, CancellationToken, Task> stopOwnedRequest, Func<string, Task> progress,
-        CancellationToken cancellation, int resetTimeoutMilliseconds = 6000, int enableTimeoutMilliseconds = 10000,
-        int homeTimeoutMilliseconds = 60000)
+        CancellationToken cancellation, RecoveryHomeDeadlines? deadlines = null)
     {
-        if (!restingAndClearAcknowledged)
-            throw new InvalidOperationException("The arm must already rest securely on the desk or another support, with its route to zero clear. Motor flags cannot establish physical support.");
+        deadlines ??= new();
+        int resetTimeoutMilliseconds = deadlines.ResetMilliseconds, enableTimeoutMilliseconds = deadlines.EnableMilliseconds,
+            homeTimeoutMilliseconds = deadlines.HomeMilliseconds;
         RecoveryHomeSnapshot Current()
         {
             cancellation.ThrowIfCancellationRequested();
