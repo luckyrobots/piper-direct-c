@@ -53,13 +53,13 @@ internal sealed class HostControlDispatcher(ControllerService controller, PikaSe
         if (!SessionOwnerGuard.Allows(sessionOwner, route, input)) return new(Error: SessionOwnerGuard.Denied);
         try
         {
-            if (route == BackendMaintenance.RestartRoute)
+            if (route == HostRoutes.Restart)
             {
                 var restart = maintenance.Prepare(input);
                 if (restart.Ok) maintenance.Commit();
                 return new(Restart: restart);
             }
-            if (transport == HostControlTransport.Http && route == "/api/shutdown")
+            if (transport == HostControlTransport.Http && route == HostRoutes.Shutdown)
                 return maintenance.PrepareShutdown() is { } error ? new(Error: error) : new(Shutdown: true);
         }
         // The exit checks read controller state; both transports reject alike.
@@ -81,12 +81,12 @@ internal sealed class HostControlDispatcher(ControllerService controller, PikaSe
     private async Task<HostControlResult> DispatchAsync(string route, string body, JsonElement input,
         HostControlTransport transport, CancellationToken cancellation)
     {
-        if (route == CoordinatedStopRequest.Route)
+        if (route == HostRoutes.CoordinatedStop)
         {
             var stopped = await CoordinatedStopRequest.ExecuteAsync(controller, pika, input);
             return new(stopped.Ok ? 200 : 409, stopped);
         }
-        if (!route.StartsWith("/api/pika/", StringComparison.Ordinal))
+        if (!HostRoutes.IsPika(route))
         {
             var native = controller.Execute(route, body, cancellation);
             return new(native.Status, RawJson: native.Json);
@@ -95,10 +95,10 @@ internal sealed class HostControlDispatcher(ControllerService controller, PikaSe
         bool grpc = transport == HostControlTransport.Grpc;
         if (simulated)
         {
-            if (grpc && route == "/api/pika/devices") return new(200, EmptySimulatedInventory);
+            if (grpc && route == HostRoutes.PikaDevices) return new(200, EmptySimulatedInventory);
             return new(409, Error: "Pika hardware is disabled in simulation");
         }
-        if (route == "/api/pika/configure")
+        if (route == HostRoutes.PikaConfigure)
         {
             string activeMessage = grpc ? "Finish the active arm movement before changing Pika assignment" :
                 "Finish active arm movements before changing Pika assignment";
@@ -107,7 +107,7 @@ internal sealed class HostControlDispatcher(ControllerService controller, PikaSe
             return new(200, await pika.ConfigureAsync(input, cancellation,
                 commit => controller.CommitWhenArmIdle(commit, activeMessage, cancellation)));
         }
-        return new(200, await pika.ExecuteAsync(route[10..], input, cancellation));
+        return new(200, await pika.ExecuteAsync(HostRoutes.PikaAction(route), input, cancellation));
     }
 
     internal static bool IsControlOperationError(Exception error) =>

@@ -5,8 +5,6 @@ namespace LuckyRobots.Piper.Host;
 
 internal static class CoordinatedStopRequest
 {
-    internal const string Route = "/api/stop/coordinated";
-
     internal static Task<CoordinatedStopResult> ExecuteAsync(ControllerService controller, PikaSessionRegistry pika,
         JsonElement input)
     {
@@ -17,7 +15,7 @@ internal static class CoordinatedStopRequest
         return CoordinatedStop.RunAsync(
             _ =>
             {
-                var arm = controller.Execute("/api/stop", body);
+                var arm = controller.Execute(HostRoutes.Stop, body);
                 return Task.FromResult(new StopChannelResult(arm.Status is >= 200 and < 300, arm.Json));
             },
             async cancellation =>

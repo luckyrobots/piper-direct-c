@@ -20,7 +20,7 @@ public sealed record BackendRestartResult(
 /// gripper power; native persisted STOP/recovery records are deliberately unchanged.</summary>
 public sealed class BackendMaintenance
 {
-    public const string RestartRoute = "/api/maintenance/restart";
+    public const string RestartRoute = HostRoutes.Restart;
     public const int RestartExitCode = 75;
     public const string PendingMessage = "Backend restart is in progress. Wait for the new server session; no commands will be replayed.";
     private const string ShutdownPending = "Backend shutdown is in progress. New controls are closed; STOP remains available.";
@@ -80,7 +80,7 @@ public sealed class BackendMaintenance
         {
             // Emergency STOP remains available, including after admission is
             // frozen. It cannot start motion or clear a persisted recovery latch.
-            if (pending != Operation.None && route is not ("/api/stop" or CoordinatedStopRequest.Route))
+            if (pending != Operation.None && !HostRoutes.IsEmergencyStop(route))
             {
                 admission = null;
                 error = pending == Operation.Shutdown ? ShutdownPending : PendingMessage;
@@ -175,7 +175,7 @@ public sealed class BackendMaintenance
     {
         var arms = armSnapshot();
         if (ControllerActivity.AnyMotion(arms) || ControllerActivity.AnyQuery(arms))
-            return "Stop active arm actions and finish queries before restarting the server";
+            return "Stop active arm actions and finish queries before shutting down the server.";
         if (pikaSnapshots().OfType<JsonObject>().Any(pika => pika["pending"]?.GetValue<bool>() == true ||
             pika["following"]?.GetValue<bool>() == true || pika["resuming_hold"]?.GetValue<bool>() == true ||
             pika["connected"]?.GetValue<bool>() == true && Finite(pika["telemetry"]?["motor"] as JsonObject, "Speed", out double speed) && Math.Abs(speed) > .02))

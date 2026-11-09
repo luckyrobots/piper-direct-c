@@ -69,8 +69,7 @@ public sealed class PiperGrpcService(PiperRpcContext state, IHostApplicationLife
                 return new ControlReply { Status = 409, Json = JsonSerializer.Serialize(new { error = denied }) };
             if (admission.Restart is { } restarting)
                 return new ControlReply { Status = restarting.Ok ? 202 : 409, Json = JsonSerializer.Serialize(restarting, WebJson) };
-            if (request.Route is not ("/api/command" or "/api/select" or "/api/stop" or "/api/heartbeat" or "/api/query" or "/api/reconnect" or CoordinatedStopRequest.Route) &&
-                !request.Route.StartsWith("/api/pika/", StringComparison.Ordinal))
+            if (!HostRoutes.IsGrpcControl(request.Route))
                 throw new RpcException(new Status(StatusCode.InvalidArgument, "Unsupported control route."));
             var result = await state.Control.ExecuteAsync(request.Route, request.Json, json.RootElement,
                 HostControlTransport.Grpc, context.CancellationToken);

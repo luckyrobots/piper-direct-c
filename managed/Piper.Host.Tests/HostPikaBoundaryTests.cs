@@ -72,7 +72,7 @@ internal static class HostPikaBoundaryTests
             Check(rejected.Status == 409 && rejected.Error == "Finish active arm movements before changing Pika assignment" &&
                 registry.Snapshot()["device"]?.GetValue<string>() == first && !agents.ContainsKey(replacement),
                 "Pika configuration committed after an arm started moving.");
-            var stopped = await Send(CoordinatedStopRequest.Route, new { owner });
+            var stopped = await Send(HostRoutes.CoordinatedStop, new { owner });
             Check(stopped.Status == 200 && stopped.Payload is CoordinatedStopResult { Ok: true } &&
                 agents[peer].Actions.Count(action => action == "hold") == 1 && !agents[first].Actions.Contains("hold"),
                 "Coordinated STOP after denied configuration did not hold only the owned gripper.");
