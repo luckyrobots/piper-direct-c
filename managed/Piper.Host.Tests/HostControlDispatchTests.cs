@@ -46,6 +46,10 @@ internal static class HostControlDispatchTests
         Check(stopped.Status == HttpStatusCode.OK && stopped.Body["ok"]?.GetValue<bool>() == true &&
             stopped.Body["arm"]?["ok"]?.GetValue<bool>() == true && stopped.Body["pika"]?["ok"]?.GetValue<bool>() == true,
             "HTTP coordinated STOP lost an independent simulated channel outcome");
+        var ownerless = await Post("/api/stop/coordinated", "{}");
+        Check(ownerless.Status == HttpStatusCode.Conflict && ownerless.Body["arm"]?["ok"]?.GetValue<bool>() == true &&
+            ownerless.Body["pika"]?["message"]?.GetValue<string>() == "Pika hold unverified: an unscoped STOP requires the dashboard owner ID.",
+            "Ownerless coordinated STOP blocked the arm or hid the missing owner behind an internal error");
         var emptyScope = JsonNode.Parse(owner)!.AsObject();
         emptyScope["device_id"] = "";
         var empty = await Execute("/api/stop/coordinated", emptyScope.ToJsonString());
