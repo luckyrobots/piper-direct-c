@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Text.Json.Serialization;
@@ -25,15 +26,31 @@ public sealed class BackendMaintenance
     public const string PendingMessage = "Backend restart is in progress. Wait for the new server session; no commands will be replayed.";
     private const string ShutdownPending = "Backend shutdown is in progress. New controls are closed; STOP remains available.";
     private enum Operation { None, Restart, Shutdown }
+
+    // Maintenance freeze (Host-B). One Phase value, written only under gate:
+    //   Open                  admits every control; Operation is None
+    //   Checking(op)          frozen while exit preconditions are read     -> Prepared | Open
+    //   Prepared(op, owner)   frozen; accepted and waiting for its one-shot
+    //                         commit                                       -> Committed
+    //   Committed(op, owner)  frozen; rechecks after the response drain    -> exit | Open (last_failure)
+    // Emergency STOP is admitted in every stage. A prepare starts only from Open
+    // with no admitted control in flight. "pending" reports Prepared/Committed,
+    // never a Checking that may still be rejected.
+    private enum Stage { Open, Checking, Prepared, Committed }
+    private readonly record struct Phase(Stage Stage, Operation Operation, string Owner)
+    {
+        internal static Phase Open => new(Stage.Open, Operation.None, "");
+        internal bool Accepted => Stage is Stage.Prepared or Stage.Committed;
+    }
+
     private readonly object gate = new();
     private readonly Func<JsonObject> armSnapshot;
     private readonly Func<JsonArray> pikaSnapshots;
     private readonly Action restart;
     private readonly TimeSpan responseDrain;
     private int controls;
-    private Operation pending;
-    private bool committed;
-    private string preparedOwner = "", lastFailure = "";
+    private Phase phase = Phase.Open;
+    private string lastFailure = "";
     public string InstanceId { get; } = Guid.NewGuid().ToString("N");
     public int ProcessId { get; }
     public int? SupervisorProcessId { get; }
@@ -64,11 +81,11 @@ public sealed class BackendMaintenance
     {
         lock (gate) return new JsonObject {
             ["supported"] = Supported, ["mode"] = Mode, ["plugin_owner"] = PluginOwner,
-            ["endpoint"] = RestartRoute, ["pending"] = pending != Operation.None,
+            ["endpoint"] = RestartRoute, ["pending"] = phase.Accepted,
             ["supervisor_process_id"] = SupervisorProcessId, ["supervisor_instance_id"] = SupervisorInstanceId,
             ["releases_gripper_torque"] = true, ["preserves_arm_recovery"] = true,
             ["last_failure"] = lastFailure,
-            ["message"] = lastFailure.Length > 0 ? lastFailure : pending == Operation.Shutdown ? ShutdownPending :
+            ["message"] = lastFailure.Length > 0 ? lastFailure : phase is { Accepted: true, Operation: Operation.Shutdown } ? ShutdownPending :
                 Supported ? "Restart releases Pika holding torque. Arm STOP/recovery remains latched." :
                 "This backend has no restart supervisor. Restart it with its original launcher; no shutdown was requested."
         };
@@ -80,18 +97,21 @@ public sealed class BackendMaintenance
         {
             // Emergency STOP remains available, including after admission is
             // frozen. It cannot start motion or clear a persisted recovery latch.
-            if (pending != Operation.None && !HostRoutes.IsEmergencyStop(route))
+            if (phase.Stage != Stage.Open && !HostRoutes.IsEmergencyStop(route))
             {
                 admission = null;
-                error = pending == Operation.Shutdown ? ShutdownPending : PendingMessage;
+                error = Busy(phase.Operation);
                 return false;
             }
             ++controls; admission = new Admission(this); error = null; return true;
         }
     }
 
-    public BackendRestartResult Prepare(JsonElement input)
+    /// <summary>On success, <paramref name="commit"/> starts the restart after the
+    /// response drain. It is one-shot: later calls do nothing.</summary>
+    public BackendRestartResult Prepare(JsonElement input, out Action? commit)
     {
+        commit = null;
         if (!Supported) return Result(false, "This backend has no restart supervisor or owning plugin. Use its original launcher or Restart-WindowsDashboard.ps1; no shutdown was requested.");
         if (!input.TryGetProperty("owner", out var ownerValue) || ownerValue.ValueKind != JsonValueKind.String ||
             !Guid.TryParse(ownerValue.GetString(), out _)) return Result(false, "Restart requires the current plugin owner identity.");
@@ -103,62 +123,82 @@ public sealed class BackendMaintenance
         if (!input.TryGetProperty("release_grippers", out var release) || release.ValueKind != JsonValueKind.True)
             return Result(false, "Confirm that all grippers are empty: restarting releases Pika holding torque.");
         string owner = ownerValue.GetString()!;
-        if (PrepareExit(Operation.Restart, () => Check(armSnapshot(), pikaSnapshots(), owner)) is { } blocker)
+        if (PrepareExit(Operation.Restart, owner, () => Check(armSnapshot(), pikaSnapshots(), owner)) is { } blocker)
             return Result(false, blocker);
-        preparedOwner = owner;
+        commit = OneShot(CommitRestart);
         return Result(true, "Restart accepted. Pika holding torque will be released; arm power is unchanged and existing STOP/recovery remains latched. " +
             (Supervised ? "The supervisor restarts in monitoring mode without replaying targets." :
                 "The owning plugin must wait for this exact process to exit75, then start one new monitoring-only backend. No targets are replayed."));
     }
 
-    public void Commit()
+    private void CommitRestart()
     {
-        if (!BeginCommit(Operation.Restart)) return;
+        string owner = BeginCommit(Operation.Restart);
         // Both HTTP and gRPC receive the acknowledgement before Kestrel drains.
         // Client disconnect cannot leave an accepted restart half committed.
         _ = Task.Run(async () => {
             await Task.Delay(responseDrain);
-            RecheckAndExit("Restart", () => Check(armSnapshot(), pikaSnapshots(), preparedOwner), restart);
+            RecheckAndExit("Restart", () => Check(armSnapshot(), pikaSnapshots(), owner), restart);
         });
     }
 
-    public string? PrepareShutdown() => PrepareExit(Operation.Shutdown, CheckShutdown);
-
-    public void CommitShutdown(Action shutdown)
+    /// <summary>On success, <paramref name="commit"/> rechecks and then runs the
+    /// given exit action. It is one-shot: later calls do nothing.</summary>
+    public string? PrepareShutdown(out Action<Action>? commit)
     {
-        if (BeginCommit(Operation.Shutdown)) RecheckAndExit("Shutdown", CheckShutdown, shutdown);
+        commit = null;
+        if (PrepareExit(Operation.Shutdown, "", CheckShutdown) is { } blocker) return blocker;
+        int used = 0;
+        commit = shutdown =>
+        {
+            if (Interlocked.Exchange(ref used, 1) != 0) return;
+            BeginCommit(Operation.Shutdown);
+            RecheckAndExit("Shutdown", CheckShutdown, shutdown);
+        };
+        return null;
     }
 
-    private string? PrepareExit(Operation operation, Func<string?> check)
+    private string? PrepareExit(Operation operation, string owner, Func<string?> check)
     {
         lock (gate)
         {
-            if (pending != Operation.None) return pending == Operation.Shutdown ? ShutdownPending : PendingMessage;
+            if (phase.Stage != Stage.Open) return Busy(phase.Operation);
             if (controls != 0) return operation == Operation.Restart
                 ? "A controller request is still in progress. Wait for it to finish before restarting."
                 : "A controller request is still in progress. Wait for it to finish before shutting down.";
-            pending = operation; lastFailure = "";
+            phase = new(Stage.Checking, operation, ""); lastFailure = "";
         }
-        bool accepted = false;
-        try
+        string? blocker = null;
+        bool checkedOk = false;
+        try { blocker = check(); checkedOk = blocker is null; }
+        finally
         {
-            string? blocker = check();
-            accepted = blocker is null;
-            return blocker;
+            // Checking has a single exit, taken under the gate with the owner.
+            lock (gate) phase = checkedOk ? new(Stage.Prepared, operation, owner) : Phase.Open;
         }
-        finally { if (!accepted) lock (gate) pending = Operation.None; }
+        return blocker;
     }
 
-    private bool BeginCommit(Operation operation)
+    // Only the one-shot commit of a Prepared phase reaches here, and nothing
+    // else leaves Prepared, so the phase cannot have changed.
+    private string BeginCommit(Operation operation)
     {
         lock (gate)
         {
-            if (pending != operation) throw new InvalidOperationException(operation + " was not admitted.");
-            if (committed) return false;
-            committed = true;
-            return true;
+            if (phase.Stage != Stage.Prepared || phase.Operation != operation)
+                throw new UnreachableException(operation + " commit without its prepared phase.");
+            phase = phase with { Stage = Stage.Committed };
+            return phase.Owner;
         }
     }
+
+    private static Action OneShot(Action action)
+    {
+        int used = 0;
+        return () => { if (Interlocked.Exchange(ref used, 1) == 0) action(); };
+    }
+
+    private static string Busy(Operation operation) => operation == Operation.Shutdown ? ShutdownPending : PendingMessage;
 
     private void RecheckAndExit(string operation, Func<string?> check, Action exit)
     {
@@ -257,7 +297,11 @@ public sealed class BackendMaintenance
     }
     private void CancelCommit(string reason)
     {
-        lock (gate) { lastFailure = reason; pending = Operation.None; committed = false; preparedOwner = ""; }
+        lock (gate)
+        {
+            Debug.Assert(phase.Stage == Stage.Committed);
+            lastFailure = reason; phase = Phase.Open;
+        }
     }
     private BackendRestartResult Result(bool ok, string message) => new(ok, message, ProcessId, InstanceId, Mode,
         SupervisorProcessId, SupervisorInstanceId, true, true);

@@ -102,8 +102,8 @@ app.Run(async context => {
             response.StatusCode = restarting.Ok ? 202 : 409;
             await response.WriteAsJsonAsync(restarting); return;
         }
-        if (admission.Shutdown) {
-            response.OnCompleted(() => { maintenance.CommitShutdown(app.Lifetime.StopApplication); return Task.CompletedTask; });
+        if (admission.Shutdown is { } shutdown) {
+            response.OnCompleted(() => { shutdown(app.Lifetime.StopApplication); return Task.CompletedTask; });
             await response.WriteAsJsonAsync(new {ok=true,message="Closing USB transports before shutdown"}); return;
         }
         var result = await control.ExecuteAsync(route, body, json.RootElement, HostControlTransport.Http, context.RequestAborted);

@@ -6,8 +6,10 @@ namespace LuckyRobots.Piper.Host;
 
 internal enum HostControlTransport { Http, Grpc }
 
+/// <summary>Exactly one of: a control lease, a denial, a restart reply, or a
+/// prepared shutdown whose one-shot commit runs after the response.</summary>
 internal readonly record struct HostControlAdmission(IDisposable? Lease = null, string? Error = null,
-    BackendRestartResult? Restart = null, bool Shutdown = false) : IDisposable
+    BackendRestartResult? Restart = null, Action<Action>? Shutdown = null) : IDisposable
 {
     public void Dispose() => Lease?.Dispose();
 }
@@ -55,12 +57,12 @@ internal sealed class HostControlDispatcher(ControllerService controller, PikaSe
         {
             if (route == HostRoutes.Restart)
             {
-                var restart = maintenance.Prepare(input);
-                if (restart.Ok) maintenance.Commit();
+                var restart = maintenance.Prepare(input, out var commit);
+                commit?.Invoke();
                 return new(Restart: restart);
             }
             if (transport == HostControlTransport.Http && route == HostRoutes.Shutdown)
-                return maintenance.PrepareShutdown() is { } error ? new(Error: error) : new(Shutdown: true);
+                return maintenance.PrepareShutdown(out var shutdown) is { } error ? new(Error: error) : new(Shutdown: shutdown);
         }
         // The exit checks read controller state; both transports reject alike.
         catch (Exception error) when (IsControlOperationError(error)) { return new(Error: error.Message); }
