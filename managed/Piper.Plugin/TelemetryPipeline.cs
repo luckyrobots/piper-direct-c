@@ -143,8 +143,7 @@ public sealed partial class PipersPlugin
             // Keep the old receipt from granting control under the new epoch
             // between invalidation and publication of the replacement frame.
             telemetry.Disconnect();
-            DisarmTelemetryTargets("Controller session or assigned CAN connection changed", clearLink: true);
-            teachingSeen = approvalBeforeTeaching = false;
+            DisarmTelemetryTargets("Controller session or assigned CAN connection changed", clearLink: true); // Also clears teachingSeen.
             if (backendChanged) ReleasePikaRole();
         }
         token = receipt.BackendToken;

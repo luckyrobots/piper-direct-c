@@ -85,8 +85,7 @@ internal static class MeasuredGhostPublicationTests
                 new("b", "Second", "can-b", RobotId: "compound", PikaDevice: "/dev/b", WslDistribution: "Ubuntu", RobotJointPrefix: "piper3_")], ActiveRobotId: "a"));
             SetPreferences(Preferences);
             Set("passiveMeasuredTrackingStarted", true);
-            Set("measuredGhostSupported", true);
-            Set("ghostVisibilitySupported", true);
+            Set("ghostCapabilities", Activator.CreateInstance(typeof(PipersPlugin).GetNestedType("GhostCapabilities", System.Reflection.BindingFlags.NonPublic)!, true, true));
             Set("publishedGhostVisibility", true);
             Set("token", "backend");
             var joints = new JsonArray();

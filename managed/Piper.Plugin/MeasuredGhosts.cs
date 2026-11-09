@@ -6,9 +6,13 @@ namespace LuckyRobots.Piper.Plugin;
 /// <summary>Visual feedback never owns the leader's physics or sends a hardware target.</summary>
 public sealed partial class PipersPlugin
 {
-    private bool? measuredGhostSupported;
-    private long measuredGhostCapabilityAttempt;
-    private bool ghostVisibilitySupported;
+    /// <summary>Plugin-H: null is Unknown. A probe (at most every 5 s, shared by
+    /// publication and the visibility toggle) records what the engine host supports;
+    /// visibility can therefore never be known while ghost support is unknown.</summary>
+    private sealed record GhostCapabilities(bool Ghosts, bool Visibility);
+    private GhostCapabilities? ghostCapabilities;
+    private long ghostCapabilityAttempt;
+    private const double GhostProbeBackoffSeconds = 5;
     private bool? publishedGhostVisibility;
     private readonly Dictionary<string, PikaClosedDisplayReference?> ghostDisplayReferences = new();
 
@@ -26,17 +30,25 @@ public sealed partial class PipersPlugin
         return saved?.AngleFor(profile, pika);
     }
 
+    private async Task<GhostCapabilities?> ProbeGhostCapabilities(CancellationToken cancellation)
+    {
+        if (ghostCapabilities is { } known) return known;
+        if (ghostCapabilityAttempt != 0 && Stopwatch.GetElapsedTime(ghostCapabilityAttempt).TotalSeconds < GhostProbeBackoffSeconds) return null;
+        ghostCapabilityAttempt = Stopwatch.GetTimestamp();
+        using var discovery = CancellationTokenSource.CreateLinkedTokenSource(cancellation);
+        discovery.CancelAfter(400);
+        var info = await engine.RequestAsync("host.info", cancellation: discovery.Token);
+        return ghostCapabilities = new(info.TryGetProperty("robotFeedbackGhostSupported", out var supported) && supported.GetBoolean(),
+            info.TryGetProperty("robotGhostVisibilitySupported", out var visibility) && visibility.GetBoolean());
+    }
+
     private async Task SetMeasuredGhostVisibility(bool visible, CancellationToken cancellation)
     {
+        // Unknown and backing off: leave publishedGhostVisibility unset so it is retried.
+        if (await ProbeGhostCapabilities(cancellation) is not { } capabilities) return;
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellation);
         timeout.CancelAfter(500);
-        if (measuredGhostSupported is null)
-        {
-            var info = await engine.RequestAsync("host.info", cancellation: timeout.Token);
-            measuredGhostSupported = info.TryGetProperty("robotFeedbackGhostSupported", out var supported) && supported.GetBoolean();
-            ghostVisibilitySupported = info.TryGetProperty("robotGhostVisibilitySupported", out var visibility) && visibility.GetBoolean();
-        }
-        if (ghostVisibilitySupported)
+        if (capabilities.Visibility)
             await engine.RequestAsync("robot.ghost.visibility", new JsonObject { ["visible"] = visible }, timeout.Token);
         // Older hosts expire an unpublished overlay naturally. No visibility
         // preference changes leader physics, motor state or control ownership.
@@ -99,19 +111,10 @@ public sealed partial class PipersPlugin
             var referenceKeys = (preferences.Robots ?? []).Select(PikaClosedDisplayReference.Key).ToHashSet(StringComparer.Ordinal);
             foreach (string obsolete in ghostDisplayReferences.Keys.Where(key => !referenceKeys.Contains(key)).ToArray())
                 ghostDisplayReferences.Remove(obsolete);
-            if (measuredGhostSupported is null)
-            {
-                if (measuredGhostCapabilityAttempt != 0 && Stopwatch.GetElapsedTime(measuredGhostCapabilityAttempt).TotalSeconds < 5) return;
-                measuredGhostCapabilityAttempt = Stopwatch.GetTimestamp();
-                using var discovery = CancellationTokenSource.CreateLinkedTokenSource(cancellation);
-                discovery.CancelAfter(400);
-                var info = await engine.RequestAsync("host.info", cancellation: discovery.Token);
-                measuredGhostSupported = info.TryGetProperty("robotFeedbackGhostSupported", out var supported) && supported.GetBoolean();
-                ghostVisibilitySupported = info.TryGetProperty("robotGhostVisibilitySupported", out var visibility) && visibility.GetBoolean();
-            }
+            if (await ProbeGhostCapabilities(cancellation) is not { } capabilities) return;
             if (publishedGhostVisibility != preferences.ShowMeasuredGhosts)
                 await SetMeasuredGhostVisibility(preferences.ShowMeasuredGhosts, cancellation);
-            if (!preferences.ShowMeasuredGhosts || measuredGhostSupported != true || scene?["robots"] is not JsonArray robots) return;
+            if (!preferences.ShowMeasuredGhosts || !capabilities.Ghosts || scene?["robots"] is not JsonArray robots) return;
             string source = scene["sceneId"]!.GetValue<string>();
             var profiles = (preferences.Robots ?? []).Where(MeasuredTrackingPolicy.Enabled).ToArray();
             if (profiles.Length == 0) return;

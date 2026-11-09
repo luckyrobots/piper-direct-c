@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Runtime.CompilerServices;
 using System.Text.Json.Nodes;
 
@@ -46,6 +47,9 @@ internal sealed class FollowLaneObservation
     {
         this.receipt = receipt;
         this.timestampFrequency = timestampFrequency;
+        // Receipts always carry a backend token, and preparation admits only
+        // assigned CAN devices on a positive generation.
+        Debug.Assert(receipt.BackendToken.Length > 0 && profile.CanDeviceId.Length > 0 && generation > 0);
         this.profile = profile;
         this.generation = generation;
         var (device, motion, pika) = GroupSimulationLaneTelemetry.Resolve(receipt, profile, generation);
@@ -101,7 +105,8 @@ internal sealed class FollowLaneObservation
             throw new InvalidOperationException(profile.Name + ": fresh healthy CAN control, six enabled motors and reported limits are required.");
         if (Motion.Active && Motion.Owner != owner)
             throw new InvalidOperationException(profile.Name + ": another controller owns its active motion.");
-        if (!receipt.IsFresh(now) || !pikaSamplesFresh || receipt.AgeMilliseconds(now) + pikaSampleAge > 250 ||
+        // HasFreshArm above already required a fresh receipt.
+        if (!pikaSamplesFresh || receipt.AgeMilliseconds(now) + pikaSampleAge > SimulationFollowPolicy.MaximumGripperFeedbackAgeMilliseconds ||
             pikaOwner != owner || !pikaReady)
             throw new InvalidOperationException(profile.Name + ": its enabled Pika needs fresh owned, fault-free feedback (250 ms limit).");
         var result = hardware ?? throw new InvalidOperationException(profile.Name + ": the controller did not provide measured joints and numeric limits.");
@@ -118,7 +123,7 @@ internal sealed class FollowLaneObservation
 
     private void RequireNativeScope(long now)
     {
-        if (receipt.BackendToken.Length == 0 || profile.CanDeviceId.Length == 0 || generation <= 0 || !HasFreshArm(now) ||
+        if (!HasFreshArm(now) ||
             receipt.AgeMilliseconds(now) > SimulationFollowPolicy.MaximumSourceAgeMilliseconds)
             throw new InvalidOperationException("The native trajectory reference is stale or belongs to a different backend or robot; no queued target was sent.");
     }
