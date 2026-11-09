@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import {readFile} from 'node:fs/promises';
 import vm from 'node:vm';
+import {randomUUID} from 'node:crypto';
 const source=await readFile(new URL('../web/app.js',import.meta.url),'utf8');
 const nodes=new Map();let shown=0,closed=0;
 const element=id=>{if(!nodes.has(id))nodes.set(id,{showModal(){shown++;},close(){closed++;}});return nodes.get(id);};
@@ -45,7 +46,7 @@ let confirmed=true,answer=()=>({ok:true,json:async()=>({message:'ok'})});
 const app=vm.createContext({
   window:{addEventListener(){},dispatchEvent:event=>dispatched.push(event),confirm:()=>confirmed},
   document:{getElementById:byId,createElement:()=>fake(),addEventListener(){},querySelector:()=>fake(),querySelectorAll:()=>[],hidden:false,hasFocus:()=>true,activeElement:null},
-  crypto,performance,AbortSignal,JSON,Number,Math,Object,Set,Error,Promise,Date,
+  crypto:{randomUUID},performance,AbortSignal,JSON,Number,Math,Object,Set,Error,Promise,Date,
   CustomEvent:class{constructor(type,init){this.type=type;this.detail=init?.detail;}},
   Event:class{constructor(type){this.type=type;}},
   Option:class{},
