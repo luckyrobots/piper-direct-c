@@ -27,10 +27,6 @@
     /* Opt-in simulation follower: wire-quantized reference intervals are
        bounded by this connection's reported speed and acceleration limits. */
     bool trajectory_follow;
-    /* Pinned wire transport survives a measured follow-end hold. No idle
-       mode switching: a subsequent ordinary action admits PV only after its
-       existing stationary gate. */
-    bool streamed_position_mode;
     double trajectory_velocity[6], trajectory_previous_dt;
     double trajectory_speed[6], trajectory_acceleration[6];
     double trajectory_minimum[6], trajectory_maximum[6];

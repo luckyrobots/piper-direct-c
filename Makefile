@@ -101,15 +101,6 @@ build/test-trajectory-follow: tests/test_trajectory_follow.c $(CORE) $(HEADERS) 
 build/test-trajectory-viability: tests/test_trajectory_viability.c $(CORE) $(HEADERS) | build
 	$(CC) $(CPPFLAGS) $(CFLAGS) tests/test_trajectory_viability.c src/canbus.c src/protocol.c vendor/cJSON.c -Wl,--wrap=piper_now -Wl,--wrap=can_bus_receive -Wl,--wrap=can_bus_send -o $@ $(LDLIBS)
 
-build/test-streamed-position: tests/test_streamed_position.c $(CORE) $(HEADERS) | build
-	$(CC) $(CPPFLAGS) $(CFLAGS) -DPIPER_ENABLE_EXPERIMENTAL_STREAMED_POSITION=1 tests/test_streamed_position.c $(CORE) -Wl,--wrap=piper_now -Wl,--wrap=can_bus_receive -Wl,--wrap=can_bus_send -o $@ $(LDLIBS)
-
-build/test-streamed-bus: tests/test_streamed_bus.c $(CORE) $(HEADERS) | build
-	$(CC) $(CPPFLAGS) $(CFLAGS) -DPIPER_ENABLE_EXPERIMENTAL_STREAMED_POSITION=1 tests/test_streamed_bus.c $(CORE) -Wl,--wrap=piper_now -o $@ $(LDLIBS)
-
-build/test-streamed-disabled: tests/test_streamed_disabled.c $(CORE) $(HEADERS) | build
-	$(CC) $(CPPFLAGS) $(CFLAGS) tests/test_streamed_disabled.c $(CORE) -Wl,--wrap=piper_now -o $@ $(LDLIBS)
-
 build/test-teaching: tests/test_teaching.c $(CORE) $(HEADERS) | build
 	$(CC) $(CPPFLAGS) $(CFLAGS) tests/test_teaching.c $(CORE) -o $@ $(LDLIBS)
 
@@ -125,15 +116,12 @@ build/test-recover-at-pose: tests/test_recover_at_pose.c $(CORE) $(HEADERS) | bu
 build/test-stop-generation: tests/test_stop_generation.c $(CORE) $(HEADERS) | build
 	$(CC) $(CPPFLAGS) $(CFLAGS) tests/test_stop_generation.c $(CORE) -o $@ $(LDLIBS)
 
-test: all build/test-protocol build/test-speed-units build/test-control build/test-camera build/test-startup build/test-reset-retry build/test-enable-sequence build/test-cycle build/test-gripper build/test-obstruction build/test-obstruction-controller build/test-range-drift build/test-range-transition build/test-arrival-tolerance build/test-configuration-cache build/test-follow build/test-follow-noop build/test-trajectory-follow build/test-trajectory-viability build/test-streamed-position build/test-streamed-bus build/test-streamed-disabled build/test-teaching build/test-teach-batches build/test-stop-generation build/test-stationary build/test-recover-at-pose
+test: all build/test-protocol build/test-speed-units build/test-control build/test-camera build/test-startup build/test-reset-retry build/test-enable-sequence build/test-cycle build/test-gripper build/test-obstruction build/test-obstruction-controller build/test-range-drift build/test-range-transition build/test-arrival-tolerance build/test-configuration-cache build/test-follow build/test-follow-noop build/test-trajectory-follow build/test-trajectory-viability build/test-teaching build/test-teach-batches build/test-stop-generation build/test-stationary build/test-recover-at-pose
 	./build/test-stationary
 	./build/test-recover-at-pose
 	./build/test-speed-units
 	./build/test-trajectory-follow
 	./build/test-trajectory-viability
-	./build/test-streamed-position
-	./build/test-streamed-bus
-	./build/test-streamed-disabled
 	./build/test-stop-generation
 	./build/test-teaching
 	./build/test-teach-batches

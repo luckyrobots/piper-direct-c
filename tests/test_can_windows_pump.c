@@ -50,38 +50,27 @@ int main(void)
     assert(sends==1&&reads==5&&d->local==1&&d->rx==1&&d->tx==1&&!d->feedback.foreign_seen);
     assert(d->feedback.arm[0].control==1&&d->feedback.arm[0].status_at>=before);
     /* Keep the real common allowlist and the real windows_send wrapper. Only
-       Cando callbacks are fake, so a rejected 0xAD packet cannot hide behind a
+       Cando callbacks are fake, so a rejected packet cannot hide behind a
        replacement can_bus_send as it did in the controller-only fixture. */
     strcpy(d->feedback.hardware,"H-V1.2-1");strcpy(d->feedback.version,"S-V1.9-0");
     const double target[6]={1.125,2.25,-3.375,4.5,-5.625,6.75};
-    struct can_frame streamed[4];streamed[0]=piper_streamed_position_mode(90);assert(piper_targets(target,streamed+1));
-    expect_frames(streamed,4);uint64_t previous_tx=d->tx;unsigned previous_sends=sends;
-    assert(can_bus_send(&bus,d,7,streamed,4));
+    struct can_frame pose[4];pose[0]=piper_mode(90);assert(piper_targets(target,pose+1));
+    expect_frames(pose,4);uint64_t previous_tx=d->tx;unsigned previous_sends=sends;
+    assert(can_bus_send(&bus,d,7,pose,4));
     assert(expected_sent==4&&sends==previous_sends+4&&d->tx==previous_tx+4);
-
-    rejected_batch(&bus,d,streamed,1); /* A standalone mode change is not a streamed pose transaction. */
-    rejected_batch(&bus,d,streamed,3);
     struct can_frame invalid[4];
-    for (unsigned error=0;error<12;++error) {
-        memcpy(invalid,streamed,sizeof invalid);
-        if (error==0) { struct can_frame swap=invalid[1];invalid[1]=invalid[2];invalid[2]=swap; }
-        if (error==1) invalid[2]=invalid[1];
-        if (error==2) invalid[3].can_id=0x159;
-        if (error==3) invalid[0].data[4]=1;
-        if (error==4) invalid[0].data[3]=0xae;
-        if (error==5) invalid[0].data[0]=2;
-        if (error==6) invalid[0].data[0]=0;
-        if (error==7) invalid[0].data[1]=2;
-        if (error==8) invalid[0].data[2]=0;
-        if (error==9) invalid[0].data[2]=101;
-        if (error==10) invalid[3].len=7;
-        if (error==11) invalid[3].can_id|=0x80000000u;
+    for (unsigned error=0;error<9;++error) {
+        memcpy(invalid,pose,sizeof invalid);
+        if (error==0) invalid[0].data[3]=0xAD; /* The removed streamed-position mode flag. */
+        if (error==1) invalid[0].data[4]=1;
+        if (error==2) invalid[0].data[0]=2;
+        if (error==3) invalid[0].data[1]=2;
+        if (error==4) invalid[0].data[2]=0;
+        if (error==5) invalid[0].data[2]=101;
+        if (error==6) invalid[3].len=7;
+        if (error==7) invalid[3].can_id|=0x80000000u;
+        if (error==8) invalid[3].can_id=0x158;
         rejected_batch(&bus,d,invalid,4);
     }
-    strcpy(d->feedback.version,"S-V1.9-2");rejected_batch(&bus,d,streamed,4);
-    strcpy(d->feedback.version,"S-V1.9-1");strcpy(d->feedback.hardware,"H-V1.2-0");rejected_batch(&bus,d,streamed,4);
-    strcpy(d->feedback.hardware,"H-V1.2-1");
-    expect_frames(streamed,4);assert(can_bus_send(&bus,d,7,streamed,4)&&expected_sent==4);
-    can_bus_invalidate_configuration(d,piper_now());rejected_batch(&bus,d,streamed,4);
-    puts("PASS fake native Windows pump: real batch validation and Windows packing preserve complete JS/0xAD plus six-angle bytes; malformed/partial/unqualified transactions send nothing, ordered RX timestamps and echo filtering remain intact.");
+    puts("PASS fake native Windows pump: real batch validation and Windows packing preserve a complete mode plus six-angle transaction; malformed or 0xAD transactions send nothing, ordered RX timestamps and echo filtering remain intact.");
 }

@@ -219,12 +219,6 @@ struct can_frame piper_mode(unsigned speed_percent)
 {
     return (struct can_frame){.can_id=0x151,.len=8,.data={1,1,(uint8_t)speed_percent,0,0,0,0,0}};
 }
-struct can_frame piper_streamed_position_mode(unsigned speed_percent)
-{
-    struct can_frame frame=piper_mode(speed_percent);
-    frame.data[3]=0xAD;
-    return frame;
-}
 struct can_frame piper_power(unsigned joint, bool enabled)
 {
     /* Callers address 1..6 explicitly; never use the ambiguous all-motor index. */
@@ -245,7 +239,6 @@ bool piper_supported(const struct piper_feedback *s)
     if (strcmp(s->hardware,"H-V1.2-1") || !firmware_version(s->version,&major,&minor,&patch)) return false;
     /* V3 retains MOVE J, 0x155-157 targets and width-mode gripper commands.
        Reviewed against AgileX SDK b847e539; ordinary motion remains PV.
-       The separately gated JS position stream does not use impedance packets.
        Explicit revisions only: unknown later firmware remains read-only. */
     return major==1 && ((minor==6 && patch>=3 && patch<=9) || (minor==7 && patch<=9) || (minor==8 && patch<=9) || (minor==9 && patch<=1));
 }
@@ -257,16 +250,4 @@ bool piper_seamless_teach_supported(const struct piper_feedback *s)
        is not authority to bypass the legacy zero-pose handoff. */
     return piper_supported(s)&&firmware_version(s->version,&major,&minor,&patch)&&
         major==1&&(minor>8||(minor==8&&patch>=5));
-}
-bool piper_streamed_position_supported(const struct piper_feedback *s)
-{
-#if !PIPER_ENABLE_EXPERIMENTAL_STREAMED_POSITION
-    (void)s;
-    return false;
-#else
-    /* Initial opt-in qualification is deliberately narrower than MoveJ.
-       Reviewed against pyAgxArm d90e234, default/v188 JS mapping (J + AD).
-       Future firmware and other hardware never inherit this experiment. */
-    return piper_supported(s)&&(!strcmp(s->version,"S-V1.9-0")||!strcmp(s->version,"S-V1.9-1"));
-#endif
 }

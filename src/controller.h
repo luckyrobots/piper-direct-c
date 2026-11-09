@@ -10,7 +10,7 @@ struct controller_lane {
 };
 struct controller {
     struct can_bus bus;
-    char selected[160], state_dir[512], legacy_dir[512];
+    char selected[160], state_dir[512];
     cJSON *saved, *profiles, *legacy_stops;
     bool storage_failed;
     /* The serialized execution cursor contains only POD lane state. The bus

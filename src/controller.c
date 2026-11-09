@@ -577,8 +577,7 @@ static void abandon_teaching_return(struct controller *c,const char *reason)
 static bool send_pose(struct controller *c,struct can_device *d,const double target[6])
 {
     unsigned speed=c->op==OP_ALIGN||c->arrival_hold?1:(unsigned)fmax(1,ceil(c->speed_percent));
-    if (c->streamed_position_mode&&!piper_streamed_position_supported(&d->feedback)) { c->pose_tx_valid=false; return false; }
-    struct can_frame f[4]; f[0]=c->streamed_position_mode?piper_streamed_position_mode(speed):piper_mode(speed);
+    struct can_frame f[4]; f[0]=piper_mode(speed);
     if (!piper_targets(target,f+1)) { c->pose_tx_valid=false; return false; }
     int32_t encoded[6]; bool same=true;
     for (unsigned i=0;i<6;++i) { encoded[i]=(int32_t)llround(target[i]*1000); same=same&&encoded[i]==c->pose_tx_millidegrees[i]; }
@@ -711,8 +710,8 @@ static bool controller_init_devices(struct controller *c,bool simulation,unsigne
 {
     memset(c,0,sizeof *c); can_bus_init(&c->bus,simulation);
     if (simulation&&!can_bus_init_simulated(&c->bus,count)) return false;
-    if (strlen(directory)>=sizeof c->state_dir||strlen(legacy)>=sizeof c->legacy_dir) return false;
-    snprintf(c->state_dir,sizeof c->state_dir,"%s",directory); snprintf(c->legacy_dir,sizeof c->legacy_dir,"%s",legacy);
+    if (strlen(directory)>=sizeof c->state_dir||strlen(legacy)>=sizeof c->state_dir) return false; /* Both feed 1024-byte file paths. */
+    snprintf(c->state_dir,sizeof c->state_dir,"%s",directory);
 #ifdef _WIN32
     if (_mkdir(directory)<0&&errno!=EEXIST) return false;
 #else
@@ -824,9 +823,6 @@ static void begin(struct controller *c,struct can_device *d,const char *owner,en
     c->arrival_hold=false; c->arrival_hold_at=0;
     c->following=c->follow_committed=false; c->follow_updated=0; c->follow_sequence=0;
     c->trajectory_follow=false; c->trajectory_previous_dt=0;
-    /* Every pose-producing ordinary admission has already required measured
-       stillness. Power/reset actions do not transmit a mode/pose here. */
-    c->streamed_position_mode=false;
     memset(c->trajectory_velocity,0,sizeof c->trajectory_velocity);
     snprintf(c->owner,sizeof c->owner,"%s",owner);
     memcpy(c->initial,d->feedback.arm[0].deg,sizeof c->initial);
@@ -890,9 +886,6 @@ static double trajectory_braking_speed(double distance,double acceleration,doubl
 }
 static enum trajectory_step_result trajectory_reference_step(struct controller *c,struct can_device *d,double now,double dt)
 {
-    if (c->streamed_position_mode&&!piper_streamed_position_supported(&d->feedback)) {
-        snprintf(c->error,sizeof c->error,"Streamed-position firmware support changed; following stopped."); return TRAJECTORY_STEP_INVALID;
-    }
     double next[6],velocity[6],midpoint_dt=c->trajectory_previous_dt>0?(dt+c->trajectory_previous_dt)/2:dt;
     if (!isfinite(dt)||dt<.02||dt>.050001||!isfinite(midpoint_dt)||midpoint_dt<=0) {
         snprintf(c->error,sizeof c->error,"Trajectory reference interval is invalid; following stopped."); return TRAJECTORY_STEP_INVALID;
@@ -1184,11 +1177,10 @@ static cJSON *lane_action(struct controller *c,const char *route,const cJSON *bo
         if (field(body,"trajectory")&&(!cJSON_IsBool(field(body,"trajectory"))||strcmp(action,"follow-start")))
             return reply(status,400,"trajectory is a boolean available only on follow-start.");
         bool trajectory=yes(body,"trajectory");
-        bool streamed=trajectory&&!strcmp(text_field(body,"trajectory_transport"),"streamed-position");
-        if (streamed&&!PIPER_ENABLE_EXPERIMENTAL_STREAMED_POSITION)
+        /* The experimental streamed-position transport was removed; the name is
+           still recognized so old clients get the same explicit rejection. */
+        if (trajectory&&!strcmp(text_field(body,"trajectory_transport"),"streamed-position"))
             return reply(status,409,"Experimental streamed-position transport is disabled in this build. Use position-velocity; no action or motor command was admitted.");
-        if (streamed&&!piper_streamed_position_supported(&d->feedback))
-            return reply(status,409,"Streamed-position qualification supports only H-V1.2-1 with S-V1.9-0 or S-V1.9-1; ordinary position-velocity remains available.");
         if (!yes(body,"clear")) return reply(status,400,"Confirm that the full motion path is clear and the arm is attended.");
         /* The MCU's target-arrival bit can remain unset after a disabled arm
            settles away from its last target. Require measured stillness. */
@@ -1296,15 +1288,9 @@ static cJSON *lane_action(struct controller *c,const char *route,const cJSON *bo
             if (!valid_target(c,d,c->target)) return reply(status,400,c->error);
             op=OP_ALIGN; c->speed=ceiling/100; c->speed_percent=1;
         }
-        if (streamed) {
-            struct can_frame admission[4];admission[0]=piper_streamed_position_mode((unsigned)fmax(1,ceil(c->speed_percent)));
-            if (!piper_targets(c->target,admission+1)||!can_bus_batch_allowed(d,admission,4))
-                return reply(status,409,"The production CAN allowlist rejected the initial streamed-position transaction; no action or motor command was admitted.");
-        }
         if (!latch(c,d->id,intent_reason,KIND_INTENT,false)) return reply(status,500,"Could not persist action intent; no command sent.");
         begin(c,d,owner,op,now);
         c->position_seed_pending=(op==OP_MOVE||op==OP_ALIGN||op==OP_CYCLE)&&strcmp(action,"follow-start")!=0;
-        c->streamed_position_mode=streamed;
         if (staged_range) {
             c->range_followup=true; memcpy(c->range_followup_target,requested_target,sizeof requested_target);
             c->range_followup_speed=requested_speed; c->range_followup_percent=requested_percent;
@@ -1324,8 +1310,8 @@ static cJSON *lane_action(struct controller *c,const char *route,const cJSON *bo
         if (staged_range) message(c,"aligning","Explicit destination accepted. First correcting bounded range overrun at 1%% controller speed; then moving to the requested target under the same live lease.");
     }
     cJSON *result=reply(status,202,c->message); num(result,"request_id",c->request_id);
-    str(result,"trajectory_transport",c->streamed_position_mode?"streamed-position":"position-velocity");
-    flag(result,"trajectory_transport_validated",c->streamed_position_mode);
+    str(result,"trajectory_transport","position-velocity");
+    flag(result,"trajectory_transport_validated",false);
     flag(result,"trajectory_follow",c->op==OP_MOVE&&c->trajectory_follow); return result;
 }
 
@@ -1847,8 +1833,8 @@ static cJSON *lane_motion(struct controller *c,double now)
     num(motion,"speed_percent",c->speed_percent);
     flag(motion,"following",c->op!=OP_IDLE&&c->following);
     flag(motion,"trajectory_follow",c->op==OP_MOVE&&c->trajectory_follow);
-    str(motion,"trajectory_transport",c->streamed_position_mode?"streamed-position":"position-velocity");
-    flag(motion,"streamed_position_hold",c->streamed_position_mode&&c->op==OP_IDLE);
+    str(motion,"trajectory_transport","position-velocity");
+    flag(motion,"streamed_position_hold",false);
     cJSON *reference_velocity=cJSON_CreateArray();
     if (c->op==OP_MOVE&&c->trajectory_follow) for (unsigned i=0;i<6;++i) cJSON_AddItemToArray(reference_velocity,cJSON_CreateNumber(c->trajectory_velocity[i]));
     put(motion,"reference_velocity_deg_s",reference_velocity);
@@ -1874,8 +1860,9 @@ cJSON *controller_state(struct controller *c,const char *token)
     flag(root,"trajectory_follow_supported",true);
     flag(root,"multi_device_lanes_supported",true);num(root,"maximum_motion_lanes",CANBUS_MAX);
     flag(root,"any_motion_active",controller_any_motion_active(c));flag(root,"any_query_active",controller_any_query_active(c));
-    flag(root,"streamed_position_transport_supported",PIPER_ENABLE_EXPERIMENTAL_STREAMED_POSITION!=0);
-    flag(root,"streamed_position_wire_validation_supported",PIPER_ENABLE_EXPERIMENTAL_STREAMED_POSITION!=0);
+    /* Constant since the streamed-position transport was removed; kept for API compatibility. */
+    flag(root,"streamed_position_transport_supported",false);
+    flag(root,"streamed_position_wire_validation_supported",false);
     str(root,"token",token); str(root,"selected",c->selected); str(root,"message",c->message); str(root,"phase",c->phase);str(root,"error",c->error);
     flag(root,"query_active",c->query); flag(root,"storage_failed",c->storage_failed);
     put(root,"motion",lane_motion(c,now));
@@ -1919,7 +1906,7 @@ cJSON *controller_state(struct controller *c,const char *token)
         put(j,"stop_event",field(r,"stop_event")?cJSON_Duplicate(field(r,"stop_event"),true):cJSON_CreateNull());
         flag(j,"reset_pending",reset_pending(c,d->id));
         str(j,"firmware",f->version); str(j,"hardware",f->hardware); str(j,"build",f->build); flag(j,"firmware_supported",piper_supported(f));
-        flag(j,"streamed_position_supported",piper_streamed_position_supported(f));
+        flag(j,"streamed_position_supported",false);
         cJSON *status=cJSON_CreateObject(); num(status,"control",s->status_seen?s->control:NAN); num(status,"arm_status",s->status_seen?s->arm_status:NAN);
         num(status,"motion_mode",s->status_seen?s->motion_mode:NAN); num(status,"error",s->status_seen?s->error:NAN); num(status,"age_s",s->status_seen?now-s->status_at:NAN); put(j,"status",status);
         num(status,"motion_status",s->status_seen?s->motion_status:NAN);

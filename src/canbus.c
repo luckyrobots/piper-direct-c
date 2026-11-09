@@ -8,7 +8,6 @@
 #include <linux/can/netlink.h>
 #include <linux/rtnetlink.h>
 #include <poll.h>
-#include <math.h>
 #include <net/if_arp.h>
 #endif
 #include <stdio.h>
@@ -377,18 +376,11 @@ bool can_bus_batch_allowed(const struct can_device *d,const struct can_frame *fr
         unsigned tail=0;
         if (f->can_id==0x150) { allowed=f->data[0]==1||f->data[0]==2; tail=1; }
         if (f->can_id==0x151) {
-            /* Ordinary PV/standby behavior is unchanged. The reviewed JS flag
-               is admitted only as the head of a complete ordered position
-               transaction; never as a loose mode/gain/impedance write. */
+            /* PV MoveJ or the documented standby request; never a mode,
+               gain or impedance flag in the tail bytes. */
             allowed=(f->data[0]==1&&f->data[1]==1&&f->data[2]>=1&&f->data[2]<=100)||
                 (f->data[0]==0&&f->data[1]==1&&f->data[2]==1);
             tail=3;
-            if (f->data[3]==0xAD) {
-                allowed=f->data[0]==1&&f->data[1]==1&&f->data[2]>=1&&f->data[2]<=100&&
-                    piper_streamed_position_supported(&d->feedback)&&i==0&&count==4&&
-                    frames[1].can_id==0x155&&frames[2].can_id==0x156&&frames[3].can_id==0x157;
-                tail=4;
-            }
         }
         if (f->can_id==0x471) { allowed=f->data[0]>=1&&f->data[0]<=6&&(f->data[1]==1||f->data[1]==2); tail=2; }
         if (f->can_id==0x472) { allowed=f->data[0]>=1&&f->data[0]<=6&&(f->data[1]==1||f->data[1]==2); tail=2; }

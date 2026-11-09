@@ -178,8 +178,6 @@ static void windows_scan_inventory(struct can_bus *b,
             win.close(handle); win.free(handle); continue;
         }
         win.handles[slot]=handle; win.arrivals[slot]=arrival; d->fd=(int)slot; d->index=i;
-        snprintf(d->id,sizeof d->id,"%s",id); snprintf(d->name,sizeof d->name,"Cando %u",slot);
-        snprintf(d->path,sizeof d->path,"Windows USB-CAN %s",name);
         d->present=d->up=d->stable=d->link_verified=true; d->bitrate=1000000; d->bus_state=0; d->control_flags=0;
         d->generation=++b->sequence; d->problem[0]=0; memset(&d->feedback,0,sizeof d->feedback);
     }
