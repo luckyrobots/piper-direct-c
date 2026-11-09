@@ -9,16 +9,15 @@ public sealed partial class PipersPlugin
 {
     private JsonObject? simulationCameras;
 
-    private long simulationCameraRefreshAttempt;
-    private Task? simulationCameraRefreshWorker;
     private long simulationCameraDiscoveryEpoch;
     private sealed record SimulationCameraDiscovery(long Epoch, JsonObject Cameras);
-    private SimulationCameraDiscovery? pendingSimulationCameraDiscovery;
+    private readonly ThrottledProbe<SimulationCameraDiscovery> simulationCameraProbe = new(TimeSpan.FromSeconds(2));
     private readonly CancellationTokenSource cameraDiscoveryShutdown = new();
+    private bool CameraDiscoveryRunning => passiveMeasuredTrackingStarted && !cameraDiscoveryShutdown.IsCancellationRequested;
 
     private async Task MaintainCameraDiscovery(CancellationToken cancellation)
     {
-        if (!passiveMeasuredTrackingStarted || cameraDiscoveryShutdown.IsCancellationRequested || switchingProfile)
+        if (!CameraDiscoveryRunning || switchingProfile)
             return;
         try
         {
@@ -27,23 +26,21 @@ public sealed partial class PipersPlugin
             bool refreshSettings;
             try
             {
-                if (!passiveMeasuredTrackingStarted || cameraDiscoveryShutdown.IsCancellationRequested || switchingProfile)
+                if (!CameraDiscoveryRunning || switchingProfile)
                     return;
                 // Manual refresh and preference changes also use the command gate.
                 // Probe completion only queues evidence; this tick applies it.
                 QueueSimulationCameraRefresh(cancellation);
                 QueueCameraDeviceRefresh(cancellation);
-                if (Volatile.Read(ref pendingSimulationCameraDiscovery) is null &&
-                    Volatile.Read(ref pendingCameraDeviceInventory) is null)
+                if (!simulationCameraProbe.HasPending && !cameraDeviceProbe.HasPending)
                     return;
                 using var lifetime = CancellationTokenSource.CreateLinkedTokenSource(cancellation, cameraDiscoveryShutdown.Token);
-                var discovered = Interlocked.Exchange(ref pendingSimulationCameraDiscovery, null);
-                if (discovered is not null && discovered.Epoch == Interlocked.Read(ref simulationCameraDiscoveryEpoch))
+                if (simulationCameraProbe.Take() is { } discovered && discovered.Epoch == Interlocked.Read(ref simulationCameraDiscoveryEpoch))
                     await ApplySimulationCameraDiscovery(discovered.Cameras, lifetime.Token);
                 refreshSettings = await ApplyCameraDeviceInventory(lifetime.Token);
             }
             finally { commands.Release(); }
-            if (refreshSettings && passiveMeasuredTrackingStarted && !cameraDiscoveryShutdown.IsCancellationRequested && workspacePage == "settings")
+            if (refreshSettings && CameraDiscoveryRunning && workspacePage == "settings")
                 await Render(cancellation);
         }
         catch (OperationCanceledException) when (cameraDiscoveryShutdown.IsCancellationRequested && !cancellation.IsCancellationRequested)
@@ -55,16 +52,22 @@ public sealed partial class PipersPlugin
         }
     }
 
-    private void QueueSimulationCameraRefresh(CancellationToken cancellation)
+    // Stops both discovery probes for shutdown and drops any unapplied result.
+    private async Task RetireCameraDiscovery()
     {
-        if (!passiveMeasuredTrackingStarted || cameraDiscoveryShutdown.IsCancellationRequested || switchingProfile || simulationCameraRefreshWorker is { IsCompleted: false } ||
-            simulationCameraRefreshAttempt != 0 && System.Diagnostics.Stopwatch.GetElapsedTime(simulationCameraRefreshAttempt).TotalSeconds < 2)
-            return;
-        simulationCameraRefreshAttempt = System.Diagnostics.Stopwatch.GetTimestamp();
-        simulationCameraRefreshWorker = ReadSimulationCameraDiscovery(Interlocked.Read(ref simulationCameraDiscoveryEpoch), cancellation);
+        await cameraDiscoveryShutdown.CancelAsync();
+        await Task.WhenAll(simulationCameraProbe.Retire(), cameraDeviceProbe.Retire());
+        cameraDiscoveryShutdown.Dispose();
     }
 
-    private async Task ReadSimulationCameraDiscovery(long epoch, CancellationToken cancellation)
+    private void QueueSimulationCameraRefresh(CancellationToken cancellation)
+    {
+        if (!CameraDiscoveryRunning || switchingProfile) return;
+        long epoch = Interlocked.Read(ref simulationCameraDiscoveryEpoch);
+        simulationCameraProbe.Queue(() => ReadSimulationCameraDiscovery(epoch, cancellation));
+    }
+
+    private async Task<SimulationCameraDiscovery?> ReadSimulationCameraDiscovery(long epoch, CancellationToken cancellation)
     {
         using var lifetime = CancellationTokenSource.CreateLinkedTokenSource(cancellation, cameraDiscoveryShutdown.Token);
         cancellation = lifetime.Token;
@@ -81,7 +84,7 @@ public sealed partial class PipersPlugin
                 if (robots["sceneId"]?.GetValue<string>() == discovered["sceneId"]?.GetValue<string>())
                     discovered["robotInventory"] = robots;
             }
-            Interlocked.Exchange(ref pendingSimulationCameraDiscovery, new(epoch, discovered));
+            return new(epoch, discovered);
         }
         catch (Exception error) when (!cancellation.IsCancellationRequested)
         {
@@ -90,13 +93,14 @@ public sealed partial class PipersPlugin
         catch (OperationCanceledException) when (cancellation.IsCancellationRequested)
         {
         }
+        return null;
     }
 
     private async Task DiscoverSimulationCameras(CancellationToken cancellation)
     {
         // An explicit refresh supersedes an older periodic read still in flight.
         Interlocked.Increment(ref simulationCameraDiscoveryEpoch);
-        Interlocked.Exchange(ref pendingSimulationCameraDiscovery, null);
+        simulationCameraProbe.Take();
         var discovered = JsonNode.Parse((await engine.RequestAsync("scene.cameras", cancellation: cancellation)).GetRawText())!.AsObject();
         Materialize(discovered);
         await ApplySimulationCameraDiscovery(discovered, cancellation);

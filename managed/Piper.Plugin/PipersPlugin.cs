@@ -688,15 +688,7 @@ public sealed partial class PipersPlugin : ILuckyPlugin
                 catch (Exception error) { Trace.TraceWarning("Recovery shutdown: {0}", error.Message); }
             }
         }
-        {
-            await cameraDiscoveryShutdown.CancelAsync();
-            var discoveryWorkers = new[] { simulationCameraRefreshWorker, cameraDeviceDiscoveryWorker }.OfType<Task>().ToArray();
-            try { await Task.WhenAll(discoveryWorkers); }
-            catch (OperationCanceledException) { }
-            Interlocked.Exchange(ref pendingSimulationCameraDiscovery, null);
-            Interlocked.Exchange(ref pendingCameraDeviceInventory, null);
-            cameraDiscoveryShutdown.Dispose();
-        }
+        await RetireCameraDiscovery();
         using (var markerTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(1)))
         {
             try { await StopHeightCheck(markerTimeout.Token); }
