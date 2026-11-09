@@ -51,7 +51,7 @@ internal static class WorkspacePublicationTests
         check(fixture.Unscope(fixture.Wire("joint.6.target")) == "joint.6.target", "A later successful publication could not restore controls after transport recovery");
 
         oldTarget = fixture.Wire("joint.6.target"); oldNavigation = fixture.Wire("workspace.settings.robot");
-        fixture.Set("workspacePage", "settings");
+        fixture.Plugin.Navigation = WorkspaceNavigation.At(WorkspacePage.Settings);
         check(fixture.Unscope(oldTarget).Length == 0 && fixture.Unscope(oldNavigation).Length == 0,
             "A page change accepted the previous page's controls before its replacement view was published");
         using (var cancelled = new CancellationTokenSource())
@@ -85,8 +85,7 @@ internal static class WorkspacePublicationTests
             cancelled.Cancel();
             bool retired = false;
             try { await navigation; } catch (OperationCanceledException) { retired = true; }
-            check(retired && serial.Get<string>("workspacePage") == "controls" && serial.Get<string>("settingsCategory") == "robot" &&
-                serial.Get<string>("settingsCamera") == "bench", "Cancelled navigation committed a destination before entering the view publication gate");
+            check(retired && serial.Plugin.Navigation == WorkspaceNavigation.Initial, "Cancelled navigation committed a destination before entering the view publication gate");
         }
         check(serialCalls == 1 && serial.Epoch == serialInitial, "Concurrent renders published out of order or committed an in-flight candidate");
         release.TrySetResult();
@@ -114,7 +113,7 @@ internal static class WorkspacePublicationTests
         await patchEntered.Task.WaitAsync(TimeSpan.FromSeconds(2));
         var queuedPatch = updating.Update();
         updating.Set("preferences", RobotProfileRouting.Normalize(new Preferences(Robots: [new("two", "Piper 2")], ActiveRobotId: "two")));
-        updating.Set("workspacePage", "recording");
+        updating.Plugin.Navigation = WorkspaceNavigation.At(WorkspacePage.Recording);
         var replacement = updating.Render();
         check(!replacement.IsCompleted && sent.Count == 1, "A full view overtook an in-flight patch");
         patchRelease.TrySetResult();
@@ -134,6 +133,7 @@ internal static class WorkspacePublicationTests
     {
         private const BindingFlags Flags = BindingFlags.Instance | BindingFlags.NonPublic;
         private readonly PipersPlugin plugin = new();
+        public PipersPlugin Plugin => plugin;
         public Func<Widget, CancellationToken, Task> Publish = (_, _) => Task.CompletedTask;
         public Func<IReadOnlyDictionary<string, JsonObject>, CancellationToken, Task> PublishPatch = (_, _) => Task.CompletedTask;
         public Widget? LastRoot;

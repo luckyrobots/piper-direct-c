@@ -208,7 +208,7 @@ internal static class CalibrationReevaluationTests
             var prefs = RobotProfileRouting.Normalize(new Preferences(Robots: [new("piper-1", "Fixture", "can-a", RobotId: "robot-a")], ActiveRobotId: "piper-1"));
             Set("engine", context); Set("preferences", prefs); Set("state", State); Set("token", "session");
             Set("link", new RobotLink(liveScene, liveEntity, Pose()["joints"]!.AsArray(), device));
-            Set("linkBackendToken", "session"); Set("calibrationOpen", true); Set("workspacePage", "settings"); Set("settingsCategory", "bench");
+            Set("linkBackendToken", "session"); Plugin.Navigation = WorkspaceNavigation.Calibration;
             Set("calibrationProfile", "piper-1"); Set("wizardProfile", "piper-1"); Set("calibrationIdentity", Identity);
             Set("calibrationOriginal", Root); Set("calibrationFit", originalFit); Set("calibrationDesk", desk); Set("calibrationPath", ReportPath);
             Get<List<CalibrationSample>>("calibrationSamples").AddRange(Originals);

@@ -97,7 +97,7 @@ public sealed partial class PipersPlugin
             lock (pikaTeachingSync) { if (pikaTeachingUnsaved is not null) QueuePikaTeachingSaveLocked(pikaTeachingUnsaved); }
             await Update(cancellation); return;
         }
-        if (workspacePage != "controls" || calibrationOpen || switchingProfile)
+        if (Navigation.Page != WorkspacePage.Controls || switchingProfile)
             throw new InvalidOperationException("Open Controls before freeing Pika jaws for teaching.");
         JsonObject device = Device();
         if (!TeachingState.Inspect(device).HandGuiding)
@@ -172,7 +172,7 @@ public sealed partial class PipersPlugin
     private async Task ResumePikaMeasuredHold(CancellationToken cancellation)
     {
         var device = Device();
-        if (workspacePage != "controls" || calibrationOpen || state?["motion"]?["active"]?.GetValue<bool>() == true)
+        if (Navigation.Page != WorkspacePage.Controls || state?["motion"]?["active"]?.GetValue<bool>() == true)
             throw new InvalidOperationException("Return to idle Controls before holding the jaws here.");
         var pika = state?["pika"] as JsonObject;
         if (!PikaMatchesProfile() || !PikaTeachingRecorder.DisabledAfterRequest(pika, owner, pikaTeachingDisableRequest) ||

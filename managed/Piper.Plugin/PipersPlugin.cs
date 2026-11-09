@@ -150,8 +150,7 @@ public sealed partial class PipersPlugin : ILuckyPlugin
         bool recoveryOnly = recoveryAcknowledged && action is "reset" or "verify-reset" or "verify-current" or "recover-at-pose";
         bool releasingPower = action == "disable";
         bool teachingOnly = teachingAcknowledged && action == "teach-return";
-        if (calibrationOpen && !recoveryOnly && !teachingOnly && !releasingPower && action != "hold") throw new InvalidOperationException("Calibrate robot is read-only. Use Back to robot controls before sending arm targets or enable commands.");
-        if (workspacePage != "controls" && !recoveryOnly && !teachingOnly && !releasingPower && action != "hold") throw new InvalidOperationException("Return to Controls before enabling or moving the real robot.");
+        if (Navigation.Page != WorkspacePage.Controls && !recoveryOnly && !teachingOnly && !releasingPower && action != "hold") throw new InvalidOperationException("Return to Controls before enabling or moving the real robot.");
         if (!approved && !recoveryOnly && !teachingOnly && !releasingPower) throw new InvalidOperationException("Use Enable robot and confirm the workspace is clear first.");
         var device = Device(expectedDeviceId, expectedGeneration, expectedToken);
         var scope = new RobotCommandScope(ActiveProfile.Id, expectedToken, device["id"]!.GetValue<string>(), device["generation"]!.GetValue<long>());
@@ -287,8 +286,7 @@ public sealed partial class PipersPlugin : ILuckyPlugin
             if (id.StartsWith("global.", StringComparison.Ordinal))
             { await GlobalSettingsEvent(id[7..], input.Value, cancellation); await Update(cancellation); return; }
             if (id == "recovery.guide.cancel") { CancelHandGuideRecovery(); await Update(cancellation); return; }
-            if (workspacePage != "controls" && WorkspaceCommandPolicy.RequiresControls(id)) throw new InvalidOperationException("Return to Controls before enabling or moving the robot.");
-            if (CalibrationCommandGuard.Blocks(id, calibrationOpen)) throw new InvalidOperationException("Calibrate robot is read-only. Use Back to robot controls before enabling or moving the real robot.");
+            if (Navigation.Page != WorkspacePage.Controls && WorkspaceCommandPolicy.RequiresControls(id)) throw new InvalidOperationException("Return to Controls before enabling or moving the robot.");
             if (id.StartsWith("workspace.", StringComparison.Ordinal))
             {
                 await WorkspaceEvent(id[10..], cancellation); await Update(cancellation); return;
@@ -312,8 +310,10 @@ public sealed partial class PipersPlugin : ILuckyPlugin
                 if (calibrationOpen && (id.StartsWith("profiles.select.", StringComparison.Ordinal) || id is "profiles.add" or "profiles.remove"))
                 { await StopHeightCheck(cancellation); await ClearWizardHighlight(cancellation); }
                 await ProfileEvent(id[9..], cancellation);
-                workspacePage = "controls"; calibrationOpen = false;
-                await Render(cancellation); await Update(cancellation); return;
+                // Selecting a robot returns to its controls through the same
+                // publication gate as every other navigation.
+                await PublishWorkspaceView(cancellation, () => Navigation = Navigation.Navigate("controls"));
+                await Update(cancellation); return;
             }
             if (id.StartsWith("pika.reference.", StringComparison.Ordinal))
             {
@@ -618,7 +618,6 @@ public sealed partial class PipersPlugin : ILuckyPlugin
         };
         patches["safety"] = new() { ["visible"] = scope.View?.Confirmation is { } presented &&
             ReferenceEquals(CommandAuthority.Current.Confirmation, presented) };
-        patches["backend.setup"] = new() { ["visible"] = backendSetupOpen || snapshot is null || scope.Context.Page == "settings" && scope.Context.SettingsCategory is "controller" or "diagnostics" };
         patches["backend.restart.confirmation"] = new() { ["visible"] = backendRestartConfirmation };
         patches["backend.status"] = new() { ["text"] = backendStatus };
         patches["backend.prerequisites"] = new() { ["text"] = setupStatus };
@@ -630,7 +629,7 @@ public sealed partial class PipersPlugin : ILuckyPlugin
             try { device = Device(sourceReceipt: receipt); }
             catch (InvalidOperationException) { }
         }
-        bool movable = scope.Context.Page == "controls" && approved && !TeachingState.Inspect(device).BlocksTargets && snapshot?["motion"]?["active"]?.GetValue<bool>() != true && device?["fresh"]?.GetValue<bool>() == true && device["recovery_required"]?.GetValue<bool>() != true && string.IsNullOrEmpty(device["blocker"]?.GetValue<string>());
+        bool movable = scope.Context.Page == WorkspacePage.Controls && approved && !TeachingState.Inspect(device).BlocksTargets && snapshot?["motion"]?["active"]?.GetValue<bool>() != true && device?["fresh"]?.GetValue<bool>() == true && device["recovery_required"]?.GetValue<bool>() != true && string.IsNullOrEmpty(device["blocker"]?.GetValue<string>());
         var joints = device?["joints"]?.AsArray();
         bool ownMove = snapshot?["motion"]?["active"]?.GetValue<bool>() == true && snapshot["motion"]?["owner"]?.GetValue<string>() == owner;
         var remaining = joints?.Select((j, i) => new { Joint = i + 1, Actual = j?["actual_deg"]?.GetValue<double>(), Target = j?["target_deg"]?.GetValue<double>() })
@@ -666,7 +665,7 @@ public sealed partial class PipersPlugin : ILuckyPlugin
         patches["pika.value"] = new() { ["text"] = pikaReading, ["hint"] = pikaMonitorStatus + " Raw encoder: " +
             (pika?["telemetry"]?["motor"]?["Position"]?.ToJsonString() ?? "unavailable") + " rad. " +
             (PikaDisplayReferenceAngle(pika as JsonObject) is double angle ? $"Closed display reference {angle:F5} rad; motor targets unchanged." : "Nominal reference; a negative closed reading may need an operator-confirmed display reference.") };
-        bool manualPika = scope.Context.Page == "controls" && ManualPikaBlocker(device, pika as JsonObject) is null;
+        bool manualPika = scope.Context.Page == WorkspacePage.Controls && ManualPikaBlocker(device, pika as JsonObject) is null;
         patches["pika.target"] = new() { ["value"] = opening ?? 0, ["enabled"] = manualPika };
         patches["pika.monitor"] = new() { ["text"] = pikaMonitorStatus };
         bool limitsFresh = joints?.All(j => j?["limits_fresh"]?.GetValue<bool>() == true && j["max_speed_rad_s"]?.GetValue<double>() > 0) == true;

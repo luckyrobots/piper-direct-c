@@ -986,7 +986,6 @@ internal static partial class SimulationFollowingTests
             return plugin.HandleEventAsync(new("fixture", wireId, "click", JsonSerializer.SerializeToElement(true)), CancellationToken.None);
         }
         public void SetDetail(string detail) => Set("GroupFollowDetail", detail);
-        public void SetWorkspace(string page, bool calibration = false) { Set("workspacePage", page); Set("calibrationOpen", calibration); }
         public Task PublishMeasured() { Refresh(); return Invoke("PublishMeasuredScene", CancellationToken.None); }
         public async Task Gap(string method)
         {

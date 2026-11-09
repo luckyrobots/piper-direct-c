@@ -166,7 +166,7 @@ public sealed partial class PipersPlugin
             Widget.Label("profiles.heading", "ROBOTS") with { Appearance = "muted" },
             Widget.Column("profiles.list", rows) with { Spacing = 8 },
             GroupFollowControls(),
-            (workspacePage == "camera" && cameraDetail == "bench" ? Widget.Label("workspace.bench.enlarged", "Bench camera is enlarged") with { Height = 60, Appearance = "muted" } : Camera("bench", "Bench camera")),
+            (Navigation.Page == WorkspacePage.Camera && cameraDetail == "bench" ? Widget.Label("workspace.bench.enlarged", "Bench camera is enlarged") with { Height = 60, Appearance = "muted" } : Camera("bench", "Bench camera")),
             Widget.Button("workspace.camera.bench@compare", "Enlarge & compare") with { Appearance = "quiet", Hint = "The bench camera is shared by every robot." }) with { Width = 170, Padding = 12, Spacing = 14, Appearance = "sidebar" };
     }
 

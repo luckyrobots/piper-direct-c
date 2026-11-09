@@ -100,7 +100,7 @@ internal static class CalibrationSheetIntegrationTests
                 })], null)!;
         Set("engine", context); Set("token", "fixture-session"); Set("state", snapshot); Fresh();
         Set("link", new RobotLink("fixture-scene", "fixture-robot", Pose()["joints"]!.AsArray(), device));
-        Set("linkBackendToken", "fixture-session"); Set("workspacePage", "settings"); Set("settingsCategory", "bench"); Set("calibrationOpen", true);
+        Set("linkBackendToken", "fixture-session"); plugin.Navigation = WorkspaceNavigation.Calibration;
         IEnumerable<JsonObject> Walk(JsonObject node)
         {
             yield return node;

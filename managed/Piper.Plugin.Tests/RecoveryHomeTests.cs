@@ -179,10 +179,7 @@ internal static class RecoveryHomeTests
             check(await Failure(() => fixture.Run()) is IOException && fixture.Actions.Count == 0,
                 "Failure to persist the initial recovery stage still admitted a reset");
         }
-        check(WorkspaceCommandPolicy.RequiresControls("recovery.home") && CalibrationCommandGuard.Blocks("recovery.home", true),
-            "Recovery home bypassed Controls/calibration command policy");
-        check(WorkspaceCommandPolicy.RequiresControls("recovery.home") && CalibrationCommandGuard.Blocks("recovery.home", true),
-            "The primary incident recovery alias bypassed the same Controls/calibration policy");
+        check(WorkspaceCommandPolicy.RequiresControls("recovery.home"), "Recovery home bypassed Controls/calibration command policy");
         await RecoveryHomeUiTests.Run(check);
     }
 

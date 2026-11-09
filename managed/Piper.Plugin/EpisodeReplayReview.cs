@@ -100,7 +100,7 @@ public sealed partial class PipersPlugin
 
     private async Task ReplayEvent(string action, JsonElement value, CancellationToken cancellation)
     {
-        if (workspacePage != "replay")
+        if (Navigation.Page != WorkspacePage.Replay)
             throw new InvalidOperationException("Open Physical replay review before editing its preparation.");
         if (action == "path")
         {
@@ -226,7 +226,7 @@ public sealed partial class PipersPlugin
 
     private void AddReplayPatches(Dictionary<string, JsonObject> patches, JsonObject? device)
     {
-        if (workspacePage != "replay" || replayArtifact is not { } artifact)
+        if (Navigation.Page != WorkspacePage.Replay || replayArtifact is not { } artifact)
             return;
         if (replayProfile != ActiveProfile.Id || replayCheckedToken.Length > 0 && (replayCheckedToken != token ||
             replayCheckedDevice != device?["id"]?.GetValue<string>() || replayCheckedGeneration != device?["generation"]?.GetValue<long>()))

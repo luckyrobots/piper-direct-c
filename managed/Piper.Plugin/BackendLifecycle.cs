@@ -11,7 +11,6 @@ public sealed partial class PipersPlugin
 {
     private Process? ownedBackend;
     private string? ownedBackendToken;
-    private bool backendSetupOpen;
     private string backendStatus = "Use the existing controller, or start the bundled server when ports 8765/8766 are free.";
     private string setupStatus = "Windows Pika requires WSL 2 + a Linux distribution and usbipd-win. Share only the Pika USB device with WSL. Driver/USB setup is explicit; see plugin instructions.";
     private BackendSettings BackendOptions => preferences.Backend ?? new();
@@ -28,12 +27,11 @@ public sealed partial class PipersPlugin
             new Widget("input", "backend.wsl") { Text = BackendOptions.WslDistribution, Hint = "Existing WSL 2 distribution; used only by a bundled server started here", Visible = OperatingSystem.IsWindows() },
             Widget.Label("backend.device.label", "Pika Linux device"),
             new Widget("input", "backend.device") { Text = BackendOptions.PikaDevice, Hint = "Linux serial path. Leave blank for an arm-only server." }),
-        Widget.Button("backend.instructions", "Open setup instructions")) with { Visible = backendSetupOpen || state is null };
+        Widget.Button("backend.instructions", "Open setup instructions"));
 
     private async Task BackendEvent(string action, string value, CancellationToken cancellation)
     {
-        if (action == "toggle") backendSetupOpen = !backendSetupOpen;
-        else if (action == "restart") { backendRestartConfirmation = true; await Render(cancellation); }
+        if (action == "restart") { backendRestartConfirmation = true; await Render(cancellation); }
         else if (action == "restart.cancel") { backendRestartConfirmation = false; await Render(cancellation); }
         else if (action == "restart.confirm") await RestartBackend(cancellation);
         else if (action == "start") await StartBundledBackend(cancellation);

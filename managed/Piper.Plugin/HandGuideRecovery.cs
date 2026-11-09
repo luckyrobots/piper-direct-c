@@ -139,7 +139,7 @@ public sealed partial class PipersPlugin
 
     private async Task RunRecoveryCard(CancellationToken cancellation)
     {
-        if (workspacePage != "controls" || calibrationOpen) throw new InvalidOperationException("Return to Controls to use the recovery guide.");
+        if (Navigation.Page != WorkspacePage.Controls) throw new InvalidOperationException("Return to Controls to use the recovery guide.");
         long permissionEpoch = CommandAuthority.Epoch;
         var device = Device();
         var view = RecoveryCardState(device);

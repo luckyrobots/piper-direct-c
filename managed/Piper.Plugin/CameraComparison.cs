@@ -43,7 +43,7 @@ public sealed partial class PipersPlugin
                 refreshSettings = await ApplyCameraDeviceInventory(lifetime.Token);
             }
             finally { commands.Release(); }
-            if (refreshSettings && passiveMeasuredTrackingStarted && !cameraDiscoveryShutdown.IsCancellationRequested && workspacePage == "settings")
+            if (refreshSettings && passiveMeasuredTrackingStarted && !cameraDiscoveryShutdown.IsCancellationRequested && Navigation.Page == WorkspacePage.Settings)
                 await Render(cancellation);
         }
         catch (OperationCanceledException) when (cameraDiscoveryShutdown.IsCancellationRequested && !cancellation.IsCancellationRequested)
@@ -126,7 +126,7 @@ public sealed partial class PipersPlugin
             int selection = value.GetInt32();
             const string changed = "Simulation cameras changed. Click Refresh cameras and select the counterpart again.";
             if (view is null || Volatile.Read(ref workspacePublicationUncertain) != 0 || view.Context != CurrentWorkspaceViewContext ||
-                view.Context is not { Page: "settings", SettingsCategory: "cameras" } || view.Context.SettingsCamera != camera ||
+                view.Context is not { Page: WorkspacePage.Settings, SettingsCategory: SettingsCategory.Cameras } || view.Context.SettingsCamera != camera ||
                 wireId != WorkspaceEventScope.Wrap(view.Epoch, view.Context.Profile, "camera." + camera + ".simselect") ||
                 view.CameraChoices.SceneId != (inventory?["sceneId"]?.GetValue<string>() ?? "") ||
                 selection < 0 || selection > view.CameraChoices.Cameras.Length)

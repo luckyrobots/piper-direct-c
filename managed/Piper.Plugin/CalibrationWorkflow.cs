@@ -8,16 +8,9 @@ namespace LuckyRobots.Piper.Plugin;
 
 public sealed record CalibrationPreferences(CalibrationDesk Desk, CalibrationMeasurement Measurement);
 
-public static class CalibrationCommandGuard
-{
-    public static bool Blocks(string action, bool calibrationOpen) => calibrationOpen &&
-        (action is "enable" or "safety.accept" or "teleoperate.toggle" or "zero.all" or "recovery.home" or "pika.target" or "engine.robot.target" or "engine.robot.follow" ||
-            action.StartsWith("joint.", StringComparison.Ordinal));
-}
-
 public sealed partial class PipersPlugin
 {
-    private bool calibrationOpen, calibrationPlacementUnverified, calibrationArchiveConfirmation;
+    private bool calibrationPlacementUnverified, calibrationArchiveConfirmation;
     private string calibrationProfile = "";
     private string calibrationPath = "";
     private CalibrationDesk calibrationDesk = new();

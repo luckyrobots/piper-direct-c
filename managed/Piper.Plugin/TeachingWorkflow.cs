@@ -71,7 +71,7 @@ public sealed partial class PipersPlugin
                 long expectedGeneration = current["generation"]!.GetValue<long>();
                 TeachingState currentTeaching = TeachingState.Inspect(current);
                 if (!GroupFollowActive && CurrentRecovery is null && teachingReturnGate.Observe(currentTeaching, approvalBeforeTeaching,
-                    workspacePage == "controls" && !calibrationOpen && !switchingProfile,
+                    Navigation.Page == WorkspacePage.Controls && !switchingProfile,
                     expectedDevice + ":" + expectedGeneration + ":" + expectedToken))
                 {
                     attempting = true;

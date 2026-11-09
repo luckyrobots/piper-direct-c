@@ -51,7 +51,7 @@ public sealed partial class PipersPlugin
         JsonObject Current()
         {
             cancellation.ThrowIfCancellationRequested();
-            if (ActiveProfile.Id != expectedProfile || workspacePage != "controls" || calibrationOpen ||
+            if (ActiveProfile.Id != expectedProfile || Navigation.Page != WorkspacePage.Controls ||
                 expectedPermission != CommandAuthority.Epoch)
                 throw new InvalidOperationException("Control permission or selected robot changed. Click Resume controls again for the current robot.");
             return Device(expectedDevice, expectedGeneration, expectedToken);

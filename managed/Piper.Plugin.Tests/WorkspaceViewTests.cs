@@ -154,9 +154,10 @@ internal static class WorkspaceViewTests
         int Depth(JsonObject node) => 1 + (node["children"]?.AsArray().OfType<JsonObject>().Select(Depth).DefaultIfEmpty(0).Max() ?? 0);
         async Task CheckView(string page, string category = "robot", string camera = "bench")
         {
-            Set("workspacePage", page); Set("settingsCategory", category); Set("settingsCamera", camera); Set("cameraDetail", camera);
+            plugin.Navigation = WorkspaceNavigation.At(Enum.Parse<WorkspacePage>(page, true), Enum.Parse<SettingsCategory>(category, true))
+                with { SettingsCamera = camera, CameraDetail = camera };
             bool calibration = page == "settings" && category == "bench";
-            Set("calibrationOpen", calibration);
+            check(plugin.Navigation.CalibrationOpen == calibration, "Calibration was not derived from the bench settings page: " + page + "/" + category);
             await Invoke("Render", CancellationToken.None);
             var nodes = Walk(rendered!).ToArray();
             string[] ids = nodes.Select(n => n["id"]!.GetValue<string>()).ToArray();
@@ -219,7 +220,19 @@ internal static class WorkspaceViewTests
             // A real disconnect invalidates the receipt while leaving its last
             // complete snapshot available to the settings projection.
             Get<LatestTelemetry>("telemetry").Disconnect(); Set("approved", false);
-            foreach (string category in new[] { "robot", "controller", "diagnostics" }) await CheckView("settings", category);
+            foreach (string category in new[] { "robot", "diagnostics" }) await CheckView("settings", category);
+            var bench = WorkspaceNavigation.Initial.Navigate("calibration");
+            var enlarged = bench.Navigate("camera.gripper");
+            check(bench == WorkspaceNavigation.Calibration && enlarged is { Page: WorkspacePage.Camera, CameraReturn: WorkspacePage.Settings, CalibrationOpen: true } &&
+                enlarged.Navigate("camera.bench").CameraReturn == WorkspacePage.Settings && enlarged.Navigate("camera-back") is { Page: WorkspacePage.Settings, CalibrationOpen: true } &&
+                !bench.Navigate("controls").CalibrationOpen && bench.Navigate("settings.robot").Navigate("settings.controller").Category == SettingsCategory.Robot,
+                "Workspace navigation lost the calibration page, a camera's return page, or accepted an unreachable settings category");
+            plugin.Navigation = WorkspaceNavigation.Calibration;
+            string? heightBlocker = null;
+            try { typeof(PipersPlugin).GetMethod("HeightContext", flags)!.Invoke(plugin, null); }
+            catch (TargetInvocationException error) { heightBlocker = error.InnerException?.Message; }
+            check(heightBlocker is not null && !heightBlocker.Contains("Open Calibration", StringComparison.Ordinal),
+                "The jaw-height check remained unreachable from the bench calibration page");
             foreach (string camera in new[] { "bench", "depth", "gripper" })
             {
                 await CheckView("settings", "cameras", camera);
@@ -255,11 +268,11 @@ internal static class WorkspaceViewTests
                 long before = Get<long>("workspaceViewEpoch");
                 string back = WidgetId("workspace.controls@settings");
                 await Click(WidgetId("workspace.settings.bench"));
-                check(Get<string>("settingsCategory") == "cameras" && Get<long>("workspaceViewEpoch") == before &&
+                check(plugin.Navigation.Category == SettingsCategory.Cameras && Get<long>("workspaceViewEpoch") == before &&
                     Get<string>("uiActionError").Contains("Stop following", StringComparison.Ordinal),
                     "Rejected Bench navigation mutated the published camera page");
                 await Click(back);
-                check(Get<string>("workspacePage") == "controls" && Get<long>("workspaceViewEpoch") > before,
+                check(plugin.Navigation.Page == WorkspacePage.Controls && Get<long>("workspaceViewEpoch") > before,
                     "The old page became unclickable after rejected Bench navigation");
             }
             finally { Set("groupSimulation", null); }
@@ -320,7 +333,7 @@ internal static class WorkspaceViewTests
             });
             Set("client", new PiperControl.PiperControlClient(calls)); Set("state", state); Set("token", "fixture-session");
             Get<LatestTelemetry>("telemetry").Publish(new(state, "fixture-session", 1, Stopwatch.GetTimestamp(), 0));
-            Set("workspacePage", "controls"); Set("calibrationOpen", false); Set("approved", true); Set("linkCommandsEnabled", true);
+            plugin.Navigation = WorkspaceNavigation.Initial; Set("approved", true); Set("linkCommandsEnabled", true);
             Set("approvalBeforeTeaching", true); Set("teleoperating", true); Set("followRequest", 7L);
             plugin.CommandAuthority.TryAcknowledge(plugin.CommandAuthority.Epoch, new("piper-1", "fixture-session", binding.DeviceId, binding.Generation), 7);
             Set("link", binding); Set("linkBackendToken", "fixture-session");

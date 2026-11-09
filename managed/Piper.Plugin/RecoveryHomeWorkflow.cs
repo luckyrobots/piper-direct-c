@@ -26,7 +26,7 @@ public sealed partial class PipersPlugin
 
     private string? RecoveryHomeBlocker(RecoveryHomeSnapshot? snapshot = null)
     {
-        if (workspacePage != "controls" || calibrationOpen) return "Return to Controls before recovering to zero.";
+        if (Navigation.Page != WorkspacePage.Controls) return "Return to Controls before recovering to zero.";
         if (GroupFollowActive) return "Stop following before recovering to zero.";
         if (CurrentRecovery is not null || recoveryInProgress || switchingProfile) return "Wait for the current recovery or connection change.";
         try

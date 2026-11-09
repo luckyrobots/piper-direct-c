@@ -208,7 +208,7 @@ public sealed partial class PipersPlugin
     private void AddUnifiedWorkspacePatches(Dictionary<string, JsonObject> patches, JsonObject? device)
     {
         var readiness = Readiness(device);
-        bool controls = workspacePage == "controls";
+        bool controls = Navigation.Page == WorkspacePage.Controls;
         bool controllerStopped = device?["status"]?["arm_status"]?.GetValue<int>() == 1;
         bool canReleasePower = controllerStopped || !TeachingState.Inspect(device).Active;
         bool groupParticipant = GroupFollowIncludes(ActiveProfile.Id);
