@@ -23,19 +23,19 @@ internal static class BackendMaintenanceTests
         Check(!service.Prepare(Input(pid: 124)).Ok, "Restart accepted another process identity");
         Check(!service.Prepare(JsonSerializer.SerializeToElement(new { owner, backend_process_id = "123" })).Ok,
             "Malformed process ID was admitted");
-        Check(service.TryEnterControl("/api/heartbeat", out var active), "Normal request admission failed");
+        Check(service.TryEnterControl("/api/heartbeat", out var active, out _), "Normal request admission failed");
         Check(!service.Prepare(Input()).Ok, "Restart raced an in-flight control request");
         active!.Dispose(); active.Dispose(); // release is idempotent
         string before = state.ToJsonString() + pikas.ToJsonString();
         state["motion"]!["active"] = true;
         Check(!service.Prepare(Input()).Ok, "Restart interrupted an active action");
         state["motion"]!["active"] = false;
-        Check(service.TryEnterControl("/api/query", out var afterRejected), "Rejected restart left admission frozen");
+        Check(service.TryEnterControl("/api/query", out var afterRejected, out _), "Rejected restart left admission frozen");
         afterRejected!.Dispose();
         Check(service.Prepare(Input()).Ok, "Fresh stationary enabled Pika with a retained power reservation was rejected");
         Check(state.ToJsonString() + pikas.ToJsonString() == before, "Maintenance changed robot/recovery/power snapshots");
-        Check(!service.TryEnterControl("/api/command", out _), "Accepted restart allowed a new target");
-        Check(service.TryEnterControl("/api/stop", out var emergency), "Restart blocked emergency arm STOP");
+        Check(!service.TryEnterControl("/api/command", out _, out _), "Accepted restart allowed a new target");
+        Check(service.TryEnterControl("/api/stop", out var emergency, out _), "Restart blocked emergency arm STOP");
         emergency!.Dispose();
         Check(!service.Prepare(Input()).Ok, "Duplicate restart was admitted");
         service.Commit(); service.Commit();
@@ -81,13 +81,13 @@ internal static class BackendMaintenanceTests
             () => throw new Exception("Shutdown selected the restart exit action"), 123);
         int shutdownCalls = 0;
         void Shutdown() => ++shutdownCalls;
-        Check(shutdownGate.TryEnterControl("/api/pika/position", out var gripperWrite), "Fixture could not admit gripper write");
+        Check(shutdownGate.TryEnterControl("/api/pika/position", out var gripperWrite, out _), "Fixture could not admit gripper write");
         Check(shutdownGate.PrepareShutdown() is not null, "Shutdown raced an already admitted gripper command");
         gripperWrite!.Dispose();
         Check(shutdownGate.PrepareShutdown() is null, "Legacy shutdown rejected an idle backend");
-        Check(!shutdownGate.TryEnterControl("/api/command", out _) && !shutdownGate.TryEnterControl("/api/pika/enable", out _),
+        Check(!shutdownGate.TryEnterControl("/api/command", out _, out _) && !shutdownGate.TryEnterControl("/api/pika/enable", out _, out _),
             "Shutdown admitted a new arm target or gripper power request before response completion");
-        Check(shutdownGate.TryEnterControl("/api/stop/coordinated", out var shutdownStop), "Shutdown blocked coordinated STOP");
+        Check(shutdownGate.TryEnterControl("/api/stop/coordinated", out var shutdownStop, out _), "Shutdown blocked coordinated STOP");
         shutdownStop!.Dispose();
         shutdownArm["motion"]!["active"] = true;
         shutdownGate.CommitShutdown(Shutdown);

@@ -74,9 +74,6 @@ public sealed class BackendMaintenance
         };
     }
 
-    public bool TryEnterControl(string route, out IDisposable? admission)
-        => TryEnterControl(route, out admission, out _);
-
     internal bool TryEnterControl(string route, out IDisposable? admission, out string? error)
     {
         lock (gate)

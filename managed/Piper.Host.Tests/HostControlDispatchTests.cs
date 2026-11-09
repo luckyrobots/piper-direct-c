@@ -17,8 +17,8 @@ internal static class HostControlDispatchTests
             state["backend_process_id"]?.GetValue<int>() == processId, "Both adapters must identify the fixture host and keep the gRPC time envelope");
         foreach (string field in new[] { "token", "backend_instance_id", "backend_restart", "pika", "pikas" })
             Check(dashboard.ContainsKey(field) && JsonNode.DeepEquals(dashboard[field], state[field]), "Shared snapshot differs for " + field);
-        Check(dashboard["camera"] is JsonObject && dashboard["backend"] is JsonValue && !state.ContainsKey("camera") && !state.ContainsKey("backend"),
-            "Dashboard-only state fields moved into gRPC");
+        Check(dashboard["backend"] is JsonValue && !state.ContainsKey("backend"), "Dashboard-only state fields moved into gRPC");
+        Check(!dashboard.ContainsKey("camera") && !state.ContainsKey("camera"), "The managed host exposed the C-only bench-camera state");
 
         var browserEnable = await Post("/api/pika/enable", "{}");
         var grpcEnable = await Execute("/api/pika/enable", "{}");
@@ -29,13 +29,16 @@ internal static class HostControlDispatchTests
             JsonNode.DeepEquals(browserEnable.Body["error"], grpcError["error"]), "Pika simulation rejection or an adapter's error shape changed");
 
         await UnsupportedGrpc("/api/shutdown", "{}");
-        var camera = await Post("/api/camera", """{"enabled":false}""");
-        Check(camera.Status == HttpStatusCode.OK && JsonNode.DeepEquals(camera.Body, new JsonObject { ["running"] = false }),
-            "Rejected gRPC shutdown froze HTTP controls or changed the legacy camera disable response");
         await UnsupportedGrpc("/api/camera", """{"enabled":false}""");
 
         var device = dashboard["devices"]![0]!;
         string scope = new JsonObject { ["device_id"] = device["id"]?.DeepClone(), ["generation"] = device["generation"]?.DeepClone() }.ToJsonString();
+        // The bench webcam belongs to the C server; the managed host has no camera routes.
+        var camera = await Post("/api/camera", scope);
+        Check(camera.Status == HttpStatusCode.NotFound && camera.Body["error"]?.GetValue<string>() == "Unknown API route.",
+            "Rejected gRPC shutdown froze HTTP controls or the managed host kept a camera stub");
+        using (var cameraFrame = await http.GetAsync("/api/camera/frame"))
+            Check(cameraFrame.StatusCode == HttpStatusCode.NotFound, "The managed host kept the camera frame stub");
         var unknown = await Post("/api/unsupported-fixture", scope);
         Check(unknown.Status == HttpStatusCode.NotFound && unknown.Body["error"]?.GetValue<string>() == "Unknown API route.",
             "Unknown HTTP control route did not reach native route validation");

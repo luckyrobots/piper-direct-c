@@ -13,10 +13,6 @@ public sealed class PiperRpcContext(ControllerService controller, PikaSessionReg
 {
     private long sequence;
     public ControllerService Controller { get; } = controller;
-    public PikaSessionRegistry Pika { get; } = pika;
-    public bool Simulated { get; } = simulated;
-    public string SessionOwner { get; } = sessionOwner;
-    public BackendMaintenance Maintenance { get; } = maintenance;
     internal HostControlDispatcher Control { get; } = new(controller, pika, simulated, sessionOwner, maintenance);
     internal TimeProvider Clock { get; init; } = TimeProvider.System;
     public StateFrame Snapshot()

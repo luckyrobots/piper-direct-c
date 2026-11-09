@@ -73,9 +73,7 @@ app.Run(async context => {
     try {
         if (HttpMethods.IsGet(request.Method)) {
             if (route=="/api/state") {
-                var state = control.ReadState(OperatingSystem.IsWindows() ? "dotnet-windows" : "dotnet-linux");
-                state["camera"]=new JsonObject { ["configured"]=false,["running"]=false,["fresh"]=false,["error"]="Use local browser camera selection",["name"]="Local USB camera",["sequence"]=0 };
-                await response.WriteAsJsonAsync(state); return;
+                await response.WriteAsJsonAsync(control.ReadState(OperatingSystem.IsWindows() ? "dotnet-windows" : "dotnet-linux")); return;
             }
             if (route=="/api/pika/state") {
                 await response.WriteAsJsonAsync(control.PikaState(Query("pika_device"), Query("pika_distribution"))); return;
@@ -86,7 +84,6 @@ app.Run(async context => {
                 catch (Exception e) when (HostControlDispatcher.IsControlOperationError(e)) { await Error(409,e.Message); }
                 return;
             }
-            if (route=="/api/camera/frame") { await Error(409,"Use local browser camera preview"); return; }
             if (assets.TryGetValue(route,out var asset)) { response.ContentType=asset.Type; await response.SendFileAsync(Path.Combine(web,asset.File)); return; }
             await Error(404,"Not found"); return;
         }
@@ -108,11 +105,6 @@ app.Run(async context => {
         if (admission.Shutdown) {
             response.OnCompleted(() => { maintenance.CommitShutdown(app.Lifetime.StopApplication); return Task.CompletedTask; });
             await response.WriteAsJsonAsync(new {ok=true,message="Closing USB transports before shutdown"}); return;
-        }
-        if (route=="/api/camera") {
-            if (!json.RootElement.TryGetProperty("enabled",out var enabled)||enabled.ValueKind is not (JsonValueKind.True or JsonValueKind.False)) { await Error(400,"enabled must be true or false"); return; }
-            if (enabled.GetBoolean()) { await Error(409,"Use local browser camera preview"); return; }
-            await response.WriteAsJsonAsync(new {running=false}); return;
         }
         var result = await control.ExecuteAsync(route, body, json.RootElement, HostControlTransport.Http, context.RequestAborted);
         response.StatusCode = result.Status;

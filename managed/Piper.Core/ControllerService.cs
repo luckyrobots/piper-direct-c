@@ -13,7 +13,7 @@ public sealed class ControllerService : IDisposable
     private readonly Task worker;
     private IntPtr core;
     public string Token { get; } = Convert.ToHexString(RandomNumberGenerator.GetBytes(32)).ToLowerInvariant();
-    public string? WorkerError { get; private set; }
+    private volatile string? workerError;
 
     public ControllerService(bool simulated, string stateDirectory, int simulatedRobotCount = 1)
     {
@@ -32,7 +32,7 @@ public sealed class ControllerService : IDisposable
                     cancellation.Token.WaitHandle.WaitOne(5);
                 }
             }
-            catch (Exception e) { WorkerError = e.Message; }
+            catch (Exception e) { workerError = e.Message; }
         }, CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default);
     }
     public string Snapshot()
@@ -71,7 +71,7 @@ public sealed class ControllerService : IDisposable
     private void Check()
     {
         ObjectDisposedException.ThrowIf(core == IntPtr.Zero, this);
-        if (WorkerError is not null) throw new InvalidOperationException($"Controller loop stopped: {WorkerError}");
+        if (workerError is { } failure) throw new InvalidOperationException($"Controller loop stopped: {failure}");
     }
     private static string Take(IntPtr value)
     {
