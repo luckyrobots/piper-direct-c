@@ -1,12 +1,10 @@
     char lane_device[160], message[256], phase[32], error[256], owner[81];
     enum operation op;
     unsigned generation, request_id, enable_count;
-    unsigned enable_cursor;
-    bool enable_requested[6], enable_acknowledged[6];
-    double enable_first_sent_at[6], enable_last_sent_at[6], enable_baseline[6];
-    unsigned disable_cursor;
-    bool disable_requested[6], disable_acknowledged[6];
-    double disable_first_sent_at[6], disable_last_sent_at[6];
+    /* Per-driver power handshake for the active ENABLE or DISABLE. */
+    unsigned power_cursor;
+    bool power_requested[6], power_acknowledged[6];
+    double power_first_sent_at[6], power_last_sent_at[6], enable_baseline[6];
     bool pose_tx_valid;
     bool position_seed_pending;
     unsigned pose_tx_generation, pose_tx_speed;
@@ -23,30 +21,27 @@
     double range_followup_target[6], range_followup_speed, range_followup_percent;
     bool arrival_hold;
     double arrival_hold_at, arrival_hold_pose[6];
-    bool following, follow_committed;
+    enum follow_phase follow;
     /* Opt-in simulation follower: wire-quantized reference intervals are
        bounded by this connection's reported speed and acceleration limits. */
     bool trajectory_follow;
-    /* Pinned wire transport survives a measured follow-end hold. No idle
-       mode switching: a subsequent ordinary action admits PV only after its
-       existing stationary gate. */
-    bool streamed_position_mode;
     double trajectory_velocity[6], trajectory_previous_dt;
     double trajectory_speed[6], trajectory_acceleration[6];
     double trajectory_minimum[6], trajectory_maximum[6];
     double follow_updated;
     unsigned follow_sequence;
-    unsigned cycle_stage;
-    unsigned teach_return_stage;
+    enum lane_stage stage;
     /* Volatile evidence from this connection, never restored from a session
        file. A new STOP, disconnect, fault or playback invalidates the cycle. */
-    char teaching_cycle_device[160];
+    enum teach_cycle teaching_cycle;
     unsigned teaching_cycle_generation;
     double teaching_cycle_seen, teaching_cycle_completed;
     bool recovering_at_pose;
     double leg_start[6], leg_span, leg_fraction, pause_until;
-    bool query, disable_keeps_recovery;
-    unsigned query_joint, query_generation;
+    enum query_phase query;
+    bool disable_keeps_recovery;
+    /* INITIAL: next limit request 0..11. RETRY: rotating request 0..13. */
+    unsigned query_cursor, query_generation;
     double query_start, query_next;
     double auto_reconnect_at, auto_query_at;
     struct obstruction_watch obstruction[6];
