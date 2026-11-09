@@ -172,6 +172,9 @@ static void windows_scan_inventory(struct can_bus *b,
            Classic CAN uses one-shot only; receive filters transmit echoes.
            No enable/motion/reset frame is sent during transport setup. */
         if (!win.stop(handle)||!win.timing(handle,&timing)||!win.start(handle,1u<<3)) {
+            DWORD error=GetLastError(); int transport=win.last_error(handle);
+            d->up=d->link_verified=false;
+            snprintf(d->problem,sizeof d->problem,"Windows USB-CAN timing/start failed (transport error %d, WinUSB error %lu)",transport,(unsigned long)error);
             win.close(handle); win.free(handle); continue;
         }
         win.handles[slot]=handle; win.arrivals[slot]=arrival; d->fd=(int)slot; d->index=i;

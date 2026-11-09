@@ -65,10 +65,12 @@ static bool __stdcall fake_timing(void *handle,struct win_timing *timing)
     assert(timing->prop==1&&timing->phase1==12&&timing->phase2==2&&timing->sjw==1&&timing->brp==3);
     ++timings[h->device];return true;
 }
+static bool fail_start;
 static bool __stdcall fake_start(void *handle,uint32_t flags)
 {
-    struct fake_handle *h=handle;assert(h->device==1&&h->open&&!h->freed&&flags==(1u<<3));++starts[h->device];return true;
+    struct fake_handle *h=handle;assert(h->device==1&&h->open&&!h->freed&&flags==(1u<<3));++starts[h->device];return !fail_start;
 }
+static int __stdcall fake_last_error(void *handle) { (void)handle;return 7; }
 static bool __stdcall fake_send(void *handle,struct win_frame *frame,fn_pump pump,void *context)
 {
     (void)handle;(void)frame;(void)pump;(void)context;++can_sends;assert(!"Discovery must not send a CAN frame");return false;
@@ -108,6 +110,7 @@ int main(void)
     win.list_alloc=fake_list_alloc;win.list_scan=fake_list_scan;win.list_free=fake_list_free;
     win.num=fake_num;win.alloc=fake_alloc;win.serial=fake_serial;win.open=fake_open;
     win.stop=fake_stop;win.close=fake_close;win.free=fake_free;win.timing=fake_timing;win.start=fake_start;win.send_pumped=fake_send;
+    win.last_error=fake_last_error;
 
     windows_scan_inventory(&bus,fake_connection,fake_identity);
     struct can_device *second=&bus.devices[1];
@@ -161,6 +164,13 @@ int main(void)
     assert(second->generation>failed_generation&&win.arrivals[1]==arrivals[1]&&opens[1]==opens_before+1&&closes[1]==closes_before+1);
     assert(opens[0]==0&&stops[0]==0&&closes[0]==0&&timings[0]==0&&starts[0]==0);
     assert(!memcmp(first,&saved_first,sizeof *first)&&win.handles[0]==&original&&can_sends==0);
+
+    /* B20: a timing/start failure after open closes the handle and reports why. */
+    fail_start=true;++arrivals[1];windows_scan_inventory(&bus,fake_connection,fake_identity);
+    assert(second->fd==-1&&!second->up&&strstr(second->problem,"timing/start failed (transport error 7"));
+    assert(win.handles[1]==NULL&&!memcmp(first,&saved_first,sizeof *first)&&can_sends==0);
+    fail_start=false;windows_scan_inventory(&bus,fake_connection,fake_identity);
+    assert(second->fd==1&&second->up&&second->problem[0]==0);
 
     struct controller controller={0};controller.op=OP_MOVE;piper_tick(&controller);
     assert(full_scans==0&&connection_checks==1&&controller_ticks==1);
