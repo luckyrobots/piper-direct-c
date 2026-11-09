@@ -124,7 +124,7 @@ int main(void)
 
     struct controller c;
     char directory[96];
-    for (unsigned failure=0;failure<6;++failure) {
+    for (unsigned failure=0;failure<7;++failure) {
         fixture(&c,directory);struct can_device *device=&c.bus.devices[0];
         LANE(&c)->command[1]=1.8;LANE(&c)->target[1]=10;LANE(&c)->trajectory_velocity[1]=15;LANE(&c)->trajectory_previous_dt=.025;
         if (!failure) {
@@ -137,6 +137,7 @@ int main(void)
         if (failure==3) device->feedback.acceleration[1].max=4;
         if (failure==4) fail_pose=true;
         if (failure==5) device->feedback.arm[0].error=1;
+        if (failure==6) LANE(&c)->trajectory_velocity[1]=NAN;
         clock_now+=.025;LANE(&c)->heartbeat=LANE(&c)->follow_updated=clock_now;controller_tick(&c,clock_now);
         CHECK(LANE(&c)->op==OP_IDLE&&!LANE(&c)->trajectory_follow);
         if (!failure) {
@@ -150,6 +151,7 @@ int main(void)
             if (failure==3) CHECK(strstr(LANE(&c)->message,"limits changed"));
             if (failure==4) CHECK(strstr(LANE(&c)->message,"hold failed"));
             if (failure==5) CHECK(strstr(LANE(&c)->message,"fault"));
+            if (failure==6) CHECK(strstr(LANE(&c)->message,"not finite"));
         }
         close_fixture(&c,directory);
     }

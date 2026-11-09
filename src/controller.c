@@ -913,8 +913,13 @@ static double trajectory_braking_speed(double distance,double acceleration,doubl
 enum trajectory_step_result trajectory_reference_step(struct controller_lane *l,struct can_device *d,double now,double dt)
 {
     double next[6],velocity[6],midpoint_dt=l->trajectory_previous_dt>0?(dt+l->trajectory_previous_dt)/2:dt;
-    /* lane_tick returns below 20 ms and holds above 50 ms before calling. */
-    assert(isfinite(dt)&&dt>=.02&&dt<=.050001&&isfinite(midpoint_dt)&&midpoint_dt>0);
+    /* lane_tick returns below 20 ms and holds above 50 ms before calling, so
+       this cannot fire today. It stays a runtime check, not an assert: in the
+       motion loop the fail-safe answer is to stop following, never to abort
+       the daemon while the arm may be moving. */
+    if (!isfinite(dt)||dt<.02||dt>.050001||!isfinite(midpoint_dt)||midpoint_dt<=0) {
+        snprintf(l->error,sizeof l->error,"Trajectory reference interval is invalid; following stopped."); return TRAJECTORY_STEP_INVALID;
+    }
     for (unsigned i=0;i<6;++i) {
         const struct piper_limit *lim=&d->feedback.limit[i];
         struct piper_acceleration *a=&d->feedback.acceleration[i];
@@ -937,8 +942,11 @@ enum trajectory_step_result trajectory_reference_step(struct controller_lane *l,
         /* Admission requires finite limits with acceleration above the
            2.5 deg/s^2 grid reserve, health requires finite feedback, and every
            committed reference/velocity below is checked finite. */
-        assert(isfinite(l->command[i])&&isfinite(l->trajectory_velocity[i])&&isfinite(d->feedback.arm[0].deg[i])&&
-            isfinite(maximum_speed)&&isfinite(braking_acceleration)&&braking_acceleration>0);
+        /* Runtime check rather than assert for the same fail-safe reason. */
+        if (!isfinite(l->command[i])||!isfinite(l->trajectory_velocity[i])||!isfinite(d->feedback.arm[0].deg[i])||
+            !isfinite(maximum_speed)||!isfinite(braking_acceleration)||braking_acceleration<=0) {
+            snprintf(l->error,sizeof l->error,"J%u trajectory state is not finite; following stopped.",i+1); return TRAJECTORY_STEP_INVALID;
+        }
         double braking=trajectory_braking_speed(fabs(remaining),braking_acceleration,dt);
         double wanted=copysign(fmin(maximum_speed,fmin(fabs(remaining)/dt,braking)),remaining);
         double lower=fmax(-maximum_speed,l->trajectory_velocity[i]-acceleration*midpoint_dt);
