@@ -11,6 +11,9 @@ public sealed record TelemetryReceipt(JsonObject State, string BackendToken, lon
     public double AgeMilliseconds(long nowTicks) => SourceAgeMilliseconds +
         Math.Max(0, Stopwatch.GetElapsedTime(ReceivedTicks, nowTicks).TotalMilliseconds);
     public bool IsFresh(long nowTicks) => Connected && nowTicks >= ReceivedTicks && AgeMilliseconds(nowTicks) <= 500;
+    /// <summary>Source capture time on the receipt clock. Pass the frequency of the
+    /// clock that stamped <see cref="ReceivedTicks"/> and the compared value.</summary>
+    public double CapturedTicks(long timestampFrequency) => ReceivedTicks - SourceAgeMilliseconds * timestampFrequency / 1000;
     public double DeviceEvidenceAgeMilliseconds(JsonObject device, long nowTicks)
     {
         if (device["joints"] is not JsonArray { Count: 6 } joints) return double.PositiveInfinity;
@@ -420,7 +423,7 @@ public sealed partial class PipersPlugin
         {
             long acknowledged = Interlocked.Read(ref recoveryAcknowledgedTicks);
             if (acknowledged > 0 && (receipt.Sequence <= Interlocked.Read(ref recoveryAcknowledgedSequence) ||
-                receipt.ReceivedTicks - receipt.SourceAgeMilliseconds * Stopwatch.Frequency / 1000 <= acknowledged ||
+                receipt.CapturedTicks(Stopwatch.Frequency) <= acknowledged ||
                 receipt.State["motion"]?["request_id"]?.GetValue<long>() != Interlocked.Read(ref recoveryRequestId))) return;
             // A failed native reset has retired. Release only the UI's waiting
             // latch; a supported retry remains an explicit operator action.

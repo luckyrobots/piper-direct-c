@@ -18,7 +18,7 @@ internal sealed class FollowLaneTelemetry(RobotProfile profile, long generation,
         // scale as the telemetry receipt's monotonic clock.
         if (receipt.BackendToken != backend || !receipt.IsFresh(clock.GetTimestamp()))
             throw new InvalidOperationException("Controller feedback is stale or belongs to another session.");
-        lock (gate) return observations.GetValue(receipt, current => new(current, profile, generation, closedReference));
+        lock (gate) return observations.GetValue(receipt, current => new(current, profile, generation, closedReference, clock.TimestampFrequency));
     }
 }
 
@@ -27,7 +27,7 @@ internal sealed class FollowLaneObservation
     // Only receipt timing metadata is used after construction.
     private readonly TelemetryReceipt receipt;
     private readonly RobotProfile profile;
-    private readonly long generation;
+    private readonly long generation, timestampFrequency;
     private readonly bool armSamplesFresh, armHealthy, armReady, armSettled;
     private readonly bool pikaSamplesFresh, pikaReady;
     private readonly double armSampleAge, pikaSampleAge;
@@ -41,9 +41,11 @@ internal sealed class FollowLaneObservation
     public double PikaSpeed => pikaSpeed ?? throw new InvalidOperationException("Pika did not provide a finite telemetry.motor.Speed.");
     public double PikaFeedbackTime => pikaFeedbackTime ?? throw new InvalidOperationException("Pika did not provide a finite feedback_time_s.");
 
-    public FollowLaneObservation(TelemetryReceipt receipt, RobotProfile profile, long generation, double? closedReference)
+    public FollowLaneObservation(TelemetryReceipt receipt, RobotProfile profile, long generation, double? closedReference,
+        long timestampFrequency)
     {
         this.receipt = receipt;
+        this.timestampFrequency = timestampFrequency;
         this.profile = profile;
         this.generation = generation;
         var (device, motion, pika) = GroupSimulationLaneTelemetry.Resolve(receipt, profile, generation);
@@ -111,7 +113,7 @@ internal sealed class FollowLaneObservation
     public bool AdmissionReady(string owner, long request, long publishedSequence, long acknowledgementTicks, long acknowledgementSequence, long now)
     {
         RequireNativeScope(now);
-        return Motion.AdmissionReady(receipt, profile.CanDeviceId, generation, owner, request, publishedSequence, acknowledgementTicks, acknowledgementSequence);
+        return Motion.AdmissionReady(receipt, profile.CanDeviceId, generation, owner, request, publishedSequence, acknowledgementTicks, acknowledgementSequence, timestampFrequency);
     }
 
     private void RequireNativeScope(long now)
