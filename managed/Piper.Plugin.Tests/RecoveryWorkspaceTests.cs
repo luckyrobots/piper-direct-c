@@ -112,16 +112,16 @@ internal static class RecoveryWorkspaceTests
                 plugin.recoveryOperation = null;
             }
             Fresh(); await Click("recovery.card.run");
-            Check(calls.Actions.SequenceEqual(["recover-at-pose"]) && plugin.recoveryGuide?.CommandSent == true,
+            Check(calls.Actions.SequenceEqual(["recover-at-pose"]) && plugin.recoveryGuide is RecoveryGuide.CommandSent,
                 "A qualified green/off cycle did not admit the explicit same-pose return");
-            calls.Actions.Clear(); plugin.recoveryGuide = plugin.recoveryGuide! with { CommandSent = false };
+            calls.Actions.Clear(); plugin.recoveryGuide = new RecoveryGuide.Open(plugin.recoveryGuide!.Scope);
             device["status"]!["arm_status"] = 0; device["teaching"]!["phase"] = "off";
             device["status"]!["control"] = 1; device["status"]!["teach_state"] = 0;
             foreach (var joint in device["joints"]!.AsArray()) joint!["enabled"] = false;
             device["recovery_required"] = false; device["blocker"] = ""; device.Remove("stop_event");
             Fresh();
             await plugin.ObserveHandGuideRecovery(CancellationToken.None);
-            Check(plugin.recoveryGuide is { Gate: null } && calls.Actions.Count == 0,
+            Check(plugin.recoveryGuide is RecoveryGuide.Open && calls.Actions.Count == 0,
                 "Reset's retired stop record closed the visible range/holding guide or reused old teaching proof");
             using var reset = SimulatedRecovery(PipersPlugin.RecoveryKind.HoldHere);
             reset.ResetAt = Stopwatch.GetTimestamp();

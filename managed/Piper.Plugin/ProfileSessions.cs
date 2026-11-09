@@ -73,7 +73,7 @@ public sealed partial class PipersPlugin
         // A previously approved operator can use the physical button to recover
         // from an obstruction directly. Actual movement remains blocked until
         // the native controller verifies the new same-pose handoff.
-        if (d["recovery_required"]?.GetValue<bool>() == true && teaching.HandGuiding && CurrentGuide?.Gate is null)
+        if (d["recovery_required"]?.GetValue<bool>() == true && teaching.HandGuiding && CurrentGuide?.HandGuideGate is null)
             BeginHandGuideRecovery(d);
         if (d["recovery_required"]?.GetValue<bool>() == true || d["reset_pending"]?.GetValue<bool>() == true || teaching.BlocksTargets ||
             !RobotPowerState.Inspect(d).AllEnabled || !string.IsNullOrEmpty(d["blocker"]?.GetValue<string>())) return;
