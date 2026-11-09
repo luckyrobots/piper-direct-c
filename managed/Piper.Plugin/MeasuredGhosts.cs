@@ -14,8 +14,7 @@ public sealed partial class PipersPlugin
 
     private double? GhostDisplayReference(RobotProfile profile, JsonObject pika)
     {
-        string distribution = OperatingSystem.IsWindows() ? profile.WslDistribution : "";
-        string key = profile.Id + "\n" + profile.PikaDevice + "\n" + distribution;
+        string key = PikaClosedDisplayReference.Key(profile);
         if (profile.Id == ActiveProfile.Id)
         {
             double? angle = PikaDisplayReferenceAngle(pika);
@@ -23,17 +22,8 @@ public sealed partial class PipersPlugin
             return angle;
         }
         if (!ghostDisplayReferences.TryGetValue(key, out var saved))
-        {
-            string path = Path.Combine(engine.Start.SettingsDirectory, "gripper-reference", profile.Id + ".json");
-            try
-            {
-                saved = File.Exists(path) ? System.Text.Json.JsonSerializer.Deserialize<PikaClosedDisplayReference>(File.ReadAllText(path), LuckyEngine.PluginSdk.PluginProtocol.Json) : null;
-            }
-            catch (Exception error) when (error is IOException or System.Text.Json.JsonException)
-            { Trace.TraceWarning("Measured ghost gripper reference: {0}", error.Message); }
-            ghostDisplayReferences[key] = saved;
-        }
-        return saved?.Matches(profile.Id, profile.PikaDevice, distribution, pika) == true ? saved.MotorAngle : null;
+            ghostDisplayReferences[key] = saved = PikaClosedDisplayReference.TryLoad(engine.Start.SettingsDirectory, profile);
+        return saved?.AngleFor(profile, pika);
     }
 
     private async Task SetMeasuredGhostVisibility(bool visible, CancellationToken cancellation)
@@ -106,8 +96,7 @@ public sealed partial class PipersPlugin
         if (!passiveMeasuredTrackingStarted || switchingProfile) return;
         try
         {
-            var referenceKeys = (preferences.Robots ?? []).Select(profile => profile.Id + "\n" + profile.PikaDevice + "\n" +
-                (OperatingSystem.IsWindows() ? profile.WslDistribution : "")).ToHashSet(StringComparer.Ordinal);
+            var referenceKeys = (preferences.Robots ?? []).Select(PikaClosedDisplayReference.Key).ToHashSet(StringComparer.Ordinal);
             foreach (string obsolete in ghostDisplayReferences.Keys.Where(key => !referenceKeys.Contains(key)).ToArray())
                 ghostDisplayReferences.Remove(obsolete);
             if (measuredGhostSupported is null)

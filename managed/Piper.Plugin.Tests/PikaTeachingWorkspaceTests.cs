@@ -13,7 +13,7 @@ internal static class PikaTeachingWorkspaceTests
         bool Visible() => (bool)typeof(PipersPlugin).GetProperty("PikaTeachingControlsVisible", flags)!.GetValue(plugin)!;
         var a = new RobotProfile("a", "First", "CAN-A", PikaDevice: "/dev/pika/by-host/11-4");
         var b = new RobotProfile("b", "Second", "CAN-B", PikaDevice: "/dev/pika/by-host/15-4");
-        var identity = PikaTeachingIdentity.Create(a.Id, a.CanDeviceId, 7, a.PikaDevice, "Ubuntu", "test-backend-token");
+        var identity = PikaTeachingIdentity.Create(a.Id, a.CanDeviceId, 7, a.PikaDevice, a.PikaDistribution, "test-backend-token");
         var report = new PikaTeachingRecorder(identity, "free-A", null, 1000, DateTimeOffset.UnixEpoch).Snapshot(DateTimeOffset.UnixEpoch);
         try
         {

@@ -6,9 +6,9 @@ using System.Text.Json.Nodes;
 namespace LuckyRobots.Piper.Plugin;
 
 public sealed record PikaTeachingIdentity(string ProfileId, string CanDeviceId, long Generation,
-    string PikaDevice, string Distribution, string BackendSessionSha256)
+    string PikaDevice, string? Distribution, string BackendSessionSha256)
 {
-    public static PikaTeachingIdentity Create(string profile, string can, long generation, string pika, string distribution, string backendToken) =>
+    public static PikaTeachingIdentity Create(string profile, string can, long generation, string pika, string? distribution, string backendToken) =>
         new(profile, can, generation, pika, distribution, Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(backendToken))).ToLowerInvariant());
 }
 

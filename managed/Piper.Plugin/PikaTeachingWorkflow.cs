@@ -9,7 +9,7 @@ namespace LuckyRobots.Piper.Plugin;
 public sealed partial class PipersPlugin
 {
     private const string DefaultPikaTeachingStatus = "Arm teaching records six joints. Free the USB Pika jaws explicitly to capture their hand-guided motion in the plugin.";
-    private sealed record PikaTeachingWorkspaceKey(string ProfileId, string CanDeviceId, string PikaDevice, string Distribution);
+    private sealed record PikaTeachingWorkspaceKey(string ProfileId, string CanDeviceId, string PikaDevice, string? Distribution);
     private sealed record PikaTeachingWorkspaceState(string DisableRequest, string Status, string SavedPath, PikaTeachingReport? Unsaved);
     private readonly Dictionary<PikaTeachingWorkspaceKey, PikaTeachingWorkspaceState> pikaTeachingWorkspaces = new();
     private readonly object pikaTeachingSync = new();
@@ -32,7 +32,7 @@ public sealed partial class PipersPlugin
     }
 
     private static PikaTeachingWorkspaceKey PikaTeachingKey(RobotProfile profile) =>
-        new(profile.Id, profile.CanDeviceId, profile.PikaDevice, OperatingSystem.IsWindows() ? profile.WslDistribution : "");
+        new(profile.Id, profile.CanDeviceId, profile.PikaDevice, profile.PikaDistribution);
 
     private void StorePikaTeachingWorkspace(RobotProfile profile)
     {
@@ -153,7 +153,7 @@ public sealed partial class PipersPlugin
                         break;
                     }
                 }
-                var identity = PikaTeachingIdentity.Create(expectedProfile, expectedDevice, generation, ActiveProfile.PikaDevice, PikaReferenceDistribution, expectedToken);
+                var identity = PikaTeachingIdentity.Create(expectedProfile, expectedDevice, generation, ActiveProfile.PikaDevice, ActiveProfile.PikaDistribution, expectedToken);
                 double? reference = PikaDisplayReferenceAngle(pika);
                 var recorder = new PikaTeachingRecorder(identity, request, reference, receipt.ReceivedTicks, DateTimeOffset.UtcNow);
                 long utc = (DateTimeOffset.UtcNow.Ticks - DateTimeOffset.UnixEpoch.Ticks) / 10;
@@ -257,14 +257,14 @@ public sealed partial class PipersPlugin
             if (recorder is null) return;
             try
             {
-                if (ActiveProfile.Id != recorder.Identity.ProfileId || ActiveProfile.PikaDevice != recorder.Identity.PikaDevice || PikaReferenceDistribution != recorder.Identity.Distribution)
+                if (ActiveProfile.Id != recorder.Identity.ProfileId || ActiveProfile.PikaDevice != recorder.Identity.PikaDevice || ActiveProfile.PikaDistribution != recorder.Identity.Distribution)
                 {
                     recorder.Finish("Selected robot profile or Pika assignment changed");
                     CompletePikaTeachingLocked(recorder); return;
                 }
                 var device = RobotProfileRouting.Device(preferences, receipt.State);
                 var identity = PikaTeachingIdentity.Create(ActiveProfile.Id, device["id"]!.GetValue<string>(), device["generation"]!.GetValue<long>(),
-                    ActiveProfile.PikaDevice, PikaReferenceDistribution, receipt.BackendToken);
+                    ActiveProfile.PikaDevice, ActiveProfile.PikaDistribution, receipt.BackendToken);
                 var pika = receipt.State["pika"] as JsonObject;
                 if (identity != recorder.Identity || !PikaMatchesProfile()) recorder.Finish("Robot, Pika or backend identity changed");
                 else if (device["fresh"]?.GetValue<bool>() == true && !TeachingState.Inspect(device).HandGuiding)

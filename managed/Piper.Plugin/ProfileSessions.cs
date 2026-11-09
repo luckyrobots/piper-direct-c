@@ -35,7 +35,7 @@ public sealed partial class PipersPlugin
         var selected = ProfilePikaRouting.Find(snapshot, profile);
         if (snapshot["pikas"] is JsonArray || selected is not null)
             snapshot["pika"] = selected?.DeepClone() ?? new JsonObject { ["device"] = profile.PikaDevice,
-                ["distribution"] = profile.WslDistribution, ["configured"] = false, ["connected"] = false, ["fresh"] = false };
+                ["distribution"] = profile.PikaDistribution, ["configured"] = false, ["connected"] = false, ["fresh"] = false };
     }
 
     private JsonObject[] OwnedPikaSessions(JsonObject snapshot) => (snapshot["pikas"] is JsonArray sessions

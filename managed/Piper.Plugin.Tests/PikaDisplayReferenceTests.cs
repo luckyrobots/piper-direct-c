@@ -12,7 +12,8 @@ internal static class PikaDisplayReferenceTests
 {
     private const double ClosedAngle = -.0354;
     private const string DevicePath = "/dev/pika-fixture";
-    private static string Distribution => OperatingSystem.IsWindows() ? "Ubuntu" : "";
+    private static readonly RobotProfile Profile = new("piper-1", "Fixture", "can-a", RobotId: "fixture-robot", PikaDevice: DevicePath);
+    private static string? Distribution => Profile.PikaDistribution;
     private static JsonObject Pika() => new()
     {
         ["device"] = DevicePath, ["distribution"] = Distribution, ["connected"] = true, ["fresh"] = true,
@@ -97,7 +98,7 @@ internal static class PikaDisplayReferenceTests
         Task Invoke(string name, params object[] args) => (Task)typeof(PipersPlugin).GetMethod(name, hidden)!.Invoke(plugin, args)!;
         string folder = Path.Combine(Path.GetTempPath(), "piper-display-reference-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(folder);
-        var prefs = RobotProfileRouting.Normalize(new Preferences(Robots: [new("piper-1", "Fixture", "can-a", RobotId: "fixture-robot", PikaDevice: DevicePath, WslDistribution: Distribution)], ActiveRobotId: "piper-1"));
+        var prefs = RobotProfileRouting.Normalize(new Preferences(Robots: [Profile], ActiveRobotId: "piper-1"));
         Set("preferences", prefs); Set("token", "fixture-session"); Set("pikaMonitoring", true);
         var model = new JsonArray(Enumerable.Range(1, 6).Select(i => (JsonNode)new JsonObject { ["name"] = "joint" + i, ["unit"] = "rad" }).ToArray());
         const double travel = .0470221912391186;

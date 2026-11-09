@@ -46,7 +46,7 @@ internal static partial class SimulationFollowingTests
         foreach (string saved in new[] { "valid", "missing", "malformed", "other-profile", "other-device", "other-distribution" })
         {
             await using var reference = new Fixture(); reference.ConfigureGroup(); reference.SelectGroupFollowers("piper-2"); reference.UseUiDispatcher();
-            string distribution = OperatingSystem.IsWindows() ? "Ubuntu" : "";
+            string? distribution = new RobotProfile("piper-2", "Second").PikaDistribution;
             var value = new PikaClosedDisplayReference(1, saved == "other-profile" ? "piper-1" : "piper-2",
                 saved == "other-device" ? "/dev/other" : "/dev/pika-b", saved == "other-distribution" ? "other" : distribution, -.0354, DateTimeOffset.UtcNow);
             string path = Path.Combine(reference.Get<PluginContext>("engine").Start.SettingsDirectory, "gripper-reference", "piper-2.json");
@@ -704,7 +704,7 @@ internal static partial class SimulationFollowingTests
                 }),
                 ["pika"] = new JsonObject
                 {
-                    ["configured"] = true, ["device"] = "/dev/pika-a", ["distribution"] = "Ubuntu", ["owner"] = Get<string>("owner"),
+                    ["configured"] = true, ["device"] = "/dev/pika-a", ["distribution"] = RobotProfile.PikaDistributionFor("Ubuntu"), ["owner"] = Get<string>("owner"),
                     ["fresh"] = true, ["connected"] = true, ["armed"] = true, ["enabled"] = true, ["pending"] = false, ["age_s"] = .001,
                     ["telemetry"] = new JsonObject { ["motor"] = new JsonObject { ["Position"] = PikaProtocol.Angle(20), ["Speed"] = 0d } }
                 }

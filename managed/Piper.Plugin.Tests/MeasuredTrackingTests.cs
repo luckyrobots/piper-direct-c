@@ -208,7 +208,7 @@ internal static class MeasuredTrackingTests
                 }),
                 ["pika"] = new JsonObject
                 {
-                    ["configured"] = true, ["device"] = "/dev/pika-a", ["distribution"] = "Ubuntu", ["owner"] = "",
+                    ["configured"] = true, ["device"] = "/dev/pika-a", ["distribution"] = RobotProfile.PikaDistributionFor("Ubuntu"), ["owner"] = "",
                     ["connected"] = false, ["fresh"] = true, ["power_requested"] = false, ["power_uncertain"] = false,
                     ["telemetry"] = new JsonObject { ["motor"] = new JsonObject { ["Position"] = 0.0 } }
                 }
