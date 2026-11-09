@@ -1,6 +1,5 @@
 using System.Collections.Concurrent;
 using System.Diagnostics;
-using System.Reflection;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using Grpc.Core;
@@ -737,8 +736,7 @@ internal static partial class SimulationFollowingTests
             plugin.scene = new JsonObject { ["sceneId"] = "source-a", ["robots"] = new JsonArray(new JsonObject
                 { ["entityId"] = "robot-a", ["modelAssetId"] = "asset-a", ["modelRevision"] = "model-a" }) };
             Refresh();
-            var context = (PluginContext)Activator.CreateInstance(typeof(PluginContext), BindingFlags.Instance | BindingFlags.NonPublic, null,
-                [new PluginStart("fixture", settingsDirectory, Path.GetTempPath()),
+            var context = Fixtures.Context(new PluginStart("fixture", settingsDirectory, Path.GetTempPath()),
                     (Func<object, CancellationToken, Task>)((message, _) =>
                     {
                         var sent = JsonSerializer.SerializeToElement(message);
@@ -903,7 +901,7 @@ internal static partial class SimulationFollowingTests
                         if (action == "activate-start" && FreezeClockAtActivation && followClock is FollowTestClock clock)
                             clock.Freeze();
                         return JsonSerializer.SerializeToElement(pose);
-                    })], null)!;
+                    }));
             plugin.engine = context;
         }
 

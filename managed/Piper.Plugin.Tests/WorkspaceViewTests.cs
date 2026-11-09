@@ -1,5 +1,4 @@
 using System.Diagnostics;
-using System.Reflection;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using Grpc.Core;
@@ -119,8 +118,7 @@ internal static class WorkspaceViewTests
         plugin.preferences = prefs; plugin.calibrationProfile = "piper-1";
         JsonObject? rendered = null, patched = null;
         var engineRequests = new List<(string Method, JsonObject Arguments)>();
-        var context = (PluginContext)Activator.CreateInstance(typeof(PluginContext), BindingFlags.Instance | BindingFlags.NonPublic, null,
-            [new PluginStart("fixture", folder, folder),
+        var context = Fixtures.Context(new PluginStart("fixture", folder, folder),
                 (Func<object, CancellationToken, Task>)((message, _) =>
                 {
                     var json = JsonSerializer.SerializeToNode(message, PluginProtocol.Json)!.AsObject();
@@ -132,7 +130,7 @@ internal static class WorkspaceViewTests
                 {
                     engineRequests.Add((method, (JsonObject)args.DeepClone()));
                     return Task.FromResult(JsonSerializer.SerializeToElement(new { applied = false }));
-                })], null)!;
+                }));
         plugin.engine = context;
         IEnumerable<JsonObject> Walk(JsonObject node)
         {

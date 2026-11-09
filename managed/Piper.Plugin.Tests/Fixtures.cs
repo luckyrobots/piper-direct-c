@@ -1,9 +1,18 @@
+using System.Reflection;
+using System.Text.Json;
 using System.Text.Json.Nodes;
+using LuckyEngine.PluginSdk;
 
 /// <summary>Controller snapshot builders shared by the plugin test fixtures.
 /// Each returns a fresh tree, so a test may mutate what it gets.</summary>
 internal static class Fixtures
 {
+    /// <summary>An engine context over fake transports. The SDK keeps this
+    /// constructor non-public, so this is the one place tests reach it.</summary>
+    public static PluginContext Context(PluginStart start, Func<object, CancellationToken, Task> send,
+        Func<string, JsonObject, CancellationToken, Task<JsonElement>> request) =>
+        (PluginContext)Activator.CreateInstance(typeof(PluginContext), BindingFlags.Instance | BindingFlags.NonPublic, null, [start, send, request], null)!;
+
     /// <summary>One present, fresh, idle arm named "Fixture": controller mode,
     /// no teach or error state, six healthy joints at zero with ±180° limits.
     /// <paramref name="joint"/> adjusts each joint (1-based index) in place.</summary>

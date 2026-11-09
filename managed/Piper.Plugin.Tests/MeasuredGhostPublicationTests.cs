@@ -1,5 +1,4 @@
 using System.Diagnostics;
-using System.Reflection;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using LuckyEngine.PluginSdk;
@@ -98,8 +97,7 @@ internal static class MeasuredGhostPublicationTests
             }
             plugin.scene = new JsonObject { ["sceneId"] = "source", ["robots"] = new JsonArray(new JsonObject {
                 ["entityId"] = "compound", ["modelAssetId"] = "asset", ["modelRevision"] = "revision", ["joints"] = joints }) };
-            var context = (PluginContext)Activator.CreateInstance(typeof(PluginContext), BindingFlags.Instance | BindingFlags.NonPublic, null,
-                [new PluginStart("fixture", folder, folder), (Func<object, CancellationToken, Task>)((_, _) => Task.CompletedTask),
+            var context = Fixtures.Context(new PluginStart("fixture", folder, folder), (Func<object, CancellationToken, Task>)((_, _) => Task.CompletedTask),
                     (Func<string, JsonObject, CancellationToken, Task<JsonElement>>)(async (method, arguments, _) =>
                     {
                         if (method == "robot.runtime.read")
@@ -110,7 +108,7 @@ internal static class MeasuredGhostPublicationTests
                         if (method != "robot.feedback") throw new InvalidOperationException("Unexpected ghost request: " + method);
                         Ghosts.Add(arguments.DeepClone().AsObject());
                         return JsonSerializer.SerializeToElement(new { applied = false, renderMode = "ghost" });
-                    })], null)!;
+                    }));
             plugin.engine = context;
             Fresh();
         }

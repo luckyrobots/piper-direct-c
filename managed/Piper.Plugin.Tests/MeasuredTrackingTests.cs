@@ -1,6 +1,5 @@
 using System.Collections.Concurrent;
 using System.Diagnostics;
-using System.Reflection;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using Grpc.Core;
@@ -214,8 +213,7 @@ internal static class MeasuredTrackingTests
             // feedback before this plugin opens its monitor session.
             Snapshot["pika"]!["connected"] = true;
             Fresh();
-            plugin.engine = (PluginContext)Activator.CreateInstance(typeof(PluginContext), BindingFlags.Instance | BindingFlags.NonPublic, null,
-                [new PluginStart("fixture", Folder, Folder),
+            plugin.engine = Fixtures.Context(new PluginStart("fixture", Folder, Folder),
                     (Func<object, CancellationToken, Task>)((_, _) => Task.CompletedTask),
                     (Func<string, JsonObject, CancellationToken, Task<JsonElement>>)(async (method, body, cancellation) =>
                     {
@@ -235,7 +233,7 @@ internal static class MeasuredTrackingTests
                         { ["name"] = pair.Key, ["position"] = pair.Value!.DeepClone() }).ToArray());
                         var reply = JsonSerializer.SerializeToElement(method == "robot.feedback" ? new JsonObject { ["applied"] = true, ["pose"] = pose } : pose);
                         AfterRequest?.Invoke(method); return reply;
-                    })], null)!;
+                    }));
         }
 
         private static JsonArray Model() => new(Enumerable.Range(1, 8).Select(i => (JsonNode)(i < 7

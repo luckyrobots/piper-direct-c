@@ -1,6 +1,5 @@
 using System.Collections.Concurrent;
 using System.Diagnostics;
-using System.Reflection;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using Grpc.Core;
@@ -24,8 +23,7 @@ internal static class RecoveryHomeUiTests
         var errors = new ConcurrentQueue<Exception>();
         var calls = new HomeCalls(plugin.owner, cancelMove);
         JsonObject? rendered = null, patches = null;
-        var engine = (PluginContext)Activator.CreateInstance(typeof(PluginContext), BindingFlags.Instance | BindingFlags.NonPublic, null,
-            [new PluginStart("fixture", root, Path.GetTempPath()),
+        var engine = Fixtures.Context(new PluginStart("fixture", root, Path.GetTempPath()),
                 (Func<object, CancellationToken, Task>)((message, _) =>
                 {
                     var json = JsonSerializer.SerializeToNode(message, PluginProtocol.Json)!.AsObject();
@@ -33,7 +31,7 @@ internal static class RecoveryHomeUiTests
                     if (json["type"]?.GetValue<string>() == "patch") patches = json["widgets"]!.AsObject();
                     return Task.CompletedTask;
                 }),
-                (Func<string, JsonObject, CancellationToken, Task<JsonElement>>)((_, _, _) => Task.FromResult(JsonSerializer.SerializeToElement(new { })))], null)!;
+                (Func<string, JsonObject, CancellationToken, Task<JsonElement>>)((_, _, _) => Task.FromResult(JsonSerializer.SerializeToElement(new { }))));
         plugin.engine = engine; plugin.client = new PiperControl.PiperControlClient(calls); plugin.token = "home-ui-fixture";
         plugin.preferences = RobotProfileRouting.Normalize(new Preferences(Robots: [new("piper-1", "Fixture", "resting-arm")], ActiveRobotId: "piper-1"));
         static IEnumerable<JsonObject> Walk(JsonObject node)

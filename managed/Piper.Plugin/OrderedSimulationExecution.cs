@@ -20,7 +20,7 @@ public sealed class OrderedSimulationExecution
     private ulong completedHomeCursor;
     private string completedHomeEpisode = "";
     private double? lastClosingCommand, completedOpeningCommand;
-    private JawReference jaw = JawReference.None;
+    internal JawReference jaw = JawReference.None;
     public bool QualifyingLostContact => jaw.Kind == JawReferenceKind.LosingContact;
     public bool PhysicalGraspMissed { get; private set; }
     public bool MissedGrasp => PhysicalGraspMissed || Path.SourceMissedGrasp;

@@ -1,5 +1,4 @@
 using System.Diagnostics;
-using System.Reflection;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using Grpc.Core;
@@ -83,9 +82,8 @@ internal static class RecoveryWorkspaceTests
             ["motion"] = new JsonObject { ["active"] = false, ["request_id"] = 77L } };
         plugin.preferences = RobotProfileRouting.Normalize(new Preferences(Robots: [new("piper-2", "Piper 2", "can-b")], ActiveRobotId: "piper-2"));
         plugin.token = "recovery-ui-fixture"; plugin.client = new PiperControl.PiperControlClient(calls); plugin.state = snapshot;
-        plugin.engine = (PluginContext)Activator.CreateInstance(typeof(PluginContext), BindingFlags.Instance | BindingFlags.NonPublic, null,
-            [new PluginStart("fixture", folder, folder), (Func<object, CancellationToken, Task>)((_, _) => Task.CompletedTask),
-                (Func<string, JsonObject, CancellationToken, Task<JsonElement>>)((_, _, _) => Task.FromResult(JsonSerializer.SerializeToElement(new { applied = false })))], null)!;
+        plugin.engine = Fixtures.Context(new PluginStart("fixture", folder, folder), (Func<object, CancellationToken, Task>)((_, _) => Task.CompletedTask),
+                (Func<string, JsonObject, CancellationToken, Task<JsonElement>>)((_, _, _) => Task.FromResult(JsonSerializer.SerializeToElement(new { applied = false }))));
         void Fresh() => plugin.telemetry.Publish(new(snapshot, "recovery-ui-fixture", 1, Stopwatch.GetTimestamp(), 0));
         Task Click(string id) => plugin.HandleEventAsync(new("fixture", WorkspaceEventScope.Wrap(plugin.workspaceViewEpoch, "piper-2", id), "click", JsonSerializer.SerializeToElement(true)), CancellationToken.None);
         try
