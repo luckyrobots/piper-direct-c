@@ -79,12 +79,15 @@ public sealed partial class PipersPlugin : ILuckyPlugin
             Materialize(scene);
         }
         catch (PluginRequestException error) { message = "Scene robot discovery: " + error.Message; }
+        // The dispatcher exists before the first view is published, so a click
+        // during startup is queued instead of running a full handler inline on
+        // the SDK reader thread, where it would delay a following STOP.
+        uiEvents = new(HandleEventCoreAsync, () => ControlInputEpoch,
+            UiEventNeedsPermission, error => { uiActionError = message = error.Message; Trace.TraceWarning("UI action: {0}", error.Message); }, shutdown.Token);
         await Render(cancellation);
         passiveMeasuredTrackingStarted = true;
         worker = Watch(shutdown.Token);
         foreach (string camera in new[] { "bench", "gripper", "depth" }) await RestartCamera(camera);
-        uiEvents = new(HandleEventCoreAsync, () => ControlInputEpoch,
-            UiEventNeedsPermission, error => { uiActionError = message = error.Message; Trace.TraceWarning("UI action: {0}", error.Message); }, shutdown.Token);
     }
 
     private JsonObject Device(string? expectedDeviceId = null, long? expectedGeneration = null, string? expectedToken = null,
