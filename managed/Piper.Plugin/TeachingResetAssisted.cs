@@ -26,7 +26,7 @@ public static class TeachingResetAssisted
             return "A controller/driver fault is present; use the displayed fault recovery procedure.";
         int control = status["control"]?.GetValue<int>() ?? -1, teach = status["teach_state"]?.GetValue<int>() ?? -1;
         if (control is < 0 or > 2 || status["motion_mode"]?.GetValue<int>() is not (0 or 1) || teach is not (0 or 2 or 6) ||
-            requireEndedTeaching && (control != 2 || TeachingState.Inspect(device).Phase != "ended"))
+            requireEndedTeaching && (control != 2 || TeachingState.Inspect(device).Phase != TeachingPhase.Ended))
             return "End physical teaching/playback and turn the teach light off before reset-assisted return.";
         double stationary = status["stationary_s"]?.GetValue<double>() ?? 0;
         if (!double.IsFinite(stationary) || stationary < .4) return "Support the arm and hold it stationary for at least 0.4 seconds.";

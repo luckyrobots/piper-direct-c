@@ -26,7 +26,7 @@ public static class TeachingResumeCheck
             j["enabled"]?.GetValue<bool>() != true || j["fault"]?.GetValue<int>() != 0))
             throw new InvalidOperationException("All six motors must report fresh, enabled and fault-free feedback. No motor-power command was sent.");
         var teaching = TeachingState.Inspect(device);
-        if (teaching.Phase != "ended" || teaching.Active || !teaching.ReturnRequired)
+        if (teaching.Phase != TeachingPhase.Ended || teaching.Active || !teaching.ReturnRequired)
             throw new InvalidOperationException("The robot's teaching mode changed. Finish hand guiding or playback, then click Resume controls again.");
         if (device["motion"]?["active"]?.GetValue<bool>() == true || device["motion"]?["query_active"]?.GetValue<bool>() == true)
             throw new InvalidOperationException("Another controller action is active. Wait for it to finish before resuming controls.");
@@ -102,7 +102,7 @@ public sealed partial class PipersPlugin
                 if (request > 0 && observed > request)
                     throw new InvalidOperationException("A different controller request replaced this resume. No retry will run.");
                 if (Completed(current)) break;
-                if (mode.Active || mode.Phase == "stopped" || current["recovery_required"]?.GetValue<bool>() == true ||
+                if (mode.Active || mode.Phase == TeachingPhase.Stopped || current["recovery_required"]?.GetValue<bool>() == true ||
                     current["reset_pending"]?.GetValue<bool>() == true || current["status"]?["error"]?.GetValue<int>() != 0)
                     throw new InvalidOperationException("The controller changed mode or reported a fault while reconnecting. No retry will run.");
                 if (request > 0 && observed >= request)
@@ -133,7 +133,7 @@ public sealed partial class PipersPlugin
             }
             TeachingResumeCheck.CommitApproval(() => { _ = Current(); }, () =>
             {
-                teachingSeen = approvalBeforeTeaching = false;
+                teachingOwnership = TeachingOwnership.None;
                 RememberControlApproval(expectedPermission, activate: true);
             }, () =>
             {

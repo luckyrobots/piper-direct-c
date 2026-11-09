@@ -322,11 +322,11 @@ foreach (var joint in manualDevice["joints"]!.AsArray()) { joint!["fresh"] = tru
 Check(TeachingState.Inspect(manualDevice) is { HandGuiding: true, Active: true, BlocksTargets: true }, "Physical hand-guiding mode was not recognized");
 Check(!PipersPlugin.TeachingCanResume(manualDevice), "Hand-guiding feedback rearmed motion controls");
 manualDevice["status"]!["teach_state"] = 3;
-Check(TeachingState.Inspect(manualDevice) is { Phase: "playback", BlocksTargets: true }, "Onboard playback was not separated from CAN control");
+Check(TeachingState.Inspect(manualDevice) is { Phase: TeachingPhase.Playback, BlocksTargets: true }, "Onboard playback was not separated from CAN control");
 manualDevice["status"]!["teach_state"] = 4;
-Check(TeachingState.Inspect(manualDevice).Phase == "playback-paused", "Paused onboard playback was treated as stopped teaching");
+Check(TeachingState.Inspect(manualDevice).Phase == TeachingPhase.PlaybackPaused, "Paused onboard playback was treated as stopped teaching");
 manualDevice["status"]!["teach_state"] = 2;
-Check(TeachingState.Inspect(manualDevice) is { Phase: "ended", ReturnRequired: true, CanReturn: false }, "Ended recording with sticky teach control was treated as a fault or normal CAN");
+Check(TeachingState.Inspect(manualDevice) is { Phase: TeachingPhase.Ended, ReturnRequired: true, CanReturn: false }, "Ended recording with sticky teach control was treated as a fault or normal CAN");
 manualDevice["teaching"] = new JsonObject { ["phase"] = "ended", ["return_required"] = true, ["can_return"] = true };
 Check(TeachingState.Inspect(manualDevice).CanReturn, "Native validated teaching return was not offered");
 manualDevice.Remove("teaching"); manualDevice["status"]!["control"] = 1;

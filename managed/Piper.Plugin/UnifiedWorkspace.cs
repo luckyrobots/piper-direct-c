@@ -37,8 +37,8 @@ public sealed record RobotReadiness(string Label, string Action, bool Enabled, s
             return Step("Stopped", "Recover robot", device["blocker"]?.GetValue<string>() ?? "Move the arm to a safe pose using its physical hand-guide button.", RobotPrimaryAction.OpenRecovery);
         // Stillness is an admission condition, not a rapidly changing click
         // target. The explicit action waits boundedly for native eligibility.
-        if (teaching.ReturnRequired) return Step(teaching.Phase == "ended" ? "Hand guiding off" : "Controller needs attention",
-            "Resume controls", teaching.NextStep, teaching.Phase == "ended" || teaching.CanReturn ? RobotPrimaryAction.Resume : RobotPrimaryAction.None);
+        if (teaching.ReturnRequired) return Step(teaching.Phase == TeachingPhase.Ended ? "Hand guiding off" : "Controller needs attention",
+            "Resume controls", teaching.NextStep, teaching.Phase == TeachingPhase.Ended || teaching.CanReturn ? RobotPrimaryAction.Resume : RobotPrimaryAction.None);
         var power = RobotPowerState.Inspect(device);
         if (!power.EnabledCount.HasValue) return Step("Waiting for motor feedback", "Connecting…", "Waiting for fresh feedback from all six motors.");
         if (moving) return Step("Movement in progress", "Moving…", "Stop movement remains available.");

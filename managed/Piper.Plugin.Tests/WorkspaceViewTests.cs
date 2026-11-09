@@ -334,14 +334,14 @@ internal static class WorkspaceViewTests
             Set("client", new PiperControl.PiperControlClient(calls)); Set("state", state); Set("token", "fixture-session");
             Get<LatestTelemetry>("telemetry").Publish(new(state, "fixture-session", 1, Stopwatch.GetTimestamp(), 0));
             plugin.Navigation = WorkspaceNavigation.Initial; Set("approved", true); Set("linkCommandsEnabled", true);
-            Set("approvalBeforeTeaching", true); Set("teleoperating", true); Set("followRequest", 7L);
+            Set("teachingOwnership", TeachingOwnership.ObservedAfterApproval); Set("teleoperating", true); Set("followRequest", 7L);
             plugin.CommandAuthority.TryAcknowledge(plugin.CommandAuthority.Epoch, new("piper-1", "fixture-session", binding.DeviceId, binding.Generation), 7);
             Set("link", binding); Set("linkBackendToken", "fixture-session");
             long previousPermission = plugin.CommandAuthority.Epoch;
             await Invoke("WorkspaceEvent", "settings.robot", CancellationToken.None);
             check(calls.Requests.Count == 1 && calls.Requests[0].Route == "/api/command" &&
                 JsonNode.Parse(calls.Requests[0].Json)?["action"]?.GetValue<string>() == "follow-end", "Leaving Controls replayed a target or failed to end its gesture");
-            check(Get<bool>("approved") && Get<bool>("approvalBeforeTeaching") && Get<bool>("linkCommandsEnabled") && !Get<bool>("teleoperating") && Get<long>("followRequest") == 0,
+            check(Get<bool>("approved") && Get<TeachingOwnership>("teachingOwnership") == TeachingOwnership.ObservedAfterApproval && Get<bool>("linkCommandsEnabled") && !Get<bool>("teleoperating") && Get<long>("followRequest") == 0,
                 "Browsing settings revoked readiness or retained a live viewport gesture");
             check(ReferenceEquals(Get<RobotLink>("link"), binding) && plugin.CommandAuthority.Epoch == previousPermission,
                 "Browsing settings dropped the measured binding or revoked healthy idle approval");

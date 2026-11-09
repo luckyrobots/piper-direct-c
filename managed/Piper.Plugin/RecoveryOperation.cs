@@ -91,7 +91,7 @@ public sealed partial class PipersPlugin
         {
             operation.Token.ThrowIfCancellationRequested();
             RememberControlApproval(operation.Epoch, activate: true);
-            teachingSeen = approvalBeforeTeaching = false;
+            teachingOwnership = TeachingOwnership.None;
         }))
             throw new InvalidOperationException("STOP or a connection change retired the recovery result.");
     }

@@ -87,7 +87,8 @@ public sealed partial class PipersPlugin
     private async Task MakeCalibrationReadOnly(CancellationToken cancellation)
     {
         RequireCalibrationIdle();
-        approved = linkCommandsEnabled = approvalBeforeTeaching = false;
+        approved = linkCommandsEnabled = false;
+        if (teachingOwnership == TeachingOwnership.ObservedAfterApproval) teachingOwnership = TeachingOwnership.ObservedWithoutApproval;
         PauseSceneFollowing();
         if (link is { } current) await engine.RequestAsync("robot.teleoperate", new JsonObject { ["sceneId"] = current.SceneId, ["entityId"] = current.EntityId, ["enabled"] = false }, cancellation);
     }

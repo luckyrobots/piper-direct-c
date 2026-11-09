@@ -94,7 +94,7 @@ public sealed partial class PipersPlugin
         CommandAuthority.Revoke(forgetApproval, () =>
         {
             approved = linkCommandsEnabled = false;
-            teachingSeen = approvalBeforeTeaching = false;
+            teachingOwnership = TeachingOwnership.None;
         }, forgetAllApprovals);
         CurrentRecovery?.Cancel();
         CancelGroupSimulationFollowingInput(reason);
@@ -139,7 +139,7 @@ public sealed partial class PipersPlugin
             // between invalidation and publication of the replacement frame.
             telemetry.Disconnect();
             DisarmTelemetryTargets("Controller session or assigned CAN connection changed", clearLink: true);
-            teachingSeen = approvalBeforeTeaching = false;
+            teachingOwnership = TeachingOwnership.None;
             if (backendChanged) pikaOwned = pikaMonitoring = false;
         }
         token = receipt.BackendToken;
@@ -157,15 +157,14 @@ public sealed partial class PipersPlugin
         {
             // Observe the transition on the reader even if the editor is busy,
             // so a short teaching interval cannot leave an old drag armed.
-            if (!teachingSeen)
+            if (teachingOwnership == TeachingOwnership.None)
             {
                 telemetry.Disconnect();
                 CommandAuthority.Revoke(revokeLocalApproval: () =>
                 {
-                    approvalBeforeTeaching = approved;
+                    ObserveTeachingOwnership();
                     approved = linkCommandsEnabled = false;
                 });
-                teachingSeen = true;
                 teachingDevice = linked.DeviceId; teachingGeneration = linked.Generation;
             }
             approved = linkCommandsEnabled = teleoperating = false;
