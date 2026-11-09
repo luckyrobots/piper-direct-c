@@ -443,25 +443,18 @@ public sealed partial class PipersPlugin : ILuckyPlugin
             }
             else if (id is "pika.target" or "pika.plus" or "pika.minus" or "pika.zero")
             {
-                if (PikaTeachingRecording) throw new InvalidOperationException("Use Free jaws / Hold jaws here while teaching, or finish the observation session before sending an opening target.");
                 long epoch = CommandAuthority.Epoch;
                 var profile = ActiveProfile;
                 var receipt = telemetry.Latest ?? throw new InvalidOperationException("Waiting for the controller server.");
                 var device = Device(expectedToken: receipt.BackendToken, sourceReceipt: receipt);
-                if (!ManualPikaControlAllowed(device))
-                    throw new InvalidOperationException("Restore robot controls before sending a gripper target. STOP and recovery retire manual arm and gripper targets.");
                 var pika = receipt.State["pika"] as JsonObject;
-                if (!PikaMatchesProfile(profile, pika)) throw new InvalidOperationException("The Pika serial assignment does not match this robot.");
-                if (!pikaOwned || pika?["owner"]?.GetValue<string>() != owner || pika["armed"]?.GetValue<bool>() != true)
-                    throw new InvalidOperationException("Pika is monitoring only. Use Enable robot before commanding its opening.");
-                if (pika["fresh"]?.GetValue<bool>() != true)
-                    throw new InvalidOperationException("Waiting for fresh gripper feedback before changing its opening.");
+                if (ManualPikaBlocker(device, pika) is { } blocked) throw new InvalidOperationException(blocked);
                 double opening;
                 if (id == "pika.target") opening = FiniteControlNumber(input.Value, "Gripper opening");
                 else if (id == "pika.zero") opening = 0;
                 else
                 {
-                    if (!PikaDisplayOpening(pika, out double currentOpening))
+                    if (!PikaDisplayOpening(pika!, out double currentOpening))
                         throw new InvalidOperationException("Waiting for a valid gripper opening. If the physical jaws are closed, set their display reference first.");
                     opening = Math.Clamp(currentOpening + (id == "pika.plus" ? 1 : -1), 0, 90);
                 }
@@ -589,6 +582,24 @@ public sealed partial class PipersPlugin : ILuckyPlugin
         device["status"]?["arm_status"]?.GetValue<int>() != 1 && device["status"]?["error"]?.GetValue<int>() == 0 &&
         device["recovery_required"]?.GetValue<bool>() != true && device["reset_pending"]?.GetValue<bool>() != true && !TeachingState.Inspect(device).BlocksTargets;
 
+    /// <summary>The one admission rule for manual Pika opening targets. Render
+    /// enables the widgets only when this is null; the handler rejects with it,
+    /// so a queued or hotkey event cannot bypass what the panel shows.</summary>
+    private string? ManualPikaBlocker(JsonObject? device, JsonObject? pika)
+    {
+        if (PikaTeachingRecording) return "Use Free jaws / Hold jaws here while teaching, or finish the observation session before sending an opening target.";
+        if (switchingProfile) return "Changing robot assignment; wait for measured feedback.";
+        if (!ManualPikaControlAllowed(device))
+            return "Restore robot controls before sending a gripper target. STOP and recovery retire manual arm and gripper targets.";
+        if (!PikaMatchesProfile(ActiveProfile, pika)) return "The Pika serial assignment does not match this robot.";
+        if (!pikaOwned || pika!["owner"]?.GetValue<string>() != owner || pika["armed"]?.GetValue<bool>() != true)
+            return "Pika is monitoring only. Use Enable robot before commanding its opening.";
+        if (pika["fresh"]?.GetValue<bool>() != true) return "Waiting for fresh gripper feedback before changing its opening.";
+        if (pika["enabled"]?.GetValue<bool>() != true) return "Pika motor power is off. Use Enable robot before commanding its opening.";
+        if (pika["pending"]?.GetValue<bool>() == true) return "Wait for the previous gripper target to finish before sending another.";
+        return null;
+    }
+
     private Task Update(CancellationToken cancellation)
     {
         if (CaptureWorkspacePatchScope() is not { } scope) return Task.CompletedTask;
@@ -652,10 +663,7 @@ public sealed partial class PipersPlugin : ILuckyPlugin
         patches["pika.value"] = new() { ["text"] = pikaReading, ["hint"] = pikaMonitorStatus + " Raw encoder: " +
             (pika?["telemetry"]?["motor"]?["Position"]?.ToJsonString() ?? "unavailable") + " rad. " +
             (PikaDisplayReferenceAngle(pika as JsonObject) is double angle ? $"Closed display reference {angle:F5} rad; motor targets unchanged." : "Nominal reference; a negative closed reading may need an operator-confirmed display reference.") };
-        bool manualPika = scope.Context.Page == "controls" && !PikaTeachingRecording && !switchingProfile &&
-            ManualPikaControlAllowed(device) && pikaOwned && pika?["owner"]?.GetValue<string>() == owner &&
-            pika["armed"]?.GetValue<bool>() == true && pika["fresh"]?.GetValue<bool>() == true &&
-            pika["enabled"]?.GetValue<bool>() == true && pika["pending"]?.GetValue<bool>() != true;
+        bool manualPika = scope.Context.Page == "controls" && ManualPikaBlocker(device, pika as JsonObject) is null;
         patches["pika.target"] = new() { ["value"] = opening ?? 0, ["enabled"] = manualPika };
         patches["pika.monitor"] = new() { ["text"] = pikaMonitorStatus };
         bool limitsFresh = joints?.All(j => j?["limits_fresh"]?.GetValue<bool>() == true && j["max_speed_rad_s"]?.GetValue<double>() > 0) == true;
