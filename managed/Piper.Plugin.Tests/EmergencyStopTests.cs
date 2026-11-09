@@ -264,10 +264,80 @@ internal static class EmergencyStopTests
             fixture.Plugin.state = snapshot;
             telemetry.Publish(receipt with { State = snapshot, Sequence = 2 });
             fixture.Plugin.approved = true;
-            fixture.Plugin.SetPikaRole(PikaSessionRole.Owned);
+            fixture.Plugin.pikaRole = (long)PikaSessionRole.Owned;
             await fixture.Plugin.Enable(CancellationToken.None, true, null, null);
             Check(fixture.Rpc.Routes.IsEmpty && fixture.Authority.Current.Approvals.Count == 1,
                 "An assigned Pika alias was found in telemetry but Enable reconfigured the already-owned canonical gripper");
+        }
+        {
+            // Deterministic interleavings: a STOP lands between a gesture writer's
+            // observation and its transition. STOP must win every time.
+            var plugin = new PipersPlugin();
+            var teleoperating = new ViewportDrag(ViewportDragPhase.Teleoperating, "joint3");
+            plugin.viewportDrag = teleoperating;
+            plugin.StopViewportDrag();
+            Check(!plugin.TryBeginViewportFollowing(teleoperating, 7, "joint3") && plugin.viewportDrag.Phase == ViewportDragPhase.Off,
+                "A follow-start acknowledgement observed before STOP revived Following after it");
+            var following = new ViewportDrag(ViewportDragPhase.Following, "joint3", Request: 7);
+            plugin.viewportDrag = following;
+            plugin.StopViewportDrag();
+            plugin.EndViewportGesture(following);
+            Check(plugin.viewportDrag is { Phase: ViewportDragPhase.Off, Joint: "joint3" },
+                "A gesture end observed before STOP turned Off back into Teleoperating");
+            plugin.viewportDrag = teleoperating;
+            Check(plugin.TryBeginViewportFollowing(teleoperating, 7, "joint4") &&
+                plugin.viewportDrag is { Phase: ViewportDragPhase.Following, Request: 7, FollowJoint: "joint4" },
+                "An undisturbed follow-start did not enter Following");
+            plugin.EndViewportGesture(plugin.viewportDrag);
+            Check(plugin.viewportDrag is { Phase: ViewportDragPhase.Teleoperating, Request: 0 }, "An undisturbed gesture end did not keep teleoperation selected");
+        }
+        {
+            // Pika role interleavings through the observation seam: a stale writer
+            // never clobbers a newer role, and a release always survives.
+            var plugin = new PipersPlugin();
+            var monitorSnapshot = plugin.ObservePikaRole();
+            Check(plugin.TryAdvancePikaRole(plugin.ObservePikaRole(), PikaSessionRole.Owned) &&
+                !plugin.TryAdvancePikaRole(monitorSnapshot, PikaSessionRole.None) && plugin.PikaRole == PikaSessionRole.Owned,
+                "A monitor release decided from a stale snapshot overwrote the Owned role Enable set");
+            plugin.ReleasePikaRole();
+            var enableSnapshot = plugin.ObservePikaRole();
+            plugin.ReleasePikaRole();
+            Check(!plugin.TryAdvancePikaRole(enableSnapshot, PikaSessionRole.Owned) && plugin.PikaRole == PikaSessionRole.None,
+                "An Enable that observed None before a same-role revocation still upgraded to Owned");
+        }
+        using (var fixture = new Fixture())
+        {
+            fixture.Rpc.DelayConnect = true;
+            fixture.Plugin.approved = true;
+            Task enable = fixture.Plugin.Enable(CancellationToken.None, true, null, null);
+            try
+            {
+                await fixture.Rpc.ConnectReached.Task.WaitAsync(TimeSpan.FromSeconds(1));
+                fixture.Plugin.ReleasePikaRole(); // The telemetry thread revokes while connect is in flight.
+                fixture.Rpc.ConnectReply.TrySetResult(new ControlReply { Status = 200, Json = "{\"ok\":true}" });
+                bool refused = false;
+                try { await enable; } catch (InvalidOperationException error) { refused = error.Message.Contains("Pika session was released"); }
+                Check(refused && fixture.Plugin.PikaRole == PikaSessionRole.None && !fixture.Rpc.Routes.Contains("/api/pika/enable"),
+                    "Enable's Owned write overwrote a revocation that landed during its connect");
+            }
+            finally { fixture.Rpc.ConnectReply.TrySetResult(new ControlReply { Status = 200, Json = "{\"ok\":true}" }); }
+        }
+        foreach (bool resetPending in new[] { true, false })
+        {
+            using var fixture = new Fixture();
+            var telemetry = fixture.Plugin.telemetry;
+            var receipt = telemetry.Latest!;
+            var snapshot = receipt.State.DeepClone().AsObject();
+            snapshot["devices"]![0]!["recovery_required"] = true;
+            snapshot["devices"]![0]!["reset_pending"] = resetPending;
+            fixture.Plugin.state = snapshot;
+            telemetry.Publish(receipt with { State = snapshot, Sequence = 2 });
+            fixture.Plugin.approved = true;
+            bool refused = false;
+            try { await fixture.Plugin.Enable(CancellationToken.None, true, null, null); }
+            catch (InvalidOperationException error) { refused = error.Message.Contains("Recover robot on Controls"); }
+            Check(refused && fixture.Rpc.Routes.IsEmpty,
+                "Enable sent a control-purpose recovery verification instead of routing to the Controls recovery card (reset_pending=" + resetPending + ")");
         }
         foreach (StatusCode status in new[] { StatusCode.InvalidArgument, StatusCode.Unimplemented })
         {

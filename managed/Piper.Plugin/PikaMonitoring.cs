@@ -12,18 +12,31 @@ namespace LuckyRobots.Piper.Plugin;
 /// </code></summary>
 internal enum PikaSessionRole { None, Monitoring, Owned }
 
+/// <summary>One read of the role field: the role plus the transition count that
+/// distinguishes it from every later write, including a release to the same role.</summary>
+internal readonly record struct PikaRoleObservation(long Value)
+{
+    public PikaSessionRole Role => (PikaSessionRole)(Value & 3);
+    public long Next(PikaSessionRole role) => (((Value >> 2) + 1) << 2) | (long)role;
+}
+
 public sealed partial class PipersPlugin
 {
-    // One field, written only through SetPikaRole/TryEnterPikaRole/ReleasePikaRole.
-    internal int pikaRole;
-    private PikaSessionRole PikaRole => (PikaSessionRole)Volatile.Read(ref pikaRole);
+    // One field: the role in the low two bits, a transition count above them.
+    // Writers observe it before their await and advance only from that exact
+    // observation, so a stale writer fails instead of clobbering a newer state.
+    // Only ReleasePikaRole is unconditional: a revocation is never lost.
+    internal long pikaRole;
+    internal PikaRoleObservation ObservePikaRole() => new(Volatile.Read(ref pikaRole));
+    internal PikaSessionRole PikaRole => ObservePikaRole().Role;
     private bool pikaOwned => PikaRole == PikaSessionRole.Owned;
-    internal void SetPikaRole(PikaSessionRole next) => Volatile.Write(ref pikaRole, (int)next);
-    /// <summary>Moves only from <paramref name="expected"/>, so a revocation that
-    /// raced an in-flight connect is not overwritten.</summary>
-    private bool TryEnterPikaRole(PikaSessionRole expected, PikaSessionRole next) =>
-        Interlocked.CompareExchange(ref pikaRole, (int)next, (int)expected) == (int)expected;
-    private void ReleasePikaRole() => SetPikaRole(PikaSessionRole.None);
+    internal bool TryAdvancePikaRole(PikaRoleObservation observed, PikaSessionRole next) =>
+        Interlocked.CompareExchange(ref pikaRole, observed.Next(next), observed.Value) == observed.Value;
+    internal void ReleasePikaRole()
+    {
+        PikaRoleObservation current;
+        do current = ObservePikaRole(); while (!TryAdvancePikaRole(current, PikaSessionRole.None));
+    }
 
     private string pikaMonitorStatus = "Pika telemetry starts read-only when the scene is linked.";
     // One field, written only through its own TryStart/CancelAsync/Stop/StopAsync.
@@ -57,11 +70,15 @@ public sealed partial class PipersPlugin
     {
         var expectedLink = link;
         string expectedToken = token, expectedProfile = ActiveProfile.Id;
+        // The role is observed with the snapshot that decides it; any newer
+        // write (an Enable's Owned or a revocation) makes this monitor's own
+        // transitions below fail rather than overwrite it.
+        var role = ObservePikaRole();
         var pika = state?["pika"] as JsonObject;
         bool matches = PikaMatchesProfile();
         if (!PikaMonitorConnectionPolicy.MayConnect(pika, matches, owner))
         {
-            if (pika?["owner"]?.GetValue<string>() != owner) ReleasePikaRole();
+            if (pika?["owner"]?.GetValue<string>() != owner) TryAdvancePikaRole(role, PikaSessionRole.None);
             pikaMonitorStatus = !matches ? "Pika assignment is unconfigured or differs from this robot."
                 : pika?["owner"]?.GetValue<string>() == owner ? pikaOwned ? "Pika control session active."
                     : "This Pika session has a recorded power request; use its explicit control or cleanup flow."
@@ -78,16 +95,16 @@ public sealed partial class PipersPlugin
             _ = Device(expectedLink.DeviceId, expectedLink.Generation, expectedToken);
             if (!ReferenceEquals(link, expectedLink) || token != expectedToken || ActiveProfile.Id != expectedProfile || !PikaMatchesProfile())
             {
-                TryEnterPikaRole(PikaSessionRole.Monitoring, PikaSessionRole.None);
+                if (role.Role == PikaSessionRole.Monitoring) TryAdvancePikaRole(role, PikaSessionRole.None);
                 pikaMonitorStatus = "Pika monitor scope changed while connecting; no control permission was granted.";
                 return;
             }
-            TryEnterPikaRole(PikaSessionRole.None, PikaSessionRole.Monitoring);
+            if (role.Role == PikaSessionRole.None) TryAdvancePikaRole(role, PikaSessionRole.Monitoring);
             pikaMonitorStatus = pikaOwned ? "Pika control session active." : "Pika monitoring only · motor power unchanged.";
         }
         catch (Exception error) when (error is not OperationCanceledException)
         {
-            TryEnterPikaRole(PikaSessionRole.Monitoring, PikaSessionRole.None);
+            if (role.Role == PikaSessionRole.Monitoring) TryAdvancePikaRole(role, PikaSessionRole.None);
             pikaMonitorStatus = "Pika monitor unavailable: " + error.Message;
         }
     }

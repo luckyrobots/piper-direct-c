@@ -150,6 +150,18 @@ foreach (string garbage in new[] { "/dev/pika-garbage-fixture", "/dev/pika-garba
         bool failed = false;
         try { await garbled.ExecuteAsync("position", JsonSerializer.SerializeToElement(new { owner, value = .9 }), default); }
         catch (IOException) { failed = true; }
+        if (garbage == "/dev/pika-garbage-hang-fixture")
+        {
+            // The agent ignores EOF, so its retirement holds the operation gate
+            // for the bounded exit wait. A scoped STOP hold reports that
+            // retirement at once instead of timing out behind it.
+            var retiringStopwatch = Stopwatch.StartNew();
+            using var stopBound = new CancellationTokenSource(TimeSpan.FromSeconds(3));
+            var retiringHold = await garbled.HoldForOwnerAsync(owner, stopBound.Token);
+            Check(garbled.Phase is PikaAgentPhase.Faulted or PikaAgentPhase.Closing && retiringStopwatch.Elapsed < TimeSpan.FromSeconds(1) &&
+                retiringHold.Outcome == PikaHoldOutcome.Unverified && retiringHold.Message!.Contains("retiring", StringComparison.Ordinal),
+                "A STOP hold on a faulted, retiring agent waited behind its close or reported a generic unverified result");
+        }
         for (int i = 0; i < 1000 && garbled.Phase != PikaAgentPhase.Idle; i++) await Task.Delay(10);
         var faulted = garbled.Snapshot();
         Check(failed && garbled.Phase == PikaAgentPhase.Idle && ProcessEnded(pid), "A faulted Pika agent was not stopped and detached: " + garbage);

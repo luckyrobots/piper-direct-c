@@ -86,16 +86,23 @@ public sealed class PikaProcessService : IPikaSession
     {
         if (!Guid.TryParse(requestedOwner, out _)) throw new ArgumentException("A dashboard Pika owner ID is required");
         const string noLiveSession = "Pika power is unverified and this owner has no live session to hold.";
+        const string retiring = "Pika agent is retiring: closing its input makes it disable the gripper; its exit is not yet confirmed.";
         Process? agent;
         lock (stateGate)
         {
             // Skip unrelated devices without waiting for their operations. Pin
             // the matching process so a queued STOP cannot reach its replacement.
             agent = owner == requestedOwner ? process : null;
+            // A faulted or closing agent cannot take a hold: its retirement
+            // (EOF, bounded wait, tree kill) owns the operation gate, and a hold
+            // queued behind it would only time out. Report that retirement,
+            // still unverified, instead of waiting for it.
+            bool retiringAgent = owner == requestedOwner && phase is PikaAgentPhase.Faulted or PikaAgentPhase.Closing;
             if (agent is null)
                 return unresolvedOwner == requestedOwner
-                    ? new(PikaHoldOutcome.Unverified, noLiveSession)
+                    ? new(PikaHoldOutcome.Unverified, retiringAgent ? retiring : noLiveSession)
                     : new(PikaHoldOutcome.Skipped);
+            if (retiringAgent) return new(PikaHoldOutcome.Unverified, retiring);
         }
 
         await operations.WaitAsync(cancellation);

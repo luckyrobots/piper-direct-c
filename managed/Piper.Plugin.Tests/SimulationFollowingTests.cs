@@ -361,7 +361,7 @@ internal static partial class SimulationFollowingTests
             await gripperUnready.Click("enable");
             _ = await WaitPrimary(gripperUnready, "complete");
             Check(gripperUnready.Rpc.Requests.Select(r => r.Route).SequenceEqual(["/api/pika/connect", "/api/pika/enable"]) &&
-                gripperUnready.Plugin.pikaRole == (int)PikaSessionRole.Owned && gripperUnready.PrimaryActionName() == "Enabled",
+                gripperUnready.Plugin.PikaRole == PikaSessionRole.Owned && gripperUnready.PrimaryActionName() == "Enabled",
                 "Enable robot did not finish the assigned read-only/unready gripper connection");
             Check(gripperUnready.Session is null && !gripperUnready.Ready && !gripperUnready.PlayStarted && gripperUnready.Mode == "edit" &&
                 !gripperUnready.EngineRequests.Any(r => r.Method == "robot.runtime.control"),
@@ -585,7 +585,7 @@ internal static partial class SimulationFollowingTests
         public void SetApproved(bool value) => plugin.approved = value;
         public void SetGripperUnready()
         {
-            plugin.pikaRole = (int)PikaSessionRole.None;
+            plugin.pikaRole = (long)PikaSessionRole.None;
             Snapshot["pika"]!["enabled"] = false; Snapshot["pika"]!["armed"] = false; Snapshot["pika"]!["read_only"] = true;
             Refresh();
         }
@@ -676,7 +676,7 @@ internal static partial class SimulationFollowingTests
             plugin.client = new PiperControl.PiperControlClient(Rpc);
             plugin.preferences = RobotProfileRouting.Normalize(new Preferences(Robots:
                 [new("piper-1", "Fixture", "can-a", RobotId: "robot-a", PikaDevice: "/dev/pika-a")], ActiveRobotId: "piper-1"));
-            plugin.token = "fixture-backend"; plugin.approved = true; plugin.pikaRole = (int)PikaSessionRole.Owned; plugin.linkCommandsEnabled = true;
+            plugin.token = "fixture-backend"; plugin.approved = true; plugin.pikaRole = (long)PikaSessionRole.Owned; plugin.linkCommandsEnabled = true;
             var model = SimulationFollowTests.Pose();
             var sample = SimulationFollowSample.Read(model);
             var arm = Fixtures.Arm(joint: (index, joint) =>

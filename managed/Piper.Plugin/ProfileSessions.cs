@@ -63,6 +63,7 @@ public sealed partial class PipersPlugin
     {
         var permission = CommandAuthority.Current;
         var profile = ActiveProfile;
+        var role = ObservePikaRole();
         if (switchingProfile || calibrationOpen || CurrentRecovery is not null || !HasFreshControlTelemetry(out var receipt) ||
             !permission.Approvals.TryGetValue(profile.Id, out var saved)) return;
         var d = Device(sourceReceipt: receipt);
@@ -83,7 +84,8 @@ public sealed partial class PipersPlugin
         {
             approved = true;
             linkCommandsEnabled = link is not null;
-            SetPikaRole(owns ? PikaSessionRole.Owned : monitoring ? PikaSessionRole.Monitoring : PikaSessionRole.None);
+            // A release since the observation above wins over this restore.
+            TryAdvancePikaRole(role, owns ? PikaSessionRole.Owned : monitoring ? PikaSessionRole.Monitoring : PikaSessionRole.None);
         });
     }
 
