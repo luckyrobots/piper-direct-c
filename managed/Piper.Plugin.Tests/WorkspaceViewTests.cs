@@ -212,7 +212,7 @@ internal static class WorkspaceViewTests
                         HeaderPatch("workspace.power")["hint"]?.GetValue<string>()?.Contains("All six motors report enabled", StringComparison.Ordinal) == true,
                         "Teaching hid the distinction between powered motors and blocked plugin controls");
             }
-            plugin.preferences = prefs; plugin.link = null; plugin.SetPikaRole(PikaSessionRole.None);
+            plugin.preferences = prefs; plugin.link = null; plugin.ReleasePikaRole();
             // A real disconnect invalidates the receipt while leaving its last
             // complete snapshot available to the settings projection.
             plugin.telemetry.Disconnect(); plugin.approved = false;

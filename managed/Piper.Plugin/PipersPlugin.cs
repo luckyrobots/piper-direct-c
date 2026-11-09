@@ -538,9 +538,11 @@ public sealed partial class PipersPlugin : ILuckyPlugin
                 state["pika"]?["owner"]?.GetValue<string>() == owner && state["pika"]?["enabled"]?.GetValue<bool>() == true && state["pika"]?["armed"]?.GetValue<bool>() == true;
             if (!gripperAlreadyReady)
             {
+                var role = ObservePikaRole();
                 await Call("/api/pika/connect", new JsonObject { ["owner"] = owner, ["take_over"] = true }, cancellation, expectedToken);
                 CheckEnableScope();
-                SetPikaRole(PikaSessionRole.Owned);
+                if (!TryAdvancePikaRole(role, PikaSessionRole.Owned))
+                    throw new InvalidOperationException("The Pika session was released while Enable connected it. Enable again when the gripper is reconnected.");
                 pikaMonitorStatus = "Pika control session active.";
                 long started = Stopwatch.GetTimestamp();
                 while (state?["pika"]?["fresh"]?.GetValue<bool>() != true)
