@@ -13,7 +13,9 @@ int main(void)
     CHECK(!camera_init("relative-device"));
     CHECK(camera_init("/dev/piper-camera-does-not-exist"));
     size_t size=99; CHECK(!camera_frame(piper_now(),&size)&&size==0);
-    if (!access("/usr/bin/ffmpeg",X_OK)) {
+    bool capture=!access("/usr/bin/ffmpeg",X_OK);
+    if (!capture) puts("SKIP camera capture lifecycle: /usr/bin/ffmpeg is not installed, so only the disabled and unavailable-device checks ran.");
+    else {
         CHECK(camera_start()==NULL);
         bool stopped=false; double deadline=piper_now()+3;
         while (piper_now()<deadline) {
@@ -27,6 +29,7 @@ int main(void)
         CHECK(stopped); CHECK(camera_start()==NULL); // A failed capture can be retried.
     }
     camera_close();
-    puts("Camera lifecycle passed: disabled default, unavailable device, no stale JPEG, child exit and cleanup.");
+    puts(capture?"Camera lifecycle passed: disabled default, unavailable device, no stale JPEG, child exit and cleanup.":
+        "Camera lifecycle passed (capture SKIPPED): disabled default, unavailable device, no stale JPEG.");
     return 0;
 }
