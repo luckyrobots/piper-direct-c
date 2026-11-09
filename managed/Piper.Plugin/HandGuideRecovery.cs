@@ -128,7 +128,7 @@ internal sealed record RecoveryGuide(string Scope, HandGuideRecoveryGate? Gate =
 
 public sealed partial class PipersPlugin
 {
-    private RecoveryGuide? recoveryGuide;
+    internal RecoveryGuide? recoveryGuide;
     private RecoveryGuide? CurrentGuide => Volatile.Read(ref recoveryGuide);
 
     /// <summary>Applies <paramref name="change"/> to the open guide; a closed guide stays closed,
@@ -228,7 +228,7 @@ public sealed partial class PipersPlugin
         Volatile.Write(ref recoveryGuide, null);
     }
 
-    private async Task ObserveHandGuideRecovery(CancellationToken cancellation)
+    internal async Task ObserveHandGuideRecovery(CancellationToken cancellation)
     {
         if (CurrentRecovery is not null || GroupFollowActive || CurrentGuide is null || switchingProfile || calibrationOpen || !HasFreshControlTelemetry(out _)) return;
         long expectedPermission = CommandAuthority.Epoch;

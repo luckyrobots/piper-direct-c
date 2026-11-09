@@ -26,24 +26,24 @@ internal enum CommandPurpose { Control, Recovery, TeachingReturn }
 public sealed partial class PipersPlugin : ILuckyPlugin
 {
     private const string Panel = "luckyrobots.pipers.controls";
-    private readonly string owner = Guid.NewGuid().ToString();
-    private readonly CancellationTokenSource shutdown = new();
-    private readonly GrpcChannel channel;
-    private readonly SemaphoreSlim commands = new(1);
-    private PluginContext engine = null!;
-    private PiperControl.PiperControlClient client = null!;
-    private Preferences preferences = new();
-    private volatile JsonObject? state;
-    private string token = "", message = "Connecting to the existing Piper server…";
-    private string uiActionError = "";
+    internal readonly string owner = Guid.NewGuid().ToString();
+    internal readonly CancellationTokenSource shutdown = new();
+    internal readonly GrpcChannel channel;
+    internal readonly SemaphoreSlim commands = new(1);
+    internal PluginContext engine = null!;
+    internal PiperControl.PiperControlClient client = null!;
+    internal Preferences preferences = new();
+    internal volatile JsonObject? state;
+    internal string token = "", message = "Connecting to the existing Piper server…";
+    internal string uiActionError = "";
     internal RobotCommandAuthority CommandAuthority { get; } = new();
-    private volatile bool approved, pikaOwned;
+    internal volatile bool approved, pikaOwned;
     private volatile RobotLink? link;
     private volatile bool linkCommandsEnabled;
     private double? linkErrorDegrees;
     private JsonObject? scene;
     private Task? worker;
-    private UiEventDispatch? uiEvents;
+    internal UiEventDispatch? uiEvents;
     private readonly CameraPreviewSlots<CameraCapture> cameras = new();
     private readonly ConcurrentDictionary<string, string> cameraStatus = new();
     private readonly ConcurrentDictionary<string, (int Width, int Height)> cameraDimensions = new();
@@ -155,7 +155,7 @@ public sealed partial class PipersPlugin : ILuckyPlugin
         return text;
     }
 
-    private static void Materialize(JsonNode? node)
+    internal static void Materialize(JsonNode? node)
     {
         // JsonNode lazily builds child dictionaries. Finish that work on the
         // receive thread before publishing a snapshot to UI/control readers.
@@ -164,7 +164,7 @@ public sealed partial class PipersPlugin : ILuckyPlugin
     }
 
     /// <param name="expected">The connection a prior confirmation authorized; null uses the current one.</param>
-    private async Task<JsonObject> Command(string action, JsonObject? fields, CancellationToken cancellation,
+    internal async Task<JsonObject> Command(string action, JsonObject? fields, CancellationToken cancellation,
         CommandPurpose purpose = CommandPurpose.Control, RobotCommandScope? expected = null, long? expectedPermissionEpoch = null,
         double? speedOverridePercent = null)
     {
@@ -276,7 +276,7 @@ public sealed partial class PipersPlugin : ILuckyPlugin
         return GroupBlocksControlEvent(id) || WorkspaceCommandPolicy.RequiresControls(id);
     }
 
-    private async Task HandleEventCoreAsync(UiEvent input, CancellationToken cancellation)
+    internal async Task HandleEventCoreAsync(UiEvent input, CancellationToken cancellation)
     {
         string queued = UnscopePublishedWorkspaceEvent(input.WidgetId);
         if (queued.Length == 0) return;
@@ -486,7 +486,7 @@ public sealed partial class PipersPlugin : ILuckyPlugin
         }
     }
 
-    private async Task Enable(CancellationToken cancellation, bool includePika = true, RobotCommandScope? expected = null,
+    internal async Task Enable(CancellationToken cancellation, bool includePika = true, RobotCommandScope? expected = null,
         long? expectedPermissionEpoch = null)
     {
         long enableEpoch = expectedPermissionEpoch ?? CommandAuthority.Epoch;
@@ -610,7 +610,7 @@ public sealed partial class PipersPlugin : ILuckyPlugin
         return null;
     }
 
-    private Task Update(CancellationToken cancellation)
+    internal Task Update(CancellationToken cancellation)
     {
         if (CaptureWorkspacePatchScope() is not { } scope) return Task.CompletedTask;
         var evidence = new WorkspacePatchEvidence(telemetry.Latest, state, token, CommandAuthority.Epoch);

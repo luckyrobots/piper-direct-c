@@ -67,7 +67,7 @@ public sealed record RobotReadiness(string Label, string Action, bool Enabled, s
 public sealed partial class PipersPlugin
 {
     internal sealed record PrimaryActionState(PrimaryActionPhase Phase, string Id, string Status);
-    private PrimaryActionState primaryAction = new(PrimaryActionPhase.Idle, "", "");
+    internal PrimaryActionState primaryAction = new(PrimaryActionPhase.Idle, "", "");
     private bool PrimaryActionBusy => primaryAction.Phase != PrimaryActionPhase.Idle;
     private bool ResumeControlsBusy => primaryAction.Phase == PrimaryActionPhase.ResumingControls;
     private JsonObject[] pikaDevices = [];

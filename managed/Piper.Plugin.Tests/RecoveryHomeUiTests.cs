@@ -22,10 +22,9 @@ internal static class RecoveryHomeUiTests
         string root = Path.Combine(Path.GetTempPath(), "piper-recovery-home-ui-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(root);
         var plugin = new PipersPlugin();
-        void Set(string name, object? value) => typeof(PipersPlugin).GetField(name, fields)!.SetValue(plugin, value);
         T Get<T>(string name) => (T)typeof(PipersPlugin).GetField(name, fields)!.GetValue(plugin)!;
         var errors = new ConcurrentQueue<Exception>();
-        var calls = new HomeCalls(Get<string>("owner"), cancelMove);
+        var calls = new HomeCalls(plugin.owner, cancelMove);
         JsonObject? rendered = null, patches = null;
         var engine = (PluginContext)Activator.CreateInstance(typeof(PluginContext), fields, null,
             [new PluginStart("fixture", root, Path.GetTempPath()),
@@ -37,8 +36,8 @@ internal static class RecoveryHomeUiTests
                     return Task.CompletedTask;
                 }),
                 (Func<string, JsonObject, CancellationToken, Task<JsonElement>>)((_, _, _) => Task.FromResult(JsonSerializer.SerializeToElement(new { })))], null)!;
-        Set("engine", engine); Set("client", new PiperControl.PiperControlClient(calls)); Set("token", "home-ui-fixture");
-        Set("preferences", RobotProfileRouting.Normalize(new Preferences(Robots: [new("piper-1", "Fixture", "resting-arm")], ActiveRobotId: "piper-1")));
+        plugin.engine = engine; plugin.client = new PiperControl.PiperControlClient(calls); plugin.token = "home-ui-fixture";
+        plugin.preferences = RobotProfileRouting.Normalize(new Preferences(Robots: [new("piper-1", "Fixture", "resting-arm")], ActiveRobotId: "piper-1"));
         static IEnumerable<JsonObject> Walk(JsonObject node)
         {
             yield return node;
@@ -51,7 +50,7 @@ internal static class RecoveryHomeUiTests
         {
             JsonObject snapshot = calls.Snapshot();
             typeof(PipersPlugin).GetMethod("Materialize", BindingFlags.NonPublic | BindingFlags.Static)!.Invoke(null, [snapshot]);
-            Set("state", snapshot);
+            plugin.state = snapshot;
             Get<LatestTelemetry>("telemetry").Publish(new(snapshot, "home-ui-fixture", Interlocked.Increment(ref sequence), Stopwatch.GetTimestamp(), 0));
         }
         Publish();
@@ -60,7 +59,7 @@ internal static class RecoveryHomeUiTests
         await using var dispatch = new UiEventDispatch((input, cancellation) =>
                 (Task)typeof(PipersPlugin).GetMethod("HandleEventCoreAsync", fields)!.Invoke(plugin, [input, cancellation])!,
             () => plugin.CommandAuthority.Epoch, errors.Enqueue);
-        Set("uiEvents", dispatch);
+        plugin.uiEvents = dispatch;
         try
         {
             await Present("Render");
@@ -75,7 +74,7 @@ internal static class RecoveryHomeUiTests
                 JsonSerializer.SerializeToElement(new { })), CancellationToken.None);
             long started = Stopwatch.GetTimestamp();
             Task? recoveryWorker;
-            while ((recoveryWorker = Get<PipersPlugin.RecoveryOperation?>("recoveryOperation")?.Worker) is null)
+            while ((recoveryWorker = plugin.recoveryOperation?.Worker) is null)
             {
                 if (Stopwatch.GetElapsedTime(started).TotalSeconds > 3) throw new TimeoutException("Recovery UI event did not start its worker: " + string.Join("; ", errors));
                 await Task.Delay(5);
@@ -91,8 +90,8 @@ internal static class RecoveryHomeUiTests
             }
             await recoveryWorker.WaitAsync(TimeSpan.FromSeconds(4));
             check(calls.Actions.SequenceEqual(["enable", "move-to-zero"]),
-                "The single real UI-actor healthy/all-off recovery event cancelled itself, reset unnecessarily or failed to finish: " + Get<string>("message"));
-            check(errors.IsEmpty && Get<PipersPlugin.RecoveryOperation?>("recoveryOperation") is null && Get<bool>("approved") == !cancelMove,
+                "The single real UI-actor healthy/all-off recovery event cancelled itself, reset unnecessarily or failed to finish: " + plugin.message);
+            check(errors.IsEmpty && plugin.recoveryOperation is null && plugin.approved == !cancelMove,
                 "Retired UI recovery published incorrect approval");
             if (cancelMove)
                 check(calls.ScopedStopRequest == 12 && plugin.CommandAuthority.Current.Lease is null,
@@ -108,9 +107,9 @@ internal static class RecoveryHomeUiTests
         finally
         {
             pumping.Cancel(); try { await pump; } catch (OperationCanceledException) { }
-            await dispatch.StopAsync(); Get<CancellationTokenSource>("shutdown").Cancel();
-            ((IDisposable)Get<object>("channel")).Dispose(); Get<SemaphoreSlim>("commands").Dispose();
-            Get<CancellationTokenSource>("shutdown").Dispose();
+            await dispatch.StopAsync(); plugin.shutdown.Cancel();
+            ((IDisposable)plugin.channel).Dispose(); plugin.commands.Dispose();
+            plugin.shutdown.Dispose();
             Directory.Delete(root, recursive: true);
         }
     }

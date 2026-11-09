@@ -5,7 +5,7 @@ namespace LuckyRobots.Piper.Plugin;
 
 public sealed partial class PipersPlugin
 {
-    private Task Render(CancellationToken cancellation) => PublishWorkspaceView(cancellation);
+    internal Task Render(CancellationToken cancellation) => PublishWorkspaceView(cancellation);
 
     private Widget BuildWorkspaceView(bool showClearanceConfirmation, SimulationCameraChoices cameraChoices)
     {

@@ -14,7 +14,7 @@ public sealed partial class PipersPlugin
     private TeachingState teaching = TeachingState.Inspect(null);
     private string teachingDevice = "";
     private long teachingGeneration;
-    private TeachingOwnership teachingOwnership;
+    internal TeachingOwnership teachingOwnership;
 
     /// <summary>Records the hand-over to physical teaching once, keeping the approval that existed then.</summary>
     private void ObserveTeachingOwnership()

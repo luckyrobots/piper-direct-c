@@ -110,11 +110,11 @@ public sealed partial class PipersPlugin
     private bool calibrationOpen => Navigation.CalibrationOpen;
     private string settingsCamera => Navigation.SettingsCamera;
     private string cameraDetail => Navigation.CameraDetail;
-    private long workspaceViewEpoch;
+    internal long workspaceViewEpoch;
     private Task? wizardHighlightMaintenance;
     private bool connectionDetailsOpen, cameraStreamDetailsOpen, cameraLensDetailsOpen;
 
-    private async Task WorkspaceEvent(string action, CancellationToken cancellation)
+    internal async Task WorkspaceEvent(string action, CancellationToken cancellation)
     {
         action = action.Split('@', 2)[0];
         if (action == "link-info" || action.StartsWith("info.", StringComparison.Ordinal) || action is "recording.camera-info" or "recording.time-info") return;

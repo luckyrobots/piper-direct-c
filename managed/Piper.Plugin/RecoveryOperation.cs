@@ -25,7 +25,7 @@ public sealed partial class PipersPlugin
         public void Dispose() => cancellation.Dispose();
     }
 
-    private RecoveryOperation? recoveryOperation;
+    internal RecoveryOperation? recoveryOperation;
     private RecoveryOperation? CurrentRecovery => Volatile.Read(ref recoveryOperation);
     private bool SupportedRecoveryBusy => CurrentRecovery?.Kind == RecoveryKind.HoldHere;
     private bool RecoveryHomeBusy => CurrentRecovery?.Kind == RecoveryKind.ReturnToZero;
@@ -61,7 +61,7 @@ public sealed partial class PipersPlugin
 
     private bool RecoveryScopeCurrent(RecoveryOperation operation) => !operation.Token.IsCancellationRequested && RecoveryScopeMatches(operation);
 
-    private bool RecoveryExpectedGap(TelemetryReceipt? receipt)
+    internal bool RecoveryExpectedGap(TelemetryReceipt? receipt)
     {
         if (CurrentRecovery is not { } operation || !RecoveryScopeCurrent(operation) || receipt is null ||
             receipt.BackendToken != operation.Scope.Backend || !receipt.IsFresh(Stopwatch.GetTimestamp())) return false;
@@ -78,7 +78,7 @@ public sealed partial class PipersPlugin
             joints.All(j => j?["fault"]?.GetValue<int>() == 0) && !receipt.HasFreshDevice(device, Stopwatch.GetTimestamp());
     }
 
-    private void GrantRecoveryHolding(RecoveryOperation operation, CancellationToken cancellation)
+    internal void GrantRecoveryHolding(RecoveryOperation operation, CancellationToken cancellation)
     {
         cancellation.ThrowIfCancellationRequested();
         if (!RecoveryScopeCurrent(operation) || !CommandAuthority.TryInEpoch(operation.Epoch, () => approved = true))
