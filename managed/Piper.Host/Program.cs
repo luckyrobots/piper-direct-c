@@ -43,7 +43,7 @@ builder.Services.AddSingleton(provider => new PiperRpcContext(controller, pika, 
 builder.Services.AddGrpc(options => { options.MaxReceiveMessageSize = HostEndpoints.MaxRequestBytes; options.MaxSendMessageSize = HostEndpoints.MaxGrpcSendBytes; });
 builder.WebHost.ConfigureKestrel(k => { k.Listen(IPAddress.Loopback, port); k.Listen(IPAddress.Loopback, grpcPort, endpoint => endpoint.Protocols = HttpProtocols.Http2); k.Limits.MaxRequestBodySize = HostEndpoints.MaxRequestBytes; });
 var app = builder.Build();
-maintenance = new BackendMaintenance(() => JsonNode.Parse(controller.Snapshot())!.AsObject(), () => pika.Snapshots(),
+maintenance = new BackendMaintenance(controller.SnapshotJson, () => pika.Snapshots(),
     () => { Environment.ExitCode = BackendMaintenance.RestartExitCode; app.Lifetime.StopApplication(); },
     Environment.ProcessId, supervisorPid, supervisorPid.HasValue ? supervisorIdentity : null,
     pluginOwner: sessionOwner.Length > 0 ? sessionOwner : null);

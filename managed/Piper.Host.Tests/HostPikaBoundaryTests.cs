@@ -88,7 +88,7 @@ internal static class HostPikaBoundaryTests
             Check(discovery.Distributions[^1] == "Debian", "HTTP Pika inventory used the startup distribution after configure.");
             Console.WriteLine("Host Pika boundaries passed: same-sample snapshot, source clock, idle commit, and independent STOP/peer writes.");
 
-            JsonObject ArmState() => JsonNode.Parse(controller.Snapshot())!.AsObject();
+            JsonObject ArmState() => controller.SnapshotJson();
 
             async Task<HostControlResult> Send(string route, object body)
             {
@@ -138,6 +138,7 @@ internal static class HostPikaBoundaryTests
             var maintenance = new BackendMaintenance(() => new JsonObject(), () => [], () => { }, Environment.ProcessId);
             var context = new PiperRpcContext(controller, registry, false, "", maintenance);
             controller.Dispose();
+            controller.Dispose(); // idempotent
             var input = JsonSerializer.SerializeToElement(new { action = "hold" });
             var result = await context.Control.ExecuteAsync("/api/command", input.GetRawText(), input, HostControlTransport.Http, default);
             Check(result.Status == 409 && result.Error is { Length: > 0 }, "A disposed controller was not a 409 control error.");

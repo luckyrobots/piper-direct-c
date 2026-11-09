@@ -28,7 +28,7 @@ internal sealed class HostControlDispatcher(ControllerService controller, PikaSe
 
     internal JsonObject ReadState(string? dashboardBackend = null)
     {
-        var state = JsonNode.Parse(controller.Snapshot())!.AsObject();
+        var state = controller.SnapshotJson();
         if (dashboardBackend is not null) state["backend"] = dashboardBackend;
         var grippers = pika.SnapshotPair();
         state["pika"] = grippers.Default;
@@ -104,7 +104,7 @@ internal sealed class HostControlDispatcher(ControllerService controller, PikaSe
         {
             string activeMessage = grpc ? "Finish the active arm movement before changing Pika assignment" :
                 "Finish active arm movements before changing Pika assignment";
-            if (ControllerActivity.AnyMotion(JsonNode.Parse(controller.Snapshot())))
+            if (ControllerActivity.AnyMotion(controller.SnapshotJson()))
                 return new(409, Error: activeMessage);
             return new(200, await pika.ConfigureAsync(input, cancellation,
                 commit => controller.CommitWhenArmIdle(commit, activeMessage, cancellation)));
