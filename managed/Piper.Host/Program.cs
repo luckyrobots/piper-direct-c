@@ -69,6 +69,7 @@ app.Run(async context => {
     if (!hosts.Contains(host,StringComparer.OrdinalIgnoreCase) || request.Headers.Origin.Count>1 ||
         (request.Headers.Origin.Count==1 && !hosts.Any(h=>request.Headers.Origin==$"http://{h}")) || request.Headers["Sec-Fetch-Site"]=="cross-site") { await Error(403,"Only this local dashboard origin is permitted"); return; }
     string route=request.Path.Value??"/";
+    string? Query(string key) => request.Query.TryGetValue(key, out var value) ? value.ToString() : null;
     try {
         if (HttpMethods.IsGet(request.Method)) {
             if (route=="/api/state") {
@@ -77,14 +78,11 @@ app.Run(async context => {
                 await response.WriteAsJsonAsync(state); return;
             }
             if (route=="/api/pika/state") {
-                var selected = request.Query.TryGetValue("pika_device", out var selectedDevice)
-                    ? pika.Snapshot(selectedDevice.ToString(), request.Query.TryGetValue("pika_distribution", out var selectedDistribution) ? selectedDistribution.ToString() : pikaDistribution, true)
-                    : pika.Snapshot(includeRawEvidence: true);
-                await response.WriteAsJsonAsync(selected); return;
+                await response.WriteAsJsonAsync(control.PikaState(Query("pika_device"), Query("pika_distribution"))); return;
             }
             if (route=="/api/pika/devices") {
                 if (simulated) { await response.WriteAsJsonAsync(HostControlDispatcher.EmptySimulatedInventory); return; }
-                try { await response.WriteAsJsonAsync(await pika.DiscoverAsync(request.Query.TryGetValue("distribution", out var inventoryDistribution) ? inventoryDistribution.ToString() : pikaDistribution, context.RequestAborted)); }
+                try { await response.WriteAsJsonAsync(await control.DiscoverPikaAsync(Query("distribution"), context.RequestAborted)); }
                 catch (Exception e) when (HostControlDispatcher.IsControlOperationError(e)) { await Error(409,e.Message); }
                 return;
             }

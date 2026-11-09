@@ -80,6 +80,12 @@ internal static class HostPikaBoundaryTests
             var accepted = await Send("/api/pika/configure", new { owner, device = alias });
             Check(accepted.Status == 200 && registry.Snapshot()["device"]?.GetValue<string>() == replacement &&
                 agents[replacement].Actions.Count == 0, "Idle configuration did not register without opening or writing to the gripper.");
+            var moved = await Send("/api/pika/configure", new { owner, device = replacement, distribution = "Debian" });
+            Check(moved.Status == 200 && context.Control.PikaState(replacement, null)["distribution"]?.GetValue<string>() == "Debian" &&
+                context.Control.PikaState(replacement, distribution)["distribution"]?.GetValue<string>() == distribution,
+                "HTTP Pika state ignored the current registry distribution after configure.");
+            _ = await context.Control.DiscoverPikaAsync(null, deadline.Token);
+            Check(discovery.Distributions[^1] == "Debian", "HTTP Pika inventory used the startup distribution after configure.");
             Console.WriteLine("Host Pika boundaries passed: same-sample snapshot, source clock, idle commit, and independent STOP/peer writes.");
 
             JsonObject ArmState() => JsonNode.Parse(controller.Snapshot())!.AsObject();
@@ -134,9 +140,11 @@ internal static class HostPikaBoundaryTests
     {
         internal TaskCompletionSource Entered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         internal TaskCompletionSource Release { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        internal List<string?> Distributions { get; } = [];
 
         public async Task<JsonObject> DiscoverAsync(string? distribution, CancellationToken cancellation)
         {
+            Distributions.Add(distribution);
             Entered.TrySetResult();
             await Release.Task.WaitAsync(cancellation);
             return new JsonObject { ["devices"] = new JsonArray(new JsonObject { ["device"] = device,

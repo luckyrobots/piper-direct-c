@@ -37,6 +37,17 @@ internal sealed class HostControlDispatcher(ControllerService controller, PikaSe
         return state;
     }
 
+    /// <summary>A null distribution means the registry's current assignment, which
+    /// /api/pika/configure may have changed since startup.</summary>
+    internal JsonObject PikaState(string? device, string? distribution)
+    {
+        if (device is null) return pika.Snapshot(includeRawEvidence: true);
+        return pika.Snapshot(device, distribution ?? pika.Snapshot()["distribution"]?.GetValue<string>(), includeRawEvidence: true);
+    }
+
+    internal Task<JsonObject> DiscoverPikaAsync(string? distribution, CancellationToken cancellation) =>
+        pika.DiscoverAsync(distribution, cancellation);
+
     internal HostControlAdmission Admit(string route, JsonElement input, HostControlTransport transport)
     {
         if (!SessionOwnerGuard.Allows(sessionOwner, route, input)) return new(Error: SessionOwnerGuard.Denied);
