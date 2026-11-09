@@ -1,4 +1,4 @@
-param([string]$Repository=(Split-Path $PSScriptRoot -Parent))
+param([string]$Repository=(Split-Path (Split-Path $PSScriptRoot -Parent) -Parent))
 $ErrorActionPreference='Stop'
 # Exercise the actual native-process wrapper under Windows PowerShell 5 without
 # running setup, requiring elevation, sharing USB, or opening any serial port.

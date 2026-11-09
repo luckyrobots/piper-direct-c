@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 const elements = new Map(), intervals = [], events = new Map(), writes = [];
-let now = 1000, simulated = false, serialRequests = 0, serialInput, closed = false, approved = false;
+let now = 1000, serialRequests = 0, serialInput, closed = false, approved = false, gate = null;
 const element = id => {
   if (!elements.has(id)) elements.set(id, { checked:false, disabled:false, textContent:'', addEventListener(name, fn) { events.set(`${id}:${name}`, fn); } });
   return elements.get(id);
@@ -10,10 +10,10 @@ globalThis.window = { confirmPiperControl:()=>approved, addEventListener(name,fn
 Object.defineProperty(globalThis, 'performance', { value:{now:()=>now}, configurable:true });
 globalThis.setInterval = fn => { intervals.push(fn); };
 globalThis.setTimeout = () => {};
-globalThis.fetch = async () => ({ok:true,json:async()=>({simulated})});
+globalThis.fetch = async () => { throw Error('pika.mjs must follow app.js piper-state events, not poll'); };
 const port = {
   readable:new ReadableStream({start(c) { serialInput = c; }}),
-  writable:new WritableStream({write(bytes) { writes.push([...bytes]); }}),
+  writable:new WritableStream({write(bytes) { writes.push([...bytes]); return gate?.promise; }}),
   async open(options) { assert.equal(options.baudRate,460800); },
   async close() { closed = true; }
 };
@@ -21,6 +21,7 @@ Object.defineProperty(globalThis, 'navigator', { value:{serial:{async requestPor
 const { angleFromWidth } = await import('../web/pika.mjs');
 const settle = async () => { for (let i=0;i<20;i++) await Promise.resolve(); };
 await settle();
+events.get('window:piper-state')({detail:{simulated:false}});
 await element('pika-connect').onclick();
 assert.equal(serialRequests,1); assert.equal(writes.length,0,'Connecting must not enable or move');
 assert.equal(element('pika-enable').disabled,true,'Missing telemetry blocks enable');
@@ -60,7 +61,28 @@ serialInput.enqueue(new TextEncoder().encode('{"motor":{"Position":0.5},"motorst
 await settle(); await element('pika-enable').onclick(); now += 2100;
 for (const fn of intervals) fn(); await settle();
 assert.equal(writes.at(-1)[0],10,'Stale feedback requests disable');
+const hold = () => { let release; gate = { promise:new Promise(resolve => { release = resolve; }) }; return () => { gate = null; release(); }; };
+const telemetry = () => serialInput.enqueue(new TextEncoder().encode('{"motor":{"Position":0.5},"motorstatus":{}}'));
+// B18: a STOP during a disable write must not make the next enable disable itself.
+telemetry(); await settle(); await element('pika-enable').onclick();
+assert.equal(writes.at(-1)[0],11);
+let release = hold(); const disabling = element('pika-disable').onclick(); await settle();
+assert.equal(writes.at(-1)[0],10);
+events.get('stop:click')(); release(); await disabling; await settle();
+const afterStop = writes.length;
+telemetry(); await settle(); await element('pika-enable').onclick(); await settle();
+assert.equal(writes.length,afterStop+1,'A STOP consumed by a disable write must not disable the next enable');
+assert.equal(writes.at(-1)[0],11);
+assert.equal(element('pika-open').disabled,false,'The next enable arms the jaws');
+// A STOP during an enable write sends disable afterwards and leaves the jaws unarmed.
+events.get('stop:click')(); await settle(); assert.equal(writes.at(-1)[0],10);
+telemetry(); await settle();
+release = hold(); const enabling = element('pika-enable').onclick(); await settle();
+assert.equal(writes.at(-1)[0],11);
+events.get('stop:click')(); release(); await enabling; await settle();
+assert.equal(writes.at(-1)[0],10,'STOP during enable is followed by disable');
+assert.equal(element('pika-open').disabled,true,'STOP during enable leaves the jaws unarmed');
 await element('pika-disconnect').onclick();
 assert.equal(closed,true);
 assert.equal(element('pika-open').disabled,true);
-console.log('Pika UI lifecycle passed: read-only connect, missing feedback/ack guards, explicit enable, bounded step, stale rejection/disable, disconnect');
+console.log('Pika UI lifecycle passed: read-only connect, missing feedback/ack guards, explicit enable, bounded step, stale rejection/disable, STOP during writes, disconnect');

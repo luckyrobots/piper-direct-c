@@ -33,7 +33,7 @@ replaced independently. The proprietary vendor cando.dll is not loaded.
 
 The receive-pumping core requires the matching updated transport DLL and rejects
 an older DLL without `cando_frame_send_pumped`. Install the two DLLs together.
-Run `tools/Test-WindowsTransport.ps1` to exercise the actual production transport
+Run `tools/lab/Test-WindowsTransport.ps1` to exercise the actual production transport
 with fake WinUSB and receive callbacks; it opens no hardware. The fixtures cover
 receive backpressure, unchanged timeouts, cancellation, incomplete/partial
 transfers, safe oversized-record discard and local-echo filtering.
