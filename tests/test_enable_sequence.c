@@ -92,7 +92,7 @@ static void complete(struct controller *c)
 {
     for (unsigned tick_count=0;tick_count<400&&c->op!=OP_IDLE;++tick_count) tick(c);
     CHECK(c->op==OP_IDLE&&!strcmp(c->phase,"complete")&&stops==0);
-    for (unsigned i=0;i<6;++i) CHECK(c->enable_acknowledged[i]&&c->enable_baseline[i]==wire_pose[i]);
+    for (unsigned i=0;i<6;++i) CHECK(c->power_acknowledged[i]&&c->enable_baseline[i]==wire_pose[i]);
 }
 static void close_fixture(struct controller *c,const char *directory)
 {
@@ -107,10 +107,10 @@ int main(void)
     ack_delay[0]=.6;
     for (unsigned i=0;i<6;++i) tick(&c);
     for (unsigned i=0;i<6;++i) CHECK(power_count[i]==1&&first_wire[i]<=c.started+.151);
-    CHECK(!c.enable_acknowledged[0]);
+    CHECK(!c.power_acknowledged[0]);
     double all_ack_at=0;
     for (unsigned n=0;n<100&&c.op!=OP_IDLE;++n) {
-        tick(&c); bool all=true; for (unsigned i=0;i<6;++i) all=all&&c.enable_acknowledged[i];
+        tick(&c); bool all=true; for (unsigned i=0;i<6;++i) all=all&&c.power_acknowledged[i];
         if (all&&!all_ack_at) all_ack_at=clock_now;
     }
     CHECK(c.op==OP_IDLE&&!strcmp(c.phase,"complete")&&all_ack_at&&clock_now-all_ack_at>=.4-1e-9&&stops==0);
@@ -128,7 +128,7 @@ int main(void)
 
     fixture(&c,directory); tick(&c); /* Only J1 has received a request. */
     move(&c,3,-19.445); tick(&c); /* J4 moves .555 degrees while still free. */
-    CHECK(c.op==OP_ENABLE&&!c.enable_requested[3]);
+    CHECK(c.op==OP_ENABLE&&!c.power_requested[3]);
     complete(&c); CHECK(fabs(c.enable_baseline[3]+19.445)<1e-9&&c.initial[3]==-20);
     close_fixture(&c,directory);
 
@@ -137,30 +137,30 @@ int main(void)
     close_fixture(&c,directory);
 
     fixture(&c,directory); for (unsigned i=0;i<4;++i) tick(&c);
-    CHECK(c.enable_requested[3]); move(&c,3,c.enable_baseline[3]+.501); tick(&c);
+    CHECK(c.power_requested[3]); move(&c,3,c.enable_baseline[3]+.501); tick(&c);
     CHECK(c.op==OP_IDLE&&stops==1&&c.obstruction_joint==4&&strstr(c.message,"after its enable request"));
     close_fixture(&c,directory);
 
     fixture(&c,directory); for (unsigned i=0;i<6;++i) ack_delay[i]=-1;
-    tick(&c); double frozen=c.enable_baseline[0],first=c.enable_first_sent_at[0];
+    tick(&c); double frozen=c.enable_baseline[0],first=c.power_first_sent_at[0];
     move(&c,0,frozen+.25);
     for (unsigned i=0;i<12;++i) tick(&c);
-    CHECK(power_count[0]>=2&&c.enable_baseline[0]==frozen&&c.enable_first_sent_at[0]==first);
+    CHECK(power_count[0]>=2&&c.enable_baseline[0]==frozen&&c.power_first_sent_at[0]==first);
     move(&c,0,frozen+.501); tick(&c);
     CHECK(c.op==OP_IDLE&&stops==1&&c.obstruction_joint==1); close_fixture(&c,directory);
 
     fixture(&c,directory); ack_delay[0]=-1; tick(&c);
     c.bus.devices[0].feedback.motor[0].enabled=true; low_stamp[0]=first_wire[0];
     for (unsigned i=0;i<4;++i) tick(&c);
-    CHECK(c.op==OP_ENABLE&&!c.enable_acknowledged[0]); /* Same-time sample is not a post-request ACK. */
-    low_stamp[0]=-1; tick(&c); CHECK(c.enable_acknowledged[0]); complete(&c); close_fixture(&c,directory);
+    CHECK(c.op==OP_ENABLE&&!c.power_acknowledged[0]); /* Same-time sample is not a post-request ACK. */
+    low_stamp[0]=-1; tick(&c); CHECK(c.power_acknowledged[0]); complete(&c); close_fixture(&c,directory);
 
     fixture(&c,directory); pump_before_completion=true; ack_delay[0]=-1; tick(&c);
-    CHECK(low_stamp[0]<c.enable_first_sent_at[0]);
-    tick(&c); CHECK(!c.enable_acknowledged[0]); /* A pumped sample before actual write completion is not an ACK. */
-    low_stamp[0]=-1; tick(&c); CHECK(c.enable_acknowledged[0]); complete(&c); close_fixture(&c,directory);
+    CHECK(low_stamp[0]<c.power_first_sent_at[0]);
+    tick(&c); CHECK(!c.power_acknowledged[0]); /* A pumped sample before actual write completion is not an ACK. */
+    low_stamp[0]=-1; tick(&c); CHECK(c.power_acknowledged[0]); complete(&c); close_fixture(&c,directory);
 
-    fixture(&c,directory); tick(&c); tick(&c); CHECK(c.enable_acknowledged[0]);
+    fixture(&c,directory); tick(&c); tick(&c); CHECK(c.power_acknowledged[0]);
     ack_delay[0]=-1; c.bus.devices[0].feedback.motor[0].enabled=false; unsigned count=power_count[0]; tick(&c);
     CHECK(c.op==OP_IDLE&&stops==1&&power_count[0]==count&&c.obstruction_joint==1&&strstr(c.message,"no automatic re-enable"));
     close_fixture(&c,directory);

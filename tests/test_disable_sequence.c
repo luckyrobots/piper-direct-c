@@ -153,7 +153,7 @@ int main(void)
     fixture(c,directory,sizeof directory,1,false);mcu[0].delay[0]=.5;start(c,0);start(c,1);
     cJSON *select=cJSON_CreateObject();cJSON_AddStringToObject(select,"device_id",c->bus.devices[1].id);request(c,"/api/select",select,200);
     complete(c);
-    for(unsigned n=0;n<2;++n)for(unsigned i=0;i<6;++i)CHECK(!c->bus.devices[n].feedback.motor[i].enabled&&lane(c,n)->disable_acknowledged[i]&&mcu[n].count[i]>=1);
+    for(unsigned n=0;n<2;++n)for(unsigned i=0;i<6;++i)CHECK(!c->bus.devices[n].feedback.motor[i].enabled&&lane(c,n)->power_acknowledged[i]&&mcu[n].count[i]>=1);
     CHECK(!mcu[0].stops&&!mcu[1].stops&&!strcmp(lane(c,0)->phase,"complete")&&!strcmp(lane(c,1)->phase,"complete"));
     for(unsigned n=0;n<2;++n){unsigned before[6];memcpy(before,mcu[n].count,sizeof before);for(unsigned t=0;t<8;++t)tick(c,true,true);CHECK(!memcmp(before,mcu[n].count,sizeof before));}
     cleanup(c,directory);
@@ -188,7 +188,7 @@ int main(void)
 
     fixture(c,directory,sizeof directory,7,false);mcu[0].freeze_low_mask=1u<<5;start(c,0);
     for(unsigned i=0;i<10;++i)tick(c,true,false);
-    CHECK(lane(c,0)->op==OP_DISABLE&&!lane(c,0)->disable_acknowledged[5]);
+    CHECK(lane(c,0)->op==OP_DISABLE&&!lane(c,0)->power_acknowledged[5]);
     mcu[0].freeze_low_mask=0;complete(c);CHECK(!strcmp(lane(c,0)->phase,"complete")&&!mcu[0].stops);cleanup(c,directory);
     free(c);puts("PASS staged disable: per-driver paced OFF/ACK and bounded missing-ACK retries, fresh all-off settlement, independent lanes, timeout/TX failure/lease/generation/STOP isolation and original incident preservation; no enable/reset/mode/pose packets.");
 }

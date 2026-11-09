@@ -1,12 +1,10 @@
     char lane_device[160], message[256], phase[32], error[256], owner[81];
     enum operation op;
     unsigned generation, request_id, enable_count;
-    unsigned enable_cursor;
-    bool enable_requested[6], enable_acknowledged[6];
-    double enable_first_sent_at[6], enable_last_sent_at[6], enable_baseline[6];
-    unsigned disable_cursor;
-    bool disable_requested[6], disable_acknowledged[6];
-    double disable_first_sent_at[6], disable_last_sent_at[6];
+    /* Per-driver power handshake for the active ENABLE or DISABLE. */
+    unsigned power_cursor;
+    bool power_requested[6], power_acknowledged[6];
+    double power_first_sent_at[6], power_last_sent_at[6], enable_baseline[6];
     bool pose_tx_valid;
     bool position_seed_pending;
     unsigned pose_tx_generation, pose_tx_speed;
