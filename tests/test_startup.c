@@ -14,7 +14,7 @@ double __wrap_piper_now(void) { return clock_now; }
 static void tick(struct controller *c)
 {
     clock_now+=.01;
-    c->heartbeat=piper_now(); controller_tick(c,piper_now());
+    LANE(c)->heartbeat=piper_now(); controller_tick(c,piper_now());
 }
 static void settle(struct controller *c)
 {
@@ -40,8 +40,8 @@ static void action(struct controller *c,const char *name,int expected)
         if (!*d->feedback.version) {
             int query_status; cJSON *query=controller_action(c,"/api/query",j,&query_status);
             CHECK(query_status==202); cJSON_Delete(query);
-            for (unsigned poll=0;poll<600&&c->query;++poll) tick(c);
-            CHECK(!c->query&&piper_fresh(&d->feedback.arm[0],piper_now()));
+            for (unsigned poll=0;poll<600&&LANE(c)->query;++poll) tick(c);
+            CHECK(!LANE(c)->query&&piper_fresh(&d->feedback.arm[0],piper_now()));
         }
     }
     int status; cJSON *r=controller_action(c,"/api/command",j,&status);
@@ -49,18 +49,18 @@ static void action(struct controller *c,const char *name,int expected)
     CHECK(status==expected); cJSON_Delete(r); cJSON_Delete(j);
     if (expected==202) {
         unsigned ticks=0;
-        while (c->op!=OP_IDLE&&ticks++<1000) {
+        while (LANE(c)->op!=OP_IDLE&&ticks++<1000) {
             if (!strcmp(name,"reset")) d->feedback.arm[0].arm_status=ticks<20?2:0;
             uint64_t previous_tx=d->tx;
             tick(c);
             if (!strcmp(name,"enable")) {
                 CHECK(d->tx-previous_tx<=1); // Same-ID power commands are paced, never burst.
-                if (c->enable_count<3) c->bus.sim_enabled&=~1u; // First driver misses two wake-up requests.
-                if (slow_first_enable&&piper_now()-c->started<3.2) c->bus.sim_enabled&=~1u;
+                if (LANE(c)->enable_count<3) c->bus.sim_enabled&=~1u; // First driver misses two wake-up requests.
+                if (slow_first_enable&&piper_now()-LANE(c)->started<3.2) c->bus.sim_enabled&=~1u;
             }
-            if (!strcmp(name,"reset")&&ticks<20) CHECK(c->op==OP_RESET);
+            if (!strcmp(name,"reset")&&ticks<20) CHECK(LANE(c)->op==OP_RESET);
         }
-        CHECK(c->op==OP_IDLE); CHECK(!strcmp(c->phase,"complete"));
+        CHECK(LANE(c)->op==OP_IDLE); CHECK(!strcmp(LANE(c)->phase,"complete"));
         if (!strcmp(name,"enable")) slow_first_enable=false;
     }
 }
@@ -134,10 +134,10 @@ int main(void)
     CHECK(cJSON_GetObjectItem(fault,"arm_status")->valueint==5);
     CHECK(cJSON_GetObjectItem(fault,"error")->valueint==63);
     // Expire the five-second information query while preserving the fault record.
-    c.query=QUERY_INITIAL; c.query_generation=d->generation; c.query_start=piper_now()-6;
+    LANE(&c)->query=QUERY_INITIAL; LANE(&c)->query_generation=d->generation; LANE(&c)->query_start=piper_now()-6;
     controller_tick(&c,piper_now());
-    CHECK(!c.query && !strcmp(c.phase,"blocked"));
-    CHECK(strstr(c.message,"Joint-drive communication fixture."));
+    CHECK(!LANE(&c)->query && !strcmp(LANE(&c)->phase,"blocked"));
+    CHECK(strstr(LANE(&c)->message,"Joint-drive communication fixture."));
     d->feedback.arm[0].arm_status=0; d->feedback.arm[0].error=0;
     d->feedback.arm[0].control=2; d->feedback.arm[0].teach=3;
     action(&c,"reset",409); // Active onboard playback cannot be reset by this path.

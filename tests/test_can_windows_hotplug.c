@@ -173,11 +173,11 @@ int main(void)
     fail_start=false;windows_scan_inventory(&bus,fake_connection,fake_identity);
     CHECK(second->fd==1&&second->up&&second->problem[0]==0);
 
-    struct controller controller={0};controller.op=OP_MOVE;piper_tick(&controller);
+    struct controller controller={0};strcpy(controller.lanes[0].lane_device,"usb:lane");controller.lanes[0].op=OP_MOVE;piper_tick(&controller);
     CHECK(full_scans==0&&connection_checks==1&&controller_ticks==1);
-    scheduling_clock+=1.1;controller.op=OP_IDLE;piper_tick(&controller);
+    scheduling_clock+=1.1;controller.lanes[0].op=OP_IDLE;piper_tick(&controller);
     CHECK(full_scans==1&&connection_checks==1&&controller_ticks==2);
-    scheduling_clock+=.1;controller.op=OP_MOVE;piper_tick(&controller);
+    scheduling_clock+=.1;controller.lanes[0].op=OP_MOVE;piper_tick(&controller);
     CHECK(full_scans==1&&connection_checks==1&&controller_ticks==3);
     scheduling_clock+=1.1;piper_tick(&controller);
     CHECK(full_scans==1&&connection_checks==2&&controller_ticks==4);

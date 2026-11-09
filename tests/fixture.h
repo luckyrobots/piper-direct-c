@@ -14,6 +14,9 @@
 
 #include "check.h"
 
+/* The selected device's lane, created on first use. */
+#define LANE(c) controller_lane((c),(c)->selected)
+
 /* A fake "open" transport for a non-simulated device. It is negative, so no
    OS call (close, send, recvmsg) can ever act on a real descriptor. */
 #define FIXTURE_FD (-2)

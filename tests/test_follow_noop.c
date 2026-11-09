@@ -36,7 +36,7 @@ static void command(struct controller *c,const char *action,double wrist,int exp
     struct can_device *d=&c->bus.devices[0]; cJSON *j=cJSON_CreateObject();
     cJSON_AddStringToObject(j,"device_id",d->id); cJSON_AddNumberToObject(j,"generation",d->generation);
     cJSON_AddStringToObject(j,"owner","follow-noop-regression-client"); cJSON_AddStringToObject(j,"action",action);
-    cJSON_AddNumberToObject(j,"request_id",c->request_id); cJSON_AddNumberToObject(j,"sequence",++sequence);
+    cJSON_AddNumberToObject(j,"request_id",LANE(c)->request_id); cJSON_AddNumberToObject(j,"sequence",++sequence);
     cJSON_AddNumberToObject(j,"speed_percent",100); cJSON_AddBoolToObject(j,"standalone",true); cJSON_AddBoolToObject(j,"clear",true);
     double pose[6]={0,0,0,0,0,wrist}; cJSON_AddItemToObject(j,"degrees",cJSON_CreateDoubleArray(pose,6));
     int status; cJSON *reply=controller_action(c,"/api/command",j,&status); CHECK(status==expected);
@@ -55,35 +55,35 @@ static void fixture(struct controller *c,char directory[96])
     }
     __wrap_can_bus_receive(&c->bus,clock_now); command(c,"follow-start",0,202);
 }
-static void tick(struct controller *c) { clock_now+=.025; c->heartbeat=clock_now; controller_tick(c,clock_now); }
+static void tick(struct controller *c) { clock_now+=.025; LANE(c)->heartbeat=clock_now; controller_tick(c,clock_now); }
 static void close_fixture(struct controller *c,const char *directory)
 {
-    CHECK(c->op==OP_IDLE); controller_close(c); char path[128]; snprintf(path,sizeof path,"%s/control-state.json",directory); CHECK(!unlink(path)); CHECK(!rmdir(directory));
+    CHECK(LANE(c)->op==OP_IDLE); controller_close(c); char path[128]; snprintf(path,sizeof path,"%s/control-state.json",directory); CHECK(!unlink(path)); CHECK(!rmdir(directory));
 }
 int main(void)
 {
     struct controller c; char directory[96]; fixture(&c,directory); tick(&c); CHECK(full_poses==1);
-    double sent=c.sent_at,wire=c.pose_tx_at;
+    double sent=LANE(&c)->sent_at,wire=LANE(&c)->pose_tx_at;
     for (unsigned n=0;n<25;++n) { command(&c,"follow-update",0,202); tick(&c); }
-    CHECK(full_poses==1&&c.sent_at==sent&&c.pose_tx_at==wire&&c.op==OP_MOVE&&c.follow==FOLLOW_LIVE);
+    CHECK(full_poses==1&&LANE(&c)->sent_at==sent&&LANE(&c)->pose_tx_at==wire&&LANE(&c)->op==OP_MOVE&&LANE(&c)->follow==FOLLOW_LIVE);
     command(&c,"follow-commit",0,202); tick(&c);
-    CHECK(c.final_sent_at==wire&&c.pose_tx_at==wire&&full_poses==1);
-    for (unsigned n=0;n<30&&c.op!=OP_IDLE;++n) tick(&c);
-    CHECK(c.op==OP_IDLE&&!stops&&full_poses==1); close_fixture(&c,directory);
+    CHECK(LANE(&c)->final_sent_at==wire&&LANE(&c)->pose_tx_at==wire&&full_poses==1);
+    for (unsigned n=0;n<30&&LANE(&c)->op!=OP_IDLE;++n) tick(&c);
+    CHECK(LANE(&c)->op==OP_IDLE&&!stops&&full_poses==1); close_fixture(&c,directory);
 
     fixture(&c,directory); tick(&c); command(&c,"follow-update",.003,202); tick(&c); CHECK(full_poses==2);
-    c.speed_percent=50; tick(&c); CHECK(full_poses==3); /* Different mode tuple is never suppressed. */
+    LANE(&c)->speed_percent=50; tick(&c); CHECK(full_poses==3); /* Different mode tuple is never suppressed. */
     c.bus.devices[0].feedback.arm[0].control=0; tick(&c); CHECK(full_poses==4);
-    command(&c,"follow-end",0,200); CHECK(c.op==OP_IDLE); unsigned previous=full_poses;
+    command(&c,"follow-end",0,200); CHECK(LANE(&c)->op==OP_IDLE); unsigned previous=full_poses;
     command(&c,"follow-start",0,202); tick(&c); CHECK(full_poses==previous+1); /* New session always starts with a real write. */
     command(&c,"follow-end",0,200); close_fixture(&c,directory);
 
     for (unsigned expiry=0;expiry<2;++expiry) {
         fixture(&c,directory); tick(&c); struct can_device *d=&c.bus.devices[0];
         d->feedback.arm[0].deg[5]=.02; fail_pose=true;
-        if (expiry) { clock_now=c.follow_updated+.251; c.heartbeat=clock_now; controller_tick(&c,clock_now); }
+        if (expiry) { clock_now=LANE(&c)->follow_updated+.251; LANE(&c)->heartbeat=clock_now; controller_tick(&c,clock_now); }
         else command(&c,"follow-end",0,409);
-        CHECK(c.op==OP_IDLE&&stops==1&&!c.pose_tx_valid);
+        CHECK(LANE(&c)->op==OP_IDLE&&stops==1&&!LANE(&c)->pose_tx_valid);
         cJSON *record=cJSON_GetObjectItem(cJSON_GetObjectItem(c.saved,"devices"),d->id),*event=cJSON_GetObjectItem(record,"stop_event");
         const char *reason=cJSON_GetObjectItem(event,"reason")->valuestring;
         CHECK(strstr(reason,expiry?"Following input expired after 250 ms":"Movement stopped. Holding measured pose"));

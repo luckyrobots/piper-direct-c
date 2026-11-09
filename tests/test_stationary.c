@@ -147,11 +147,11 @@ int main(void)
     cJSON_AddBoolToObject(command,"standalone",true); cJSON_AddBoolToObject(command,"clear",true); cJSON_AddBoolToObject(command,"supported",true);
     cJSON_AddStringToObject(command,"action","reset");
     uint64_t before=d->tx; int command_status; cJSON *response=controller_action(&c,"/api/command",command,&command_status);
-    CHECK(command_status==409&&d->tx==before&&c.op==OP_IDLE); cJSON_Delete(response);
+    CHECK(command_status==409&&d->tx==before&&LANE(&c)->op==OP_IDLE); cJSON_Delete(response);
     cJSON_ReplaceItemInObject(command,"action",cJSON_CreateString("joint"));
     cJSON_AddNumberToObject(command,"joint",6); cJSON_AddNumberToObject(command,"degrees",.1);
     response=controller_action(&c,"/api/command",command,&command_status);
-    CHECK(command_status==202&&c.op==OP_MOVE&&c.target[5]==.1&&c.bus.simulated);
+    CHECK(command_status==202&&LANE(&c)->op==OP_MOVE&&LANE(&c)->target[5]==.1&&c.bus.simulated);
     cJSON_Delete(response); cJSON_Delete(command);
     d->simulated=true; d->fd=-1;
     controller_close(&c);

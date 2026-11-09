@@ -59,26 +59,26 @@ int main(void)
     CHECK(cJSON_GetObjectItem(g,"width_mm")->valuedouble==-1.3);
     CHECK(cJSON_GetObjectItem(g,"max_width_mm")->valuedouble==100); cJSON_Delete(s);
     act(&c,5,true,202);
-    usleep(25000); c.heartbeat=piper_now(); controller_tick(&c,piper_now());
-    CHECK(c.op==OP_GRIPPER&&c.gripper_command==1&&c.gripper_effort==.1);
+    usleep(25000); LANE(&c)->heartbeat=piper_now(); controller_tick(&c,piper_now());
+    CHECK(LANE(&c)->op==OP_GRIPPER&&LANE(&c)->gripper_command==1&&LANE(&c)->gripper_effort==.1);
     unsigned ticks=0;
-    while (c.op!=OP_IDLE&&ticks++<250) { usleep(10000); c.heartbeat=piper_now(); controller_tick(&c,piper_now()); }
-    CHECK(c.op==OP_IDLE&&!strcmp(c.phase,"complete"));
-    CHECK(d->feedback.gripper_mm>=4.5&&!c.gripper_entry);
+    while (LANE(&c)->op!=OP_IDLE&&ticks++<250) { usleep(10000); LANE(&c)->heartbeat=piper_now(); controller_tick(&c,piper_now()); }
+    CHECK(LANE(&c)->op==OP_IDLE&&!strcmp(LANE(&c)->phase,"complete"));
+    CHECK(d->feedback.gripper_mm>=4.5&&!LANE(&c)->gripper_entry);
     act(&c,95,false,202);
     cJSON *hold=request(d,95,false); cJSON_ReplaceItemInObject(hold,"action",cJSON_CreateString("hold"));
     int status; cJSON *reply=controller_action(&c,"/api/command",hold,&status); CHECK(status==409); cJSON_Delete(reply);
-    usleep(25000); c.heartbeat=piper_now(); controller_tick(&c,piper_now());
+    usleep(25000); LANE(&c)->heartbeat=piper_now(); controller_tick(&c,piper_now());
     cJSON_ReplaceItemInObject(hold,"owner",cJSON_CreateString("different-client-owner"));
     reply=controller_action(&c,"/api/command",hold,&status); CHECK(status==409); cJSON_Delete(reply);
     cJSON_ReplaceItemInObject(hold,"owner",cJSON_CreateString("gripper-regression-client"));
     uint64_t holding_tx=d->tx; double held=c.bus.sim_gripper;
     reply=controller_action(&c,"/api/command",hold,&status); CHECK(status==200); cJSON_Delete(reply); cJSON_Delete(hold);
-    CHECK(c.op==OP_IDLE&&d->tx==holding_tx&&c.bus.sim_gripper==held&&d->feedback.gripper_enabled);
+    CHECK(LANE(&c)->op==OP_IDLE&&d->tx==holding_tx&&c.bus.sim_gripper==held&&d->feedback.gripper_enabled);
     act(&c,95,false,202);
-    d->feedback.gripper_max_mm=70; usleep(25000); c.heartbeat=piper_now(); controller_tick(&c,piper_now());
-    CHECK(c.op==OP_IDLE&&!strcmp(c.phase,"stopped"));
-    CHECK(strstr(c.message,"configuration changed"));
+    d->feedback.gripper_max_mm=70; usleep(25000); LANE(&c)->heartbeat=piper_now(); controller_tick(&c,piper_now());
+    CHECK(LANE(&c)->op==OP_IDLE&&!strcmp(LANE(&c)->phase,"stopped"));
+    CHECK(strstr(LANE(&c)->message,"configuration changed"));
     d->feedback.gripper_config_seen=false;
     CHECK(piper_gripper(0,.1,false,&frame)); CHECK(can_bus_send(&c.bus,d,d->generation,&frame,1));
     frame=(struct can_frame){.can_id=0x477,.len=8,.data={4,0,0,0,3}};

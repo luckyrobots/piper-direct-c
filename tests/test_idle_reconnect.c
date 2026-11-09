@@ -44,7 +44,7 @@ int main(void)
     strcpy(controller.selected,failed->id);
 
     controller_tick(&controller,clock_now);
-    CHECK(targeted_reopens==1&&query_attempts==1&&failed->generation==3&&!controller.query);
+    CHECK(targeted_reopens==1&&query_attempts==1&&failed->generation==3&&!LANE(&controller)->query);
     CHECK(!memcmp(healthy,&saved_healthy,sizeof *healthy));
     clock_now+=1;controller_tick(&controller,clock_now);
     saved_healthy.last_rx=clock_now;
@@ -54,12 +54,12 @@ int main(void)
     CHECK(targeted_reopens==2&&query_attempts==2&&failed->generation==4&&!memcmp(healthy,&saved_healthy,sizeof *healthy));
 
     /* An existing read-only query retains its connection until it retires. */
-    controller.query=QUERY_INITIAL;controller.query_generation=failed->generation;
-    clock_now+=9;controller.query_start=clock_now;controller.query_next=clock_now+1;
+    LANE(&controller)->query=QUERY_INITIAL;LANE(&controller)->query_generation=failed->generation;
+    clock_now+=9;LANE(&controller)->query_start=clock_now;LANE(&controller)->query_next=clock_now+1;
     controller_tick(&controller,clock_now);
     saved_healthy.last_rx=clock_now;
     CHECK(targeted_reopens==2&&query_attempts==2&&!memcmp(healthy,&saved_healthy,sizeof *healthy));
-    controller.query=QUERY_IDLE;
+    LANE(&controller)->query=QUERY_IDLE;
 
     /* Unknown saved selection only discovers inventory; it must not close a
        healthy peer just because that selection has no device object yet. */
@@ -67,7 +67,7 @@ int main(void)
     CHECK(inventory_scans==1&&targeted_reopens==3&&!memcmp(healthy,&saved_healthy,sizeof *healthy));
 
     /* Selecting the healthy arm must not retry a different stale adapter. */
-    strcpy(controller.selected,healthy->id);healthy->last_rx=clock_now;controller.auto_query_at=clock_now;
+    strcpy(controller.selected,healthy->id);healthy->last_rx=clock_now;LANE(&controller)->auto_query_at=clock_now;
     const struct can_device healthy_selected=*healthy;
     controller_tick(&controller,clock_now);
     CHECK(inventory_scans==1&&targeted_reopens==3&&query_attempts==3&&!memcmp(healthy,&healthy_selected,sizeof *healthy));

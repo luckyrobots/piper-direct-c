@@ -28,13 +28,13 @@ static void run_case(double measured,const char *action,unsigned joint,double de
         d->feedback.acceleration[i]=(struct piper_acceleration){.seen=true,.max=5,.at=now};
     }
     fixture_still(d,now-1);
-    strcpy(c.error,"previous lane error");
+    strcpy(LANE(&c)->error,"previous lane error");
     cJSON *state=controller_state(&c,"test");
     cJSON *device=cJSON_GetArrayItem(cJSON_GetObjectItem(state,"devices"),0);
     double correction=cJSON_GetObjectItem(device,"range_entry_deg")->valuedouble;
     CHECK((correction==0)==(fabs(measured)<=70.1));
     /* B6: a state read reports the range reason but never overwrites the lane error. */
-    CHECK(!strcmp(c.error,"previous lane error"));
+    CHECK(!strcmp(LANE(&c)->error,"previous lane error"));
     CHECK(!strcmp(cJSON_GetStringValue(cJSON_GetObjectItem(cJSON_GetObjectItem(device,"motion"),"error")),"previous lane error"));
     cJSON_Delete(state);
 
@@ -64,33 +64,33 @@ static void run_case(double measured,const char *action,unsigned joint,double de
     CHECK(status==expected);
     cJSON_Delete(reply); cJSON_Delete(body);
     if (expected==202) {
-        if (c.range_followup) {
-            CHECK(c.op==OP_ALIGN && c.speed_percent==1);
+        if (LANE(&c)->range_followup) {
+            CHECK(LANE(&c)->op==OP_ALIGN && LANE(&c)->speed_percent==1);
             if (!strcmp(action,"pose")||!strcmp(action,"move-to-zero"))
-                for (unsigned i=0;i<6;++i) CHECK(c.range_followup_target[i]==0);
+                for (unsigned i=0;i<6;++i) CHECK(LANE(&c)->range_followup_target[i]==0);
         } else if (!strcmp(action,"pose")) {
-            CHECK(c.synchronized_pose);
-            for (unsigned i=0;i<6;++i) CHECK(c.target[i]==0);
-        } else if (joint!=5) CHECK(c.target[4]==copysign(70,measured));
-        else if (!strcmp(action,"jog")) CHECK(fabs(c.target[4]-(copysign(70,measured)+degrees))<1e-9);
-        now=c.started;
-        for (unsigned tick=0;tick<500&&c.op!=OP_IDLE;++tick) {
-            bool seed=c.position_seed_pending;
-            now+=.03; c.heartbeat=now; controller_tick(&c,now);
+            CHECK(LANE(&c)->synchronized_pose);
+            for (unsigned i=0;i<6;++i) CHECK(LANE(&c)->target[i]==0);
+        } else if (joint!=5) CHECK(LANE(&c)->target[4]==copysign(70,measured));
+        else if (!strcmp(action,"jog")) CHECK(fabs(LANE(&c)->target[4]-(copysign(70,measured)+degrees))<1e-9);
+        now=LANE(&c)->started;
+        for (unsigned tick=0;tick<500&&LANE(&c)->op!=OP_IDLE;++tick) {
+            bool seed=LANE(&c)->position_seed_pending;
+            now+=.03; LANE(&c)->heartbeat=now; controller_tick(&c,now);
             /* Only the one-shot unchanged measured hold may preserve the
                admitted boundary overrun. Every moving target remains legal. */
             for (unsigned i=0;i<6;++i) {
-                if(seed) CHECK(fabs(c.bus.sim_target[i]-c.initial[i])<.00051);
+                if(seed) CHECK(fabs(c.bus.sim_target[i]-LANE(&c)->initial[i])<.00051);
                 else {
                     CHECK(c.bus.sim_target[i]>=limits[i][0]);
                     CHECK(c.bus.sim_target[i]<=limits[i][1]);
                 }
             }
         }
-        CHECK(c.op==OP_IDLE && !strcmp(c.phase,"complete"));
+        CHECK(LANE(&c)->op==OP_IDLE && !strcmp(LANE(&c)->phase,"complete"));
         CHECK(c.bus.sim_enabled==63);
-        for (unsigned i=0;i<6;++i) CHECK(fabs(d->feedback.arm[0].deg[i]-c.target[i])<=c.tolerance);
-    } else CHECK(c.op==OP_IDLE && d->tx==tx);
+        for (unsigned i=0;i<6;++i) CHECK(fabs(d->feedback.arm[0].deg[i]-LANE(&c)->target[i])<=LANE(&c)->tolerance);
+    } else CHECK(LANE(&c)->op==OP_IDLE && d->tx==tx);
     controller_close(&c);
     char path[256]; snprintf(path,sizeof path,"%s/control-state.json",directory);
     CHECK(!unlink(path)); CHECK(!rmdir(directory));

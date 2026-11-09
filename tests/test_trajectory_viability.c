@@ -1,6 +1,5 @@
 #define _GNU_SOURCE
-/* White-box reference-math tests avoid inventing a new public motion API. */
-#include "../src/controller.c"
+/* White-box reference-math tests use controller_internal.h, not a public API. */
 #include "fixture.h"
 #include <assert.h>
 #include <unistd.h>
@@ -29,7 +28,7 @@ bool __wrap_can_bus_send(struct can_bus *bus,struct can_device *d,unsigned gener
     for (unsigned i=1;i<4;++i) { CHECK(frames[i].can_id==0x154+i);CHECK(piper_decode(&decoded,frames[i].can_id+0x150,frames[i].data,8,clock_now)); }
     memcpy(bus->sim_target,decoded.arm[0].deg,sizeof bus->sim_target);d->tx+=4;++pose_packets;return true;
 }
-static void configure_math(struct controller *c,struct can_device *d)
+static void configure_math(struct controller_lane *c,struct can_device *d)
 {
     memset(c,0,sizeof *c);memset(d,0,sizeof *d);c->speed_percent=90;
     const double minimum[6]={-150,0,-170,-100,-70,-170},maximum[6]={150,180,0,100,70,170};
@@ -40,7 +39,7 @@ static void configure_math(struct controller *c,struct can_device *d)
         c->trajectory_speed[i]=3*180/3.141592653589793*.9;c->trajectory_acceleration[i]=5*180/3.141592653589793;
     }
 }
-static void assert_step(struct controller *c,struct can_device *d,double dt)
+static void assert_step(struct controller_lane *c,struct can_device *d,double dt)
 {
     double before[6],old_velocity[6],previous_dt=c->trajectory_previous_dt;
     memcpy(before,c->command,sizeof before);memcpy(old_velocity,c->trajectory_velocity,sizeof old_velocity);
@@ -59,7 +58,7 @@ static void assert_step(struct controller *c,struct can_device *d,double dt)
 struct observation { double at,q[6]; };
 static void delayed_feedback(double lag)
 {
-    struct controller c;struct can_device d;configure_math(&c,&d);
+    struct controller_lane c;struct can_device d;configure_math(&c,&d);
     struct observation history[2401]={0};history[0].at=clock_now;
     unsigned observed=0;
     for (unsigned n=0;n<2400;++n) {
@@ -100,57 +99,58 @@ static void fixture(struct controller *c,char directory[96])
     cJSON_AddStringToObject(body,"owner","trajectory-viability-fixture");cJSON_AddStringToObject(body,"action","follow-start");
     cJSON_AddNumberToObject(body,"speed_percent",90);cJSON_AddBoolToObject(body,"trajectory",true);
     cJSON_AddBoolToObject(body,"standalone",true);cJSON_AddBoolToObject(body,"clear",true);
-    int status;cJSON *reply=controller_action(c,"/api/command",body,&status);CHECK(status==202&&c->trajectory_follow);
+    int status;cJSON *reply=controller_action(c,"/api/command",body,&status);CHECK(status==202&&LANE(c)->trajectory_follow);
     cJSON_Delete(reply);cJSON_Delete(body);
 }
 static void close_fixture(struct controller *c,const char *directory)
 {
-    CHECK(c->op==OP_IDLE);controller_close(c);char path[128];snprintf(path,sizeof path,"%s/control-state.json",directory);
+    CHECK(LANE(c)->op==OP_IDLE);controller_close(c);char path[128];snprintf(path,sizeof path,"%s/control-state.json",directory);
     CHECK(!unlink(path));CHECK(!rmdir(directory));
 }
 int main(void)
 {
-    struct controller c;struct can_device d;configure_math(&c,&d);
+    struct controller_lane m;struct can_device d;configure_math(&m,&d);
     for (unsigned n=0;n<1000;++n) {
-        for (unsigned i=0;i<6;++i) c.target[i]=i==2?-20:20;
-        clock_now+=.025;assert_step(&c,&d,.025);
+        for (unsigned i=0;i<6;++i) m.target[i]=i==2?-20:20;
+        clock_now+=.025;assert_step(&m,&d,.025);
     }
-    CHECK(c.command[1]>1.99&&c.command[1]<=2&&fabs(c.trajectory_velocity[1])<1e-9);
+    CHECK(m.command[1]>1.99&&m.command[1]<=2&&fabs(m.trajectory_velocity[1])<1e-9);
     delayed_feedback(.055);delayed_feedback(.075);
 
     /* Captured live J2 geometry (reference4.824, measured4.191, destination7.056),
        with viable approach velocities; the delayed-encoder cases above cover
        the evolving reference rather than assuming an unknown logged velocity. */
-    configure_math(&c,&d);c.command[1]=4.824;d.feedback.arm[0].deg[1]=4.191;c.target[1]=7.056;
-    c.trajectory_velocity[1]=14;c.trajectory_previous_dt=.025;clock_now+=.025;assert_step(&c,&d,.025);
+    configure_math(&m,&d);m.command[1]=4.824;d.feedback.arm[0].deg[1]=4.191;m.target[1]=7.056;
+    m.trajectory_velocity[1]=14;m.trajectory_previous_dt=.025;clock_now+=.025;assert_step(&m,&d,.025);
 
+    struct controller c;
     char directory[96];
     for (unsigned failure=0;failure<6;++failure) {
         fixture(&c,directory);struct can_device *device=&c.bus.devices[0];
-        c.command[1]=1.8;c.target[1]=10;c.trajectory_velocity[1]=15;c.trajectory_previous_dt=.025;
+        LANE(&c)->command[1]=1.8;LANE(&c)->target[1]=10;LANE(&c)->trajectory_velocity[1]=15;LANE(&c)->trajectory_previous_dt=.025;
         if (!failure) {
             device->feedback.arm[0].deg[1]=.8;
-            CHECK(trajectory_reference_step(&c,device,clock_now,.025)==TRAJECTORY_STEP_OK);
+            CHECK(trajectory_reference_step(LANE(&c),device,clock_now,.025)==TRAJECTORY_STEP_OK);
             device->feedback.arm[0].deg[1]=0; /* Fresh encoder wall recedes after a previously viable reference. */
         }
-        if (failure==1) c.command[1]=3.1;
-        if (failure==2) c.obstruction[1]=(struct obstruction_watch){.progress_position=0,.progress_at=clock_now-.6,.direction=1};
+        if (failure==1) LANE(&c)->command[1]=3.1;
+        if (failure==2) LANE(&c)->obstruction[1]=(struct obstruction_watch){.progress_position=0,.progress_at=clock_now-.6,.direction=1};
         if (failure==3) device->feedback.acceleration[1].max=4;
         if (failure==4) fail_pose=true;
         if (failure==5) device->feedback.arm[0].error=1;
-        clock_now+=.025;c.heartbeat=c.follow_updated=clock_now;controller_tick(&c,clock_now);
-        CHECK(c.op==OP_IDLE&&!c.trajectory_follow);
+        clock_now+=.025;LANE(&c)->heartbeat=LANE(&c)->follow_updated=clock_now;controller_tick(&c,clock_now);
+        CHECK(LANE(&c)->op==OP_IDLE&&!LANE(&c)->trajectory_follow);
         if (!failure) {
-            CHECK(c.follow!=FOLLOW_LIVE&&!stop_packets&&pose_packets==1&&device->feedback.motor[1].enabled);
-            CHECK(strstr(c.message,"boundary")&&strstr(c.message,"Holding"));
-            for (unsigned i=0;i<6;++i) CHECK(c.command[i]==device->feedback.arm[0].deg[i]&&c.bus.sim_target[i]==c.command[i]);
+            CHECK(LANE(&c)->follow!=FOLLOW_LIVE&&!stop_packets&&pose_packets==1&&device->feedback.motor[1].enabled);
+            CHECK(strstr(LANE(&c)->message,"boundary")&&strstr(LANE(&c)->message,"Holding"));
+            for (unsigned i=0;i<6;++i) CHECK(LANE(&c)->command[i]==device->feedback.arm[0].deg[i]&&c.bus.sim_target[i]==LANE(&c)->command[i]);
         } else {
             CHECK(stop_packets==1);
-            if (failure==1) CHECK(strstr(c.message,"3 degrees"));
-            if (failure==2) CHECK(strstr(c.message,"obstruction"));
-            if (failure==3) CHECK(strstr(c.message,"limits changed"));
-            if (failure==4) CHECK(strstr(c.message,"hold failed"));
-            if (failure==5) CHECK(strstr(c.message,"fault"));
+            if (failure==1) CHECK(strstr(LANE(&c)->message,"3 degrees"));
+            if (failure==2) CHECK(strstr(LANE(&c)->message,"obstruction"));
+            if (failure==3) CHECK(strstr(LANE(&c)->message,"limits changed"));
+            if (failure==4) CHECK(strstr(LANE(&c)->message,"hold failed"));
+            if (failure==5) CHECK(strstr(LANE(&c)->message,"fault"));
         }
         close_fixture(&c,directory);
     }

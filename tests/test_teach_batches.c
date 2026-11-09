@@ -80,10 +80,10 @@ static void start(struct controller *c,int expected)
     cJSON_AddBoolToObject(j,"button_off",true); cJSON_AddBoolToObject(j,"same_pose_confirmed",true);
     int status; cJSON *r=controller_action(c,"/api/command",j,&status); CHECK(status==expected); cJSON_Delete(r); cJSON_Delete(j);
 }
-static void tick(struct controller *c,double dt) { clock_now+=dt; c->heartbeat=clock_now; controller_tick(c,clock_now); }
+static void tick(struct controller *c,double dt) { clock_now+=dt; LANE(c)->heartbeat=clock_now; controller_tick(c,clock_now); }
 static void close_fixture(struct controller *c,const char *directory)
 {
-    CHECK(c->op==OP_IDLE); c->bus.devices[0].fd=-1; controller_close(c);
+    CHECK(LANE(c)->op==OP_IDLE); c->bus.devices[0].fd=-1; controller_close(c);
     char path[128]; snprintf(path,sizeof path,"%s/control-state.json",directory); CHECK(!unlink(path)); CHECK(!rmdir(directory));
 }
 static void check_persisted_failure(struct controller *c,const char *directory,unsigned count,unsigned index,unsigned id)
@@ -106,11 +106,11 @@ static void check_persisted_failure(struct controller *c,const char *directory,u
 int main(void)
 {
     struct controller c; char directory[96]; fixture(&c,directory); start(&c,202);
-    CHECK(batches==1&&c.stage==STAGE_TEACH_SEEDED&&c.bus.devices[0].feedback.arm[0].control==2);
-    tick(&c,.01); CHECK(batches==1); tick(&c,.015); CHECK(batches==2&&c.stage==STAGE_TEACH_MODE&&c.op==OP_TEACH_RETURN);
-    stale_at=c.sent_at; stale_joint=3; tick(&c,.01); CHECK(c.op==OP_TEACH_RETURN);
-    stale_joint=-1; stale_high=4; tick(&c,.01); CHECK(c.op==OP_TEACH_RETURN);
-    stale_high=-1; tick(&c,.01); CHECK(c.op==OP_IDLE&&!strcmp(c.phase,"complete")&&stops==0);
+    CHECK(batches==1&&LANE(&c)->stage==STAGE_TEACH_SEEDED&&c.bus.devices[0].feedback.arm[0].control==2);
+    tick(&c,.01); CHECK(batches==1); tick(&c,.015); CHECK(batches==2&&LANE(&c)->stage==STAGE_TEACH_MODE&&LANE(&c)->op==OP_TEACH_RETURN);
+    stale_at=LANE(&c)->sent_at; stale_joint=3; tick(&c,.01); CHECK(LANE(&c)->op==OP_TEACH_RETURN);
+    stale_joint=-1; stale_high=4; tick(&c,.01); CHECK(LANE(&c)->op==OP_TEACH_RETURN);
+    stale_high=-1; tick(&c,.01); CHECK(LANE(&c)->op==OP_IDLE&&!strcmp(LANE(&c)->phase,"complete")&&stops==0);
     close_fixture(&c,directory);
 
     for (unsigned failure=0;failure<6;++failure) {
@@ -127,16 +127,16 @@ int main(void)
         if (failure==2) { d->feedback.arm[0].teach=1; d->feedback.arm[0].arm_status=11; }
         if (failure==3) d->feedback.arm[0].deg[5]+=.501;
         if (failure==4) d->feedback.motor[3].enabled=false;
-        if (failure==5) { clock_now+=1; c.heartbeat=clock_now-1; }
+        if (failure==5) { clock_now+=1; LANE(&c)->heartbeat=clock_now-1; }
         if (failure==5) controller_tick(&c,clock_now); else tick(&c,.025);
-        CHECK(c.op==OP_IDLE&&batches==1); close_fixture(&c,directory);
+        CHECK(LANE(&c)->op==OP_IDLE&&batches==1); close_fixture(&c,directory);
     }
     fixture(&c,directory); start(&c,202); tick(&c,.025); c.bus.devices[0].feedback.arm[0].deg[5]+=.501; tick(&c,.01);
-    CHECK(c.op==OP_IDLE&&batches==2&&stops==1&&c.obstruction_joint==6); close_fixture(&c,directory);
+    CHECK(LANE(&c)->op==OP_IDLE&&batches==2&&stops==1&&LANE(&c)->obstruction_joint==6); close_fixture(&c,directory);
 
     fixture(&c,directory); fail_batch=1; fail_frame=2; start(&c,409);
-    CHECK(c.op==OP_IDLE&&batches==1&&stops==1); check_persisted_failure(&c,directory,3,2,0x156); close_fixture(&c,directory);
+    CHECK(LANE(&c)->op==OP_IDLE&&batches==1&&stops==1); check_persisted_failure(&c,directory,3,2,0x156); close_fixture(&c,directory);
     fixture(&c,directory); start(&c,202); fail_batch=2; fail_frame=4; tick(&c,.025);
-    CHECK(c.op==OP_IDLE&&batches==2&&stops==1); check_persisted_failure(&c,directory,4,4,0x157); close_fixture(&c,directory);
+    CHECK(LANE(&c)->op==OP_IDLE&&batches==2&&stops==1); check_persisted_failure(&c,directory,4,4,0x157); close_fixture(&c,directory);
     puts("Teach batches passed: frozen 3+4 sequence with receive gap, final fresh ACKs, pre-mode cancellation, drift and partial-transfer STOP with persistent original transport evidence.");
 }

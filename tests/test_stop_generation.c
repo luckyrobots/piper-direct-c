@@ -35,27 +35,27 @@ int main(void)
     cJSON_AddNumberToObject(body,"joint",6); cJSON_AddNumberToObject(body,"degrees",1);
     cJSON_AddBoolToObject(body,"standalone",true); cJSON_AddBoolToObject(body,"clear",true);
     int status; cJSON *result=controller_action(&c,"/api/command",body,&status);
-    CHECK(status==202&&c.op==OP_MOVE); cJSON_Delete(body); cJSON_Delete(result);
+    CHECK(status==202&&LANE(&c)->op==OP_MOVE); cJSON_Delete(body); cJSON_Delete(result);
     uint64_t tx=d->tx; unsigned original_generation=d->generation;
     // A reconnect can preserve the serial but must invalidate queued cleanup stops.
     ++d->generation;
     body=identity(d); cJSON_AddNumberToObject(body,"generation",original_generation);
-    stop(&c,body,409); CHECK(d->tx==tx&&c.op==OP_MOVE&&!strcmp(c.owner,"stop-generation-fixture"));
+    stop(&c,body,409); CHECK(d->tx==tx&&LANE(&c)->op==OP_MOVE&&!strcmp(LANE(&c)->owner,"stop-generation-fixture"));
     const char *invalid[]={"null","0","-1","1.5","4294967296","\"2\"","true"};
     for(unsigned i=0;i<sizeof invalid/sizeof invalid[0];++i) {
         body=identity(d); cJSON_AddItemToObject(body,"generation",cJSON_Parse(invalid[i]));
-        stop(&c,body,409); CHECK(d->tx==tx&&c.op==OP_MOVE);
+        stop(&c,body,409); CHECK(d->tx==tx&&LANE(&c)->op==OP_MOVE);
     }
     // Wrong adapter identity must not relinquish an active action to teaching.
     d->generation=original_generation;
     d->feedback.arm[0].control=2; d->feedback.arm[0].teach=1;
     body=cJSON_CreateObject(); cJSON_AddStringToObject(body,"device_id","simulation:other");
     cJSON_AddNumberToObject(body,"generation",d->generation);
-    stop(&c,body,409); CHECK(d->tx==tx&&c.op==OP_MOVE&&!strcmp(c.owner,"stop-generation-fixture"));
+    stop(&c,body,409); CHECK(d->tx==tx&&LANE(&c)->op==OP_MOVE&&!strcmp(LANE(&c)->owner,"stop-generation-fixture"));
     d->feedback.arm[0].control=1; d->feedback.arm[0].teach=0;
     // Matching the active action's current adapter and generation permits STOP.
     body=identity(d); cJSON_AddNumberToObject(body,"generation",d->generation);
-    stop(&c,body,200); CHECK(d->tx==tx+1&&c.op==OP_IDLE);
+    stop(&c,body,200); CHECK(d->tx==tx+1&&LANE(&c)->op==OP_IDLE);
     // Cleanup stops use the published identity, even during a short feedback gap.
     ++d->generation; d->feedback.arm[0].status_at=now-2; tx=d->tx;
     body=identity(d); cJSON_AddNumberToObject(body,"generation",d->generation);

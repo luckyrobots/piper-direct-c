@@ -37,10 +37,10 @@ int main(void)
        No host device is opened. Missing optional CAN-gripper settings must
        not restart a full arm query either. */
     d->feedback.gripper_config_seen=false;
-    c.bus.simulated=false; c.auto_query_at=now-120;
+    c.bus.simulated=false; LANE(&c)->auto_query_at=now-120;
     uint64_t tx=d->tx;
     controller_tick(&c,now);
-    CHECK(!c.query && d->tx==tx && *d->feedback.version && d->feedback.limit[0].seen);
+    CHECK(!LANE(&c)->query && d->tx==tx && *d->feedback.version && d->feedback.limit[0].seen);
     c.bus.simulated=true;
 
     /* A fresh live stream with old configuration still permits a command. */
@@ -51,8 +51,8 @@ int main(void)
     cJSON_AddBoolToObject(body,"clear",true); cJSON_AddBoolToObject(body,"standalone",true);
     int status; cJSON *reply=controller_action(&c,"/api/command",body,&status);
     CHECK(status==202); cJSON_Delete(reply);
-    while(c.op!=OP_IDLE) { usleep(30000); c.heartbeat=piper_now(); controller_tick(&c,piper_now()); }
-    CHECK(!strcmp(c.phase,"complete"));
+    while(LANE(&c)->op!=OP_IDLE) { usleep(30000); LANE(&c)->heartbeat=piper_now(); controller_tick(&c,piper_now()); }
+    CHECK(!strcmp(LANE(&c)->phase,"complete"));
 
     now=piper_now();
     struct can_frame frame={.can_id=0x2a1,.len=8,.data={1,0,1,0,0}};
@@ -70,14 +70,14 @@ int main(void)
     /* Reconnection clears the generation and reads settings again. A missing
        optional gripper reply must not hold up the completed arm query. */
     reply=controller_action(&c,"/api/reconnect",body,&status);
-    CHECK(status==200 && c.query); cJSON_Delete(reply);
-    for(unsigned tick=0;tick<70 && c.query;++tick) {
+    CHECK(status==200 && LANE(&c)->query); cJSON_Delete(reply);
+    for(unsigned tick=0;tick<70 && LANE(&c)->query;++tick) {
         usleep(30000); controller_tick(&c,piper_now());
         d->feedback.gripper_config_seen=false;
     }
-    CHECK(!c.query && !controller_blocker(&c,d,piper_now()));
-    CHECK(strstr(c.message,"Standard CAN gripper configuration unavailable"));
-    CHECK(c.bus.sim_enabled==63 && c.op==OP_IDLE);
+    CHECK(!LANE(&c)->query && !controller_blocker(&c,d,piper_now()));
+    CHECK(strstr(LANE(&c)->message,"Standard CAN gripper configuration unavailable"));
+    CHECK(c.bus.sim_enabled==63 && LANE(&c)->op==OP_IDLE);
     cJSON_Delete(body); controller_close(&c);
     char path[256]; snprintf(path,sizeof path,"%s/control-state.json",directory);
     CHECK(!unlink(path)); CHECK(!rmdir(directory));

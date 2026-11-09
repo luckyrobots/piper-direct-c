@@ -40,15 +40,8 @@ struct controller {
     char selected[160], state_dir[512];
     cJSON *saved, *profiles, *legacy_stops;
     bool storage_failed;
-    /* The serialized execution cursor contains only POD lane state. The bus
-       and recovery store above are never copied or replaced when binding a lane.
-       Anonymous aliases retain the native single-lane source/test interface. */
-    union {
-        struct controller_lane lane;
-        struct {
-#include "controller_lane_fields.inc"
-        };
-    };
+    /* One lane per known device id (lane_device); unused slots have an empty id.
+       Lane operations receive their lane explicitly (C-F). */
     struct controller_lane lanes[CANBUS_MAX];
     unsigned next_request_id, next_tick_lane;
     double inventory_scanned;
@@ -56,8 +49,8 @@ struct controller {
 };
 bool controller_init(struct controller *c,bool simulated,const char *directory,const char *legacy);
 bool controller_init_simulated(struct controller *c,unsigned count,const char *directory,const char *legacy);
-bool controller_any_motion_active(struct controller *c);
-bool controller_any_query_active(struct controller *c);
+bool controller_any_motion_active(const struct controller *c);
+bool controller_any_query_active(const struct controller *c);
 void controller_close(struct controller *c);
 void controller_tick(struct controller *c,double now);
 const char *controller_blocker(struct controller *c,struct can_device *d,double now);

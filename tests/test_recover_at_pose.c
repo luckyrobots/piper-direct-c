@@ -46,7 +46,7 @@ static cJSON *record(struct controller *c)
     return cJSON_GetObjectItem(cJSON_GetObjectItem(c->saved,"devices"),c->bus.devices[0].id);
 }
 static bool blocked(struct controller *c) { return cJSON_IsTrue(cJSON_GetObjectItem(record(c),"blocked")); }
-static void tick(struct controller *c,double dt) { clock_now+=dt; c->heartbeat=clock_now; controller_tick(c,clock_now); }
+static void tick(struct controller *c,double dt) { clock_now+=dt; LANE(c)->heartbeat=clock_now; controller_tick(c,clock_now); }
 static void fixture(struct controller *c,char directory[96])
 {
     strcpy(directory,"/tmp/piper-recover-at-pose-XXXXXX"); CHECK(mkdtemp(directory)); clock_now+=10;
@@ -63,7 +63,7 @@ static void fixture(struct controller *c,char directory[96])
         d->feedback.acceleration[i]=(struct piper_acceleration){.seen=true,.max=5,.at=clock_now};
     }
     __wrap_can_bus_receive(&c->bus,clock_now);
-    c->obstruction_joint=1;
+    LANE(c)->obstruction_joint=1;
     controller_stop_obstruction(c,"Possible obstruction at J1: no measured progress for 0.5 seconds.");
     CHECK(blocked(c)&&stop_packets==1); stop_packets=0;
 }
@@ -71,9 +71,9 @@ static void physical_cycle(struct controller *c)
 {
     struct piper_sample *s=&c->bus.devices[0].feedback.arm[0];
     s->control=2; s->teach=1; s->arm_status=11; tick(c,.05);
-    CHECK(c->teaching_cycle==TEACH_CYCLE_SEEN);
+    CHECK(LANE(c)->teaching_cycle==TEACH_CYCLE_SEEN);
     s->teach=2; s->arm_status=0; tick(c,.05);
-    CHECK(c->teaching_cycle==TEACH_CYCLE_COMPLETED);
+    CHECK(LANE(c)->teaching_cycle==TEACH_CYCLE_COMPLETED);
 }
 static void action(struct controller *c,const char *name,int expected)
 {
@@ -89,7 +89,7 @@ static void action(struct controller *c,const char *name,int expected)
 }
 static void close_fixture(struct controller *c,const char *directory)
 {
-    CHECK(c->op==OP_IDLE); c->bus.devices[0].fd=-1; controller_close(c);
+    CHECK(LANE(c)->op==OP_IDLE); c->bus.devices[0].fd=-1; controller_close(c);
     char path[160]; snprintf(path,sizeof path,"%s/control-state.json",directory); CHECK(!unlink(path)); CHECK(!rmdir(directory));
 }
 int main(void)
@@ -100,11 +100,11 @@ int main(void)
     physical_cycle(&c);
     cJSON *state=controller_state(&c,"recovery-test"),*device=cJSON_GetArrayItem(cJSON_GetObjectItem(state,"devices"),0);
     CHECK(cJSON_IsTrue(cJSON_GetObjectItem(cJSON_GetObjectItem(device,"teaching"),"can_recover_at_pose"))); cJSON_Delete(state);
-    action(&c,"recover-at-pose",202); CHECK(c.op==OP_TEACH_RETURN&&blocked(&c)&&pose_batches==1);
-    CHECK(c.teaching_cycle!=TEACH_CYCLE_COMPLETED&&c.recovering_at_pose);
-    for (unsigned i=0;i<6;++i) CHECK(c.target[i]==frozen[i]&&c.command[i]==frozen[i]);
+    action(&c,"recover-at-pose",202); CHECK(LANE(&c)->op==OP_TEACH_RETURN&&blocked(&c)&&pose_batches==1);
+    CHECK(LANE(&c)->teaching_cycle!=TEACH_CYCLE_COMPLETED&&LANE(&c)->recovering_at_pose);
+    for (unsigned i=0;i<6;++i) CHECK(LANE(&c)->target[i]==frozen[i]&&LANE(&c)->command[i]==frozen[i]);
     tick(&c,.025); CHECK(blocked(&c)&&pose_batches==2);
-    tick(&c,.025); CHECK(c.op==OP_IDLE&&!blocked(&c)&&!c.recovering_at_pose&&stop_packets==0);
+    tick(&c,.025); CHECK(LANE(&c)->op==OP_IDLE&&!blocked(&c)&&!LANE(&c)->recovering_at_pose&&stop_packets==0);
     CHECK(!cJSON_IsTrue(cJSON_GetObjectItem(record(&c),"stop_event_active"))); close_fixture(&c,directory);
 
     for (unsigned failure=0;failure<10;++failure) {
@@ -127,12 +127,12 @@ int main(void)
     cJSON_ReplaceItemInObject(record(&c),"reason",cJSON_CreateString("Reworded obstruction message."));
     cJSON_ReplaceItemInObject(cJSON_GetObjectItem(record(&c),"stop_event"),"reason",cJSON_CreateString("Reworded."));
     CHECK(!strcmp(cJSON_GetStringValue(cJSON_GetObjectItem(cJSON_GetObjectItem(record(&c),"stop_event"),"kind")),"obstruction"));
-    action(&c,"recover-at-pose",202); tick(&c,.025); tick(&c,.025); CHECK(c.op==OP_IDLE&&!blocked(&c)); close_fixture(&c,directory);
+    action(&c,"recover-at-pose",202); tick(&c,.025); tick(&c,.025); CHECK(LANE(&c)->op==OP_IDLE&&!blocked(&c)); close_fixture(&c,directory);
     /* A record written before "kind" existed derives it once from its text. */
     fixture(&c,directory); physical_cycle(&c);
     cJSON_DeleteItemFromObject(record(&c),"kind"); cJSON_DeleteItemFromObject(record(&c),"state");
     cJSON_DeleteItemFromObject(cJSON_GetObjectItem(record(&c),"stop_event"),"kind");
-    action(&c,"recover-at-pose",202); tick(&c,.025); tick(&c,.025); CHECK(c.op==OP_IDLE&&!blocked(&c)); close_fixture(&c,directory);
+    action(&c,"recover-at-pose",202); tick(&c,.025); tick(&c,.025); CHECK(LANE(&c)->op==OP_IDLE&&!blocked(&c)); close_fixture(&c,directory);
     fixture(&c,directory); physical_cycle(&c);
     cJSON_DeleteItemFromObject(record(&c),"kind"); cJSON_DeleteItemFromObject(record(&c),"state");
     cJSON_ReplaceItemInObject(record(&c),"reason",cJSON_CreateString("Operator stop."));
@@ -145,12 +145,12 @@ int main(void)
     c.bus.devices[0].feedback.arm[0].control=2; action(&c,"recover-at-pose",409); close_fixture(&c,directory);
 
     fixture(&c,directory); physical_cycle(&c); action(&c,"recover-at-pose",202); tick(&c,.025);
-    stale_high=true; tick(&c,.4); CHECK(c.op==OP_IDLE&&blocked(&c)&&stop_packets==0); close_fixture(&c,directory);
+    stale_high=true; tick(&c,.4); CHECK(LANE(&c)->op==OP_IDLE&&blocked(&c)&&stop_packets==0); close_fixture(&c,directory);
     /* Persist failure after the physical ACK must retain the obstruction,
        while leaving the verified current hold intact instead of dropping it. */
     fixture(&c,directory); physical_cycle(&c); action(&c,"recover-at-pose",202); tick(&c,.025);
     strcpy(c.state_dir,"/this-directory-does-not-exist/piper"); tick(&c,.025);
-    CHECK(c.op==OP_IDLE&&blocked(&c)&&c.storage_failed&&stop_packets==0&&!strcmp(c.phase,"blocked"));
+    CHECK(LANE(&c)->op==OP_IDLE&&blocked(&c)&&c.storage_failed&&stop_packets==0&&!strcmp(LANE(&c)->phase,"blocked"));
     strcpy(c.state_dir,directory); close_fixture(&c,directory);
     puts("Recover-at-pose passed: observed physical cycle, frozen-pose-only 3+4 handoff, ACK-before-clear, no power/reset/home/replay, identity/freshness/fault/range/incident/storage rejection.");
 }

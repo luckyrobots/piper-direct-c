@@ -127,7 +127,7 @@ static void start(struct controller *c,unsigned n)
 static void tick(struct controller *c)
 {
     clock_now+=.025;
-    c->heartbeat=clock_now;
+    LANE(c)->heartbeat=clock_now;
     for (unsigned n=0;n<2;++n) { struct controller_lane *l=lane(c,n);if(l->op!=OP_IDLE)l->heartbeat=clock_now; }
     controller_tick(c,clock_now);
 }

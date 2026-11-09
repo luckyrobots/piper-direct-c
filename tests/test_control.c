@@ -20,7 +20,7 @@ static void reject(struct controller *c,struct can_device *d,cJSON *j)
 {
     uint64_t tx=d->tx; int status=0; cJSON *r=controller_action(c,"/api/command",j,&status);
     if (status<400) { char *s=cJSON_Print(r); fprintf(stderr,"Unexpected acceptance: %s\n",s); free(s); }
-    CHECK(status>=400); CHECK(d->tx==tx); CHECK(c->op==OP_IDLE); cJSON_Delete(r);
+    CHECK(status>=400); CHECK(d->tx==tx); CHECK(LANE(c)->op==OP_IDLE); cJSON_Delete(r);
 }
 int main(void)
 {
@@ -82,7 +82,7 @@ int main(void)
     can_bus_ingest(d,&local,true,now+1); CHECK(d->feedback.arm[0].joint_at[0]==healthy.arm[0].joint_at[0]);
     /* A persisted in-flight intent survives process shutdown and blocks a new action. */
     int status; cJSON *r=controller_action(&c,"/api/command",j,&status); CHECK(status==202); cJSON_Delete(r);
-    c.op=OP_IDLE; controller_close(&c); CHECK(controller_init(&c,true,directory,""));
+    LANE(&c)->op=OP_IDLE; controller_close(&c); CHECK(controller_init(&c,true,directory,""));
     cJSON *snapshot=controller_state(&c,"test-token");
     cJSON *first=cJSON_GetArrayItem(cJSON_GetObjectItem(snapshot,"devices"),0);
     CHECK(cJSON_IsTrue(cJSON_GetObjectItem(first,"recovery_required")));
@@ -91,7 +91,7 @@ int main(void)
        sending power/position commands. Simulation returns firmware immediately. */
     d=&c.bus.devices[0]; tx=d->tx; unsigned old_generation=d->generation;
     j=cJSON_CreateObject(); r=controller_action(&c,"/api/reconnect",j,&status);
-    CHECK(status==200&&c.query&&c.op==OP_IDLE); cJSON_Delete(r); cJSON_Delete(j);
+    CHECK(status==200&&LANE(&c)->query&&LANE(&c)->op==OP_IDLE); cJSON_Delete(r); cJSON_Delete(j);
     CHECK(d->generation>old_generation&&d->tx==tx+2);
     CHECK(!strcmp(d->feedback.version,"S-V1.8-2")&&c.bus.sim_enabled==0);
     CHECK(d->feedback.gripper_config_seen && d->feedback.gripper_max_mm==100);
@@ -100,16 +100,16 @@ int main(void)
     CHECK(cJSON_IsTrue(cJSON_GetObjectItem(first,"recovery_required"))); cJSON_Delete(snapshot);
     /* A lost information reply is retried without motor commands, and the
        existing query deadline still bounds all retries. */
-    c.query=QUERY_RETRY; c.query_cursor=0; c.query_next=0; d->feedback.limit[0].seen=false;
+    LANE(&c)->query=QUERY_RETRY; LANE(&c)->query_cursor=0; LANE(&c)->query_next=0; d->feedback.limit[0].seen=false;
     tx=d->tx; controller_tick(&c,piper_now());
     CHECK(d->tx==tx+1&&d->feedback.limit[0].seen&&c.bus.sim_enabled==0);
-    now=piper_now(); c.query_start=now; c.query=QUERY_RETRY; c.query_cursor=0; c.query_next=0;
+    now=piper_now(); LANE(&c)->query_start=now; LANE(&c)->query=QUERY_RETRY; LANE(&c)->query_cursor=0; LANE(&c)->query_next=0;
     for (unsigned i=0;i<6;i++) { d->feedback.limit[i].seen=true; d->feedback.limit[i].at=now; d->feedback.acceleration[i].seen=true; d->feedback.acceleration[i].at=now; }
     d->feedback.version[0]=0; d->feedback.gripper_config_at=now;
     tx=d->tx; controller_tick(&c,piper_now());
     CHECK(d->tx==tx+1&&*d->feedback.version&&c.bus.sim_enabled==0); /* skipped replies do not contaminate firmware request bytes */
-    c.query_start=piper_now()-6; tx=d->tx;
-    controller_tick(&c,piper_now()); CHECK(!c.query&&d->tx==tx);
+    LANE(&c)->query_start=piper_now()-6; tx=d->tx;
+    controller_tick(&c,piper_now()); CHECK(!LANE(&c)->query&&d->tx==tx);
     /* Missing selected arm survives restart even when another arm is present. */
     struct can_device *missing=&c.bus.devices[1];
     strcpy(missing->id,"simulation:missing"); strcpy(missing->label,"Absent arm");
@@ -123,7 +123,7 @@ int main(void)
     CHECK(!strcmp(controller_blocker(&c,missing,piper_now()),"USB adapter is missing."));
     CHECK(c.bus.devices[0].tx==0&&missing->tx==0);
     j=cJSON_CreateObject(); r=controller_action(&c,"/api/reconnect",j,&status);
-    CHECK(status==200&&!c.query&&c.op==OP_IDLE); cJSON_Delete(r); cJSON_Delete(j);
+    CHECK(status==200&&!LANE(&c)->query&&LANE(&c)->op==OP_IDLE); cJSON_Delete(r); cJSON_Delete(j);
     CHECK(c.bus.devices[0].tx==0&&missing->tx==0);
     controller_close(&c);
     char path[256]; snprintf(path,sizeof path,"%s/control-state.json",directory); CHECK(!unlink(path)); CHECK(!rmdir(directory));

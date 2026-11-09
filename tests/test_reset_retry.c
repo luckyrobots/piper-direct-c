@@ -69,7 +69,7 @@ static void fixture(struct controller *c,char directory[96])
 }
 static void close_fixture(struct controller *c,const char *directory)
 {
-    CHECK(c->op==OP_IDLE); controller_close(c);
+    CHECK(LANE(c)->op==OP_IDLE); controller_close(c);
     char path[128]; snprintf(path,sizeof path,"%s/control-state.json",directory); CHECK(!unlink(path)); CHECK(!rmdir(directory));
 }
 int main(void)
@@ -78,23 +78,23 @@ int main(void)
     struct can_device *d=&c.bus.devices[0]; unsigned initial_resets=resets;
     /* Physical light is off: STOP can retain teach=1. Reset is a single
        explicit packet, and an in-flight repeat cannot send another one. */
-    action(&c,request(&c),202); CHECK(c.op==OP_RESET && pending(&c) && resets==initial_resets+1);
-    unsigned first_request=c.request_id; action(&c,request(&c),409);
+    action(&c,request(&c),202); CHECK(LANE(&c)->op==OP_RESET && pending(&c) && resets==initial_resets+1);
+    unsigned first_request=LANE(&c)->request_id; action(&c,request(&c),409);
     /* No completion acknowledgement: the bounded operation fails stopped.
        The retained pending intent must no longer create an unrecoverable lock. */
-    clock_now+=3.01; fresh(&c); c.heartbeat=clock_now;
+    clock_now+=3.01; fresh(&c); LANE(&c)->heartbeat=clock_now;
     controller_tick(&c,clock_now);
-    CHECK(c.op==OP_IDLE && pending(&c) && strstr(c.message,"Control action timed out") && stops==1);
+    CHECK(LANE(&c)->op==OP_IDLE && pending(&c) && strstr(LANE(&c)->message,"Control action timed out") && stops==1);
     clock_now+=.5; fresh(&c); fixture_still(d,clock_now-1);
-    action(&c,request(&c),202); CHECK(resets==initial_resets+2 && c.request_id==first_request+1 && pending(&c));
+    action(&c,request(&c),202); CHECK(resets==initial_resets+2 && LANE(&c)->request_id==first_request+1 && pending(&c));
     action(&c,request(&c),409);
     /* A transient stale teach flag without an actual hand-guiding status
        cannot silently abandon this retry before reset acknowledgement. */
-    clock_now+=.1; d->feedback.arm[0].arm_status=0; fresh(&c); c.heartbeat=clock_now;
-    controller_tick(&c,clock_now); CHECK(c.op==OP_RESET && pending(&c));
+    clock_now+=.1; d->feedback.arm[0].arm_status=0; fresh(&c); LANE(&c)->heartbeat=clock_now;
+    controller_tick(&c,clock_now); CHECK(LANE(&c)->op==OP_RESET && pending(&c));
     d->feedback.arm[0].teach=0;
-    clock_now+=.5; fresh(&c); c.heartbeat=clock_now; controller_tick(&c,clock_now);
-    CHECK(c.op==OP_IDLE && !pending(&c) && !strcmp(c.phase,"complete"));
+    clock_now+=.5; fresh(&c); LANE(&c)->heartbeat=clock_now; controller_tick(&c,clock_now);
+    CHECK(LANE(&c)->op==OP_IDLE && !pending(&c) && !strcmp(LANE(&c)->phase,"complete"));
     CHECK(resets==initial_resets+2 && stops==1);
     close_fixture(&c,directory);
 
@@ -103,8 +103,8 @@ int main(void)
     for (unsigned failure=0;failure<14;++failure) {
         fixture(&c,directory); d=&c.bus.devices[0];
         action(&c,request(&c),202);
-        clock_now+=3.01; fresh(&c); c.heartbeat=clock_now; controller_tick(&c,clock_now);
-        CHECK(c.op==OP_IDLE && pending(&c));
+        clock_now+=3.01; fresh(&c); LANE(&c)->heartbeat=clock_now; controller_tick(&c,clock_now);
+        CHECK(LANE(&c)->op==OP_IDLE && pending(&c));
         clock_now+=.5; fresh(&c); fixture_still(d,clock_now-1);
         cJSON *body=request(&c); int expected=409;
         if (failure==0) { cJSON_DeleteItemFromObject(body,"supported"); expected=400; }
@@ -122,7 +122,7 @@ int main(void)
         if (failure==12) d->feedback.arm[0].motion_mode=2;
         if (failure==13) d->feedback.motor[2].fault=1;
         unsigned before=resets+stops; action(&c,body,expected);
-        CHECK(pending(&c) && c.op==OP_IDLE && resets+stops==before);
+        CHECK(pending(&c) && LANE(&c)->op==OP_IDLE && resets+stops==before);
         close_fixture(&c,directory);
     }
     puts("Reset retry passed: explicit supported stopped/all-off retry after timeout, one-packet in-flight guard, residual teach transition, verified completion and unsafe/stale/missing-confirmation rejection.");
