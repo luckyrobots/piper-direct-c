@@ -130,7 +130,7 @@ public sealed partial class PipersPlugin
             // handshake after an otherwise healthy first reply.
             using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellation);
             deadline.CancelAfter(TimeSpan.FromMilliseconds(400));
-            if (primaryActionBusy) await WritePrimaryActionReceipt("link-scene." + method);
+            if (PrimaryActionBusy) await WritePrimaryActionReceipt("link-scene." + method);
             return JsonNode.Parse((await engine.RequestAsync(method, body, deadline.Token)).GetRawText())!.AsObject();
         }
 

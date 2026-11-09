@@ -264,11 +264,11 @@ internal static partial class SimulationFollowingTests
         {
             f.ConfigureTeachingResume();
             Task resume = f.PrimaryResume();
-            for (int i = 0; i < 100 && !f.Get<bool>("resumeControlsBusy"); i++) { f.Refresh(); await Task.Delay(5); }
-            string pending = f.Get<string>("primaryActionStatus");
+            for (int i = 0; i < 100 && f.Get<PipersPlugin.PrimaryActionState>("primaryAction").Phase != PrimaryActionPhase.ResumingControls; i++) { f.Refresh(); await Task.Delay(5); }
+            string pending = f.Get<PipersPlugin.PrimaryActionState>("primaryAction").Status;
             for (int i = 0; i < 5; i++) { f.Refresh(); await Task.Delay(40); }
-            check(f.Get<bool>("resumeControlsBusy") && f.Get<bool>("primaryActionBusy") && f.Rpc.Requests.IsEmpty &&
-                f.Get<string>("primaryActionStatus") == pending && pending.Contains("Hold the arm still", StringComparison.Ordinal),
+            check(f.Get<PipersPlugin.PrimaryActionState>("primaryAction").Phase == PrimaryActionPhase.ResumingControls && f.Rpc.Requests.IsEmpty &&
+                f.Get<PipersPlugin.PrimaryActionState>("primaryAction").Status == pending && pending.Contains("Hold the arm still", StringComparison.Ordinal),
                 "A pending Resume flickered, exited early or issued a command before native stillness admission");
             var patch = f.PrimaryResumePatch();
             check(patch["text"]?.GetValue<string>() == "Resuming controls…" && patch["enabled"]?.GetValue<bool>() == false,
@@ -280,8 +280,8 @@ internal static partial class SimulationFollowingTests
                 request.Body["device_id"]?.GetValue<string>() == "can-a" && request.Body["generation"]?.GetValue<long>() == 7 &&
                 request.Body["same_pose_confirmed"]?.GetValue<bool>() == true,
                 "One explicit resume did not send exactly one pinned measured-pose handoff");
-            check(f.Get<bool>("approved") && !f.Get<bool>("primaryActionBusy") && !f.Get<bool>("resumeControlsBusy") &&
-                f.Get<string>("primaryActionStatus").StartsWith("Controls restored", StringComparison.Ordinal) && f.Mode == "edit",
+            check(f.Get<bool>("approved") && f.Get<PipersPlugin.PrimaryActionState>("primaryAction").Phase == PrimaryActionPhase.Idle &&
+                f.Get<PipersPlugin.PrimaryActionState>("primaryAction").Status.StartsWith("Controls restored", StringComparison.Ordinal) && f.Mode == "edit",
                 "Successful resume failed its final approval/presentation or entered Play");
         }
         await using (var f = new Fixture())
@@ -290,7 +290,7 @@ internal static partial class SimulationFollowingTests
             f.Rpc.DelayedOperation = "heartbeat";
             Task resume = f.PrimaryResume();
             await f.Rpc.DelayedReached.Task.WaitAsync(TimeSpan.FromSeconds(2));
-            check(!resume.IsCompleted && !f.Get<bool>("approved") && f.Get<bool>("resumeControlsBusy"),
+            check(!resume.IsCompleted && !f.Get<bool>("approved") && f.Get<PipersPlugin.PrimaryActionState>("primaryAction").Phase == PrimaryActionPhase.ResumingControls,
                 "CAN mode alone completed Resume before the native handoff acknowledgement");
             var pendingMotion = f.Get<LatestTelemetry>("telemetry").Latest!.State["devices"]![0]!["motion"]!;
             f.CompleteResume();
@@ -307,12 +307,12 @@ internal static partial class SimulationFollowingTests
         {
             await using var f = new Fixture(); f.ConfigureTeachingResume();
             Task resume = f.PrimaryResume();
-            for (int i = 0; i < 100 && !f.Get<bool>("resumeControlsBusy"); i++) { f.Refresh(); await Task.Delay(5); }
+            for (int i = 0; i < 100 && f.Get<PipersPlugin.PrimaryActionState>("primaryAction").Phase != PrimaryActionPhase.ResumingControls; i++) { f.Refresh(); await Task.Delay(5); }
             f.InterruptResume(interruption);
             bool rejected = false;
             try { await resume.WaitAsync(TimeSpan.FromSeconds(2)); } catch (InvalidOperationException) { rejected = true; }
             check(rejected && f.Rpc.Requests.IsEmpty && !f.Get<bool>("approved") &&
-                !f.Get<bool>("primaryActionBusy") && f.Get<string>("primaryActionStatus").StartsWith("Could not start:", StringComparison.Ordinal),
+                f.Get<PipersPlugin.PrimaryActionState>("primaryAction").Phase == PrimaryActionPhase.Idle && f.Get<PipersPlugin.PrimaryActionState>("primaryAction").Status.StartsWith("Could not start:", StringComparison.Ordinal),
                 "A pending resume survived revocation, identity change, playback or a fault, or hid its failure");
         }
         await using (var f = new Fixture())

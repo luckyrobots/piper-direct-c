@@ -44,7 +44,7 @@ public sealed partial class PipersPlugin
             }
             if (next.Phase != teaching.Phase) message = next.Label + ". " + next.NextStep;
         }
-        else if (!resumeControlsBusy && teachingSeen && device is not null && TeachingCanResume(device))
+        else if (!ResumeControlsBusy && teachingSeen && device is not null && TeachingCanResume(device))
         {
             // Restore only a previous UI approval. This sends no enable, reset,
             // replay or position packet, and a new gesture is still required.
@@ -59,7 +59,7 @@ public sealed partial class PipersPlugin
         }
         // Serialize with manual actions before consuming the one-attempt gate.
         // A busy UI action leaves this poll observational; it grants no request.
-        if (!resumeControlsBusy && !GroupFollowActive && CurrentRecovery is null && await commands.WaitAsync(0, cancellation))
+        if (!ResumeControlsBusy && !GroupFollowActive && CurrentRecovery is null && await commands.WaitAsync(0, cancellation))
         {
             bool attempting = false;
             try

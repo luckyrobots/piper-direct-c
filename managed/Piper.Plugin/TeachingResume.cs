@@ -57,7 +57,8 @@ public sealed partial class PipersPlugin
             return Device(expectedDevice, expectedGeneration, expectedToken);
         }
 
-        resumeControlsBusy = true;
+        Debug.Assert(primaryAction.Phase == PrimaryActionPhase.Running, "Resume runs only as the primary robot action.");
+        primaryAction = primaryAction with { Phase = PrimaryActionPhase.ResumingControls };
         approved = linkCommandsEnabled = false;
         teachingReturnGate.Invalidate();
         try
@@ -143,6 +144,6 @@ public sealed partial class PipersPlugin
             });
             message = "Controls restored · holding this pose · previous movement discarded";
         }
-        finally { resumeControlsBusy = false; }
+        finally { primaryAction = primaryAction with { Phase = PrimaryActionPhase.Running }; }
     }
 }

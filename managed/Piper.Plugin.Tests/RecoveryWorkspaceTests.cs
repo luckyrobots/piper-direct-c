@@ -154,7 +154,7 @@ internal static class RecoveryWorkspaceTests
             device["blocker"] = "Another controller is sending commands on this CAN bus.";
             Set("approved", true);
             Fresh(); await Click("enable");
-            check(calls.Actions.Count == 0 && Get<string>("primaryActionStatus").Contains("Another controller", StringComparison.Ordinal),
+            check(calls.Actions.Count == 0 && Get<PipersPlugin.PrimaryActionState>("primaryAction").Status.Contains("Another controller", StringComparison.Ordinal),
                 "A queued primary click sent Enable even though the current header reported a controller blocker");
         }
         finally
