@@ -20,9 +20,8 @@ internal static class PikaReadOnlyAdoptionTests
             check(invalid && unopened.Snapshot()["owner"] is null && unopened.Snapshot()["read_only_adoptable"]?.GetValue<bool>() == false,
                 "Unproven/malformed automatic adoption reached transport setup or changed ownership.");
         }
-        if (!OperatingSystem.IsLinux()) return;
 
-        await using (var live = new PikaProcessService("/dev/pika-monitor-fixture", Environment.ProcessPath!))
+        await using (var live = new PikaProcessService("/dev/pika-monitor-fixture", Environment.ProcessPath!, directLaunch: true))
         {
             await live.ExecuteAsync("connect", Request(oldOwner), default);
             await live.ExecuteAsync("heartbeat", Request(oldOwner), default);
@@ -30,7 +29,7 @@ internal static class PikaReadOnlyAdoptionTests
             check(live.Snapshot()["connected"]?.GetValue<bool>() == true && live.Snapshot()["owner"]?.GetValue<string>() == oldOwner,
                 "A stale client decision stole a connected foreign monitor.");
         }
-        await using (var expired = new PikaProcessService("/dev/pika-unpowered-monitor-die-fixture", Environment.ProcessPath!))
+        await using (var expired = new PikaProcessService("/dev/pika-unpowered-monitor-die-fixture", Environment.ProcessPath!, directLaunch: true))
         {
             await expired.ExecuteAsync("connect", Request(oldOwner), default);
             await expired.ExecuteAsync("heartbeat", Request(oldOwner), default);
@@ -50,7 +49,7 @@ internal static class PikaReadOnlyAdoptionTests
             await Reject(() => expired.ExecuteAsync("connect", Request(oldOwner, true), default));
             check(expired.Snapshot()["owner"]?.GetValue<string>() == newOwner, "Concurrent automatic adopters replaced a newly connected owner.");
         }
-        await using (var poweredObserver = new PikaProcessService("/dev/pika-monitor-die-fixture", Environment.ProcessPath!))
+        await using (var poweredObserver = new PikaProcessService("/dev/pika-monitor-die-fixture", Environment.ProcessPath!, directLaunch: true))
         {
             await poweredObserver.ExecuteAsync("connect", Request(oldOwner), default);
             await poweredObserver.ExecuteAsync("heartbeat", Request(oldOwner), default);
@@ -60,7 +59,7 @@ internal static class PikaReadOnlyAdoptionTests
             await Reject(() => poweredObserver.ExecuteAsync("connect", Request(newOwner, true), default));
             check(poweredObserver.Snapshot()["owner"]?.GetValue<string>() == oldOwner, "Powered observer's ownership was discarded by automatic adoption.");
         }
-        await using (var uncertain = new PikaProcessService("/dev/pika-fixture", Environment.ProcessPath!))
+        await using (var uncertain = new PikaProcessService("/dev/pika-fixture", Environment.ProcessPath!, directLaunch: true))
         {
             await uncertain.ExecuteAsync("connect", Request(oldOwner), default);
             await uncertain.ExecuteAsync("enable", JsonSerializer.SerializeToElement(new { owner = oldOwner, clear = true }), default);

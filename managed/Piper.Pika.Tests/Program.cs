@@ -1,7 +1,44 @@
 using System.Text.Json;
 using System.Diagnostics;
 using LuckyRobots.Piper.Pika;
+using LuckyRobots.Piper.Pika.Agent;
 
+if (args.Length >= 2 && args[0] == "--device" && args[1] is "/dev/pika-garbage-fixture" or "/dev/pika-garbage-hang-fixture")
+{
+    // B2 fixture: interleaves malformed stdout lines with valid ones, then floods
+    // garbage on a position of .9 rad. The hang variant then ignores stdin EOF.
+    if (Environment.GetEnvironmentVariable("PIKA_FIXTURE_PID_FILE") is { Length: > 0 } pidFile)
+        File.WriteAllText(pidFile, Environment.ProcessId.ToString(System.Globalization.CultureInfo.InvariantCulture));
+    Console.WriteLine("{\"type\":\"ready\",\"connected\":true}"); Console.Out.Flush();
+    bool garbageEnabled = false;
+    var garbageClock = Stopwatch.StartNew();
+    string garbageRequest = ""; double garbageRequestAt = -100;
+    while (Console.ReadLine() is { } line)
+    {
+        using var data = JsonDocument.Parse(line); var root = data.RootElement;
+        string action = root.GetProperty("action").GetString()!, id = root.GetProperty("id").GetString()!;
+        if (action == "position" && root.GetProperty("value").GetDouble() == .9)
+        {
+            for (int i = 0; i < PikaProcessService.MaximumConsecutiveMalformedLines + 8; i++) Console.WriteLine("{\"type\":\"state\",\"fresh\":\"flood\"}");
+            Console.Out.Flush();
+            if (args[1] == "/dev/pika-garbage-hang-fixture") Thread.Sleep(Timeout.Infinite);
+            continue;
+        }
+        foreach (string bad in new[] { "not json", "{\"type\":5}", "[1,2]", "{\"type\":\"state\",\"fresh\":\"yes\",\"enabled\":true}",
+            "{\"type\":\"ack\",\"id\":7,\"ok\":true}", "{\"type\":\"ack\",\"id\":\"" + id + "\",\"ok\":\"yes\"}" })
+            Console.WriteLine(bad);
+        if (action == "enable") garbageEnabled = true;
+        if (action is "disable" or "disconnect") garbageEnabled = false;
+        if (action is "enable" or "disable") { garbageRequest = id; garbageRequestAt = garbageClock.Elapsed.TotalSeconds; }
+        Console.WriteLine(JsonSerializer.Serialize(new { type = "state", connected = true, fresh = true, enabled = garbageEnabled, armed = garbageEnabled,
+            pending = false, following = false, age_s = .02, last_motor_request = garbageRequest,
+            request_time_s = garbageRequest.Length == 0 ? (double?)null : garbageRequestAt, feedback_time_s = garbageClock.Elapsed.TotalSeconds }));
+        Console.WriteLine(JsonSerializer.Serialize(new { type = "ack", id, ok = true, message = "garbage fixture accepted" }));
+        Console.Out.Flush();
+        if (action == "disconnect") break;
+    }
+    return;
+}
 if (args.Length >= 2 && args[0] == "--device" && args[1] is "/dev/pika-fixture" or "/dev/pika-monitor-fixture" or "/dev/pika-monitor-die-fixture" or
     "/dev/pika-powered-disabled-die-fixture" or "/dev/pika-powered-stale-die-fixture" or "/dev/pika-powered-pending-die-fixture" or
     "/dev/pika-powered-cancel-die-fixture" or "/dev/pika-powered-buffered-die-fixture" or "/dev/pika-enable-die-fixture" or "/dev/pika-unpowered-monitor-die-fixture")
@@ -42,7 +79,8 @@ if (args.Length >= 2 && args[0] == "--device" && args[1] is "/dev/pika-fixture" 
     }
     return;
 }
-void Check(bool condition, string message) { if (!condition) throw new Exception(message); }
+int checks = 0;
+void Check(bool condition, string message) { checks++; if (!condition) throw new Exception(message); }
 foreach (bool requested in new[] { false, true })
 {
     var acknowledgement = new PikaPowerFeedback(requested, 10);
@@ -70,8 +108,8 @@ async Task Reject(Func<Task> action, string message)
     try { await action(); } catch (InvalidOperationException) { return; }
     throw new Exception(message);
 }
-Check(Convert.ToHexString(PikaProtocol.Packet(10)) == "0A000000000D0A", "disable packet");
-Check(Convert.ToHexString(PikaProtocol.Packet(22, 1)) == "160000803F0D0A", "position wire order");
+Check(Convert.ToHexString(PikaProtocol.Packet(PikaCommand.Disable)) == "0A000000000D0A", "disable packet");
+Check(Convert.ToHexString(PikaProtocol.Packet(PikaCommand.Position, 1)) == "160000803F0D0A", "position wire order");
 for (int width = 0; width <= 90; width++) Check(Math.Abs(PikaProtocol.Width(PikaProtocol.Angle(width)) - width) < 1e-6, "linkage inversion");
 Check(!PikaProtocol.ValidAngle(double.NaN) && !PikaProtocol.ValidAngle(8), "noncanonical angles rejected");
 var parser = new PikaJsonStream();
@@ -93,9 +131,51 @@ await using (var disconnected = new PikaProcessService("/dev/pika-old", "unused"
     try { await disconnected.ExecuteAsync("configure", Configure(owner, "COM9"), default); } catch (ArgumentException) { invalidPath = true; }
     Check(invalidPath && disconnected.Snapshot()["device"]!.GetValue<string>() == "/dev/pika-new", "native Windows serial path was accepted or mutated active configuration");
 }
-if (OperatingSystem.IsLinux())
+// The fixtures below run this test executable as the agent, directly on every OS.
+static PikaProcessService Fixture(string device, string? agent = null) => new(device, agent ?? Environment.ProcessPath!, directLaunch: true);
+static bool ProcessEnded(int pid)
 {
-    await using (var monitor = new PikaProcessService("/dev/pika-monitor-fixture", Environment.ProcessPath!))
+    try { using var process = Process.GetProcessById(pid); return process.HasExited; }
+    catch (ArgumentException) { return true; }
+}
+// B2: malformed stdout lines are skipped; a sustained run faults the agent,
+// which is stopped (tree-killed if it ignores EOF), detached and replaceable.
+foreach (string garbage in new[] { "/dev/pika-garbage-fixture", "/dev/pika-garbage-hang-fixture" })
+{
+    string pidFile = Path.GetTempFileName();
+    Environment.SetEnvironmentVariable("PIKA_FIXTURE_PID_FILE", pidFile);
+    try
+    {
+        await using var garbled = Fixture(garbage);
+        await garbled.ExecuteAsync("connect", Input(owner), default);
+        await garbled.ExecuteAsync("enable", Input(owner, true), default);
+        await garbled.ExecuteAsync("heartbeat", Input(owner), default);
+        var healthy = garbled.Snapshot();
+        Check(healthy["connected"]!.GetValue<bool>() && healthy["fresh"]!.GetValue<bool>() && healthy["enabled"]!.GetValue<bool>() &&
+            healthy["agent_phase"]!.GetValue<string>() == "ready", "Isolated malformed agent lines ended the pump or corrupted state");
+        int pid = int.Parse(File.ReadAllText(pidFile), System.Globalization.CultureInfo.InvariantCulture);
+        bool failed = false;
+        try { await garbled.ExecuteAsync("position", JsonSerializer.SerializeToElement(new { owner, value = .9 }), default); }
+        catch (IOException) { failed = true; }
+        for (int i = 0; i < 1000 && garbled.Phase != PikaAgentPhase.Idle; i++) await Task.Delay(10);
+        var faulted = garbled.Snapshot();
+        Check(failed && garbled.Phase == PikaAgentPhase.Idle && ProcessEnded(pid), "A faulted Pika agent was not stopped and detached: " + garbage);
+        Check(!faulted["connected"]!.GetValue<bool>() && faulted["owner"] is null && faulted["power_uncertain"]!.GetValue<bool>() &&
+            !faulted["power_requested"]!.GetValue<bool>() && faulted["configuration_blocked"]!.GetValue<bool>() &&
+            faulted["message"]!.GetValue<string>().Contains("malformed", StringComparison.Ordinal),
+            "A faulted powered agent discarded its unresolved power evidence or hid the fault");
+        await Reject(() => garbled.ExecuteAsync("connect", Input(other), default), "A foreign owner took over a faulted powered session");
+        var reconnected = await garbled.ExecuteAsync("connect", Input(owner), default);
+        await garbled.ExecuteAsync("heartbeat", Input(owner), default);
+        Check(reconnected["message"]!.GetValue<string>() == "Linux serial connected; reading only" &&
+            garbled.Snapshot()["connected"]!.GetValue<bool>() && !garbled.Snapshot()["power_uncertain"]!.GetValue<bool>(),
+            "The owner could not reconnect after an agent fault, or fresh disabled feedback did not resolve it");
+        await garbled.ExecuteAsync("disconnect", Input(owner), default);
+    }
+    finally { Environment.SetEnvironmentVariable("PIKA_FIXTURE_PID_FILE", null); File.Delete(pidFile); }
+}
+{
+    await using (var monitor = Fixture("/dev/pika-monitor-fixture"))
     {
         await monitor.ExecuteAsync("connect", Input(owner), default);
         await monitor.ExecuteAsync("heartbeat", Input(owner), default);
@@ -110,13 +190,13 @@ if (OperatingSystem.IsLinux())
         Check(monitor.Snapshot()["enabled"]!.GetValue<bool>(), "Read-only disconnect changed external motor power");
         await monitor.ExecuteAsync("disconnect", Input(other), default);
     }
-    await using (var failedMonitor = new PikaProcessService("/dev/pika-fixture", "/nonexistent-pika-agent-" + Guid.NewGuid()))
+    await using (var failedMonitor = Fixture("/dev/pika-fixture", "/nonexistent-pika-agent-" + Guid.NewGuid()))
     {
         bool failed = false;
         try { await failedMonitor.ExecuteAsync("connect", Input(owner), default); } catch (System.ComponentModel.Win32Exception) { failed = true; }
         Check(failed && failedMonitor.Snapshot()["owner"] is null && !failedMonitor.Snapshot()["configuration_blocked"]!.GetValue<bool>(), "Failed monitor setup stranded serial ownership before process start");
     }
-    await using (var exitedMonitor = new PikaProcessService("/dev/pika-monitor-die-fixture", Environment.ProcessPath!))
+    await using (var exitedMonitor = Fixture("/dev/pika-monitor-die-fixture"))
     {
         await exitedMonitor.ExecuteAsync("connect", Input(owner), default);
         await exitedMonitor.ExecuteAsync("heartbeat", Input(owner), default);
@@ -128,7 +208,7 @@ if (OperatingSystem.IsLinux())
     }
     foreach (string ending in new[] { "disabled", "stale", "pending", "buffered" })
     {
-        await using var expiredOwner = new PikaProcessService("/dev/pika-powered-" + ending + "-die-fixture", Environment.ProcessPath!);
+        await using var expiredOwner = Fixture("/dev/pika-powered-" + ending + "-die-fixture");
         await expiredOwner.ExecuteAsync("connect", Input(owner), default);
         await expiredOwner.ExecuteAsync("enable", Input(owner, true), default);
         await expiredOwner.ExecuteAsync("position", JsonSerializer.SerializeToElement(new { owner, value = .75 }), default);
@@ -157,7 +237,7 @@ if (OperatingSystem.IsLinux())
             await Reject(() => expiredOwner.ExecuteAsync("configure", Configure(other, "/dev/pika-other"), default), "Unverified final data permitted device reassignment");
         }
     }
-    await using (var failedEnable = new PikaProcessService("/dev/pika-enable-die-fixture", Environment.ProcessPath!))
+    await using (var failedEnable = Fixture("/dev/pika-enable-die-fixture"))
     {
         await failedEnable.ExecuteAsync("connect", Input(owner), default);
         await failedEnable.ExecuteAsync("heartbeat", Input(owner), default);
@@ -178,7 +258,7 @@ if (OperatingSystem.IsLinux())
         await Reject(() => failedEnable.ExecuteAsync("connect", Input(other), default), "Lost enable result allowed passive foreign takeover");
         await Reject(() => failedEnable.ExecuteAsync("configure", Configure(other, "/dev/pika-other"), default), "Lost enable result allowed serial reassignment");
     }
-    await using (var canceledPower = new PikaProcessService("/dev/pika-powered-cancel-die-fixture", Environment.ProcessPath!))
+    await using (var canceledPower = Fixture("/dev/pika-powered-cancel-die-fixture"))
     {
         await canceledPower.ExecuteAsync("connect", Input(owner), default);
         await canceledPower.ExecuteAsync("enable", Input(owner, true), default);
@@ -193,7 +273,7 @@ if (OperatingSystem.IsLinux())
             "Cancellation discarded a transmitted request or inferred disabled hardware from EOF");
         await Reject(() => canceledPower.ExecuteAsync("connect", Input(other), default), "Cancellation allowed a foreign passive takeover");
     }
-    await using var service = new PikaProcessService("/dev/pika-fixture", Environment.ProcessPath!);
+    await using var service = Fixture("/dev/pika-fixture");
     await service.ExecuteAsync("connect", Input(owner), default);
     await Reject(() => service.ExecuteAsync("configure", Configure(other, "/dev/pika-other"), default), "foreign owner reconfigured a live serial agent");
     await Reject(() => service.ExecuteAsync("configure", Configure(owner, "/dev/pika-other"), default), "owner reconfigured without disconnecting");
@@ -226,10 +306,10 @@ if (OperatingSystem.IsLinux())
     await service.ExecuteAsync("configure", Configure(other, "/dev/pika-reassigned"), default);
     Check(service.Snapshot()["device"]!.GetValue<string>() == "/dev/pika-reassigned", "verified released session could not be reassigned");
 }
-else
+if (!OperatingSystem.IsLinux())
 {
     await using var service = new PikaProcessService("/dev/pika-fixture", "unused");
     await Reject(() => service.ExecuteAsync("connect", Input(owner), default), "native Windows WCH path must be unavailable");
     Check(service.Snapshot()["owner"] is null && !service.Snapshot()["configuration_blocked"]!.GetValue<bool>(), "Rejected native Windows transport setup stranded an owner");
 }
-Console.WriteLine("Pika C# tests passed: wire packets, linkage, fragmented telemetry, invalid feedback, ownership, causally verified disabled reconnect, pre-enable/buffered/stale/pending/canceled retention and advancing evidence age; native Windows COM is unavailable.");
+Console.WriteLine($"Pika C# tests passed ({checks} top-level checks): wire packets, linkage, fragmented telemetry, invalid feedback, ownership, causally verified disabled reconnect, pre-enable/buffered/stale/pending/canceled retention and advancing evidence age; native Windows COM is unavailable.");

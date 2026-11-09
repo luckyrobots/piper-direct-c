@@ -1,4 +1,4 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup><TargetFramework>net9.0</TargetFramework><ImplicitUsings>enable</ImplicitUsings><Nullable>enable</Nullable><TreatWarningsAsErrors>true</TreatWarningsAsErrors></PropertyGroup>
-  <ItemGroup><InternalsVisibleTo Include="Piper.Host" /></ItemGroup>
+  <ItemGroup><InternalsVisibleTo Include="Piper.Host" /><InternalsVisibleTo Include="Piper.Pika.Tests" /></ItemGroup>
 </Project>
