@@ -150,7 +150,7 @@ internal static class CalibrationSheetIntegrationTests
             await Event("left.show"); await Event("left.confirm"); await Event("back.show"); await Event("back.confirm");
             await Event("tool.show");
             await Invoke("MaintainWizardHighlight", CancellationToken.None);
-            check(Get<object?>("wizardHighlightScope") is not null, "Background edge renewal erased the jaw-tip confirmation context");
+            check(Get<object>("wizardMarker") is MarkerState.Tool, "Background edge renewal erased the jaw-tip confirmation context");
             await Event("tool.confirm"); await Event("surface");
             check(Get<CalibrationWizardDraft>("calibrationWizard").Setup.JawTipsConfirmed, "The actual confirmation event did not persist jaw-tip approval");
             string WidgetId(string suffix) => Walk(view!).Single(w => w["id"]!.GetValue<string>().EndsWith(suffix, StringComparison.Ordinal))["id"]!.GetValue<string>();

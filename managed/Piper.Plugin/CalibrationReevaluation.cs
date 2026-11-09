@@ -53,7 +53,7 @@ public sealed partial class PipersPlugin
         calibrationWizard = Wizard with { ModelAssetId = calibrationIdentity!.ModelAssetId, ModelRevision = revision,
             Setup = new(), Step = CalibrationWizardStep.ModelPoint };
         Wizard.Answers["reevaluatedscene"] = calibrationIdentity.SceneId;
-        wizardHighlightScope = null; wizardReferenceHighlightScope = null; wizardReferenceAcknowledgedAt = 0;
+        SetMarker(MarkerState.None);
         sheetMarkersDirty = true; sheetMarkersPublished = false;
     }
 

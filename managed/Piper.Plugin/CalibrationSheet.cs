@@ -112,7 +112,7 @@ public sealed partial class PipersPlugin
         else if (action == "tool.show") await ShowSheetJawTips(cancellation);
         else if (action == "tool.confirm")
         {
-            if (wizardHighlightScope is not { } marker || !WizardHighlightCurrent(marker)) throw new InvalidOperationException("Show the jaw-tip marker first, then compare it with the real midpoint.");
+            if (ToolMarker is not { } marker || !WizardHighlightCurrent(marker)) throw new InvalidOperationException("Show the jaw-tip marker first, then compare it with the real midpoint.");
             UpdateSetup(setup => setup with { JawTipsConfirmed = true });
             wizardMessage = "Jaw tips confirmed. Next, confirm that the robot base rests on the tabletop.";
         }
@@ -171,7 +171,7 @@ public sealed partial class PipersPlugin
         string text = value.GetString() ?? "";
         if (text.Length > 32) throw new InvalidOperationException("Enter a measurement in millimetres.");
         Wizard.Answers[key] = text;
-        if (desk && key != "precision") { UpdateSetup(setup => setup.ClearEdges()); wizardReferenceAcknowledgedAt = 0; }
+        if (desk && key != "precision") { UpdateSetup(setup => setup.ClearEdges()); UnacknowledgeEdge(); }
         sheetMarkersDirty = true;
         await SaveWizard(cancellation);
     }
@@ -235,7 +235,7 @@ public sealed partial class PipersPlugin
         Step("back.show", "Show BACK", left);
         Step("back.confirm", back ? "BACK confirmed" : "Confirm BACK", left && !back);
         Step("tool.show", "Show jaw tips", back);
-        Step("tool.confirm", tool ? "Jaw tips confirmed" : "Confirm jaw tips", back && !tool && wizardHighlightScope is { } marker && WizardHighlightCurrent(marker));
+        Step("tool.confirm", tool ? "Jaw tips confirmed" : "Confirm jaw tips", back && !tool && ToolMarker is { } marker && WizardHighlightCurrent(marker));
         Step("surface", surface ? "Desk confirmed" : "Base is on desk", tool && !surface);
         Step("precision.default", "Use ±5 mm", calibrationIdentity is null);
         patches[SheetId("field.precision")] = new() { ["text"] = Wizard.Answers.GetValueOrDefault("precision", ""), ["enabled"] = calibrationIdentity is null };

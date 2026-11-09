@@ -92,9 +92,9 @@ internal static class CalibrationSheetUiTests
             await Click("tool.show");
             check(Get<long>("workspaceViewEpoch") == page && Get<CalibrationWizardDraft>("calibrationWizard").Epoch == sheet && views == beforeViews,
                 "Showing jaw tips rebuilt the calibration page or invalidated the next visible button ID");
-            check(Get<WizardHighlightScope?>("wizardHighlightScope") is not null, "Showing jaw tips did not retain its confirmation scope");
+            check(Get<object>("wizardMarker") is MarkerState.Tool, "Showing jaw tips did not retain its confirmation scope");
             await Invoke("MaintainWizardHighlight", CancellationToken.None);
-            check(Get<WizardHighlightScope?>("wizardHighlightScope") is not null, "Background maintenance replaced the displayed jaw-tip marker");
+            check(Get<object>("wizardMarker") is MarkerState.Tool, "Background maintenance replaced the displayed jaw-tip marker");
             await Click("tool.confirm");
             check(Get<CalibrationWizardDraft>("calibrationWizard").Setup.JawTipsConfirmed,
                 "The visible Marker matches jaw tips click was lost after Show jaw-tip marker");

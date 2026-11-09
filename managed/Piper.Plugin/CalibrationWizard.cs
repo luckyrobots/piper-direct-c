@@ -140,7 +140,7 @@ public sealed partial class PipersPlugin
         if (pose["modelAssetId"]?.GetValue<string>() is not { Length: > 0 } asset || pose["modelRevision"]?.GetValue<string>() is not { Length: > 0 } revision)
             throw new InvalidOperationException(unavailable);
         bool samePoint = Wizard.ModelAssetId == asset && Wizard.ModelRevision == revision &&
-            (wizardHighlightScope is null || wizardHighlightScope.SiteName == name);
+            (ToolMarker is not { } shown || shown.SiteName == name);
         calibrationWizard = Wizard with { ModelAssetId = asset, ModelRevision = revision, Setup = Wizard.Setup with { JawTipsConfirmed = samePoint && Wizard.Setup.JawTipsConfirmed } };
         _ = CalibrationPlacement.Read(pose["rootPlacement"]);
         wizardModelPoint = "Look for the marker between the simulated jaw tips, then compare it with the real jaw-tip midpoint.";
