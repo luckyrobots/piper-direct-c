@@ -67,7 +67,7 @@ internal static class UnifiedWorkspaceTests
             device["status"]!["teach_state"] = residual;
             device["teaching"] = new JsonObject { ["phase"] = residual == 1 ? "hand-guiding" : "playback", ["active"] = true, ["return_required"] = true };
             var stoppedTeaching = TeachingState.Inspect(device);
-            check(stoppedTeaching is { Phase: "stopped", Active: false, ReturnRequired: false, CanReturn: false, BlocksTargets: true } &&
+            check(stoppedTeaching is { Phase: TeachingPhase.Stopped, Active: false, ReturnRequired: false, CanReturn: false, BlocksTargets: true } &&
                 stoppedTeaching.NextStep.Contains("reset", StringComparison.OrdinalIgnoreCase),
                 "Latched STOP was presented as healthy hand guiding/playback from its residual teach byte");
             check(RobotReadiness.Inspect(device, false, true, false, false) is { Label: "Stopped", Action: "Recover robot", NextAction: RobotPrimaryAction.OpenStoppedRecovery } stopped &&
@@ -106,8 +106,8 @@ internal static class UnifiedWorkspaceTests
         disabledGripper["last_motor_request"] = "";
         check(ProfilePikaRouting.CanReleaseAssignment(disabledGripper, gripperOwner, true),
             "A fresh read-only gripper session required a nonexistent motor request before reassignment");
-        var guiding = new TeachingState("hand-guiding", true, true, false, "", "") { RequiresZero = false };
-        var ended = new TeachingState("ended", false, true, false, "", "") { RequiresZero = false };
+        var guiding = new TeachingState(TeachingPhase.HandGuiding, true, true, false, "", "") { RequiresZero = false };
+        var ended = new TeachingState(TeachingPhase.Ended, false, true, false, "", "") { RequiresZero = false };
         var gate = new HandGuideRecoveryGate("identity-a");
         check(!gate.Observe("identity-a", ended, true), "Loading a completed state granted recovery without an observed guide cycle");
         check(!gate.Observe("identity-b", guiding, true) && !gate.SawGuiding, "A different arm supplied the physical guide proof");

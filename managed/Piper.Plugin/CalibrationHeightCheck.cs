@@ -81,7 +81,7 @@ public sealed partial class PipersPlugin
 
     private CalibrationIdentity HeightContext()
     {
-        if (workspacePage != "calibration" || !calibrationOpen) throw new InvalidOperationException("Open Calibration to check the jaw height.");
+        if (!calibrationOpen) throw new InvalidOperationException("Open Calibration to check the jaw height.");
         if (calibrationIdentity is not { } saved || calibrationApplied is null || calibrationDesk.ToolPoint != "calibration_jaw_tips")
             throw new InvalidOperationException("Apply a desk alignment with the confirmed jaw-tip midpoint first.");
         var current = CurrentCalibrationIdentity();
@@ -96,7 +96,7 @@ public sealed partial class PipersPlugin
     {
         get
         {
-            if (!heightCheckActive || workspacePage != "calibration" || heightLive is not { } live ||
+            if (!heightCheckActive || !calibrationOpen || heightLive is not { } live ||
                 !HeightValidation.FreshAge(live.SourceAgeMilliseconds, Stopwatch.GetElapsedTime(live.ReadAtTicks).TotalMilliseconds) || !TelemetryIsFresh()) return false;
             try { return HeightContext() == live.Observation.Identity; }
             catch (InvalidOperationException) { return false; }
@@ -105,7 +105,7 @@ public sealed partial class PipersPlugin
 
     private void ObserveHeightFeedback(TelemetryReceipt receipt, JsonObject device, JsonObject acknowledgement)
     {
-        if (!heightCheckActive || workspacePage != "calibration") return;
+        if (!heightCheckActive || !calibrationOpen) return;
         try
         {
             var identity = HeightContext();
@@ -234,7 +234,7 @@ public sealed partial class PipersPlugin
 
     private void AddHeightCheckPatches(Dictionary<string, JsonObject> patches, JsonObject? device)
     {
-        if (workspacePage != "calibration") return;
+        if (!calibrationOpen) return;
         bool fresh = HeightPreviewFresh;
         var live = fresh ? heightLive?.Observation : null;
         bool stationary = device?["status"]?["stationary_s"]?.GetValue<double>() is >= .4;

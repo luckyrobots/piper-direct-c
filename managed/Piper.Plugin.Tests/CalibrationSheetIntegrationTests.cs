@@ -100,7 +100,7 @@ internal static class CalibrationSheetIntegrationTests
                 })], null)!;
         Set("engine", context); Set("token", "fixture-session"); Set("state", snapshot); Fresh();
         Set("link", new RobotLink("fixture-scene", "fixture-robot", Pose()["joints"]!.AsArray(), device));
-        Set("linkBackendToken", "fixture-session"); Set("workspacePage", "settings"); Set("settingsCategory", "bench"); Set("calibrationOpen", true);
+        Set("linkBackendToken", "fixture-session"); plugin.Navigation = WorkspaceNavigation.Calibration;
         IEnumerable<JsonObject> Walk(JsonObject node)
         {
             yield return node;
@@ -302,9 +302,9 @@ internal static class CalibrationSheetIntegrationTests
                 "An applied alignment permitted changing its captured measurement without rollback");
             await Event("inspect");
             check(Get<CalibrationPlacement>("calibrationApplied").Same(root) && calls.Count(c => c == "robot.placement") == 1, "Checking an applied placement repeated a scene write");
-            // Jaw-height phases (Cal-D). The page value stands in for the
-            // navigation fix (B3) that makes this check reachable from the sheet.
-            Set("workspacePage", "calibration");
+            // Jaw-height phases (Cal-D), reachable from the sheet through the
+            // workspace navigation fix (B3).
+            plugin.Navigation = WorkspaceNavigation.Calibration;
             async Task Height(string action, string text = "") { Fresh(); await Invoke("HeightCheckEvent", action, JsonSerializer.SerializeToElement(text), CancellationToken.None); }
             string HeightPhase() => typeof(PipersPlugin).GetField("heightPhase", hidden)!.GetValue(plugin)!.ToString()!;
             await Height("toggle");
@@ -318,7 +318,7 @@ internal static class CalibrationSheetIntegrationTests
             check(HeightPhase() == "Live" && Get<object?>("heightFrozen") is null, "Check another pose kept the previous pinned pose");
             await Height("toggle");
             check(HeightPhase() == "Inactive", "Stop height check left the check active");
-            Set("workspacePage", "settings"); await Invoke("Render", CancellationToken.None);
+            plugin.Navigation = WorkspaceNavigation.Calibration; await Invoke("Render", CancellationToken.None);
             // Reopening the same compiled model must not tell users to redo an
             // already applied alignment just to perform independent height checks.
             var reopenedPose = Pose(); reopenedPose["sceneId"] = "reopened-scene";

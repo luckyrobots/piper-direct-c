@@ -7,6 +7,12 @@ namespace LuckyRobots.Piper.Plugin;
 
 internal enum RobotPrimaryAction { None, Enable, Resume, OpenRecovery, OpenStoppedRecovery, StopFollowing }
 
+/// <summary>Plugin-5 primary robot action: Idle → Running → Idle. Running reports
+/// stages (received → enable → link-scene, or for a resume waiting-for-stillness →
+/// returning-to-controls); ResumingControls is Running while ResumeControls owns the
+/// arm. Idle keeps the last status (complete or failed) visible.</summary>
+internal enum PrimaryActionPhase { Idle, Running, ResumingControls }
+
 /// <summary>Telemetry updates numbers; only a meaningful controller transition changes the primary action.</summary>
 public sealed record RobotReadiness(string Label, string Action, bool Enabled, string Detail)
 {
@@ -31,8 +37,8 @@ public sealed record RobotReadiness(string Label, string Action, bool Enabled, s
             return Step("Stopped", "Recover robot", device["blocker"]?.GetValue<string>() ?? "Move the arm to a safe pose using its physical hand-guide button.", RobotPrimaryAction.OpenRecovery);
         // Stillness is an admission condition, not a rapidly changing click
         // target. The explicit action waits boundedly for native eligibility.
-        if (teaching.ReturnRequired) return Step(teaching.Phase == "ended" ? "Hand guiding off" : "Controller needs attention",
-            "Resume controls", teaching.NextStep, teaching.Phase == "ended" || teaching.CanReturn ? RobotPrimaryAction.Resume : RobotPrimaryAction.None);
+        if (teaching.ReturnRequired) return Step(teaching.Phase == TeachingPhase.Ended ? "Hand guiding off" : "Controller needs attention",
+            "Resume controls", teaching.NextStep, teaching.Phase == TeachingPhase.Ended || teaching.CanReturn ? RobotPrimaryAction.Resume : RobotPrimaryAction.None);
         var power = RobotPowerState.Inspect(device);
         if (!power.EnabledCount.HasValue) return Step("Waiting for motor feedback", "Connecting…", "Waiting for fresh feedback from all six motors.");
         if (moving) return Step("Movement in progress", "Moving…", "Stop movement remains available.");
@@ -60,9 +66,10 @@ public sealed record RobotReadiness(string Label, string Action, bool Enabled, s
 
 public sealed partial class PipersPlugin
 {
-    private bool primaryActionBusy;
-    private bool resumeControlsBusy;
-    private string primaryActionStatus = "", primaryActionId = "";
+    internal sealed record PrimaryActionState(PrimaryActionPhase Phase, string Id, string Status);
+    internal PrimaryActionState primaryAction = new(PrimaryActionPhase.Idle, "", "");
+    private bool PrimaryActionBusy => primaryAction.Phase != PrimaryActionPhase.Idle;
+    private bool ResumeControlsBusy => primaryAction.Phase == PrimaryActionPhase.ResumingControls;
     private JsonObject[] pikaDevices = [];
     private SceneRobotBindingOption[] settingsRobotOptions = [];
     private string pikaInventoryMessage = "Discover connected grippers";
@@ -80,8 +87,7 @@ public sealed partial class PipersPlugin
 
     private async Task RunPrimaryAction(Func<CancellationToken, Task> action, CancellationToken cancellation)
     {
-        primaryActionBusy = true;
-        primaryActionId = Guid.NewGuid().ToString("N");
+        primaryAction = new(PrimaryActionPhase.Running, Guid.NewGuid().ToString("N"), primaryAction.Status);
         try
         {
             await PrimaryActionProgress("received", "Checking the selected robot and gripper…", cancellation);
@@ -93,15 +99,15 @@ public sealed partial class PipersPlugin
             // The primary action lives above the camera/joint controls. A
             // failure must stay visible there, rather than only in a footer
             // below the scroll area. Cancellation never resumes the action.
-            primaryActionStatus = error is OperationCanceledException
+            primaryAction = primaryAction with { Status = error is OperationCanceledException
                 ? "Action cancelled. No previous movement will resume."
-                : "Could not start: " + error.Message;
+                : "Could not start: " + error.Message };
             await WritePrimaryActionReceipt("failed", error.Message);
             throw;
         }
         finally
         {
-            primaryActionBusy = false;
+            primaryAction = primaryAction with { Phase = PrimaryActionPhase.Idle };
             try { using var presentation = new CancellationTokenSource(TimeSpan.FromSeconds(2)); await PatchPrimaryAction(presentation.Token); }
             catch (Exception error) { Trace.TraceWarning("Primary action presentation: {0}", error.Message); }
         }
@@ -119,7 +125,8 @@ public sealed partial class PipersPlugin
         {
             case RobotPrimaryAction.OpenStoppedRecovery:
                 BeginHandGuideRecovery(device);
-                message = handGuideRecoveryMessage = RecoveryCardState(device).NextStep;
+                message = RecoveryCardState(device).NextStep;
+                SetRecoveryGuideMessage(message);
                 break;
             case RobotPrimaryAction.OpenRecovery:
                 BeginHandGuideRecovery(device);
@@ -152,8 +159,8 @@ public sealed partial class PipersPlugin
         var device = Device(scope.Device, scope.Generation, scope.Backend);
         if (scope != ControlScope(ActiveProfile, scope.Backend, device))
             throw new InvalidOperationException("Robot assignments changed during Enable. Confirm the current connection.");
-        await Enable(cancellation, expectedDeviceId: scope.Device, expectedGeneration: scope.Generation,
-            expectedToken: scope.Backend, expectedPermissionEpoch: expectedPermission);
+        await Enable(cancellation, expected: new(ActiveProfile.Id, scope.Backend, scope.Device, scope.Generation),
+            expectedPermissionEpoch: expectedPermission);
         if (link is null)
         {
             await PrimaryActionProgress("link-scene", "Matching measured feedback to the selected scene robot…", cancellation);
@@ -166,15 +173,18 @@ public sealed partial class PipersPlugin
 
     private async Task PrimaryActionProgress(string stage, string text, CancellationToken cancellation)
     {
-        primaryActionStatus = text;
+        primaryAction = primaryAction with { Status = text };
         await WritePrimaryActionReceipt(stage);
         await PatchPrimaryAction(cancellation);
     }
 
-    private Task PatchPrimaryAction(CancellationToken cancellation) => Patch(new()
+    private Task PatchPrimaryAction(CancellationToken cancellation) => Patch(new() { ["workspace.primary-action"] = PrimaryActionPatch() }, cancellation);
+
+    private JsonObject PrimaryActionPatch()
     {
-        ["workspace.primary-action"] = new() { ["text"] = primaryActionStatus, ["visible"] = primaryActionStatus.Length > 0, ["hint"] = primaryActionStatus }
-    }, cancellation);
+        string status = primaryAction.Status;
+        return new() { ["text"] = status, ["visible"] = Navigation.Page == WorkspacePage.Controls && status.Length > 0, ["hint"] = status };
+    }
 
     private async Task WritePrimaryActionReceipt(string stage, string? failure = null)
     {
@@ -186,7 +196,7 @@ public sealed partial class PipersPlugin
             var telemetryReceipt = telemetry.Latest;
             var pika = telemetryReceipt?.State["pika"];
             double pikaAge = telemetryReceipt?.PikaEvidenceAgeMilliseconds(Stopwatch.GetTimestamp()) ?? double.NaN;
-            var receipt = new { id = primaryActionId, stage, atUtc = DateTimeOffset.UtcNow,
+            var receipt = new { id = primaryAction.Id, stage, atUtc = DateTimeOffset.UtcNow,
                 profileId = ActiveProfile.Id, robotId = ActiveProfile.RobotId, jointPrefix = ActiveProfile.RobotJointPrefix,
                 canDeviceId = ActiveProfile.CanDeviceId, approved, pikaOwned, linked = link is not null,
                 following = SimulationFollowingActive, followAfterEnable = false, failure,
@@ -208,28 +218,30 @@ public sealed partial class PipersPlugin
     private void AddUnifiedWorkspacePatches(Dictionary<string, JsonObject> patches, JsonObject? device)
     {
         var readiness = Readiness(device);
-        bool controls = workspacePage == "controls";
+        bool controls = Navigation.Page == WorkspacePage.Controls;
         bool controllerStopped = device?["status"]?["arm_status"]?.GetValue<int>() == 1;
         bool canReleasePower = controllerStopped || !TeachingState.Inspect(device).Active;
         bool groupParticipant = GroupFollowIncludes(ActiveProfile.Id);
         patches["workspace.connection"] = new() {
-            ["text"] = groupParticipant ? groupFollowStatus : resumeControlsBusy ? "Reconnecting controls" : readiness.Label,
+            ["text"] = groupParticipant ? groupFollowStatus : ResumeControlsBusy ? "Reconnecting controls" : readiness.Label,
             ["hint"] = groupParticipant ? groupFollowDetail : readiness.Detail };
-        patches["enable"] = new() { ["text"] = resumeControlsBusy ? "Resuming controls…" : readiness.Action, ["visible"] = controls,
-            ["enabled"] = controls && readiness.Enabled && !primaryActionBusy && PrimaryActionAvailable,
+        patches["enable"] = new() { ["text"] = ResumeControlsBusy ? "Resuming controls…" : readiness.Action, ["visible"] = controls,
+            ["enabled"] = controls && readiness.Enabled && !PrimaryActionBusy && PrimaryActionAvailable,
             ["hint"] = readiness.Detail };
-        patches["workspace.primary-action"] = new() { ["text"] = primaryActionStatus, ["visible"] = controls && primaryActionStatus.Length > 0, ["hint"] = primaryActionStatus };
+        patches["workspace.primary-action"] = PrimaryActionPatch();
         patches["disable"] = new() { ["visible"] = controls && RobotPowerState.Inspect(device).EnabledCount > 0 && canReleasePower,
             ["enabled"] = controls && device?["fresh"]?.GetValue<bool>() == true && canReleasePower && !switchingProfile,
             ["hint"] = "Support the arm. Disable cancels pending plugin actions, stops following, then removes motor holding torque. It does not home or replay." };
         bool currentRecoveryGuide = RecoveryGuideFor(device);
+        var guide = currentRecoveryGuide ? CurrentGuide : null;
+        string guideMessage = guide?.Message ?? "";
         patches["workspace.incident"] = new() { ["visible"] = controls && RecoveryPanelVisible(device) };
         var recoveryView = RecoveryCardState(device);
-        string recoveryCause = supportedRecoveryStop?["reason"]?.GetValue<string>() is { Length: > 0 } original && currentRecoveryGuide ? "Recovery after: " + original : recoveryView.Cause;
+        string recoveryCause = guide?.SupportedStop?["reason"]?.GetValue<string>() is { Length: > 0 } original ? "Recovery after: " + original : recoveryView.Cause;
         patches["incident"] = new() { ["text"] = recoveryCause, ["hint"] = recoveryCause };
         patches["recovery.next"] = new() { ["text"] = recoveryView.NextStep, ["hint"] = recoveryView.NextStep };
         patches["recovery.requirements"] = new() { ["text"] = recoveryView.Requirements, ["visible"] = recoveryView.Requirements.Length > 0, ["hint"] = recoveryView.Requirements };
-        patches["recovery.feedback"] = new() { ["text"] = currentRecoveryGuide ? handGuideRecoveryMessage : "", ["visible"] = currentRecoveryGuide && handGuideRecoveryMessage.Length > 0, ["hint"] = currentRecoveryGuide ? handGuideRecoveryMessage : "" };
+        patches["recovery.feedback"] = new() { ["text"] = guideMessage, ["visible"] = guideMessage.Length > 0, ["hint"] = guideMessage };
         patches["recovery.card.run"] = new() { ["text"] = recoveryView.ActionText, ["enabled"] = RecoveryCardCanRun(recoveryView), ["hint"] = recoveryView.NextStep };
         patches["teaching"] = new() { ["visible"] = !controllerStopped && teaching.BlocksTargets || PikaTeachingControlsVisible };
         patches["teleoperate.toggle"]!["text"] = teleoperating ? "Finish dragging" : "Drag joints";

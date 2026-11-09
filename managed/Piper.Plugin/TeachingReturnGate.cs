@@ -2,41 +2,43 @@ namespace LuckyRobots.Piper.Plugin;
 
 /// <summary>One bounded return attempt following a locally observed, approved
 /// hand-guiding session. Loading an ended state never grants this authority.</summary>
+/// <remarks>Plugin-D auto-return, per connection identity:
+/// Idle → Guiding (approval was absent) or GuidingAuthorized (approved before teaching);
+/// GuidingAuthorized → Released when the light turns off; Released → Attempted on the one
+/// eligible same-pose return. Guiding releases to Idle. Leaving Controls, Off, Playback,
+/// Unknown, a new identity and Invalidate return to Idle; HandGuiding restarts a session.</remarks>
 public sealed class TeachingReturnGate
 {
+    private enum Phase { Idle, Guiding, GuidingAuthorized, Released, Attempted }
     private readonly object sync = new();
     private string identity = "";
-    private bool guiding, inGuiding, authorized, attempted;
+    private Phase phase;
 
     public void Invalidate()
     {
-        lock (sync) { identity = ""; guiding = inGuiding = authorized = attempted = false; }
+        lock (sync) { identity = ""; phase = Phase.Idle; }
     }
 
     public bool Observe(TeachingState state, bool approvedBeforeTeaching, bool controlsPage, string connectionIdentity)
     {
         lock (sync)
         {
-            if (identity != connectionIdentity)
+            if (identity != connectionIdentity) { identity = connectionIdentity; phase = Phase.Idle; }
+            if (!controlsPage || state.Phase is TeachingPhase.Unknown or TeachingPhase.Off or TeachingPhase.Playback or TeachingPhase.PlaybackPaused)
             {
-                identity = connectionIdentity;
-                guiding = inGuiding = authorized = attempted = false;
-            }
-            if (!controlsPage || state.Phase is "unknown" or "off" or "playback" or "playback-paused")
-            {
-                guiding = inGuiding = authorized = false;
+                phase = Phase.Idle;
                 return false;
             }
             if (state.HandGuiding)
             {
-                if (!inGuiding) { authorized = approvedBeforeTeaching; attempted = false; }
-                guiding = inGuiding = true;
+                if (phase is not (Phase.Guiding or Phase.GuidingAuthorized))
+                    phase = approvedBeforeTeaching ? Phase.GuidingAuthorized : Phase.Guiding;
                 return false;
             }
-            inGuiding = false;
-            if (!guiding || !authorized || attempted || !state.SamePoseReturn || state.Phase != "ended" || !state.CanReturn)
+            phase = phase switch { Phase.Guiding => Phase.Idle, Phase.GuidingAuthorized => Phase.Released, var unchanged => unchanged };
+            if (phase != Phase.Released || !state.SamePoseReturn || state.Phase != TeachingPhase.Ended || !state.CanReturn)
                 return false;
-            attempted = true; // A rejected request is not retried on the next poll.
+            phase = Phase.Attempted; // A rejected request is not retried on the next poll.
             return true;
         }
     }

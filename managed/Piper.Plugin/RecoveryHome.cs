@@ -6,6 +6,8 @@ namespace LuckyRobots.Piper.Plugin;
 public sealed record RecoveryHomeSnapshot(JsonObject Device, JsonObject Motion, string Phase, string Message,
     long Sequence, long CapturedTicks);
 public sealed record RecoveryHomeAcknowledgement(long RequestId, long Sequence, long Ticks, bool Stateful = true);
+/// <summary>Feedback deadlines per recovery stage; fixtures shorten them.</summary>
+public sealed record RecoveryHomeDeadlines(int ResetMilliseconds = 6000, int EnableMilliseconds = 10000, int HomeMilliseconds = 60000);
 
 /// <summary>One explicit resting-arm recovery goal. Never retries a stage or restores an interrupted target.</summary>
 public static class RecoveryHome
@@ -48,6 +50,46 @@ public static class RecoveryHome
         return null;
     }
 
+    /// <summary>True once fresh feedback after <paramref name="acknowledged"/> shows this
+    /// stage finished and <paramref name="ready"/>; false while it is still pending.
+    /// Throws when the stage failed, was replaced, or a fault interrupted it.</summary>
+    private static bool StageVerified(RecoveryHomeSnapshot current, RecoveryHomeAcknowledgement acknowledged, string owner,
+        Func<RecoveryHomeSnapshot, bool> ready, bool allowResetTransitions)
+    {
+        if (current.Device["fresh"]?.GetValue<bool>() != true || current.Sequence <= acknowledged.Sequence || current.CapturedTicks <= acknowledged.Ticks)
+            return false;
+        long reported = current.Motion["request_id"]?.GetValue<long>() ?? 0;
+        if (reported > acknowledged.RequestId)
+            throw new InvalidOperationException("Another controller action replaced recovery to zero. Its action will not be changed.");
+        bool ours = reported == acknowledged.RequestId;
+        bool active = current.Motion["active"]?.GetValue<bool>() == true;
+        bool ownedByUs = current.Motion["owner"]?.GetValue<string>() == owner;
+        if (ours && current.Phase is "blocked" or "stopped" or "teaching")
+            throw new InvalidOperationException("Recovery stopped: " + current.Message);
+        bool ownReset = allowResetTransitions && ours && active && ownedByUs;
+        if (!ownReset && Interrupted(current.Device))
+            throw new InvalidOperationException("Teaching/playback or a controller/driver fault interrupted recovery. No later stage will run.");
+        if (!ours) return false;
+        if (active)
+        {
+            if (!ownedByUs) throw new InvalidOperationException("Another controller owns this action. Recovery to zero was cancelled.");
+            return false;
+        }
+        if (current.Phase != "complete" && acknowledged.Stateful)
+            throw new InvalidOperationException("Recovery stopped: " + current.Message);
+        return ready(current);
+    }
+
+    private static bool Interrupted(JsonObject device)
+    {
+        var status = device["status"];
+        int arm = status?["arm_status"]?.GetValue<int>() ?? -1;
+        int teach = status?["teach_state"]?.GetValue<int>() ?? -1;
+        bool residualTeach = arm is 0 or 1 && teach == 1;
+        return status?["error"]?.GetValue<int>() != 0 || arm is not (0 or 1) || teach is not (0 or 2 or 6) && !residualTeach ||
+            device["joints"] is not JsonArray { Count: 6 } joints || joints.Any(j => j?["fault"]?.GetValue<int>() != 0);
+    }
+
     private static bool SameDevice(RecoveryHomeSnapshot snapshot, string id, long generation) =>
         snapshot.Device["id"]?.GetValue<string>() == id && snapshot.Device["generation"]?.GetValue<long>() == generation;
 
@@ -63,15 +105,17 @@ public static class RecoveryHome
                 j["fault"]?.GetValue<int>() == 0 && j["enabled"]?.GetValue<bool>() == enabled);
     }
 
-    public static async Task Run(bool restingAndClearAcknowledged, string deviceId, long generation, string owner,
+    /// <summary>Runs after the operator's labelled "arm resting, path clear"
+    /// action; that click is the physical-support acknowledgement.</summary>
+    public static async Task Run(string deviceId, long generation, string owner,
         Func<RecoveryHomeSnapshot> snapshot,
         Func<string, CancellationToken, Task<RecoveryHomeAcknowledgement>> action,
         Func<long, CancellationToken, Task> stopOwnedRequest, Func<string, Task> progress,
-        CancellationToken cancellation, int resetTimeoutMilliseconds = 6000, int enableTimeoutMilliseconds = 10000,
-        int homeTimeoutMilliseconds = 60000)
+        CancellationToken cancellation, RecoveryHomeDeadlines? deadlines = null)
     {
-        if (!restingAndClearAcknowledged)
-            throw new InvalidOperationException("The arm must already rest securely on the desk or another support, with its route to zero clear. Motor flags cannot establish physical support.");
+        deadlines ??= new();
+        int resetTimeoutMilliseconds = deadlines.ResetMilliseconds, enableTimeoutMilliseconds = deadlines.EnableMilliseconds,
+            homeTimeoutMilliseconds = deadlines.HomeMilliseconds;
         RecoveryHomeSnapshot Current()
         {
             cancellation.ThrowIfCancellationRequested();
@@ -88,43 +132,8 @@ public static class RecoveryHome
         async Task Wait(RecoveryHomeAcknowledgement acknowledged, Func<RecoveryHomeSnapshot, bool> ready, int timeout, bool allowResetTransitions = false)
         {
             long started = Stopwatch.GetTimestamp();
-            while (true)
+            while (!StageVerified(Current(), acknowledged, owner, ready, allowResetTransitions))
             {
-                var current = Current();
-                if (current.Device["fresh"]?.GetValue<bool>() == true && current.Sequence > acknowledged.Sequence && current.CapturedTicks > acknowledged.Ticks)
-                {
-                    long reported = current.Motion["request_id"]?.GetValue<long>() ?? 0;
-                    if (reported > acknowledged.RequestId)
-                        throw new InvalidOperationException("Another controller action replaced recovery to zero. Its action will not be changed.");
-                    bool active = current.Motion["active"]?.GetValue<bool>() == true;
-                    bool ownReset = allowResetTransitions && reported == acknowledged.RequestId && active &&
-                        current.Motion["owner"]?.GetValue<string>() == owner;
-                    if (reported == acknowledged.RequestId && current.Phase is "blocked" or "stopped" or "teaching")
-                        throw new InvalidOperationException("Recovery stopped: " + current.Message);
-                    var status = current.Device["status"];
-                    int arm = status?["arm_status"]?.GetValue<int>() ?? -1;
-                    int teach = status?["teach_state"]?.GetValue<int>() ?? -1;
-                    bool residualTeach = arm is 0 or 1 && teach == 1;
-                    if (!ownReset && (status?["error"]?.GetValue<int>() != 0 || arm is not (0 or 1) ||
-                        teach is not (0 or 2 or 6) && !residualTeach ||
-                        current.Device["joints"] is not JsonArray { Count: 6 } joints ||
-                        joints.Any(j => j?["fault"]?.GetValue<int>() != 0)))
-                        throw new InvalidOperationException("Teaching/playback or a controller/driver fault interrupted recovery. No later stage will run.");
-                    if (reported == acknowledged.RequestId)
-                    {
-                        if (current.Motion["active"]?.GetValue<bool>() == true)
-                        {
-                            if (current.Motion["owner"]?.GetValue<string>() != owner)
-                                throw new InvalidOperationException("Another controller owns this action. Recovery to zero was cancelled.");
-                        }
-                        else
-                        {
-                            if (current.Phase != "complete" && acknowledged.Stateful)
-                                throw new InvalidOperationException("Recovery stopped: " + current.Message);
-                            if (ready(current)) return;
-                        }
-                    }
-                }
                 if (Stopwatch.GetElapsedTime(started).TotalMilliseconds > timeout)
                     throw new TimeoutException("Recovery feedback was not verified before its deadline. No stage will retry automatically.");
                 await Task.Delay(25, cancellation);

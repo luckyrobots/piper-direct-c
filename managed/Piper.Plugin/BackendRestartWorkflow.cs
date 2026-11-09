@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Text.Json.Nodes;
 
 namespace LuckyRobots.Piper.Plugin;
@@ -26,18 +27,24 @@ public static class BackendRestartRequest
 
 public sealed partial class PipersPlugin
 {
-    private bool backendRestartConfirmation;
+    private BackendRestartPhase backendRestart;
 
     private async Task RestartBackend(CancellationToken cancellation)
     {
-        var request = BackendRestartRequest.Create(state, owner, SimulationFollowingActive || GroupFollowActive, backendRestartConfirmation);
+        var request = BackendRestartRequest.Create(state, owner, SimulationFollowingActive || GroupFollowActive, backendRestart == BackendRestartPhase.Confirming);
         bool relaunchOwned = state?["backend_restart"]?["mode"]?.GetValue<string>() == "plugin";
-        var process = ownedBackend;
-        if (relaunchOwned && (process is null || process.HasExited ||
-            !BackendGuards.IsOwned(state!, process.Id, ownedBackendToken)))
+        var owned = OwnedBackend;
+        if (relaunchOwned && (owned is null || owned.Process.HasExited ||
+            !BackendGuards.IsOwned(state!, owned.Process.Id, owned.Token)))
             throw new InvalidOperationException("This panel does not own the backend process. Restart from the plugin session that started it; no shutdown was requested.");
         string previousInstance = request["backend_instance_id"]!.GetValue<string>();
-        backendRestartConfirmation = false;
+        backendRestart = BackendRestartPhase.Requested;
+        try { await RequestBackendRestart(request, relaunchOwned, owned?.Process, previousInstance, cancellation); }
+        finally { backendRestart = BackendRestartPhase.Idle; }
+    }
+
+    private async Task RequestBackendRestart(JsonObject request, bool relaunchOwned, Process? process, string previousInstance, CancellationToken cancellation)
+    {
         backendStatus = "Requesting an idle backend restart…";
         await Update(cancellation);
         await Call("/api/maintenance/restart", request, cancellation);
@@ -52,20 +59,19 @@ public sealed partial class PipersPlugin
         using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(1) };
         try
         {
-            bool relaunched = false;
             while (true)
             {
                 deadline.Token.ThrowIfCancellationRequested();
-                if (relaunchOwned && !relaunched && process!.HasExited)
+                if (relaunchOwned && backendRestart == BackendRestartPhase.Requested && process!.HasExited)
                 {
                     if (process.ExitCode != 75)
                         throw new InvalidOperationException($"Backend exited with {process.ExitCode}, not an acknowledged maintenance restart. It was not restarted automatically; inspect server logs.");
+                    backendRestart = BackendRestartPhase.Relaunching;
                     await StartBundledBackend(deadline.Token);
-                    relaunched = true;
                 }
                 try
                 {
-                    var next = JsonNode.Parse(await http.GetStringAsync("http://127.0.0.1:8765/api/state", deadline.Token));
+                    var next = JsonNode.Parse(await http.GetStringAsync(ControllerEndpoint.StateUrl, deadline.Token));
                     if (next?["backend_instance_id"]?.GetValue<string>() == previousInstance &&
                         next["backend_restart"]?["pending"]?.GetValue<bool>() == false &&
                         next["backend_restart"]?["last_failure"]?.GetValue<string>() is { Length: > 0 } failure)

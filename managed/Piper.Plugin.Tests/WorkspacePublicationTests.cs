@@ -44,14 +44,14 @@ internal static class WorkspacePublicationTests
         bool failed = false;
         try { await fixture.Render(); } catch (InvalidOperationException) { failed = true; }
         check(failed && attempts == 2 && fixture.Epoch == beforeFailure && fixture.Unscope(fixture.Wire("joint.6.target")).Length == 0 &&
-            fixture.Get<string>("uiActionError").Contains("Reopen Pipers", StringComparison.Ordinal) && fixture.Unscope("robot.one.disable") == "disable",
+            fixture.Plugin.uiActionError.Contains("Reopen Pipers", StringComparison.Ordinal) && fixture.Unscope("robot.one.disable") == "disable",
             "Repeated publication failure retried without a bound, lost its visible error, or left uncertain movement controls active");
         fixture.Publish = (_, _) => Task.CompletedTask;
         await fixture.Render();
         check(fixture.Unscope(fixture.Wire("joint.6.target")) == "joint.6.target", "A later successful publication could not restore controls after transport recovery");
 
         oldTarget = fixture.Wire("joint.6.target"); oldNavigation = fixture.Wire("workspace.settings.robot");
-        fixture.Set("workspacePage", "settings");
+        fixture.Plugin.Navigation = WorkspaceNavigation.At(WorkspacePage.Settings);
         check(fixture.Unscope(oldTarget).Length == 0 && fixture.Unscope(oldNavigation).Length == 0,
             "A page change accepted the previous page's controls before its replacement view was published");
         using (var cancelled = new CancellationTokenSource())
@@ -60,7 +60,7 @@ internal static class WorkspacePublicationTests
             try { await fixture.Render(cancelled.Token); } catch (OperationCanceledException) { }
             check(fixture.Unscope(oldTarget).Length == 0, "Cancellation before the render gate restored old targets from a different page");
         }
-        fixture.Set("preferences", RobotProfileRouting.Normalize(new Preferences(Robots: [new("two", "Piper 2")], ActiveRobotId: "two")));
+        fixture.Plugin.preferences = RobotProfileRouting.Normalize(new Preferences(Robots: [new("two", "Piper 2")], ActiveRobotId: "two"));
         check(fixture.Unscope("robot.one.disable").Length == 0 && fixture.Unscope("robot.two.disable") == "disable",
             "Publication recovery redirected a persistent release request to a different robot profile");
 
@@ -85,8 +85,7 @@ internal static class WorkspacePublicationTests
             cancelled.Cancel();
             bool retired = false;
             try { await navigation; } catch (OperationCanceledException) { retired = true; }
-            check(retired && serial.Get<string>("workspacePage") == "controls" && serial.Get<string>("settingsCategory") == "robot" &&
-                serial.Get<string>("settingsCamera") == "bench", "Cancelled navigation committed a destination before entering the view publication gate");
+            check(retired && serial.Plugin.Navigation == WorkspaceNavigation.Initial, "Cancelled navigation committed a destination before entering the view publication gate");
         }
         check(serialCalls == 1 && serial.Epoch == serialInitial, "Concurrent renders published out of order or committed an in-flight candidate");
         release.TrySetResult();
@@ -109,19 +108,19 @@ internal static class WorkspacePublicationTests
                 await patchRelease.Task.WaitAsync(ct);
             }
         };
-        updating.Set("uiActionError", "Old profile");
+        updating.Plugin.uiActionError = "Old profile";
         var activePatch = updating.Update();
         await patchEntered.Task.WaitAsync(TimeSpan.FromSeconds(2));
         var queuedPatch = updating.Update();
-        updating.Set("preferences", RobotProfileRouting.Normalize(new Preferences(Robots: [new("two", "Piper 2")], ActiveRobotId: "two")));
-        updating.Set("workspacePage", "recording");
+        updating.Plugin.preferences = RobotProfileRouting.Normalize(new Preferences(Robots: [new("two", "Piper 2")], ActiveRobotId: "two"));
+        updating.Plugin.Navigation = WorkspaceNavigation.At(WorkspacePage.Recording);
         var replacement = updating.Render();
         check(!replacement.IsCompleted && sent.Count == 1, "A full view overtook an in-flight patch");
         patchRelease.TrySetResult();
         await Task.WhenAll(activePatch, queuedPatch, replacement).WaitAsync(TimeSpan.FromSeconds(3));
         check(sent.Count == 1 && sent[0][oldStatus]["text"]?.GetValue<string>() == "Old profile",
             "A queued patch from the old profile/view was sent after its scope changed");
-        updating.Set("uiActionError", "New profile");
+        updating.Plugin.uiActionError = "New profile";
         await updating.Update();
         check(sent.Count == 2 && !sent[1].ContainsKey(oldStatus) &&
             sent[1][updating.Wire("workspace.action-error")]["text"]?.GetValue<string>() == "New profile",
@@ -134,12 +133,13 @@ internal static class WorkspacePublicationTests
     {
         private const BindingFlags Flags = BindingFlags.Instance | BindingFlags.NonPublic;
         private readonly PipersPlugin plugin = new();
+        public PipersPlugin Plugin => plugin;
         public Func<Widget, CancellationToken, Task> Publish = (_, _) => Task.CompletedTask;
         public Func<IReadOnlyDictionary<string, JsonObject>, CancellationToken, Task> PublishPatch = (_, _) => Task.CompletedTask;
         public Widget? LastRoot;
         public Fixture()
         {
-            Set("preferences", RobotProfileRouting.Normalize(new Preferences(Robots: [new("one", "Piper 1")], ActiveRobotId: "one")));
+            plugin.preferences = RobotProfileRouting.Normalize(new Preferences(Robots: [new("one", "Piper 1")], ActiveRobotId: "one"));
             var context = (PluginContext)Activator.CreateInstance(typeof(PluginContext), Flags, null,
                 [new PluginStart("fixture", Path.GetTempPath(), Path.GetTempPath()),
                     (Func<object, CancellationToken, Task>)(async (message, ct) =>
@@ -154,13 +154,13 @@ internal static class WorkspacePublicationTests
                         else throw new InvalidOperationException("Unexpected fixture publication");
                     }),
                     (Func<string, JsonObject, CancellationToken, Task<JsonElement>>)((_, _, _) => throw new InvalidOperationException("Unexpected engine request"))], null)!;
-            Set("engine", context);
+            plugin.engine = context;
         }
-        public long Epoch => Get<long>("workspaceViewEpoch");
+        public long Epoch => plugin.workspaceViewEpoch;
         public T Get<T>(string name) => (T)typeof(PipersPlugin).GetField(name, Flags)!.GetValue(plugin)!;
         public void Set(string name, object value) => typeof(PipersPlugin).GetField(name, Flags)!.SetValue(plugin, value);
-        public string Wire(string id) => WorkspaceEventScope.Wrap(Epoch, RobotProfileRouting.Active(Get<Preferences>("preferences")).Id, id);
-        public string Unscope(string id) => (string)typeof(PipersPlugin).GetMethod("UnscopeEvent", Flags)!.Invoke(plugin, [id])!;
+        public string Wire(string id) => WorkspaceEventScope.Wrap(Epoch, RobotProfileRouting.Active(plugin.preferences).Id, id);
+        public string Unscope(string id) => plugin.UnscopePublishedWorkspaceEvent(id);
         public Task Render(CancellationToken ct = default) => (Task)typeof(PipersPlugin).GetMethod("Render", Flags)!.Invoke(plugin, [ct])!;
         public Task Navigate(string action, CancellationToken ct) => (Task)typeof(PipersPlugin).GetMethod("WorkspaceEvent", Flags)!.Invoke(plugin, [action, ct])!;
         public Task Update() => (Task)typeof(PipersPlugin).GetMethod("Update", Flags)!.Invoke(plugin, [CancellationToken.None])!;

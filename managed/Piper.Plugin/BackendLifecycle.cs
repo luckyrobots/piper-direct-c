@@ -1,18 +1,66 @@
 using System.Diagnostics;
+using System.Net.Sockets;
 using System.Text;
 using System.Text.Json.Nodes;
 using LuckyEngine.PluginSdk;
 
 namespace LuckyRobots.Piper.Plugin;
 
+/// <summary>The local controller's fixed loopback endpoints (Piper.Host defaults).</summary>
+internal static class ControllerEndpoint
+{
+    public const string Loopback = "127.0.0.1";
+    public const int HttpPort = 8765, GrpcPort = 8766;
+    public const string GrpcAddress = "http://" + Loopback + ":8766";
+    private const string Http = "http://" + Loopback + ":8765";
+    public const string StateUrl = Http + "/api/state", StopUrl = Http + "/api/stop", ShutdownUrl = Http + "/api/shutdown";
+}
+
+public static class BackendGuards
+{
+    public static bool IsOwned(JsonNode snapshot, int processId, string? sessionToken) =>
+        snapshot["backend_process_id"]?.GetValue<int>() == processId &&
+        !string.IsNullOrEmpty(snapshot["token"]?.GetValue<string>()) &&
+        (sessionToken is null || snapshot["token"]?.GetValue<string>() == sessionToken);
+
+    public static async Task<bool> PortOccupied(int port, CancellationToken cancellation)
+    {
+        using var client = new TcpClient();
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellation);
+        deadline.CancelAfter(TimeSpan.FromMilliseconds(500));
+        try { await client.ConnectAsync("127.0.0.1", port, deadline.Token); return true; }
+        catch (SocketException) { return false; }
+        catch (OperationCanceledException) when (!cancellation.IsCancellationRequested) { return false; }
+    }
+}
+
+public static class BackendActivity
+{
+    public static bool AnyMotion(JsonNode? state) => state?["any_motion_active"]?.GetValue<bool>() == true ||
+        state?["motion"]?["active"]?.GetValue<bool>() == true ||
+        state?["motions"] is JsonArray lanes && lanes.Any(lane => lane?["active"]?.GetValue<bool>() == true) ||
+        state?["devices"] is JsonArray devices && devices.Any(device => device?["motion"]?["active"]?.GetValue<bool>() == true);
+    public static bool AnyQuery(JsonNode? state) => state?["any_query_active"]?.GetValue<bool>() == true ||
+        state?["query_active"]?.GetValue<bool>() == true ||
+        state?["motions"] is JsonArray lanes && lanes.Any(lane => lane?["query_active"]?.GetValue<bool>() == true);
+}
+
+/// <summary>Plugin-4 restart of the controller backend: Idle → Confirming (the
+/// operator opened the gripper-release confirmation) → Requested (the request
+/// was sent) → Relaunching (this session's owned process exited for maintenance
+/// and is being started again) → Idle. Any failure returns to Idle.</summary>
+internal enum BackendRestartPhase { Idle, Confirming, Requested, Relaunching }
+
 public sealed record BackendSettings(string WslDistribution = "Ubuntu", string PikaDevice = "/dev/serial/by-id/usb-1a86_USB_Serial-if00-port0");
 
 public sealed partial class PipersPlugin
 {
-    private Process? ownedBackend;
-    private string? ownedBackendToken;
-    private bool backendSetupOpen;
-    private string backendStatus = "Use the existing controller, or start the bundled server when ports 8765/8766 are free.";
+    /// <summary>Plugin-4 ownership: External (null) → Starting (Token null) → Ready (Token
+    /// set) → External once stopped or found exited. Read across threads; replaced whole.</summary>
+    private sealed record OwnedBackendProcess(Process Process, string? Token);
+    private OwnedBackendProcess? ownedBackend;
+    private OwnedBackendProcess? OwnedBackend => Volatile.Read(ref ownedBackend);
+    private string backendStatus = $"Use the existing controller, or start the bundled server when ports {ControllerEndpoint.HttpPort}/{ControllerEndpoint.GrpcPort} are free.";
     private string setupStatus = "Windows Pika requires WSL 2 + a Linux distribution and usbipd-win. Share only the Pika USB device with WSL. Driver/USB setup is explicit; see plugin instructions.";
     private BackendSettings BackendOptions => preferences.Backend ?? new();
 
@@ -21,20 +69,28 @@ public sealed partial class PipersPlugin
             Widget.Button("backend.start", "Start bundled server"), Widget.Button("backend.check", "Check Pika setup")),
         Widget.Column("backend.restart.confirmation", Widget.Label("backend.restart.explanation", "Restarting releases all Pika grippers. Empty the jaws first. Arm power stays unchanged; robot STOPs still need recovery.") with { Height = 64 },
             Widget.Row("backend.restart.confirmation.actions", Widget.Button("backend.restart.confirm", "Grippers empty — restart") with { Appearance = "primary" },
-                Widget.Button("backend.restart.cancel", "Cancel"))) with { Visible = backendRestartConfirmation, Padding = 12, Appearance = "panel" },
+                Widget.Button("backend.restart.cancel", "Cancel"))) with { Visible = backendRestart == BackendRestartPhase.Confirming, Padding = 12, Appearance = "panel" },
         Widget.Label("backend.status", backendStatus) with { Height = 42 },
         Widget.Label("backend.prerequisites", setupStatus) with { Height = 66 },
         Widget.Column("backend.options", Widget.Label("backend.wsl.label", "WSL distro") with { Visible = OperatingSystem.IsWindows() },
             new Widget("input", "backend.wsl") { Text = BackendOptions.WslDistribution, Hint = "Existing WSL 2 distribution; used only by a bundled server started here", Visible = OperatingSystem.IsWindows() },
             Widget.Label("backend.device.label", "Pika Linux device"),
             new Widget("input", "backend.device") { Text = BackendOptions.PikaDevice, Hint = "Linux serial path. Leave blank for an arm-only server." }),
-        Widget.Button("backend.instructions", "Open setup instructions")) with { Visible = backendSetupOpen || state is null };
+        Widget.Button("backend.instructions", "Open setup instructions"));
 
     private async Task BackendEvent(string action, string value, CancellationToken cancellation)
     {
-        if (action == "toggle") backendSetupOpen = !backendSetupOpen;
-        else if (action == "restart") { backendRestartConfirmation = true; await Render(cancellation); }
-        else if (action == "restart.cancel") { backendRestartConfirmation = false; await Render(cancellation); }
+        if (action == "restart")
+        {
+            if (backendRestart is not (BackendRestartPhase.Idle or BackendRestartPhase.Confirming))
+                throw new InvalidOperationException("A backend restart is already in progress.");
+            backendRestart = BackendRestartPhase.Confirming; await Render(cancellation);
+        }
+        else if (action == "restart.cancel")
+        {
+            if (backendRestart == BackendRestartPhase.Confirming) backendRestart = BackendRestartPhase.Idle;
+            await Render(cancellation);
+        }
         else if (action == "restart.confirm") await RestartBackend(cancellation);
         else if (action == "start") await StartBundledBackend(cancellation);
         else if (action == "check") await CheckPikaSetup(cancellation);
@@ -51,7 +107,7 @@ public sealed partial class PipersPlugin
 
     private async Task StartBundledBackend(CancellationToken cancellation)
     {
-        if (ownedBackend is { HasExited: false }) { backendStatus = "The bundled server is already running; waiting for feedback."; return; }
+        if (OwnedBackend is { Process.HasExited: false }) { backendStatus = "The bundled server is already running; waiting for feedback."; return; }
         string global = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "LuckyRobots", "Piper");
         Directory.CreateDirectory(global);
         FileStream startupLock;
@@ -59,9 +115,9 @@ public sealed partial class PipersPlugin
         catch (IOException) { backendStatus = "Another Pipers instance is starting the controller. Waiting for its endpoint."; return; }
         using (startupLock)
         {
-            if (await BackendGuards.PortOccupied(8765, cancellation) || await BackendGuards.PortOccupied(8766, cancellation))
+            if (await BackendGuards.PortOccupied(ControllerEndpoint.HttpPort, cancellation) || await BackendGuards.PortOccupied(ControllerEndpoint.GrpcPort, cancellation))
             {
-                backendStatus = "A local service is already listening on 8765/8766. Waiting for a compatible controller endpoint; no second server was started.";
+                backendStatus = $"A local service is already listening on {ControllerEndpoint.HttpPort}/{ControllerEndpoint.GrpcPort}. Waiting for a compatible controller endpoint; no second server was started.";
                 return;
             }
             string directory = Path.Combine(engine.Start.PackageDirectory, "server");
@@ -70,26 +126,27 @@ public sealed partial class PipersPlugin
             if (OperatingSystem.IsLinux()) File.SetUnixFileMode(executable, File.GetUnixFileMode(executable) | UnixFileMode.UserExecute);
             var start = new ProcessStartInfo(executable) { WorkingDirectory = directory, UseShellExecute = false, CreateNoWindow = true,
                 RedirectStandardInput = true, RedirectStandardOutput = true, RedirectStandardError = true };
-            foreach (string argument in new[] { "--port", "8765", "--grpc-port", "8766", "--web-root", Path.Combine(engine.Start.PackageDirectory, "web"),
+            foreach (string argument in new[] { "--port", ControllerEndpoint.HttpPort.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                "--grpc-port", ControllerEndpoint.GrpcPort.ToString(System.Globalization.CultureInfo.InvariantCulture), "--web-root", Path.Combine(engine.Start.PackageDirectory, "web"),
                 "--state-dir", Path.Combine(global, "controller"), "--session-owner", owner, "--pika-device", BackendOptions.PikaDevice }) start.ArgumentList.Add(argument);
             if (OperatingSystem.IsWindows()) { start.ArgumentList.Add("--pika-wsl"); start.ArgumentList.Add(BackendOptions.WslDistribution); }
-            ownedBackend?.Dispose();
-            ownedBackendToken = null;
-            ownedBackend = Process.Start(start) ?? throw new IOException("Could not start the bundled controller.");
-            ownedBackend.StandardInput.Close();
-            _ = DrainBackendOutput(ownedBackend.StandardOutput, Path.Combine(global, "server-output.log"));
-            _ = DrainBackendOutput(ownedBackend.StandardError, Path.Combine(global, "server-errors.log"));
+            Interlocked.Exchange(ref ownedBackend, null)?.Process.Dispose();
+            var process = Process.Start(start) ?? throw new IOException("Could not start the bundled controller.");
+            Volatile.Write(ref ownedBackend, new(process, null));
+            process.StandardInput.Close();
+            _ = DrainBackendOutput(process.StandardOutput, Path.Combine(global, "server-output.log"));
+            _ = DrainBackendOutput(process.StandardError, Path.Combine(global, "server-errors.log"));
             using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(1) };
             for (int attempt = 0; attempt < 40; attempt++)
             {
                 cancellation.ThrowIfCancellationRequested();
-                if (ownedBackend.HasExited) { backendStatus = $"Bundled server exited ({ownedBackend.ExitCode}). See {global}. Check USB/controller prerequisites."; return; }
+                if (process.HasExited) { backendStatus = $"Bundled server exited ({process.ExitCode}). See {global}. Check USB/controller prerequisites."; return; }
                 try
                 {
-                    var snapshot = JsonNode.Parse(await http.GetStringAsync("http://127.0.0.1:8765/api/state", cancellation));
-                    if (snapshot is not null && BackendGuards.IsOwned(snapshot, ownedBackend.Id, null))
+                    var snapshot = JsonNode.Parse(await http.GetStringAsync(ControllerEndpoint.StateUrl, cancellation));
+                    if (snapshot is not null && BackendGuards.IsOwned(snapshot, process.Id, null))
                     {
-                        ownedBackendToken = snapshot["token"]!.GetValue<string>();
+                        Volatile.Write(ref ownedBackend, new(process, snapshot["token"]!.GetValue<string>()));
                         backendStatus = "Bundled server started in monitoring mode. It belongs to this plugin session; closing Pipers stops this server. Startup sends no motor-power or movement commands.";
                         return;
                     }
@@ -133,7 +190,6 @@ public sealed partial class PipersPlugin
         deadline.CancelAfter(TimeSpan.FromSeconds(10));
         using var check = Process.Start(start) ?? throw new IOException("Could not start WSL. Install WSL 2 and the selected Linux distribution.");
         check.StandardInput.Close();
-        using var stop = deadline.Token.Register(() => { try { if (!check.HasExited) check.Kill(true); } catch (InvalidOperationException) { } });
         var output = check.StandardOutput.ReadToEndAsync(deadline.Token);
         var error = check.StandardError.ReadToEndAsync(deadline.Token);
         try
@@ -155,15 +211,15 @@ public sealed partial class PipersPlugin
 
     private async Task StopOwnedBackend()
     {
-        var process = ownedBackend;
-        if (process is null) return;
+        if (OwnedBackend is not { } owned) return;
+        var process = owned.Process;
         try
         {
             if (process.HasExited) return;
             using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(4));
             using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(1) };
-            var snapshot = JsonNode.Parse(await http.GetStringAsync("http://127.0.0.1:8765/api/state", deadline.Token))!;
-            if (!BackendGuards.IsOwned(snapshot, process.Id, ownedBackendToken)) return;
+            var snapshot = JsonNode.Parse(await http.GetStringAsync(ControllerEndpoint.StateUrl, deadline.Token))!;
+            if (!BackendGuards.IsOwned(snapshot, process.Id, owned.Token)) return;
             string currentToken = snapshot["token"]!.GetValue<string>();
             if (BackendActivity.AnyMotion(snapshot))
             {
@@ -173,12 +229,12 @@ public sealed partial class PipersPlugin
                 if (motions.Any(lane => lane?["active"]?.GetValue<bool>() == true && lane["owner"]?.GetValue<string>() != owner))
                 { Trace.TraceWarning("Bundled server has another client's active lease; no stop or shutdown was sent."); return; }
                 var stop = new JsonObject { ["owner"] = owner };
-                using var stopRequest = new HttpRequestMessage(HttpMethod.Post, "http://127.0.0.1:8765/api/stop") { Content = new StringContent(stop.ToJsonString(), Encoding.UTF8, "application/json") };
+                using var stopRequest = new HttpRequestMessage(HttpMethod.Post, ControllerEndpoint.StopUrl) { Content = new StringContent(stop.ToJsonString(), Encoding.UTF8, "application/json") };
                 stopRequest.Headers.Add("X-Piper-Token", currentToken);
                 using var stopped = await http.SendAsync(stopRequest, deadline.Token);
                 stopped.EnsureSuccessStatusCode();
             }
-            using var request = new HttpRequestMessage(HttpMethod.Post, "http://127.0.0.1:8765/api/shutdown") { Content = new StringContent(new JsonObject { ["owner"] = owner }.ToJsonString(), Encoding.UTF8, "application/json") };
+            using var request = new HttpRequestMessage(HttpMethod.Post, ControllerEndpoint.ShutdownUrl) { Content = new StringContent(new JsonObject { ["owner"] = owner }.ToJsonString(), Encoding.UTF8, "application/json") };
             request.Headers.Add("X-Piper-Token", currentToken);
             using var response = await http.SendAsync(request, deadline.Token);
             response.EnsureSuccessStatusCode();
@@ -186,6 +242,6 @@ public sealed partial class PipersPlugin
         }
         catch (Exception error) when (error is HttpRequestException or OperationCanceledException or InvalidOperationException or System.Text.Json.JsonException)
         { Trace.TraceWarning("Bundled server shutdown: " + error.Message); }
-        finally { process.Dispose(); ownedBackend = null; }
+        finally { process.Dispose(); Interlocked.CompareExchange(ref ownedBackend, null, owned); }
     }
 }

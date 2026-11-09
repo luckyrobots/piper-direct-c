@@ -17,7 +17,7 @@ internal static class TelemetryConnectionPresentationTests
         Set("preferences", RobotProfileRouting.Normalize(new Preferences(Robots: [new("piper-1", "Piper 1", "can-a"), new("piper-2", "Piper 2", "can-b")], ActiveRobotId: "piper-2")));
         Set("state", new JsonObject { ["selected"] = "can-b", ["devices"] = new JsonArray(new JsonObject { ["id"] = "can-b", ["fresh"] = false }) });
         UiEvent Input(string id) => new("fixture", WorkspaceEventScope.Wrap(0, "piper-2", id), "click", JsonSerializer.SerializeToElement(true));
-        bool Permission(UiEvent input) => (bool)typeof(PipersPlugin).GetMethod("UiEventNeedsPermission", flags)!.Invoke(plugin, [input])!;
+        bool Permission(UiEvent input) => PipersPlugin.ControlEventNeedsPermission(plugin.UnscopePublishedWorkspaceEvent(input.WidgetId));
         UiEvent navigation = Input("profiles.select.piper-1"), target = Input("joint.6.plus");
         check(!Permission(navigation) && Permission(target), "Profile navigation inherited the stale arm's movement-permission epoch or joint targets lost their guard");
         check(Permission(Input("profiles.can")) && Permission(Input("profiles.pika")), "Navigation exception also exempted hardware assignment changes");
@@ -30,12 +30,12 @@ internal static class TelemetryConnectionPresentationTests
             if (input.WidgetId == "block") { entered.TrySetResult(); await release.Task.WaitAsync(cancellation); return; }
             executed.Enqueue(input.WidgetId);
             if (input.WidgetId == navigation.WidgetId) navigated.TrySetResult();
-        }, () => plugin.CommandAuthority.Epoch, Permission, error => throw new InvalidOperationException("Unexpected navigation fixture error", error),
+        }, () => plugin.CommandAuthority.Epoch, error => throw new InvalidOperationException("Unexpected navigation fixture error", error),
             discarded: (input, _) => discarded.Enqueue(input.WidgetId)))
         {
-            dispatch.Enqueue(new("fixture", "block", "click", default), 0);
+            dispatch.Enqueue(new("fixture", "block", "click", default), 0, false);
             await entered.Task.WaitAsync(TimeSpan.FromSeconds(2));
-            dispatch.Enqueue(navigation, 0); dispatch.Enqueue(target, 0);
+            dispatch.Enqueue(navigation, 0, Permission(navigation)); dispatch.Enqueue(target, 0, Permission(target));
             // Simulate the heartbeat's next disarm while CAN feedback stays stale.
             plugin.CommandAuthority.Revoke(); release.TrySetResult();
             await navigated.Task.WaitAsync(TimeSpan.FromSeconds(2));

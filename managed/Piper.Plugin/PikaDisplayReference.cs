@@ -143,7 +143,7 @@ public sealed partial class PipersPlugin
             ? $"Closed display reference: {reference.Value:F5} rad · current raw encoder: {raw} rad. Scene/readout only; full-travel calibration unverified."
             : $"Nominal reference · raw encoder: {raw} rad. " + (!reading && reason.Length == 0 ? "Jaws closed? Use current as closed to align the scene/readout." : reason) };
         patches["pika.reference.set"] = new() { ["enabled"] = TelemetryIsFresh() && reason.Length == 0,
-            ["visible"] = workspacePage != "controls" || !reading && reason.Length == 0,
+            ["visible"] = Navigation.Page != WorkspacePage.Controls || !reading && reason.Length == 0,
             ["hint"] = reason.Length > 0 ? reason : "Only click with the physical jaws fully closed. Saves a display reference; sends no motion or encoder command." };
         patches["pika.reference.clear"] = new() { ["enabled"] = pikaDisplayReference is not null };
     }

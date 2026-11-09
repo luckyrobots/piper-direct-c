@@ -176,6 +176,10 @@ internal static class PikaDisplayReferenceTests
             await Event("pika.plus");
             check(rpc.Requests.Count == 0, "A gripper target bypassed arm recovery");
             device["recovery_required"] = false;
+            pika["pending"] = true; await Event("pika.plus");
+            pika["pending"] = false; pika["enabled"] = false; await Event("pika.zero");
+            check(rpc.Requests.Count == 0, "A queued gripper target bypassed the pending-move or unpowered-jaws blocker shown by the panel");
+            pika["enabled"] = true;
             await Event("pika.plus"); await Event("pika.target", 40);
             check(rpc.Requests.Count == 2 && rpc.Requests.All(r => r.Route == "/api/pika/position") &&
                 Math.Abs(JsonNode.Parse(rpc.Requests[0].Json)!["value"]!.GetValue<double>() - PikaProtocol.Angle(1)) < 1e-12 &&

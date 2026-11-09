@@ -91,7 +91,6 @@ public sealed partial class PipersPlugin
     private string telemetryConnectionUiIssue = "";
     private string linkBackendToken = "";
     private long scenePermissionEpoch;
-    private long recoveryRequestId, recoveryAcknowledgedTicks, recoveryAcknowledgedSequence;
 
     private bool TelemetryIsFresh() => telemetry.Latest is { } receipt && receipt.BackendToken == token && receipt.IsFresh(Stopwatch.GetTimestamp());
     private void DisarmTelemetryTargets(string reason, bool clearLink, string? forgetApproval = null, bool forgetAllApprovals = false)
@@ -99,14 +98,14 @@ public sealed partial class PipersPlugin
         CommandAuthority.Revoke(forgetApproval, () =>
         {
             approved = linkCommandsEnabled = false;
-            teachingSeen = approvalBeforeTeaching = false;
+            teachingOwnership = TeachingOwnership.None;
         }, forgetAllApprovals);
         CurrentRecovery?.Cancel();
         CancelGroupSimulationFollowingInput(reason);
         teachingReturnGate.Invalidate();
         StopViewportDrag();
         acknowledgedScenePose = null; linkErrorDegrees = null;
-        if (clearLink) { link = null; recoveryInProgress = false; }
+        if (clearLink) link = null;
     }
 
     private void PauseSceneFollowing()
@@ -143,7 +142,7 @@ public sealed partial class PipersPlugin
             // Keep the old receipt from granting control under the new epoch
             // between invalidation and publication of the replacement frame.
             telemetry.Disconnect();
-            DisarmTelemetryTargets("Controller session or assigned CAN connection changed", clearLink: true); // Also clears teachingSeen.
+            DisarmTelemetryTargets("Controller session or assigned CAN connection changed", clearLink: true); // Also clears teachingOwnership.
             if (backendChanged) ReleasePikaRole();
         }
         token = receipt.BackendToken;
@@ -161,15 +160,14 @@ public sealed partial class PipersPlugin
         {
             // Observe the transition on the reader even if the editor is busy,
             // so a short teaching interval cannot leave an old drag armed.
-            if (!teachingSeen)
+            if (teachingOwnership == TeachingOwnership.None)
             {
                 telemetry.Disconnect();
                 CommandAuthority.Revoke(revokeLocalApproval: () =>
                 {
-                    approvalBeforeTeaching = approved;
+                    ObserveTeachingOwnership();
                     approved = linkCommandsEnabled = false;
                 });
-                teachingSeen = true;
                 teachingDevice = linked.DeviceId; teachingGeneration = linked.Generation;
             }
             approved = linkCommandsEnabled = false;
@@ -209,7 +207,7 @@ public sealed partial class PipersPlugin
                 PikaTeachingTelemetryInterrupted();
                 DisarmTelemetryTargets("Controller telemetry interrupted", clearLink: false); ReleasePikaRole();
                 telemetryIssue = error is RpcException { StatusCode: StatusCode.Unavailable }
-                    ? "Controller unavailable on 127.0.0.1:8766; reconnecting automatically."
+                    ? $"Controller unavailable on {ControllerEndpoint.Loopback}:{ControllerEndpoint.GrpcPort}; reconnecting automatically."
                     : "Controller telemetry interrupted: " + error.Message;
                 message = telemetryIssue;
                 await Task.Delay(1000, cancellation);
@@ -393,7 +391,6 @@ public sealed partial class PipersPlugin
                 await PublishMeasuredGhosts(cancellation);
                 await PublishMeasuredScene(cancellation);
                 QueueWizardHighlight();
-                await ObserveRecovery(cancellation);
                 await Update(cancellation);
             }
             catch (Exception error) when (!cancellation.IsCancellationRequested)
@@ -406,37 +403,6 @@ public sealed partial class PipersPlugin
             }
             QueueHeightMaintenance();
             await Task.Delay(100, cancellation);
-        }
-    }
-
-    private async Task ObserveRecovery(CancellationToken cancellation)
-    {
-        if (recoveryHomeBusy) return;
-        if (!recoveryInProgress || !HasFreshControlTelemetry(out var receipt)) return;
-        var device = Device(expectedToken: receipt!.BackendToken, sourceReceipt: receipt);
-        if (device["recovery_required"]?.GetValue<bool>() != true && device["reset_pending"]?.GetValue<bool>() != true)
-        {
-            recoveryInProgress = false;
-            message = "Recovery verified. The interrupted move was discarded. Enable robot when ready; measured scene tracking continues.";
-            return;
-        }
-        var plan = RecoveryPlan.Inspect(device, receipt.State["motion"]?["active"]?.GetValue<bool>() == true);
-        if (plan.RetryFailedReset)
-        {
-            long acknowledged = Interlocked.Read(ref recoveryAcknowledgedTicks);
-            if (acknowledged > 0 && (receipt.Sequence <= Interlocked.Read(ref recoveryAcknowledgedSequence) ||
-                receipt.CapturedTicks(Stopwatch.Frequency) <= acknowledged ||
-                receipt.State["motion"]?["request_id"]?.GetValue<long>() != Interlocked.Read(ref recoveryRequestId))) return;
-            // A failed native reset has retired. Release only the UI's waiting
-            // latch; a supported retry remains an explicit operator action.
-            recoveryInProgress = false;
-            message = "The previous reset did not clear STOP. Keep supporting the arm and use Retry failed reset when ready.";
-        }
-        else if (plan.Action == "verify-reset" && await commands.WaitAsync(0, cancellation))
-        {
-            try { await Command("verify-reset", null, cancellation, recoveryAcknowledged: true); recoveryInProgress = false; }
-            catch (InvalidOperationException error) { message = error.Message; recoveryInProgress = false; }
-            finally { commands.Release(); }
         }
     }
 

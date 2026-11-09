@@ -6,6 +6,11 @@ namespace LuckyRobots.Piper.Plugin;
 
 public sealed partial class PipersPlugin
 {
+    private static readonly TimeSpan StopAcknowledgementBudget = TimeSpan.FromSeconds(4);
+    // Post-STOP cleanup runs after the hardware request, with its own budget, so
+    // a slow STOP RPC never starts group retirement or the teaching save cancelled.
+    private static readonly TimeSpan StopCleanupBudget = TimeSpan.FromSeconds(4);
+
     // This path deliberately does not wait for the ordinary UI command gate or
     // for editor requests. The backend attempts the two channels independently.
     private async Task StopImmediately(RobotProfile profile, string expectedToken, bool groupActive)
@@ -21,9 +26,8 @@ public sealed partial class PipersPlugin
         DisarmTelemetryTargets("Operator STOP; previous actions discarded", clearLink: false, forgetApproval: profile.Id, forgetAllApprovals: groupActive);
         CancelHandGuideRecovery();
         uiEvents?.InvalidateControlEvents();
-        recoveryInProgress = false;
         message = "STOP requested · previous targets discarded · verifying hardware";
-        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(4));
+        using (var timeout = new CancellationTokenSource(StopAcknowledgementBudget))
         try
         {
             if (!groupActive && deviceId.Length == 0) throw new InvalidOperationException("Assign this robot's CAN adapter before sending its STOP.");
@@ -72,12 +76,13 @@ public sealed partial class PipersPlugin
         }
         // Saving observations and updating the editor happen after the stop
         // request, so a slow renderer or disk cannot hold up the hardware path.
+        using var cleanup = new CancellationTokenSource(StopCleanupBudget);
         if (groupActive)
         {
-            try { await StopGroupSimulationFollowing("Operator STOP · follower group discarded", timeout.Token); }
+            try { await StopGroupSimulationFollowing("Operator STOP · follower group discarded", cleanup.Token); }
             catch (Exception error) { System.Diagnostics.Trace.TraceWarning("Group STOP: {0}", error.Message); }
         }
-        try { await FinishPikaTeaching("Operator STOP", timeout.Token); }
+        try { await FinishPikaTeaching("Operator STOP", cleanup.Token); }
         catch (Exception error) { System.Diagnostics.Trace.TraceWarning("Teaching stop save: {0}", error.Message); }
         try { await Update(shutdown.Token); }
         catch (Exception error) { System.Diagnostics.Trace.TraceWarning("STOP view: {0}", error.Message); }

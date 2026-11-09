@@ -25,7 +25,7 @@ internal static class TeachingModernTests
         check(legacy.ReturnFlags()["zero_pose_confirmed"]?.GetValue<bool>() == true && legacy.ReturnFlags()["same_pose_confirmed"] is null,
             "Legacy return changed its zero-only API contract");
 
-        TeachingState guiding = modern with { Phase = "hand-guiding", Active = true, CanReturn = false };
+        TeachingState guiding = modern with { Phase = TeachingPhase.HandGuiding, Active = true, CanReturn = false };
         var gate = new TeachingReturnGate();
         check(!gate.Observe(modern, true, true, "connection-a"), "Loading an ended controller state issued an automatic return");
         check(!gate.Observe(guiding, true, true, "connection-a"), "Entering hand guiding changed controller mode");
@@ -39,7 +39,7 @@ internal static class TeachingModernTests
         gate.Observe(guiding, true, true, "connection-b");
         check(!gate.Observe(legacy, true, true, "connection-b"), "Legacy firmware returned automatically without its explicit zero flow");
         gate.Observe(guiding, true, true, "connection-b");
-        gate.Observe(modern with { Phase = "playback", Active = true }, true, true, "connection-b");
+        gate.Observe(modern with { Phase = TeachingPhase.Playback, Active = true }, true, true, "connection-b");
         check(!gate.Observe(modern, true, true, "connection-b"), "Onboard playback completion was mistaken for approved hand guiding");
         gate.Observe(guiding, true, true, "connection-b");
         gate.Observe(modern, true, false, "connection-b");

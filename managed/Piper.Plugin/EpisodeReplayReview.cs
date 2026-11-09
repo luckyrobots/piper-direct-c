@@ -119,7 +119,7 @@ public sealed partial class PipersPlugin
 
     private async Task ReplayEvent(string action, JsonElement value, CancellationToken cancellation)
     {
-        if (workspacePage != "replay")
+        if (Navigation.Page != WorkspacePage.Replay)
             throw new InvalidOperationException("Open Physical replay review before editing its preparation.");
         if (action == "path")
         {
@@ -241,7 +241,7 @@ public sealed partial class PipersPlugin
 
     private void AddReplayPatches(Dictionary<string, JsonObject> patches, JsonObject? device)
     {
-        if (workspacePage != "replay" || replayReview is not { Artifact: var artifact } review)
+        if (Navigation.Page != WorkspacePage.Replay || replayReview is not { Artifact: var artifact } review)
             return;
         patches["replay.placement.confirm"] = new() { ["text"] = review.TubeConfirmed ? "Tube placement confirmed" : "Tube is at this start" };
         bool fresh = device is not null && telemetry.Latest is { } receipt && receipt.BackendToken == token &&

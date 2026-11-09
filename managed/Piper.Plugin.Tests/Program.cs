@@ -75,6 +75,9 @@ using (var absent = System.Text.Json.JsonDocument.Parse("{}"))
         Check(!LuckyRobots.Piper.SessionOwnerGuard.Allows("plugin-session", route, absent.RootElement), "Missing owner accepted for " + route);
     }
 }
+Check(ControllerEndpoint.GrpcAddress == $"http://{ControllerEndpoint.Loopback}:{ControllerEndpoint.GrpcPort}" &&
+    ControllerEndpoint.StateUrl == $"http://{ControllerEndpoint.Loopback}:{ControllerEndpoint.HttpPort}/api/state",
+    "Controller endpoint constants disagree with their ports");
 var followerPreferences = RobotProfileRouting.Normalize(new Preferences(Robots: [
     new("first", "First", FollowSimulationSelected: true), new("second", "Second")], ActiveRobotId: "first"));
 followerPreferences = RobotProfileRouting.Activate(followerPreferences, "second");
@@ -281,7 +284,6 @@ Check(RecoveryPlan.Inspect(stopped, false).Action == "verify-current", "Healthy 
 stopped["status"]!["teach_state"] = 3;
 Check(RecoveryPlan.Inspect(stopped, false).Action is null, "Active teaching must not reset");
 RecoveryPlanTests.Run(Check);
-await RecoveryPlanTests.RunObservation(Check);
 RecoveryWorkspaceTests.Run(Check);
 await RecoveryWorkspaceTests.RunEvents(Check);
 await RecoveryWorkspaceTests.RunSupportedSequence(Check);
@@ -318,11 +320,11 @@ foreach (var joint in manualDevice["joints"]!.AsArray()) { joint!["fresh"] = tru
 Check(TeachingState.Inspect(manualDevice) is { HandGuiding: true, Active: true, BlocksTargets: true }, "Physical hand-guiding mode was not recognized");
 Check(!PipersPlugin.TeachingCanResume(manualDevice), "Hand-guiding feedback rearmed motion controls");
 manualDevice["status"]!["teach_state"] = 3;
-Check(TeachingState.Inspect(manualDevice) is { Phase: "playback", BlocksTargets: true }, "Onboard playback was not separated from CAN control");
+Check(TeachingState.Inspect(manualDevice) is { Phase: TeachingPhase.Playback, BlocksTargets: true }, "Onboard playback was not separated from CAN control");
 manualDevice["status"]!["teach_state"] = 4;
-Check(TeachingState.Inspect(manualDevice).Phase == "playback-paused", "Paused onboard playback was treated as stopped teaching");
+Check(TeachingState.Inspect(manualDevice).Phase == TeachingPhase.PlaybackPaused, "Paused onboard playback was treated as stopped teaching");
 manualDevice["status"]!["teach_state"] = 2;
-Check(TeachingState.Inspect(manualDevice) is { Phase: "ended", ReturnRequired: true, CanReturn: false }, "Ended recording with sticky teach control was treated as a fault or normal CAN");
+Check(TeachingState.Inspect(manualDevice) is { Phase: TeachingPhase.Ended, ReturnRequired: true, CanReturn: false }, "Ended recording with sticky teach control was treated as a fault or normal CAN");
 manualDevice["teaching"] = new JsonObject { ["phase"] = "ended", ["return_required"] = true, ["can_return"] = true };
 Check(TeachingState.Inspect(manualDevice).CanReturn, "Native validated teaching return was not offered");
 manualDevice.Remove("teaching"); manualDevice["status"]!["control"] = 1;

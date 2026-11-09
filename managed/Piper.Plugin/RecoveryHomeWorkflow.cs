@@ -26,9 +26,9 @@ public sealed partial class PipersPlugin
 
     private string? RecoveryHomeBlocker(RecoveryHomeSnapshot? snapshot = null)
     {
-        if (workspacePage != "controls" || calibrationOpen) return "Return to Controls before recovering to zero.";
+        if (Navigation.Page != WorkspacePage.Controls) return "Return to Controls before recovering to zero.";
         if (GroupFollowActive) return "Stop following before recovering to zero.";
-        if (CurrentRecovery is not null || recoveryInProgress || switchingProfile) return "Wait for the current recovery or connection change.";
+        if (CurrentRecovery is not null || switchingProfile) return "Wait for the current recovery or connection change.";
         try
         {
             var current = snapshot ?? HomeSnapshot();
@@ -75,29 +75,26 @@ public sealed partial class PipersPlugin
             {
                 await commands.WaitAsync(operation.Token); entered = true;
                 await SaveProgress(recoveryHomeProgress);
-                await RecoveryHome.Run(true, deviceId, generation, owner, () => HomeSnapshot(operation),
+                await RecoveryHome.Run(deviceId, generation, owner, () => HomeSnapshot(operation),
                     async (step, stepCancellation) =>
                     {
                         var before = HomeSnapshot(operation);
                         if (step == "reset") Volatile.Write(ref operation.ResetAt, Stopwatch.GetTimestamp());
                         else if (step != "verify-reset") Volatile.Write(ref operation.ResetAt, 0);
                         if (step is "enable" or "move-to-zero") GrantRecoveryHolding(operation, stepCancellation);
-                        var reply = await Command(step, null, stepCancellation, recoveryAcknowledged: step is "reset" or "verify-reset" or "verify-current",
-                            expectedDeviceId: deviceId, expectedGeneration: generation, expectedToken: backend,
-                            expectedPermissionEpoch: operation.Epoch, speedOverridePercent: RecoveryHome.SpeedPercent);
+                        var reply = await Command(step, null, stepCancellation,
+                            step is "reset" or "verify-reset" or "verify-current" ? CommandPurpose.Recovery : CommandPurpose.Control,
+                            operation.Scope, operation.Epoch, RecoveryHome.SpeedPercent);
                         var receipt = telemetry.Latest;
                         long request = reply["request_id"]?.GetValue<long>() ?? before.Motion["request_id"]?.GetValue<long>() ?? 0;
                         return new(request, receipt?.Sequence ?? 0, Stopwatch.GetTimestamp(), reply["request_id"] is not null);
                     }, async (request, stopping) =>
                     {
                         // A timeout within this operation can still stop its own
-                        // exact move. Priority STOP revocation already owns the
-                        // transport if the epoch changed.
+                        // exact move; RecoveryHome.Run already matched the device,
+                        // generation, owner and active request. Priority STOP
+                        // revocation already owns the transport if the epoch changed.
                         if (!RecoveryScopeMatches(operation)) return;
-                        var current = HomeSnapshot(operation);
-                        if (current.Device["id"]?.GetValue<string>() != deviceId || current.Device["generation"]?.GetValue<long>() != generation ||
-                            current.Motion["request_id"]?.GetValue<long>() != request || current.Motion["owner"]?.GetValue<string>() != owner ||
-                            current.Motion["active"]?.GetValue<bool>() != true) return;
                         await Call("/api/stop", new JsonObject { ["device_id"] = deviceId, ["generation"] = generation,
                             ["request_id"] = request, ["owner"] = owner }, stopping, backend);
                     }, stage => SaveProgress(stage), operation.Token);
@@ -126,10 +123,10 @@ public sealed partial class PipersPlugin
     private void AddRecoveryHomePatches(Dictionary<string, JsonObject> patches)
     {
         string? blocked = RecoveryHomeBlocker();
-        patches["recovery.home"] = new() { ["text"] = recoveryHomeBusy ? "Recovering to zero…" : "Arm resting, path clear — recover to zero",
+        patches["recovery.home"] = new() { ["text"] = RecoveryHomeBusy ? "Recovering to zero…" : "Arm resting, path clear — recover to zero",
             ["enabled"] = blocked is null, ["hint"] = blocked ??
             "Rest the arm securely on a support and clear its path to zero. The controller verifies recovery and moves at 10%." };
-        if (!recoveryHomeBusy) return;
+        if (!RecoveryHomeBusy) return;
         patches["recovery.next"]["text"] = recoveryHomeProgress;
         patches["status"] = new() { ["text"] = recoveryHomeProgress };
         foreach (string id in patches.Keys.Where(id => id != "recovery.home" &&

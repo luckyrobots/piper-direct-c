@@ -18,7 +18,7 @@ public sealed partial class PipersPlugin
     private int pikaRole;
     private PikaSessionRole PikaRole => (PikaSessionRole)Volatile.Read(ref pikaRole);
     private bool pikaOwned => PikaRole == PikaSessionRole.Owned;
-    private void SetPikaRole(PikaSessionRole next) => Volatile.Write(ref pikaRole, (int)next);
+    internal void SetPikaRole(PikaSessionRole next) => Volatile.Write(ref pikaRole, (int)next);
     /// <summary>Moves only from <paramref name="expected"/>, so a revocation that
     /// raced an in-flight connect is not overwritten.</summary>
     private bool TryEnterPikaRole(PikaSessionRole expected, PikaSessionRole next) =>

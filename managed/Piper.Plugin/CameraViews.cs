@@ -4,8 +4,6 @@ namespace LuckyRobots.Piper.Plugin;
 
 public sealed partial class PipersPlugin
 {
-    private string settingsCamera = "bench";
-
     private Widget Camera(string id, string title)
     {
         var heading = new List<Widget> { Widget.Label("camera." + id + ".title", title) with { Height = 28 } };

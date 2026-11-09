@@ -130,11 +130,9 @@ public static class CalibrationTests
         badPose = (JsonObject)pose.DeepClone(); badPose["modelRevision"] = "revision-b";
         Reject(() => CalibrationCapture.Read(modelBound, modelBound, desk, original, device, badPose, 1000, 1200), "An in-place compiled source/dependency revision reused old calibration geometry");
         foreach (string targetAction in new[] { "enable", "safety.accept", "zero.all", "pika.target", "joint.6.plus", "joint.3.target", "teleoperate.toggle", "engine.robot.target", "engine.robot.follow" })
-        {
-            check(CalibrationCommandGuard.Blocks(targetAction, true), "A queued/hotkey target escaped the calibration routing guard: " + targetAction);
-            check(!CalibrationCommandGuard.Blocks(targetAction, false), "Calibration routing blocked ordinary controls after leaving the wizard");
-        }
-        check(!CalibrationCommandGuard.Blocks("stop", true) && !CalibrationCommandGuard.Blocks("disable", true) && !CalibrationCommandGuard.Blocks("calibration.capture", true), "Calibration routing blocked STOP/disable/passive capture");
+            check(WorkspaceCommandPolicy.RequiresControls(targetAction), "A queued/hotkey target escaped the calibration routing guard: " + targetAction);
+        check(WorkspaceNavigation.Calibration is { CalibrationOpen: true, Page: not WorkspacePage.Controls }, "Calibration was open on the Controls page");
+        check(!WorkspaceCommandPolicy.RequiresControls("stop") && !WorkspaceCommandPolicy.RequiresControls("disable") && !WorkspaceCommandPolicy.RequiresControls("calibration.capture"), "Calibration routing blocked STOP/disable/passive capture");
         var report = new CalibrationReport(1, modelBound, desk, original, samples, fit, null, true, DateTimeOffset.UtcNow);
         var decoded = System.Text.Json.JsonSerializer.Deserialize<CalibrationReport>(System.Text.Json.JsonSerializer.Serialize(report))!;
         decoded.Validate("piper-1");

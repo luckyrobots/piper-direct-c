@@ -71,35 +71,36 @@ internal static class RecoveryWorkspaceTests
         var plugin = new PipersPlugin();
         string folder = Path.Combine(Path.GetTempPath(), "piper-recovery-ui-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(folder);
-        void Set(string field, object? value) => typeof(PipersPlugin).GetField(field, flags)!.SetValue(plugin, value);
         T Get<T>(string field) => (T)typeof(PipersPlugin).GetField(field, flags)!.GetValue(plugin)!;
         PipersPlugin.RecoveryOperation SimulatedRecovery(PipersPlugin.RecoveryKind kind)
         {
             var operation = new PipersPlugin.RecoveryOperation(kind, new("piper-2", "recovery-ui-fixture", "can-b", 7),
                 plugin.CommandAuthority.Epoch, new());
-            Set("recoveryOperation", operation);
+            plugin.recoveryOperation = operation;
             return operation;
         }
         var calls = new Calls();
         var device = Stopped();
         var snapshot = new JsonObject { ["token"] = "recovery-ui-fixture", ["selected"] = "can-b", ["devices"] = new JsonArray(device),
             ["motion"] = new JsonObject { ["active"] = false, ["request_id"] = 77L } };
-        Set("preferences", RobotProfileRouting.Normalize(new Preferences(Robots: [new("piper-2", "Piper 2", "can-b")], ActiveRobotId: "piper-2")));
-        Set("token", "recovery-ui-fixture"); Set("client", new PiperControl.PiperControlClient(calls)); Set("state", snapshot);
-        Set("engine", (PluginContext)Activator.CreateInstance(typeof(PluginContext), flags, null,
+        plugin.preferences = RobotProfileRouting.Normalize(new Preferences(Robots: [new("piper-2", "Piper 2", "can-b")], ActiveRobotId: "piper-2"));
+        plugin.token = "recovery-ui-fixture"; plugin.client = new PiperControl.PiperControlClient(calls); plugin.state = snapshot;
+        plugin.engine = (PluginContext)Activator.CreateInstance(typeof(PluginContext), flags, null,
             [new PluginStart("fixture", folder, folder), (Func<object, CancellationToken, Task>)((_, _) => Task.CompletedTask),
-                (Func<string, JsonObject, CancellationToken, Task<JsonElement>>)((_, _, _) => Task.FromResult(JsonSerializer.SerializeToElement(new { applied = false })))], null)!);
+                (Func<string, JsonObject, CancellationToken, Task<JsonElement>>)((_, _, _) => Task.FromResult(JsonSerializer.SerializeToElement(new { applied = false })))], null)!;
         void Fresh() => Get<LatestTelemetry>("telemetry").Publish(new(snapshot, "recovery-ui-fixture", 1, Stopwatch.GetTimestamp(), 0));
-        Task Click(string id) => plugin.HandleEventAsync(new("fixture", WorkspaceEventScope.Wrap(Get<long>("workspaceViewEpoch"), "piper-2", id), "click", JsonSerializer.SerializeToElement(true)), CancellationToken.None);
+        Task Click(string id) => plugin.HandleEventAsync(new("fixture", WorkspaceEventScope.Wrap(plugin.workspaceViewEpoch, "piper-2", id), "click", JsonSerializer.SerializeToElement(true)), CancellationToken.None);
         try
         {
             Fresh(); await Click("enable");
-            check(calls.Actions.Count == 0 && Get<bool>("recoveryGuideOpen"), "Generic Recover click removed torque instead of opening its supported guide");
+            check(calls.Actions.Count == 0 && plugin.recoveryGuide is not null, "Generic Recover click removed torque instead of opening its supported guide");
+            Fresh(); await Click("recovery.run");
+            check(calls.Actions.Count == 0, "Diagnostics' Verify controller state ran a power-changing supported STOP recovery");
             using (SimulatedRecovery(PipersPlugin.RecoveryKind.ReturnToZero))
             {
                 Fresh(); await Click("disable");
                 check(calls.Actions.SequenceEqual(["disable"]), "A visible Disable action was blocked by the STOP teaching presentation or sent a reset/target");
-                Set("recoveryOperation", null);
+                plugin.recoveryOperation = null;
             }
             calls.Actions.Clear();
             device["status"]!["arm_status"] = 0; device["status"]!["control"] = 2; device["status"]!["teach_state"] = 2;
@@ -110,20 +111,19 @@ internal static class RecoveryWorkspaceTests
             {
                 Fresh(); await Click("recovery.card.run");
                 check(calls.Actions.Count == 0, "A queued recovery click ran while its card was disabled by another recovery action");
-                Set("recoveryOperation", null);
+                plugin.recoveryOperation = null;
             }
             Fresh(); await Click("recovery.card.run");
-            check(calls.Actions.SequenceEqual(["recover-at-pose"]) && Get<bool>("handGuideRecoveryCommandSent"),
+            check(calls.Actions.SequenceEqual(["recover-at-pose"]) && plugin.recoveryGuide?.CommandSent == true,
                 "A qualified green/off cycle did not admit the explicit same-pose return");
-            calls.Actions.Clear(); Set("handGuideRecoveryCommandSent", false);
-            Set("recoveryInProgress", false);
+            calls.Actions.Clear(); plugin.recoveryGuide = plugin.recoveryGuide! with { CommandSent = false };
             device["status"]!["arm_status"] = 0; device["teaching"]!["phase"] = "off";
             device["status"]!["control"] = 1; device["status"]!["teach_state"] = 0;
             foreach (var joint in device["joints"]!.AsArray()) joint!["enabled"] = false;
             device["recovery_required"] = false; device["blocker"] = ""; device.Remove("stop_event");
             Fresh();
             await (Task)typeof(PipersPlugin).GetMethod("ObserveHandGuideRecovery", flags)!.Invoke(plugin, [CancellationToken.None])!;
-            check(Get<bool>("recoveryGuideOpen") && Get<HandGuideRecoveryGate?>("handGuideRecovery") is null && calls.Actions.Count == 0,
+            check(plugin.recoveryGuide is { Gate: null } && calls.Actions.Count == 0,
                 "Reset's retired stop record closed the visible range/holding guide or reused old teaching proof");
             using var reset = SimulatedRecovery(PipersPlugin.RecoveryKind.HoldHere);
             reset.ResetAt = Stopwatch.GetTimestamp();
@@ -138,24 +138,28 @@ internal static class RecoveryWorkspaceTests
             reset.ResetAt = Stopwatch.GetTimestamp();
             Get<LatestTelemetry>("telemetry").Publish(new(snapshot, "recovery-ui-fixture", 1, Stopwatch.GetTimestamp() - Stopwatch.Frequency * 2, 0));
             check(!Gap(), "An old telemetry envelope was accepted as a fresh reset gap");
-            Fresh(); plugin.CommandAuthority.Revoke(revokeLocalApproval: () => Set("approved", false));
+            Fresh(); plugin.CommandAuthority.Revoke(revokeLocalApproval: () => plugin.approved = false);
             check(!Gap(), "A STOP/permission change retained the reset-gap exception");
             bool retiredGrant = false;
             try { typeof(PipersPlugin).GetMethod("GrantRecoveryHolding", flags)!.Invoke(plugin, [reset, CancellationToken.None]); }
             catch (TargetInvocationException error) when (error.InnerException is InvalidOperationException) { retiredGrant = true; }
-            check(retiredGrant && !Get<bool>("approved") && calls.Actions.Count == 0, "A recovery continuation granted holding permission after STOP");
-            Set("recoveryOperation", null);
+            check(retiredGrant && !plugin.approved && calls.Actions.Count == 0, "A recovery continuation granted holding permission after STOP");
+            plugin.recoveryOperation = null;
             device["fresh"] = true; device["joints"]![0]!["fresh"] = true;
+            device["reset_pending"] = true; device["recovery_required"] = true;
+            Fresh(); await Click("recovery.run");
+            check(calls.Actions.SequenceEqual(["verify-reset"]), "Diagnostics' Verify controller state did not run the recovery card's verification");
+            calls.Actions.Clear(); device["reset_pending"] = false; device["recovery_required"] = false;
             device["blocker"] = "Another controller is sending commands on this CAN bus.";
-            Set("approved", true);
+            plugin.approved = true;
             Fresh(); await Click("enable");
-            check(calls.Actions.Count == 0 && Get<string>("primaryActionStatus").Contains("Another controller", StringComparison.Ordinal),
+            check(calls.Actions.Count == 0 && plugin.primaryAction.Status.Contains("Another controller", StringComparison.Ordinal),
                 "A queued primary click sent Enable even though the current header reported a controller blocker");
         }
         finally
         {
-            Get<CancellationTokenSource>("shutdown").Cancel();
-            ((IDisposable)Get<object>("channel")).Dispose(); Get<SemaphoreSlim>("commands").Dispose();
+            plugin.shutdown.Cancel();
+            ((IDisposable)plugin.channel).Dispose(); plugin.commands.Dispose();
             if (Directory.Exists(folder)) Directory.Delete(folder, true);
         }
     }

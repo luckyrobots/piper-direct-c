@@ -154,7 +154,6 @@ public sealed partial class PipersPlugin
         CaptureWorkspacePatchScope() is { } scope
             ? PublishWorkspacePatch(scope, patches, cancellation)
             : Task.CompletedTask;
-    private string UnscopeEvent(string id) => UnscopePublishedWorkspaceEvent(id);
 
     private Widget RobotSidebar()
     {
@@ -164,7 +163,7 @@ public sealed partial class PipersPlugin
             Widget.Label("profiles.heading", "ROBOTS") with { Appearance = "muted" },
             Widget.Column("profiles.list", rows) with { Spacing = 8 },
             GroupFollowControls(),
-            (workspacePage == "camera" && cameraDetail == "bench" ? Widget.Label("workspace.bench.enlarged", "Bench camera is enlarged") with { Height = 60, Appearance = "muted" } : Camera("bench", "Bench camera")),
+            (Navigation.Page == WorkspacePage.Camera && cameraDetail == "bench" ? Widget.Label("workspace.bench.enlarged", "Bench camera is enlarged") with { Height = 60, Appearance = "muted" } : Camera("bench", "Bench camera")),
             Widget.Button("workspace.camera.bench@compare", "Enlarge & compare") with { Appearance = "quiet", Hint = "The bench camera is shared by every robot." }) with { Width = 170, Padding = 12, Spacing = 14, Appearance = "sidebar" };
     }
 
@@ -203,7 +202,7 @@ public sealed partial class PipersPlugin
         }
         if (!switchingProfile && !string.IsNullOrEmpty(ActiveProfile.CanDeviceId) && snapshot["selected"]?.GetValue<string>() != ActiveProfile.CanDeviceId)
         {
-            approved = false; linkCommandsEnabled = false; recoveryInProgress = false;
+            approved = false; linkCommandsEnabled = false;
             if (teleoperating && await commands.WaitAsync(0, cancellation))
             {
                 try { await PauseTeleoperation(cancellation); }
@@ -291,7 +290,7 @@ public sealed partial class PipersPlugin
         if (link is not null) await engine.RequestAsync("robot.unsubscribe", cancellation: cancellation);
         CommandAuthority.Revoke();
         StopViewportDrag();
-        approved = linkCommandsEnabled = recoveryInProgress = false; ReleasePikaRole(); link = null; linkErrorDegrees = null;
+        approved = linkCommandsEnabled = false; ReleasePikaRole(); link = null; linkErrorDegrees = null;
         CancelHandGuideRecovery();
     }
 

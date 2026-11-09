@@ -8,16 +8,9 @@ namespace LuckyRobots.Piper.Plugin;
 
 public sealed record CalibrationPreferences(CalibrationDesk Desk, CalibrationMeasurement Measurement);
 
-public static class CalibrationCommandGuard
-{
-    public static bool Blocks(string action, bool calibrationOpen) => calibrationOpen &&
-        (action is "enable" or "safety.accept" or "teleoperate.toggle" or "zero.all" or "recovery.home" or "pika.target" or "engine.robot.target" or "engine.robot.follow" ||
-            action.StartsWith("joint.", StringComparison.Ordinal));
-}
-
 public sealed partial class PipersPlugin
 {
-    private bool calibrationOpen, calibrationPlacementUnverified, calibrationArchiveConfirmation;
+    private bool calibrationPlacementUnverified, calibrationArchiveConfirmation;
     private string calibrationProfile = "";
     private string calibrationPath = "";
     private CalibrationDesk calibrationDesk = new();
@@ -150,7 +143,8 @@ public sealed partial class PipersPlugin
     private async Task MakeCalibrationReadOnly(CancellationToken cancellation)
     {
         RequireCalibrationIdle();
-        approved = linkCommandsEnabled = approvalBeforeTeaching = false;
+        approved = linkCommandsEnabled = false;
+        if (teachingOwnership == TeachingOwnership.ObservedAfterApproval) teachingOwnership = TeachingOwnership.ObservedWithoutApproval;
         PauseSceneFollowing();
         if (link is { } current) await engine.RequestAsync("robot.teleoperate", new JsonObject { ["sceneId"] = current.SceneId, ["entityId"] = current.EntityId, ["enabled"] = false }, cancellation);
     }

@@ -6,7 +6,8 @@ namespace LuckyRobots.Piper.Plugin;
 public sealed partial class PipersPlugin
 {
     private static Widget Info(string id, string hint) => Widget.Button(id, "(i)") with { Width = 28, Appearance = "quiet", Hint = hint };
-    private Widget Nav(string page, string text) => Widget.Button("workspace." + page, text) with { Appearance = workspacePage == page || page == "recording" && workspacePage == "replay" ? "selected" : "quiet", Width = 118 };
+    private Widget Nav(WorkspacePage page, string id, string text) => Widget.Button("workspace." + id, text) with {
+        Appearance = Navigation.Page == page || page == WorkspacePage.Recording && Navigation.Page == WorkspacePage.Replay ? "selected" : "quiet", Width = 118 };
 
     private Widget PreferenceControl(string id, string title, double value, double minimum, double maximum, double step, string help) =>
         Widget.Column(id + ".control", Widget.Row(id + ".heading", Widget.Label(id + ".label", title),

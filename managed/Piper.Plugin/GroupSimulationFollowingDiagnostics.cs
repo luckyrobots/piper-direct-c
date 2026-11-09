@@ -13,8 +13,7 @@ public sealed partial class PipersPlugin
     {
         string Redact(string text)
         {
-            foreach (string secret in new[] { group.Backend, owner })
-                if (secret.Length > 0) text = text.Replace(secret, "[redacted]", StringComparison.Ordinal);
+            text = RedactSecrets(text, group.Backend, owner);
             return text.Length <= 2000 ? text : text[..2000];
         }
         string reason = Redact(error.Message);
