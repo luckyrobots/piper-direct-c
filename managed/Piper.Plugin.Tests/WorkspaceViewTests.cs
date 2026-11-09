@@ -264,8 +264,7 @@ internal static class WorkspaceViewTests
             }
             finally { Set("groupSimulation", null); }
             await CheckView("recording");
-            Set("replayArtifact", EpisodeReplayTests.ValidArtifact());
-            Set("replayProfile", "piper-1");
+            Set("replayReview", new ReplayReview(EpisodeReplayTests.ValidArtifact(), "piper-1"));
             await CheckView("replay");
             var replayStart = Walk(rendered!).Single(n => n["id"]?.GetValue<string>()?.EndsWith(".replay.start", StringComparison.Ordinal) == true);
             check(replayStart["enabled"]?.GetValue<bool>() == false && replayStart["hint"]?.GetValue<string>() == EpisodeReplayAvailability.Reason,

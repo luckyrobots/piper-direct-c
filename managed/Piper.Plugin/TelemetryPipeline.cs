@@ -368,6 +368,7 @@ public sealed partial class PipersPlugin
                 if (receipt is null || !receipt.IsFresh(Stopwatch.GetTimestamp()) || receipt.BackendToken != token)
                 {
                     sceneTrackingStatus = "Measured scene paused · waiting for fresh controller feedback";
+                    ObserveReplayScope(null);
                     message = telemetryIssue.Length > 0 ? telemetryIssue : "Controller feedback delayed · motion permission cleared; waiting for fresh telemetry";
                     QueueHeightMaintenance();
                     await Update(cancellation);
@@ -380,6 +381,7 @@ public sealed partial class PipersPlugin
                 await ObserveHandGuideRecovery(cancellation);
                 await RestoreMeasuredTracking(cancellation);
                 ObserveTelemetryConnectionPresentation(receipt);
+                ObserveReplayScope(receipt);
                 RetryLinkedPikaMonitor();
                 if (CommandAuthority.Current.LastCommand is { } last && last.Scope.Backend == receipt.BackendToken &&
                     last.Scope.ProfileId == ActiveProfile.Id && next["selected"]?.GetValue<string>() == last.Scope.Device &&

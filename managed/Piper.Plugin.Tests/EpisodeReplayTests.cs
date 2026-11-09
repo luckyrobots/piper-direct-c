@@ -91,62 +91,37 @@ internal static class EpisodeReplayTests
         Reject(() => EpisodeReplayReader.Parse(new string(' ', EpisodeReplayReader.MaximumBytes + 1)),
             "Replay accepted an unbounded input file");
 
-        var hardware = Hardware();
+        var review = new ReplayReview(artifact, "profile-a");
+        var scope = new ReplayCheckScope("backend-a", "can-a", 7);
+        var confirmed = review.Confirmed(scope);
+        check(confirmed is { TubeConfirmed: true } && confirmed.Observe("profile-a", scope).TubeConfirmed &&
+            !confirmed.Observe("profile-b", scope).TubeConfirmed && !confirmed.Observe("profile-a", scope with { Generation = 8 }).TubeConfirmed &&
+            !confirmed.Observe("profile-a", null).TubeConfirmed && confirmed.Rechecked(scope).TubeConfirmed &&
+            !confirmed.Rechecked(scope with { Device = "can-b" }).TubeConfirmed && confirmed.Loaded() is { TubeConfirmed: false, Scope: null } &&
+            !review.Rechecked(scope).TubeConfirmed,
+            "Tube placement survived a profile or connection change, or a recheck invented a placement confirmation");
+        var limits = Limits();
         var legacy = Read(Fixture(1));
         check(!legacy.HasPositionCommands && legacy.Samples[0].CommandedJointDegrees is null,
             "Legacy measured-only samples were promoted to executable commands");
-        Reject(() => EpisodeReplayPlanner.Build(legacy, hardware), "Version1 measured-only export was treated as an actuator replay");
+        Reject(() => EpisodeReplayPlanner.AssessJointTiming(legacy, limits), "Version1 measured-only export was treated as an actuator replay");
         var oldestLegacy = Fixture(1);
         oldestLegacy["nativeRecording"]!.AsObject().Remove("nativeOrdinalSource");
         check(!Read(oldestLegacy).HasPositionCommands, "Earlier version1 files lost review support after provenance was introduced");
-        var plan = EpisodeReplayPlanner.Build(artifact, hardware);
-        check(plan.ReadyToStart && !plan.TimingChanged && plan.DurationSeconds == 1 && plan.Samples.Count == 2 &&
-            plan.Samples[0].JointDegrees.SequenceEqual(artifact.Samples[0].JointDegrees) && plan.Artifact.Audit.InitialSimulationState.MujocoQposForAudit[0] == 1234,
-            "Replay inserted a zero/home/audit-qpos target or changed valid timing");
         var invalidCapture = Fixture();
         invalidCapture["outcome"] = "invalid-capture: lost sample";
         Reject(() => Read(invalidCapture), "Replay accepted a capture explicitly exported as invalid");
-        var drifted = hardware with { JointDegrees = new double[] { 11, 20, -30, 40, 50, 60 }, GripperOpeningMm = 2 };
-        var blocked = EpisodeReplayPlanner.Build(artifact, drifted);
-        check(!blocked.ReadyToStart && blocked.StartDifferences.Count == 2 && blocked.StartDifferences[0] is { Axis: "J1", Actual: 11, Required: 10, Unit: "deg" } &&
-            blocked.Samples.Count == artifact.Samples.Count && blocked.Samples[0].JointDegrees[0] == 10,
-            "Initial pose drift silently produced an alignment move or ignored the physical gripper");
-        check(EpisodeReplayPlanner.CheckStart(blocked, hardware).Count == 0,
-            "Fresh realignment could not clear the start mismatch without rebuilding targets");
-        Reject(() => EpisodeReplayPlanner.CheckStart(plan, hardware with { Generation = 2 }), "Replay survived changed adapter generation");
-        Reject(() => EpisodeReplayPlanner.Build(artifact, hardware with { FeedbackFresh = false }), "Replay accepted stale joint feedback");
-        Reject(() => EpisodeReplayPlanner.Build(artifact, hardware with { LimitsFresh = false }), "Replay substituted fallback joint limits");
-        Reject(() => EpisodeReplayPlanner.Build(artifact, hardware with { JointLimits = hardware.JointLimits.Select(limit => limit with { AccelerationFresh = false }).ToArray() }),
+        Reject(() => EpisodeReplayPlanner.AssessJointTiming(artifact, limits.Select(limit => limit with { AccelerationFresh = false }).ToArray()),
             "Replay accepted stale acceleration reports");
         foreach (double invalidAcceleration in new[] { 0, -1, double.NaN, double.PositiveInfinity })
-            Reject(() => EpisodeReplayPlanner.Build(artifact, hardware with
-                { JointLimits = hardware.JointLimits.Select(limit => limit with { MaximumDegreesPerSecondSquared = invalidAcceleration }).ToArray() }),
+            Reject(() => EpisodeReplayPlanner.AssessJointTiming(artifact, limits.Select(limit => limit with { MaximumDegreesPerSecondSquared = invalidAcceleration }).ToArray()),
                 "Replay invented a positive acceleration cap for an invalid report");
-        Reject(() => EpisodeReplayPlanner.Build(artifact, hardware with { GripperLimitsVerified = false }), "Replay invented a Pika speed limit");
-        Reject(() => EpisodeReplayPlanner.Build(artifact, hardware with { GripperConvention = "raw-motor-angle" }), "Replay accepted raw motor angle as jaw opening");
         var outOfRange = Fixture();
         outOfRange["samples"]![1]!["commandedJointDegrees"]![0] = 151;
-        Reject(() => EpisodeReplayPlanner.Build(Read(outOfRange), hardware, new(AllowTimeScaling: true)),
-            "Replay time scaling silently clipped a joint target outside reported limits");
-        var wideGrip = Fixture();
-        wideGrip["samples"]![1]!["commandedGripperOpeningMm"] = 92;
-        Reject(() => EpisodeReplayPlanner.Build(Read(wideGrip), hardware, new(AllowTimeScaling: true)),
-            "A wider simulated jaw range bypassed the physical Pika opening limit");
-
-        var fastJson = Fixture();
-        fastJson["samples"]![1]!["timeSeconds"] = .1;
-        var fast = Read(fastJson);
-        Reject(() => EpisodeReplayPlanner.Build(fast, hardware), "Replay silently stretched excessive sample rates without opt-in");
-        var scaled = EpisodeReplayPlanner.Build(fast, hardware, new(AllowTimeScaling: true));
-        check(scaled.TimingChanged && Math.Abs(scaled.TimeScale - 5) < 1e-9 && Math.Abs(scaled.DurationSeconds - .5) < 1e-9 &&
-            scaled.Samples[1].JointDegrees.SequenceEqual(fast.Samples[1].JointDegrees) && scaled.Samples[1].GripperOpeningMm == 20 &&
-            scaled.Notes[0].Contains("stretched", StringComparison.Ordinal),
-            "Explicit replay time scaling did not preserve every angle/opening or account for gripper rate");
-        Reject(() => EpisodeReplayPlanner.Build(fast, hardware, new(AllowTimeScaling: true, MaximumTimeScale: 4)),
-            "Replay exceeded the explicit maximum time-scale setting");
-        var slowerLimits = hardware.JointLimits.Select(limit => limit with { MaximumDegreesPerSecond = 5 }).ToArray();
-        Reject(() => EpisodeReplayPlanner.CheckStart(plan, hardware with { JointLimits = slowerLimits }),
-            "Replay ignored new slower reported limits between planning and starting");
+        Reject(() => EpisodeReplayPlanner.AssessJointTiming(Read(outOfRange), limits),
+            "Replay review silently clipped a joint target outside reported limits");
+        Reject(() => EpisodeReplayPlanner.ValidateJointRanges(Read(outOfRange).Samples.Select(s => s.CommandedJointDegrees!).ToArray(), limits),
+            "Replay range review accepted a joint target outside reported limits");
 
         var reversingJson = Fixture();
         var third = reversingJson["samples"]![1]!.DeepClone();
@@ -155,29 +130,16 @@ internal static class EpisodeReplayTests
         third["commandedJointDegrees"]![0] = 10;
         reversingJson["samples"]!.AsArray().Add(third);
         var reversing = Read(reversingJson);
-        var accelerationLimits = hardware.JointLimits.Select(limit => limit with { MaximumDegreesPerSecondSquared = 5 }).ToArray();
-        var accelerationHardware = hardware with { JointLimits = accelerationLimits };
+        var accelerationLimits = limits.Select(limit => limit with { MaximumDegreesPerSecondSquared = 5 }).ToArray();
         var timing = EpisodeReplayPlanner.AssessJointTiming(reversing, accelerationLimits);
         check(timing.SpeedTimeScale == 1 && Math.Abs(timing.AccelerationTimeScale - 2) < 1e-12 && timing.RequiredTimeScale == 2,
             "Low-velocity direction reversal bypassed the acceleration cap or omitted square-root time scaling");
-        Reject(() => EpisodeReplayPlanner.Build(reversing, accelerationHardware),
-            "Acceleration-limited replay silently slowed down without explicit consent");
-        var accelerationPlan = EpisodeReplayPlanner.Build(reversing, accelerationHardware, new(AllowTimeScaling: true));
-        check(accelerationPlan.TimeScale == 2 && accelerationPlan.DurationSeconds == 4 &&
-            accelerationPlan.Samples.Select(sample => sample.JointDegrees[0]).SequenceEqual(new[] { 10.0, 20.0, 10.0 }) &&
-            accelerationPlan.Samples.Select(sample => sample.GripperOpeningMm).SequenceEqual(reversing.Samples.Select(sample => sample.CommandedGripperOpeningMm!.Value)),
-            "Acceleration planning smoothed, clipped or replaced zero-order-held position targets");
-        check(EpisodeReplayPlanner.CheckStart(accelerationPlan, accelerationHardware).Count == 0,
-            "Uniform acceleration-aware timing did not satisfy the unchanged reported caps");
-        Reject(() => EpisodeReplayPlanner.CheckStart(accelerationPlan, accelerationHardware with
-            { JointLimits = accelerationLimits.Select(limit => limit with { MaximumDegreesPerSecondSquared = 2.5 }).ToArray() }),
-            "Replay start ignored an acceleration-cap reduction after planning");
         reversingJson["samples"]![2]!["timeSeconds"] = 3;
         var irregularTiming = EpisodeReplayPlanner.AssessJointTiming(Read(reversingJson), accelerationLimits.Select(limit => limit with { MaximumDegreesPerSecondSquared = 2.5 }).ToArray());
         check(Math.Abs(irregularTiming.AccelerationTimeScale - 2) < 1e-12,
             "Acceleration used nominal sample indices instead of midpoint spacing for irregular timestamps");
 
-        var reported = new JsonArray(hardware.JointLimits.Select(limit => (JsonNode)new JsonObject
+        var reported = new JsonArray(limits.Select(limit => (JsonNode)new JsonObject
         {
             ["min_deg"] = limit.MinimumDegrees, ["max_deg"] = limit.MaximumDegrees,
             ["max_speed_rad_s"] = limit.MaximumDegreesPerSecond * Math.PI / 180,
@@ -194,25 +156,6 @@ internal static class EpisodeReplayTests
         }
         reported[1]!["acceleration_fresh"] = false;
         Reject(() => EpisodeReplayReportedLimits.Read(reported), "Replay UI accepted one stale acceleration report");
-        var measuredDifferent = Fixture();
-        measuredDifferent["samples"]![1]!["jointDegrees"]![0] = 15;
-        measuredDifferent["samples"]![1]!["gripperOpeningMm"] = 17;
-        var commandPlan = EpisodeReplayPlanner.Build(Read(measuredDifferent), hardware);
-        check(commandPlan.Samples[1].JointDegrees[0] == 20 && commandPlan.Samples[1].GripperOpeningMm == 20 &&
-            commandPlan.Artifact.Samples[1].JointDegrees[0] == 15 && commandPlan.Artifact.Samples[1].GripperOpeningMm == 17 &&
-            commandPlan.Samples[1].Source == EpisodeReplayReader.CommandSource,
-            "Physical planner substituted measured observations for position-controller actions");
-        var initialJump = Fixture();
-        initialJump["samples"]![0]!["commandedJointDegrees"]![0] = 12;
-        var jump = EpisodeReplayPlanner.Build(Read(initialJump), hardware);
-        check(!jump.ReadyToStart && jump.StartDifferences.Count == 0 && jump.InitialCommandDifferences.Count == 1 &&
-            jump.InitialCommandDifferences[0] is { Actual: 10, Required: 12 },
-            "First command jump was confused with physical alignment to the measured source start");
-        Reject(() => EpisodeReplayPlanner.CheckStart(jump, hardware), "Start recheck bypassed the initial command jump block");
-        initialJump["samples"]![0]!["commandedJointDegrees"]![0] = 10.4;
-        var smallJump = EpisodeReplayPlanner.Build(Read(initialJump), hardware);
-        check(EpisodeReplayPlanner.CheckStart(smallJump, hardware with { JointDegrees = new double[] { 10.8, 20, -30, 40, 50, 60 } }).Count == 1,
-            "Physical start was checked against the first command instead of the measured source pose");
         foreach (string missing in new[] { "commandedJointDegrees", "commandedGripperOpeningMm", "commandSource" })
         {
             var bad = Fixture();
@@ -220,20 +163,6 @@ internal static class EpisodeReplayTests
             Reject(() => Read(bad), "Version2 silently substituted observations for missing " + missing);
         }
 
-        const double gap = 94.04438247823715;
-        var mapping = new EpisodeReplayGripperMapping(-gap / 2000, 0, 0, gap / 2000);
-        check(Math.Abs(mapping.OpeningMm(0, 0) - gap) < 1e-9 && mapping.OpeningMm(-gap / 2000, gap / 2000) == 0 &&
-            Math.Abs(mapping.OpeningMm(-(gap - 40) / 2000, (gap - 40) / 2000) - 40) < 1e-9,
-            "Replay Pika inverse mapping confused open-at-zero slides with a closed jaw");
-        Reject(() => new EpisodeReplayGripperMapping(0, .04, 0, .04), "Replay accepted same-direction finger slide ranges");
-        Reject(() => new EpisodeReplayGripperMapping(-.04, 0, 0, .03), "Replay accepted unequal finger travels");
-        Reject(() => mapping.OpeningMm(-.01, .02), "Replay accepted asymmetric measured finger positions");
-        Reject(() => mapping.OpeningMm(-.05, .05), "Replay silently clipped a physical-sized finger overshoot");
-        var capped = new EpisodeReplayGripperMapping(-gap / 2000, -(gap - 90) / 2000, (gap - 90) / 2000, gap / 2000);
-        check(Math.Abs(capped.GeometricZeroOpeningMm - gap) < 1e-9 && Math.Abs(capped.MaximumOpeningMm - 90) < 1e-9 &&
-            Math.Abs(capped.OpeningMm(-.020, .02044) - (gap - 40.44)) < 1e-9,
-            "Replay lost the geometric jaw baseline or rounded away an allowed contact-induced finger asymmetry");
-        Reject(() => capped.OpeningMm(0, 0), "Task-model opening cap was bypassed using its out-of-range geometric zero");
         var zUp = Fixture();
         zUp["tubeStart"]!["worldQuaternionXyzw"] = new JsonArray(-.6830127018922193, .1830127018922193, .1830127018922193, .6830127018922193);
         check(Math.Abs(Read(zUp).TubeStart.YawDeg - 30) < 1e-9, "Native Z-up tube yaw was interpreted as an engine Y-up Euler yaw");
@@ -293,8 +222,6 @@ internal static class EpisodeReplayTests
         return value;
     }
 
-    private static EpisodeReplayHardware Hardware() => new("can-a", 1, "agilex.piper", EpisodeReplayReader.JointConvention,
-        EpisodeReplayReader.GripperConvention, true, true, true, true,
-        [new(1, -150, 150, 30, 1000, true), new(2, 0, 180, 30, 1000, true), new(3, -170, 0, 30, 1000, true), new(4, -100, 100, 30, 1000, true), new(5, -70, 70, 30, 1000, true), new(6, -180, 180, 30, 1000, true)],
-        [10, 20, -30, 40, 50, 60], 0, 90, 40);
+    private static EpisodeReplayJointLimit[] Limits() =>
+        [new(1, -150, 150, 30, 1000, true), new(2, 0, 180, 30, 1000, true), new(3, -170, 0, 30, 1000, true), new(4, -100, 100, 30, 1000, true), new(5, -70, 70, 30, 1000, true), new(6, -180, 180, 30, 1000, true)];
 }
