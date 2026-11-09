@@ -24,9 +24,15 @@ internal static class HostControlDispatchTests
         var grpcEnable = await Execute("/api/pika/enable", "{}");
         var grpcError = JsonNode.Parse(grpcEnable.Json)!.AsObject();
         Check(browserEnable.Status == HttpStatusCode.Conflict && grpcEnable.Status == 409 &&
-            browserEnable.Body["ok"]?.GetValue<bool>() == false && !grpcError.ContainsKey("ok") &&
+            browserEnable.Body["ok"]?.GetValue<bool>() == false &&
             browserEnable.Body["error"]?.GetValue<string>() == "Pika hardware is disabled in simulation" &&
-            JsonNode.DeepEquals(browserEnable.Body["error"], grpcError["error"]), "Pika simulation rejection or an adapter's error shape changed");
+            JsonNode.DeepEquals(browserEnable.Body, grpcError), "Pika simulation rejection differs between the adapters");
+        // Simulated inventory is the same empty list on every transport and verb.
+        var browserDevices = await Post("/api/pika/devices", "{}");
+        var grpcDevices = await Execute("/api/pika/devices", "{}");
+        Check(browserDevices.Status == HttpStatusCode.OK && grpcDevices.Status == 200 &&
+            browserDevices.Body["devices"] is JsonArray { Count: 0 } &&
+            JsonNode.DeepEquals(browserDevices.Body, JsonNode.Parse(grpcDevices.Json)), "Simulated Pika inventory differs between the adapters");
 
         await UnsupportedGrpc("/api/shutdown", "{}");
         await UnsupportedGrpc("/api/camera", """{"enabled":false}""");

@@ -64,6 +64,10 @@ app.Run(async context => {
     response.Headers["Referrer-Policy"]="no-referrer";
     response.Headers.ContentSecurityPolicy="default-src 'self'; style-src 'self'; script-src 'self'; connect-src 'self'; img-src 'self' data: blob:; media-src 'self' blob:; frame-ancestors 'none'; base-uri 'none'; form-action 'none'";
     async Task Error(int status,string message) { response.StatusCode=status; await response.WriteAsJsonAsync(new {ok=false,error=message}); }
+    async Task Reply(HostControlResult result) {
+        response.StatusCode=result.Status; response.ContentType="application/json; charset=utf-8";
+        await response.WriteAsync(result.ToJson());
+    }
     string host=request.Host.Value??"";
     string[] hosts=HostEndpoints.LoopbackHosts(port);
     if (!hosts.Contains(host,StringComparer.OrdinalIgnoreCase) || request.Headers.Origin.Count>1 ||
@@ -78,12 +82,7 @@ app.Run(async context => {
             if (route==HostRoutes.PikaState) {
                 await response.WriteAsJsonAsync(control.PikaState(Query("pika_device"), Query("pika_distribution"))); return;
             }
-            if (route==HostRoutes.PikaDevices) {
-                if (simulated) { await response.WriteAsJsonAsync(HostControlDispatcher.EmptySimulatedInventory); return; }
-                try { await response.WriteAsJsonAsync(await control.DiscoverPikaAsync(Query("distribution"), context.RequestAborted)); }
-                catch (Exception e) when (HostControlDispatcher.IsControlOperationError(e)) { await Error(409,e.Message); }
-                return;
-            }
+            if (route==HostRoutes.PikaDevices) { await Reply(await control.DiscoverPikaAsync(Query("distribution"), context.RequestAborted)); return; }
             if (assets.TryGetValue(route,out var asset)) { response.ContentType=asset.Type; await response.SendFileAsync(Path.Combine(web,asset.File)); return; }
             await Error(404,"Not found"); return;
         }
@@ -91,38 +90,14 @@ app.Run(async context => {
         if (request.ContentType is not ("application/json" or "application/json; charset=utf-8")) { await Error(400,"Use application/json"); return; }
         using var reader=new StreamReader(request.Body,Encoding.UTF8,false,1024,true);
         string body=await reader.ReadToEndAsync(context.RequestAborted);
-        if (Encoding.UTF8.GetByteCount(body)>16384) { await Error(413,"Request too large"); return; }
-        if (body.Contains("\\u",StringComparison.Ordinal)||body.Contains('\0')) { await Error(400,"Unicode escapes and NUL are unsupported in control requests"); return; }
-        using var json=JsonDocument.Parse(body,new JsonDocumentOptions {MaxDepth=32});
-        if (json.RootElement.ValueKind!=JsonValueKind.Object||!ControlJson.HasUniqueKeys(json.RootElement)) { await Error(400,"Expected one JSON object with unique keys"); return; }
-        using var admission = control.Admit(route, json.RootElement, HostControlTransport.Http);
-        if (admission.Error is { } denied) { await Error(409, denied); return; }
-        if (admission.Restart is { } restarting)
-        {
-            response.StatusCode = restarting.Ok ? 202 : 409;
-            await response.WriteAsJsonAsync(restarting); return;
-        }
+        if (!ControlJson.TryParse(body, out var parsed, out var rejected)) { await Error(rejected.Status, rejected.Message); return; }
+        using var json = parsed;
+        using var admission = control.Admit(route, json.RootElement);
         if (admission.Shutdown is { } shutdown) {
             response.OnCompleted(() => { shutdown(app.Lifetime.StopApplication); return Task.CompletedTask; });
             await response.WriteAsJsonAsync(new {ok=true,message="Closing USB transports before shutdown"}); return;
         }
-        var result = await control.ExecuteAsync(route, body, json.RootElement, HostControlTransport.Http, context.RequestAborted);
-        response.StatusCode = result.Status;
-        if (result.PikaAudit is { } audit)
-            await response.WriteAsJsonAsync(new { error = result.Error, pika_follow_audit = audit });
-        else if (result.Error is { } error)
-            await Error(result.Status, error);
-        else if (result.RawJson is { } raw)
-        {
-            response.ContentType = "application/json";
-            await response.WriteAsync(raw);
-        }
-        else if (result.Payload is JsonObject gripper)
-        {
-            try { await response.WriteAsJsonAsync(gripper); }
-            catch (Exception e) when (HostControlDispatcher.IsControlOperationError(e)) { await Error(409, e.Message); }
-        }
-        else await response.WriteAsJsonAsync(result.Payload);
+        await Reply(admission.Reply ?? await control.ExecuteAsync(route, body, json.RootElement, context.RequestAborted));
     }
     catch (JsonException) { await Error(400,"Invalid JSON body"); }
     catch (BadHttpRequestException e) { await Error(e.StatusCode,e.Message); }

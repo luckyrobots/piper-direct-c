@@ -4,24 +4,41 @@ using LuckyRobots.Piper.Pika;
 
 namespace LuckyRobots.Piper.Host;
 
-internal enum HostControlTransport { Http, Grpc }
-
-/// <summary>Exactly one of: a control lease, a denial, a restart reply, or a
-/// prepared shutdown whose one-shot commit runs after the response.</summary>
-internal readonly record struct HostControlAdmission(IDisposable? Lease = null, string? Error = null,
-    BackendRestartResult? Restart = null, Action<Action>? Shutdown = null) : IDisposable
+/// <summary>Exactly one of: a control lease, a finished reply (a denial or a
+/// restart decision), or a prepared shutdown whose one-shot commit runs after
+/// the response.</summary>
+internal readonly record struct HostControlAdmission(IDisposable? Lease = null, HostControlResult? Reply = null,
+    Action<Action>? Shutdown = null) : IDisposable
 {
     public void Dispose() => Lease?.Dispose();
 }
 
+/// <summary>One control reply. Both transports send <see cref="ToJson"/> with
+/// <see cref="Status"/>, so HTTP and gRPC bodies are identical.</summary>
 internal readonly record struct HostControlResult(int Status, object? Payload = null, string? RawJson = null,
-    string? Error = null, PikaFollowAudit? PikaAudit = null);
+    string? Error = null, PikaFollowAudit? PikaAudit = null)
+{
+    private static readonly JsonSerializerOptions WebJson = new(JsonSerializerDefaults.Web);
+
+    internal string ToJson()
+    {
+        if (RawJson is { } raw) return raw;
+        if (Error is { } error)
+        {
+            var reply = new JsonObject { ["ok"] = false, ["error"] = error };
+            // The plugin deserializes the audit with default (PascalCase) names.
+            if (PikaAudit is { } audit) reply["pika_follow_audit"] = JsonSerializer.SerializeToNode(audit);
+            return reply.ToJsonString();
+        }
+        return Payload is JsonNode node ? node.ToJsonString() : JsonSerializer.Serialize(Payload, WebJson);
+    }
+}
 
 /// <summary>Application policy shared by the two authenticated, parsed transports.</summary>
 internal sealed class HostControlDispatcher(ControllerService controller, PikaSessionRegistry pika, bool simulated,
     string sessionOwner, BackendMaintenance maintenance)
 {
-    internal static object EmptySimulatedInventory { get; } = new
+    private static object EmptySimulatedInventory { get; } = new
     {
         ok = true, devices = Array.Empty<object>(), message = "Pika hardware discovery is disabled in simulation."
     };
@@ -47,41 +64,49 @@ internal sealed class HostControlDispatcher(ControllerService controller, PikaSe
         return pika.Snapshot(device, distribution ?? pika.Snapshot()["distribution"]?.GetValue<string>(), includeRawEvidence: true);
     }
 
-    internal Task<JsonObject> DiscoverPikaAsync(string? distribution, CancellationToken cancellation) =>
-        pika.DiscoverAsync(distribution, cancellation);
-
-    internal HostControlAdmission Admit(string route, JsonElement input, HostControlTransport transport)
+    internal async Task<HostControlResult> DiscoverPikaAsync(string? distribution, CancellationToken cancellation)
     {
-        if (!SessionOwnerGuard.Allows(sessionOwner, route, input)) return new(Error: SessionOwnerGuard.Denied);
+        if (simulated) return new(200, EmptySimulatedInventory);
+        try { return new(200, await pika.DiscoverAsync(distribution, cancellation)); }
+        catch (Exception error) when (IsControlOperationError(error)) { return new(409, Error: error.Message); }
+    }
+
+    /// <summary>gRPC never offers shutdown: <see cref="HostRoutes.IsGrpcControl"/>
+    /// rejects it before admission.</summary>
+    internal HostControlAdmission Admit(string route, JsonElement input)
+    {
+        if (!SessionOwnerGuard.Allows(sessionOwner, route, input)) return Denied(SessionOwnerGuard.Denied);
         try
         {
             if (route == HostRoutes.Restart)
             {
                 var restart = maintenance.Prepare(input, out var commit);
                 commit?.Invoke();
-                return new(Restart: restart);
+                return new(Reply: new HostControlResult(restart.Ok ? 202 : 409, restart));
             }
-            if (transport == HostControlTransport.Http && route == HostRoutes.Shutdown)
-                return maintenance.PrepareShutdown(out var shutdown) is { } error ? new(Error: error) : new(Shutdown: shutdown);
+            if (route == HostRoutes.Shutdown)
+                return maintenance.PrepareShutdown(out var shutdown) is { } error ? Denied(error) : new(Shutdown: shutdown);
         }
         // The exit checks read controller state; both transports reject alike.
-        catch (Exception error) when (IsControlOperationError(error)) { return new(Error: error.Message); }
+        catch (Exception error) when (IsControlOperationError(error)) { return Denied(error.Message); }
         return maintenance.TryEnterControl(route, out var lease, out var denied)
-            ? new(Lease: lease) : new(Error: denied);
+            ? new(Lease: lease) : Denied(denied!);
+
+        static HostControlAdmission Denied(string error) => new(Reply: new HostControlResult(409, Error: error));
     }
 
     internal async Task<HostControlResult> ExecuteAsync(string route, string body, JsonElement input,
-        HostControlTransport transport, CancellationToken cancellation)
+        CancellationToken cancellation)
     {
         // One mapping for both transports: a controller-operation failure is a
         // 409 whether it came from the native core or from a Pika session.
-        try { return await DispatchAsync(route, body, input, transport, cancellation); }
+        try { return await DispatchAsync(route, body, input, cancellation); }
         catch (PikaFollowRejectedException error) { return new(409, Error: error.Message, PikaAudit: error.Audit); }
         catch (Exception error) when (IsControlOperationError(error)) { return new(409, Error: error.Message); }
     }
 
     private async Task<HostControlResult> DispatchAsync(string route, string body, JsonElement input,
-        HostControlTransport transport, CancellationToken cancellation)
+        CancellationToken cancellation)
     {
         if (route == HostRoutes.CoordinatedStop)
         {
@@ -94,16 +119,11 @@ internal sealed class HostControlDispatcher(ControllerService controller, PikaSe
             return new(native.Status, RawJson: native.Json);
         }
 
-        bool grpc = transport == HostControlTransport.Grpc;
         if (simulated)
-        {
-            if (grpc && route == HostRoutes.PikaDevices) return new(200, EmptySimulatedInventory);
-            return new(409, Error: "Pika hardware is disabled in simulation");
-        }
+            return route == HostRoutes.PikaDevices ? new(200, EmptySimulatedInventory) : new(409, Error: "Pika hardware is disabled in simulation");
         if (route == HostRoutes.PikaConfigure)
         {
-            string activeMessage = grpc ? "Finish the active arm movement before changing Pika assignment" :
-                "Finish active arm movements before changing Pika assignment";
+            const string activeMessage = "Finish active arm movements before changing Pika assignment";
             if (ControllerActivity.AnyMotion(controller.SnapshotJson()))
                 return new(409, Error: activeMessage);
             return new(200, await pika.ConfigureAsync(input, cancellation,
@@ -148,6 +168,6 @@ internal sealed class HostControlDispatcher(ControllerService controller, PikaSe
             });
     }
 
-    internal static bool IsControlOperationError(Exception error) =>
+    private static bool IsControlOperationError(Exception error) =>
         error is InvalidOperationException or IOException or TimeoutException or ArgumentException;
 }

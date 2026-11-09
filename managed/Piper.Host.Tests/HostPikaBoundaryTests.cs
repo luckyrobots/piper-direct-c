@@ -93,9 +93,8 @@ internal static class HostPikaBoundaryTests
             async Task<HostControlResult> Send(string route, object body)
             {
                 var input = JsonSerializer.SerializeToElement(body);
-                using var admission = context.Control.Admit(route, input, HostControlTransport.Http);
-                if (admission.Error is { } error) return new(409, Error: error);
-                return await context.Control.ExecuteAsync(route, input.GetRawText(), input, HostControlTransport.Http, deadline.Token);
+                using var admission = context.Control.Admit(route, input);
+                return admission.Reply ?? await context.Control.ExecuteAsync(route, input.GetRawText(), input, deadline.Token);
             }
 
             async Task Poll(Func<JsonObject, bool> ready, long? requestId = null)
@@ -140,8 +139,9 @@ internal static class HostPikaBoundaryTests
             controller.Dispose();
             controller.Dispose(); // idempotent
             var input = JsonSerializer.SerializeToElement(new { action = "hold" });
-            var result = await context.Control.ExecuteAsync("/api/command", input.GetRawText(), input, HostControlTransport.Http, default);
-            Check(result.Status == 409 && result.Error is { Length: > 0 }, "A disposed controller was not a 409 control error.");
+            var result = await context.Control.ExecuteAsync("/api/command", input.GetRawText(), input, default);
+            Check(result.Status == 409 && result.Error is { Length: > 0 } &&
+                JsonNode.Parse(result.ToJson())?["ok"]?.GetValue<bool>() == false, "A disposed controller was not a 409 control error.");
         }
         finally { directory.Delete(recursive: true); }
     }
