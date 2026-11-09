@@ -1,6 +1,6 @@
 # PiPer C terminal controller plan
 
-**Status: historical design proposal. The later request expanded implementation to a native C daemon, web GUI, six-joint position API and gripper controls; see [README.md](README.md) for current capabilities and validation. The GUI supports joint-selection/jog keys; a standalone ncurses terminal and CPV/torque control remain unimplemented. No robot commands were sent to prepare this original proposal.**
+**Status: historical design proposal. The later request expanded implementation to a native C daemon, web GUI, six-joint position API and gripper controls; see [README.md](../../README.md) for current capabilities and validation. The GUI supports joint-selection/jog keys; a standalone ncurses terminal and CPV/torque control remain unimplemented. No robot commands were sent to prepare this original proposal.**
 
 Build a separate Linux application in C for one PiPer arm. It will communicate through SocketCAN, display live feedback for all six joints, and let the operator select a joint with `1`–`6`, change its position with the arrow keys, or enter an absolute target. There will be no vendor SDK, Python runtime, webcam, or dependence on the existing dashboard.
 
