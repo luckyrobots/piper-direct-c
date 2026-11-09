@@ -203,6 +203,11 @@ public sealed partial class PipersPlugin
                     UpdateRecoveryGuide(guide => guide with { CommandSent = true });
                     break;
                 case RecoveryWorkspaceAction.VerifyReset:
+                    // B1: ask; ConfirmResetCompletion sends verify-reset only on Confirm.
+                    RequestResetCompletion(new RobotCommandScope(ActiveProfile.Id, token, device["id"]!.GetValue<string>(),
+                        device["generation"]!.GetValue<long>()), permissionEpoch);
+                    progress = "Confirm that the controller reset or power cycle completed. Cancel sends nothing.";
+                    break;
                 case RecoveryWorkspaceAction.VerifyCurrent:
                     await Command(view.Action!, null, cancellation, CommandPurpose.Recovery);
                     progress = "Controller recovery verification requested.";
@@ -286,6 +291,7 @@ public sealed partial class PipersPlugin
         {
             bool entered = false;
             bool completedHolding = false;
+            SupportedRecoveryOutcome? outcome = null;
             string finalStatus = starting;
             bool SameIdentity()
             {
@@ -319,11 +325,12 @@ public sealed partial class PipersPlugin
                     // Every command below still calls Device() and rejects stale
                     // evidence; only the runner's wait can consume a gap marker.
                     Volatile.Write(ref operation.ResetAt, action == "reset" ? Stopwatch.GetTimestamp() : 0);
+                    // The runner never sends verify-reset; Command would refuse it without the operator's answer.
                     var result = await Command(action, null, ct, action == "disable" ? CommandPurpose.Control : CommandPurpose.Recovery,
                         scope, operation.Epoch);
                     return new(result["request_id"]?.GetValue<long>() ?? 0, telemetry.Latest?.Sequence ?? 0, Stopwatch.GetTimestamp());
                 }
-                bool held = await SupportedStopRecovery.Run(Read, Send, async ct =>
+                outcome = await SupportedStopRecovery.Run(Read, Send, async ct =>
                 {
                     _ = Read();
                     GrantRecoveryHolding(operation, ct);
@@ -331,7 +338,7 @@ public sealed partial class PipersPlugin
                 }, Progress, operation.Token);
                 if (SameIdentity())
                 {
-                    if (held)
+                    if (outcome == SupportedRecoveryOutcome.Holding)
                     {
                         CompleteRecoveryHolding(operation);
                         completedHolding = true;
@@ -352,6 +359,8 @@ public sealed partial class PipersPlugin
                     });
                 RetireRecovery(operation);
                 if (entered) commands.Release();
+                if (outcome == SupportedRecoveryOutcome.ResetConfirmationRequired)
+                    RequestResetCompletion(scope, operation.Epoch);
             }
         }, CancellationToken.None);
     }

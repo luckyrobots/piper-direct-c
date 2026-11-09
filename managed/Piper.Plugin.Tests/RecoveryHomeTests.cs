@@ -46,9 +46,9 @@ internal static class RecoveryHomeTests
             var fixture = new Fixture(); fixture.Device["reset_pending"] = true;
             fixture.Device["status"]!["arm_status"] = 0;
             foreach (var joint in fixture.Device["joints"]!.AsArray()) joint!["enabled"] = false;
-            await fixture.Run();
-            Check(fixture.Actions.SequenceEqual(["verify-reset", "enable", "move-to-zero"]),
-                "An already completed reset was resent instead of verified once");
+            var outcome = await fixture.Run();
+            Check(outcome == RecoveryHomeOutcome.ResetConfirmationRequired && fixture.Actions.Count == 0,
+                "Recovery to zero verified a pending reset instead of stopping for the operator's confirmation");
         }
         {
             var fixture = new Fixture(); fixture.Device["reset_pending"] = true;
@@ -207,7 +207,7 @@ internal static class RecoveryHomeTests
             if (!FreezeAfterAcknowledgement) { ++sequence; ++ticks; }
             return new(Device, Motion, Phase, "Fixture controller stopped", sequence, ticks);
         }
-        public Task Run(CancellationToken cancellation = default, int timeout = 100) =>
+        public Task<RecoveryHomeOutcome> Run(CancellationToken cancellation = default, int timeout = 100) =>
             RecoveryHome.Run("resting-arm", 7, "recovery-fixture", Snapshot, (step, cancel) =>
             {
                 cancel.ThrowIfCancellationRequested(); Actions.Add(step);

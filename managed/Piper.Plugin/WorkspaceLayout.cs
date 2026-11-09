@@ -26,6 +26,7 @@ public sealed partial class PipersPlugin
                     Hint = "Measured hardware pose, visible in Edit and Play. Ghosts are excluded from camera recordings." },
             Widget.Row("safety", Widget.Label("safety.text", "Make sure it is safe to move the robot."),
                 Widget.Button("safety.accept", "Enable robot") with { Appearance = "primary" }, Widget.Button("safety.cancel", "Cancel")) with { Visible = showClearanceConfirmation, Padding = 12, Appearance = "panel" },
+            ResetCompletionConfirmation(),
             Widget.Column("workspace.incident", Widget.Label("incident", "") with { Height = 56 },
                 Widget.Label("recovery.next", "") with { Height = 88 },
                 Widget.Label("recovery.requirements", "") with { Height = 96 },

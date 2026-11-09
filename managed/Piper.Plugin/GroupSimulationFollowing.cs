@@ -174,7 +174,7 @@ public sealed partial class PipersPlugin
     private bool GroupWaitingForUserPlay(GroupSession group) =>
         group.Phase is GroupFollowPhase.Arming or GroupFollowPhase.Armed && group.RunId.Length == 0 && GroupScopeCurrent(group);
 
-    private static bool GroupBlocksControlEvent(string id) => id is "speed" or "recovery.run" or "recovery.card.run" or "robots.select" or "link" or "backend.restart.confirm" ||
+    private static bool GroupBlocksControlEvent(string id) => id is "speed" or "recovery.run" or "recovery.card.run" or "recovery.reset.confirm" or "robots.select" or "link" or "backend.restart.confirm" ||
         WorkspaceCommandPolicy.RequiresControls(id) && id is not ("simulation.toggle" or "simulation.match") ||
         id.StartsWith("global.robot.", StringComparison.Ordinal) ||
         id.StartsWith("teaching.", StringComparison.Ordinal) || id.StartsWith("pika.reference.", StringComparison.Ordinal) ||

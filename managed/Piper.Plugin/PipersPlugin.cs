@@ -166,10 +166,15 @@ public sealed partial class PipersPlugin : ILuckyPlugin
     /// <param name="expected">The connection a prior confirmation authorized; null uses the current one.</param>
     internal async Task<JsonObject> Command(string action, JsonObject? fields, CancellationToken cancellation,
         CommandPurpose purpose = CommandPurpose.Control, RobotCommandScope? expected = null, long? expectedPermissionEpoch = null,
-        double? speedOverridePercent = null)
+        double? speedOverridePercent = null, ResetCompletionPrompt? resetCompletion = null)
     {
         long permissionEpoch = expectedPermissionEpoch ?? CommandAuthority.Epoch;
         cancellation.ThrowIfCancellationRequested();
+        // B1: only the operator's consumed answer to the reset question can attest
+        // that a reset completed, for exactly the connection and epoch it named.
+        if ((action == "verify-reset") != (resetCompletion is not null) ||
+            resetCompletion is not null && (resetCompletion.Scope != expected || resetCompletion.Epoch != permissionEpoch))
+            throw new InvalidOperationException("Controller reset verification needs the operator to confirm that the reset or power cycle completed. Nothing was sent.");
         string expectedToken = expected?.Backend ?? token;
         bool recoveryOnly = purpose == CommandPurpose.Recovery && action is "reset" or "verify-reset" or "verify-current" or "recover-at-pose";
         bool releasingPower = action == "disable";
@@ -187,7 +192,7 @@ public sealed partial class PipersPlugin : ILuckyPlugin
         body["device_id"] = scope.Device;
         body["generation"] = scope.Generation;
         body["owner"] = owner;
-        AddOperatorConfirmations(body, action, resetConfirmed: recoveryOnly);
+        AddOperatorConfirmations(body, action, resetConfirmed: recoveryOnly && resetCompletion is not null);
         body["speed_percent"] = speedOverridePercent ?? preferences.Speed; body["tolerance_deg"] = preferences.Tolerance;
         if (permissionEpoch != CommandAuthority.Epoch) throw new InvalidOperationException("Control permission changed while preparing the command; start a new action.");
         cancellation.ThrowIfCancellationRequested();
@@ -211,7 +216,7 @@ public sealed partial class PipersPlugin : ILuckyPlugin
         // Motor-power and recovery transitions require a supported arm.
         if (action is "enable" or "disable" or "reset" or "verify-reset" or "verify-disabled" or "verify-current" or "teach-return" or "recover-at-pose")
             body["supported"] = true;
-        // Only an operator-acknowledged recovery confirms that a reset completed.
+        // Only the operator's explicit answer to the reset question confirms that a reset completed.
         if (resetConfirmed && action == "verify-reset") body["reset_completed"] = true;
     }
 
@@ -383,6 +388,8 @@ public sealed partial class PipersPlugin : ILuckyPlugin
         }
         else if (id == "recovery.home") await StartRecoveryHome(cancellation);
         else if (id is "recovery.card.run" or "recovery.run") await RunRecoveryCard(cancellation, verifyOnly: id == "recovery.run");
+        else if (id == "recovery.reset.confirm") await ConfirmResetCompletion(cancellation);
+        else if (id == "recovery.reset.cancel") CancelResetCompletion();
         else if (id.StartsWith("camera.", StringComparison.Ordinal))
         {
             string[] parts = id.Split('.'); string camera = parts[1];
@@ -630,6 +637,7 @@ public sealed partial class PipersPlugin : ILuckyPlugin
         };
         patches["safety"] = new() { ["visible"] = scope.View?.Confirmation is { } presented &&
             ReferenceEquals(CommandAuthority.Current.Confirmation, presented) };
+        AddResetCompletionPatches(patches);
         patches["backend.restart.confirmation"] = new() { ["visible"] = backendRestart == BackendRestartPhase.Confirming };
         patches["backend.status"] = new() { ["text"] = backendStatus };
         patches["backend.prerequisites"] = new() { ["text"] = setupStatus };

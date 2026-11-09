@@ -145,9 +145,30 @@ internal static class RecoveryWorkspaceTests
             plugin.recoveryOperation = null;
             device["fresh"] = true; device["joints"]![0]!["fresh"] = true;
             device["reset_pending"] = true; device["recovery_required"] = true;
+            // B1: verify-reset stops at the operator's reset question.
             Fresh(); await Click("recovery.run");
-            Check(calls.Actions.SequenceEqual(["verify-reset"]), "Diagnostics' Verify controller state did not run the recovery card's verification");
-            calls.Actions.Clear(); device["reset_pending"] = false; device["recovery_required"] = false;
+            Check(calls.Actions.Count == 0 && plugin.resetCompletionPrompt is not null,
+                "Verify controller state sent verify-reset before the operator confirmed the reset completed");
+            Fresh(); await Click("recovery.reset.cancel");
+            Check(calls.Actions.Count == 0 && plugin.resetCompletionPrompt is null, "Cancelling the reset question sent a command or kept it open");
+            Fresh(); await Click("recovery.reset.confirm");
+            Check(calls.Actions.Count == 0, "A reset confirmation without an open question sent verify-reset");
+            Fresh(); await Click("recovery.card.run");
+            Check(calls.Actions.Count == 0 && plugin.resetCompletionPrompt is not null,
+                "The Controls recovery card sent verify-reset before the operator confirmed the reset completed");
+            Fresh(); plugin.CommandAuthority.Revoke(revokeLocalApproval: () => plugin.approved = false);
+            Fresh(); await Click("recovery.reset.confirm");
+            Check(calls.Actions.Count == 0 && plugin.resetCompletionPrompt is null, "STOP left an earlier reset question able to verify a reset");
+            Fresh(); await Click("recovery.run");
+            Fresh(); await Click("recovery.reset.confirm");
+            Fresh(); await Click("recovery.reset.confirm");
+            Check(calls.Actions.SequenceEqual(["verify-reset"]) && calls.Bodies[^1]["reset_completed"]?.GetValue<bool>() == true &&
+                plugin.resetCompletionPrompt is null, "Confirming the reset question did not send exactly one attested verify-reset");
+            bool refused = false;
+            try { await plugin.Command("verify-reset", null, CancellationToken.None, CommandPurpose.Recovery); }
+            catch (InvalidOperationException) { refused = true; }
+            Check(refused && calls.Actions.Count == 1, "A recovery-purpose verify-reset was sent without the operator's reset confirmation");
+            calls.Actions.Clear(); calls.Bodies.Clear(); device["reset_pending"] = false; device["recovery_required"] = false;
             device["blocker"] = "Another controller is sending commands on this CAN bus.";
             plugin.approved = true;
             Fresh(); await Click("enable");
@@ -165,6 +186,7 @@ internal static class RecoveryWorkspaceTests
     public static async Task RunSupportedSequence()
     {
         foreach (bool legal in new[] { false, true })
+        foreach (bool controllerVerified in new[] { false, true })
         {
             var device = Stopped();
             if (legal) { device["joints"]![1]!["actual_deg"] = .5; device["joints"]![2]!["actual_deg"] = -.5; }
@@ -186,18 +208,23 @@ internal static class RecoveryWorkspaceTests
                 if (action == "reset")
                 {
                     device["status"]!["arm_status"] = 0; device["status"]!["control"] = 1; device["teaching"]!["phase"] = "off";
-                    device["reset_pending"] = true; device["blocker"] = "";
+                    device["reset_pending"] = !controllerVerified; device["blocker"] = "";
                 }
-                if (action == "verify-reset") { device["reset_pending"] = false; device["recovery_required"] = false; }
-                return Task.FromResult(new SupportedRecoveryAcknowledgement(action == "verify-reset" ? 0 : request, sequence, sequence));
+                if (action == "verify-current") device["recovery_required"] = false;
+                return Task.FromResult(new SupportedRecoveryAcknowledgement(action == "verify-current" ? 0 : request, sequence, sequence));
             }
-            bool held = await SupportedStopRecovery.Run(Read, Send, _ =>
+            var outcome = await SupportedStopRecovery.Run(Read, Send, _ =>
             {
                 actions.Add("enable"); foreach (var joint in device["joints"]!.AsArray()) joint!["enabled"] = true;
                 return Task.CompletedTask;
             }, _ => { }, CancellationToken.None);
-            Check(held == legal && actions.SequenceEqual(legal ? ["disable", "reset", "verify-reset", "enable"] : ["disable", "reset", "verify-reset"]),
-                "One supported STOP acknowledgement did not tolerate its bounded reset gap, recover once, or preserve the range guard");
+            if (!controllerVerified)
+                Check(outcome == SupportedRecoveryOutcome.ResetConfirmationRequired && actions.SequenceEqual(["disable", "reset"]),
+                    "Supported STOP recovery verified a pending reset without the operator's confirmation");
+            else
+                Check(outcome == (legal ? SupportedRecoveryOutcome.Holding : SupportedRecoveryOutcome.HandGuidingRequired) &&
+                    actions.SequenceEqual(legal ? ["disable", "reset", "verify-current", "enable"] : ["disable", "reset", "verify-current"]),
+                    "One supported STOP acknowledgement did not tolerate its bounded reset gap, recover once, or preserve the range guard");
         }
         foreach (string interruption in new[] { "identity", "stale", "driver", "cancel", "cached-ack" })
         {
@@ -256,11 +283,13 @@ internal static class RecoveryWorkspaceTests
     private sealed class Calls : CallInvoker
     {
         public List<string> Actions { get; } = [];
+        public List<JsonObject> Bodies { get; } = [];
         public override AsyncUnaryCall<TResponse> AsyncUnaryCall<TRequest, TResponse>(Method<TRequest, TResponse> method, string? host, CallOptions options, TRequest request)
         {
             var command = request as ControlRequest ?? throw new InvalidOperationException("Unexpected recovery fixture call");
             if (command.Route != "/api/command") throw new InvalidOperationException("Recovery fixture sent another route");
-            Actions.Add(JsonNode.Parse(command.Json)!["action"]!.GetValue<string>());
+            var body = JsonNode.Parse(command.Json)!.AsObject();
+            Bodies.Add(body); Actions.Add(body["action"]!.GetValue<string>());
             return new(Task.FromResult((TResponse)(object)new ControlReply { Status = 202, Json = "{\"request_id\":77}" }), Task.FromResult(new Metadata()), () => Status.DefaultSuccess, () => new Metadata(), () => { });
         }
         public override TResponse BlockingUnaryCall<TRequest, TResponse>(Method<TRequest, TResponse> method, string? host, CallOptions options, TRequest request) => throw new NotSupportedException();
