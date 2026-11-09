@@ -284,188 +284,32 @@ public sealed partial class PipersPlugin : ILuckyPlugin
             string id = UnscopePublishedWorkspaceEvent(input.WidgetId);
             if (id.Length == 0) return; // Late gesture from a previously selected robot.
             uiActionError = "";
-            if (id.StartsWith("group.follow.", StringComparison.Ordinal))
-            { await GroupFollowWorkspaceEvent(id[13..], input.Value, cancellation); return; }
-            if (id.StartsWith("simulation.", StringComparison.Ordinal))
-            {
-                string action = id[11..] switch {
-                    "toggle" or "match" => "toggle", "stop" => "cancel",
-                    _ => throw new InvalidOperationException("Unknown simulation follow action.") };
-                await GroupFollowEvent(action, cancellation); await Update(cancellation); return;
-            }
-            if (GroupFollowActive && (id == "disable" || id == "motion.hold"))
-                await StopGroupSimulationFollowing("Operator stopped the follower group", cancellation);
-            if (GroupFollowActive && GroupBlocksControlEvent(id))
-                throw new InvalidOperationException("Stop following in the left sidebar before changing robot controls or assignments.");
-            if (id.StartsWith("global.", StringComparison.Ordinal))
-            { await GlobalSettingsEvent(id[7..], input.Value, cancellation); await Update(cancellation); return; }
-            if (Navigation.Page != WorkspacePage.Controls && WorkspaceCommandPolicy.RequiresControls(id)) throw new InvalidOperationException("Return to Controls before enabling or moving the robot.");
-            if (id.StartsWith("workspace.", StringComparison.Ordinal))
-            {
-                await WorkspaceEvent(id[10..], cancellation); await Update(cancellation); return;
-            }
-            if (id.StartsWith("height.", StringComparison.Ordinal))
-            {
-                if (id != "height.info") await HeightCheckEvent(id[7..], input.Value, cancellation);
-                await Update(cancellation); return;
-            }
-            if (id.StartsWith("replay.", StringComparison.Ordinal))
-            {
-                await ReplayEvent(id[7..], input.Value, cancellation); await Update(cancellation); return;
-            }
-            if (id.StartsWith("wizard.", StringComparison.Ordinal))
+            if (TryStrip(id, "group.follow.", out string rest)) { await GroupFollowWorkspaceEvent(rest, input.Value, cancellation); return; }
+            bool simulation = TryStrip(id, "simulation.", out rest);
+            if (!simulation) await AdmitControlEvent(id, cancellation);
+            if (simulation) await GroupFollowEvent(rest switch {
+                "toggle" or "match" => "toggle", "stop" => "cancel",
+                _ => throw new InvalidOperationException("Unknown simulation follow action.") }, cancellation);
+            else if (TryStrip(id, "global.", out rest)) await GlobalSettingsEvent(rest, input.Value, cancellation);
+            else if (TryStrip(id, "workspace.", out rest)) await WorkspaceEvent(rest, cancellation);
+            else if (TryStrip(id, "height.", out rest)) { if (rest != "info") await HeightCheckEvent(rest, input.Value, cancellation); }
+            else if (TryStrip(id, "replay.", out rest)) await ReplayEvent(rest, input.Value, cancellation);
+            else if (TryStrip(id, "wizard.", out rest))
             {
                 if (!calibrationOpen) throw new InvalidOperationException("Open Calibration before continuing its guided measurements.");
-                await WizardEvent(id[7..], input.Value, cancellation); await Update(cancellation); return;
+                await WizardEvent(rest, input.Value, cancellation);
             }
-            if (id.StartsWith("profiles.", StringComparison.Ordinal))
+            else if (TryStrip(id, "profiles.", out rest))
             {
                 if (calibrationOpen && (id.StartsWith("profiles.select.", StringComparison.Ordinal) || id is "profiles.add" or "profiles.remove"))
                 { await StopHeightCheck(cancellation); await ClearWizardHighlight(cancellation); }
-                await ProfileEvent(id[9..], cancellation);
+                await ProfileEvent(rest, cancellation);
                 // Selecting a robot returns to its controls through the same
                 // publication gate as every other navigation.
                 await PublishWorkspaceView(cancellation, () => Navigation = Navigation.Navigate("controls"));
-                await Update(cancellation); return;
             }
-            if (id.StartsWith("pika.reference.", StringComparison.Ordinal))
-            {
-                await PikaReferenceEvent(id[15..], cancellation); return;
-            }
-            if (teleoperating && id is "stop" or "disable" or "recovery.run" or "link")
-            {
-                try { await PauseTeleoperation(cancellation); }
-                catch (Exception error) when (error is not OperationCanceledException) { message = error.Message; }
-            }
-            if (id.StartsWith("backend.", StringComparison.Ordinal))
-                await BackendEvent(id[8..], input.Value.ValueKind == JsonValueKind.String ? input.Value.GetString() ?? "" : "", cancellation);
-            else if (id.StartsWith("teaching.pika.", StringComparison.Ordinal))
-                await PikaTeachingEvent(id[14..], cancellation);
-            else if (id == "enable")
-            {
-                await PrimaryRobotAction(cancellation);
-            }
-            else if (id == "safety.accept")
-            {
-                await RunPrimaryAction(async ct =>
-                {
-                    var confirmation = await AcceptWorkspaceClearance(input.WidgetId, ct);
-                    await CompleteRobotEnable(confirmation.Epoch, confirmation.Scope, ct);
-                }, cancellation);
-                await Render(cancellation);
-            }
-            else if (id == "safety.cancel") CommandAuthority.DismissConfirmation(DisplayedConfirmation(input.WidgetId, id));
-            else if (id == "disable")
-            {
-                link = null;
-                await Command("disable", null, cancellation);
-                if (pikaOwned) await Call("/api/pika/disable", new JsonObject { ["owner"] = owner }, cancellation);
-            }
-            else if (id == "recovery.home") await StartRecoveryHome(cancellation);
-            else if (id is "recovery.card.run" or "recovery.run") await RunRecoveryCard(cancellation, verifyOnly: id == "recovery.run");
-            else if (id.StartsWith("camera.", StringComparison.Ordinal))
-            {
-                string[] parts = id.Split('.'); string camera = parts[1];
-                var settings = CameraSettings(camera);
-                if (parts[2] == "settings") await WorkspaceEvent("settings.cameras." + camera, cancellation);
-                else if (parts[2].StartsWith("sim", StringComparison.Ordinal))
-                {
-                    await CameraComparisonEvent(camera, parts[2], input.Value, input.WidgetId, cancellation);
-                }
-                else if (parts[2].StartsWith("calibration", StringComparison.Ordinal))
-                    await CameraCalibrationEvent(camera, parts[2], cancellation);
-                else
-                {
-                    if (parts[2] == "device") settings = settings with { Device = CameraDeviceChoices.Resolve(cameraDeviceChoices, input.Value, CameraSettings(camera).Device), Enabled = true };
-                    if (parts[2] == "toggle") settings = settings with { Enabled = !settings.Enabled };
-                    if (camera == "depth" && parts[2] is "view" or "selectcolor" or "selectdepth") settings = D405View.Select(settings, parts[2] == "view" ? input.Value.GetInt32() : parts[2] == "selectdepth" ? 1 : 0);
-                    if (parts[2] == "serial") preferences = preferences with { DepthSerial = CameraDeviceChoices.Resolve(depthDeviceChoices, input.Value, "") };
-                    preferences = camera switch { "bench" => preferences with { Bench = settings }, "gripper" => preferences with { Gripper = settings }, _ => preferences with { Depth = settings } };
-                    await Save(cancellation); await RestartCamera(camera);
-                    await Render(cancellation);
-                }
-            }
-            else if (id == "link")
-            {
-                if (link is not null)
-                {
-                    RememberMeasuredTracking(false);
-                    await Save(cancellation);
-                    link = null; linkCommandsEnabled = false; message = "Robot unlinked · automatic measured tracking off for this robot";
-                    await engine.RequestAsync("robot.unsubscribe", cancellation: cancellation);
-                }
-                else
-                {
-                    RememberMeasuredTracking(true);
-                    await Save(cancellation);
-                    await StartMeasuredLink(automatic: false, cancellation);
-                    message = "Measured pose linked. Start Teleoperate to drag joints; release finishes the target. Calibration is not verified.";
-                    await Render(cancellation);
-                }
-            }
-            else if (id == "teleoperate.toggle")
-            {
-                if (teleoperating) { await PauseTeleoperation(cancellation); message = "Teleoperate paused · measured pose tracking continues"; }
-                else await SelectTeleoperationJoint(link?.JointNames.Contains(teleoperationJoint, StringComparer.Ordinal) == true
-                    ? teleoperationJoint : link?.JointNames.Last() ?? ActiveProfile.RobotJointPrefix + "joint6", cancellation);
-            }
-            else if (id == "motion.hold")
-            {
-                if (state?["motion"]?["active"]?.GetValue<bool>() == true && state["motion"]?["owner"]?.GetValue<string>() == owner)
-                {
-                    if (followRequest != 0) await HoldFollowing(cancellation);
-                    else await Command("hold", new JsonObject { ["request_id"] = state["motion"]!["request_id"]!.DeepClone() }, cancellation);
-                    message = "Movement stopped · holding measured pose";
-                }
-            }
-            else if (id.StartsWith("teleoperate.joint.", StringComparison.Ordinal))
-                await SelectTeleoperationJoint((link?.JointPrefix ?? ActiveProfile.RobotJointPrefix) + "joint" + id.Split('.')[2], cancellation);
-            else if (id == "engine.robot.follow")
-                await FollowViewport(JsonNode.Parse(input.Value.GetRawText())!.AsObject(), cancellation);
-            else if (id == "engine.robot.target" && link is { } linked)
-            {
-                if (!linkCommandsEnabled) throw new InvalidOperationException("Scene tracking is read-only after a stop. Recover, then Enable robot before sending a new target.");
-                var target = JsonNode.Parse(input.Value.GetRawText())!.AsObject();
-                await Command("pose", new JsonObject { ["degrees"] = JsonSerializer.SerializeToNode(linked.Target(target, Device())), ["synchronized"] = true }, cancellation);
-            }
-            else if (id == "speed" || id == "step" || id == "tolerance")
-            {
-                if (id == "speed" && SimulationFollowingActive)
-                    throw new InvalidOperationException("Stop following before changing its prepared speed.");
-                double value = FiniteControlNumber(input.Value, id);
-                preferences = id switch { "speed" => preferences with { Speed = Math.Clamp(value, 0, 100) }, "step" => preferences with { Step = Math.Clamp(value, .1, 5) }, _ => preferences with { Tolerance = Math.Clamp(value, .05, 1) } };
-                await Save(cancellation);
-            }
-            else if (id == "zero.all") await Command("move-to-zero", null, cancellation);
-            else if (id.StartsWith("joint.", StringComparison.Ordinal))
-            {
-                string[] parts = id.Split('.'); int joint = int.Parse(parts[1]);
-                string action = parts[2];
-                await Command(action == "target" ? "joint" : action == "zero" ? "zero" : "jog",
-                    new() { ["joint"] = joint, ["degrees"] = action == "target" ? input.Value.GetDouble() : action == "plus" ? preferences.Step : action == "minus" ? -preferences.Step : 0 }, cancellation);
-            }
-            else if (id is "pika.target" or "pika.plus" or "pika.minus" or "pika.zero")
-            {
-                long epoch = CommandAuthority.Epoch;
-                var profile = ActiveProfile;
-                var receipt = telemetry.Latest ?? throw new InvalidOperationException("Waiting for the controller server.");
-                var device = Device(expectedToken: receipt.BackendToken, sourceReceipt: receipt);
-                var pika = receipt.State["pika"] as JsonObject;
-                if (ManualPikaBlocker(device, pika) is { } blocked) throw new InvalidOperationException(blocked);
-                double opening;
-                if (id == "pika.target") opening = FiniteControlNumber(input.Value, "Gripper opening");
-                else if (id == "pika.zero") opening = 0;
-                else
-                {
-                    if (!PikaDisplayOpening(pika!, out double currentOpening))
-                        throw new InvalidOperationException("Waiting for a valid gripper opening. If the physical jaws are closed, set their display reference first.");
-                    opening = Math.Clamp(currentOpening + (id == "pika.plus" ? 1 : -1), 0, 90);
-                }
-                if (epoch != CommandAuthority.Epoch || profile != ActiveProfile)
-                    throw new InvalidOperationException("Control permission changed before the gripper target was sent.");
-                await Call("/api/pika/position", new JsonObject { ["owner"] = owner, ["value"] = PikaProtocol.Angle(opening),
-                    ["pika_device"] = profile.PikaDevice, ["pika_distribution"] = profile.PikaDistribution }, cancellation, receipt.BackendToken);
-            }
+            else if (TryStrip(id, "pika.reference.", out rest)) { await PikaReferenceEvent(rest, cancellation); return; }
+            else await ControlEvent(id, input, cancellation);
             await Update(cancellation);
         }
         catch (Exception error) when (error is not OperationCanceledException)
@@ -475,6 +319,163 @@ public sealed partial class PipersPlugin : ILuckyPlugin
             await Update(cancellation);
         }
         finally { commands.Release(); }
+    }
+
+    private static bool TryStrip(string id, string prefix, out string rest)
+    {
+        bool match = id.StartsWith(prefix, StringComparison.Ordinal);
+        rest = match ? id[prefix.Length..] : "";
+        return match;
+    }
+
+    /// <summary>Guards shared by every queued event except Follow's own controls.</summary>
+    private async Task AdmitControlEvent(string id, CancellationToken cancellation)
+    {
+        if (GroupFollowActive && id is "disable" or "motion.hold")
+            await StopGroupSimulationFollowing("Operator stopped the follower group", cancellation);
+        if (GroupFollowActive && GroupBlocksControlEvent(id))
+            throw new InvalidOperationException("Stop following in the left sidebar before changing robot controls or assignments.");
+        if (Navigation.Page != WorkspacePage.Controls && WorkspaceCommandPolicy.RequiresControls(id))
+            throw new InvalidOperationException("Return to Controls before enabling or moving the robot.");
+    }
+
+    /// <summary>Robot, camera and preference controls that have no prefix handler.</summary>
+    private async Task ControlEvent(string id, UiEvent input, CancellationToken cancellation)
+    {
+        if (teleoperating && id is "stop" or "disable" or "recovery.run" or "link")
+        {
+            try { await PauseTeleoperation(cancellation); }
+            catch (Exception error) when (error is not OperationCanceledException) { message = error.Message; }
+        }
+        if (TryStrip(id, "backend.", out string rest))
+            await BackendEvent(rest, input.Value.ValueKind == JsonValueKind.String ? input.Value.GetString() ?? "" : "", cancellation);
+        else if (TryStrip(id, "teaching.pika.", out rest))
+            await PikaTeachingEvent(rest, cancellation);
+        else if (id == "enable")
+        {
+            await PrimaryRobotAction(cancellation);
+        }
+        else if (id == "safety.accept")
+        {
+            await RunPrimaryAction(async ct =>
+            {
+                var confirmation = await AcceptWorkspaceClearance(input.WidgetId, ct);
+                await CompleteRobotEnable(confirmation.Epoch, confirmation.Scope, ct);
+            }, cancellation);
+            await Render(cancellation);
+        }
+        else if (id == "safety.cancel") CommandAuthority.DismissConfirmation(DisplayedConfirmation(input.WidgetId, id));
+        else if (id == "disable")
+        {
+            link = null;
+            await Command("disable", null, cancellation);
+            if (pikaOwned) await Call("/api/pika/disable", new JsonObject { ["owner"] = owner }, cancellation);
+        }
+        else if (id == "recovery.home") await StartRecoveryHome(cancellation);
+        else if (id is "recovery.card.run" or "recovery.run") await RunRecoveryCard(cancellation, verifyOnly: id == "recovery.run");
+        else if (id.StartsWith("camera.", StringComparison.Ordinal))
+        {
+            string[] parts = id.Split('.'); string camera = parts[1];
+            var settings = CameraSettings(camera);
+            if (parts[2] == "settings") await WorkspaceEvent("settings.cameras." + camera, cancellation);
+            else if (parts[2].StartsWith("sim", StringComparison.Ordinal))
+            {
+                await CameraComparisonEvent(camera, parts[2], input.Value, input.WidgetId, cancellation);
+            }
+            else if (parts[2].StartsWith("calibration", StringComparison.Ordinal))
+                await CameraCalibrationEvent(camera, parts[2], cancellation);
+            else
+            {
+                if (parts[2] == "device") settings = settings with { Device = CameraDeviceChoices.Resolve(cameraDeviceChoices, input.Value, CameraSettings(camera).Device), Enabled = true };
+                if (parts[2] == "toggle") settings = settings with { Enabled = !settings.Enabled };
+                if (camera == "depth" && parts[2] is "view" or "selectcolor" or "selectdepth") settings = D405View.Select(settings, parts[2] == "view" ? input.Value.GetInt32() : parts[2] == "selectdepth" ? 1 : 0);
+                if (parts[2] == "serial") preferences = preferences with { DepthSerial = CameraDeviceChoices.Resolve(depthDeviceChoices, input.Value, "") };
+                preferences = camera switch { "bench" => preferences with { Bench = settings }, "gripper" => preferences with { Gripper = settings }, _ => preferences with { Depth = settings } };
+                await Save(cancellation); await RestartCamera(camera);
+                await Render(cancellation);
+            }
+        }
+        else if (id == "link")
+        {
+            if (link is not null)
+            {
+                RememberMeasuredTracking(false);
+                await Save(cancellation);
+                link = null; linkCommandsEnabled = false; message = "Robot unlinked · automatic measured tracking off for this robot";
+                await engine.RequestAsync("robot.unsubscribe", cancellation: cancellation);
+            }
+            else
+            {
+                RememberMeasuredTracking(true);
+                await Save(cancellation);
+                await StartMeasuredLink(automatic: false, cancellation);
+                message = "Measured pose linked. Start Teleoperate to drag joints; release finishes the target. Calibration is not verified.";
+                await Render(cancellation);
+            }
+        }
+        else if (id == "teleoperate.toggle")
+        {
+            if (teleoperating) { await PauseTeleoperation(cancellation); message = "Teleoperate paused · measured pose tracking continues"; }
+            else await SelectTeleoperationJoint(link?.JointNames.Contains(teleoperationJoint, StringComparer.Ordinal) == true
+                ? teleoperationJoint : link?.JointNames.Last() ?? ActiveProfile.RobotJointPrefix + "joint6", cancellation);
+        }
+        else if (id == "motion.hold")
+        {
+            if (state?["motion"]?["active"]?.GetValue<bool>() == true && state["motion"]?["owner"]?.GetValue<string>() == owner)
+            {
+                if (followRequest != 0) await HoldFollowing(cancellation);
+                else await Command("hold", new JsonObject { ["request_id"] = state["motion"]!["request_id"]!.DeepClone() }, cancellation);
+                message = "Movement stopped · holding measured pose";
+            }
+        }
+        else if (id.StartsWith("teleoperate.joint.", StringComparison.Ordinal))
+            await SelectTeleoperationJoint((link?.JointPrefix ?? ActiveProfile.RobotJointPrefix) + "joint" + id.Split('.')[2], cancellation);
+        else if (id == "engine.robot.follow")
+            await FollowViewport(JsonNode.Parse(input.Value.GetRawText())!.AsObject(), cancellation);
+        else if (id == "engine.robot.target" && link is { } linked)
+        {
+            if (!linkCommandsEnabled) throw new InvalidOperationException("Scene tracking is read-only after a stop. Recover, then Enable robot before sending a new target.");
+            var target = JsonNode.Parse(input.Value.GetRawText())!.AsObject();
+            await Command("pose", new JsonObject { ["degrees"] = JsonSerializer.SerializeToNode(linked.Target(target, Device())), ["synchronized"] = true }, cancellation);
+        }
+        else if (id == "speed" || id == "step" || id == "tolerance")
+        {
+            if (id == "speed" && SimulationFollowingActive)
+                throw new InvalidOperationException("Stop following before changing its prepared speed.");
+            double value = FiniteControlNumber(input.Value, id);
+            preferences = id switch { "speed" => preferences with { Speed = Math.Clamp(value, 0, 100) }, "step" => preferences with { Step = Math.Clamp(value, .1, 5) }, _ => preferences with { Tolerance = Math.Clamp(value, .05, 1) } };
+            await Save(cancellation);
+        }
+        else if (id == "zero.all") await Command("move-to-zero", null, cancellation);
+        else if (id.StartsWith("joint.", StringComparison.Ordinal))
+        {
+            string[] parts = id.Split('.'); int joint = int.Parse(parts[1]);
+            string action = parts[2];
+            await Command(action == "target" ? "joint" : action == "zero" ? "zero" : "jog",
+                new() { ["joint"] = joint, ["degrees"] = action == "target" ? input.Value.GetDouble() : action == "plus" ? preferences.Step : action == "minus" ? -preferences.Step : 0 }, cancellation);
+        }
+        else if (id is "pika.target" or "pika.plus" or "pika.minus" or "pika.zero")
+        {
+            long epoch = CommandAuthority.Epoch;
+            var profile = ActiveProfile;
+            var receipt = telemetry.Latest ?? throw new InvalidOperationException("Waiting for the controller server.");
+            var device = Device(expectedToken: receipt.BackendToken, sourceReceipt: receipt);
+            var pika = receipt.State["pika"] as JsonObject;
+            if (ManualPikaBlocker(device, pika) is { } blocked) throw new InvalidOperationException(blocked);
+            double opening;
+            if (id == "pika.target") opening = FiniteControlNumber(input.Value, "Gripper opening");
+            else if (id == "pika.zero") opening = 0;
+            else
+            {
+                if (!PikaDisplayOpening(pika!, out double currentOpening))
+                    throw new InvalidOperationException("Waiting for a valid gripper opening. If the physical jaws are closed, set their display reference first.");
+                opening = Math.Clamp(currentOpening + (id == "pika.plus" ? 1 : -1), 0, 90);
+            }
+            if (epoch != CommandAuthority.Epoch || profile != ActiveProfile)
+                throw new InvalidOperationException("Control permission changed before the gripper target was sent.");
+            await Call("/api/pika/position", new JsonObject { ["owner"] = owner, ["value"] = PikaProtocol.Angle(opening),
+                ["pika_device"] = profile.PikaDevice, ["pika_distribution"] = profile.PikaDistribution }, cancellation, receipt.BackendToken);
+        }
     }
 
     private async Task Enable(CancellationToken cancellation, bool includePika = true, RobotCommandScope? expected = null,
