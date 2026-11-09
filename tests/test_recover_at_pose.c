@@ -116,13 +116,33 @@ int main(void)
         if (failure==9) strcpy(d->feedback.version,"S-V1.8-2");
         action(&c,"recover-at-pose",409); CHECK(blocked(&c)); close_fixture(&c,directory);
     }
-    /* B10: eligibility follows the persisted kind, so rewording a message
-       cannot break recovery. */
+    /* B10: eligibility follows the persisted kind, so a record whose message
+       was reworded by this build (reason and kind_reason together) still
+       recovers. */
     fixture(&c,directory); physical_cycle(&c);
     cJSON_ReplaceItemInObject(record(&c),"reason",cJSON_CreateString("Reworded obstruction message."));
+    cJSON_ReplaceItemInObject(record(&c),"kind_reason",cJSON_CreateString("Reworded obstruction message."));
     cJSON_ReplaceItemInObject(cJSON_GetObjectItem(record(&c),"stop_event"),"reason",cJSON_CreateString("Reworded."));
     CHECK(!strcmp(cJSON_GetStringValue(cJSON_GetObjectItem(cJSON_GetObjectItem(record(&c),"stop_event"),"kind")),"obstruction"));
     action(&c,"recover-at-pose",202); tick(&c,.025); tick(&c,.025); CHECK(LANE(&c)->op==OP_IDLE&&!blocked(&c)); close_fixture(&c,directory);
+    /* Rollback: an older build re-latched a different stop and rewrote only
+       the reason, leaving kind "obstruction". kind is derived again. */
+    fixture(&c,directory); physical_cycle(&c);
+    cJSON_ReplaceItemInObject(record(&c),"reason",cJSON_CreateString("Control heartbeat expired."));
+    action(&c,"recover-at-pose",409); CHECK(blocked(&c));
+    CHECK(!strcmp(cJSON_GetStringValue(cJSON_GetObjectItem(record(&c),"kind")),"stop")); close_fixture(&c,directory);
+    /* Rollback: an older build latched (blocked:true) a record this build had
+       cleared, leaving state "clear". The stricter reading wins. */
+    fixture(&c,directory); physical_cycle(&c);
+    cJSON_ReplaceItemInObject(record(&c),"state",cJSON_CreateString("clear"));
+    cJSON_Delete(controller_state(&c,"rollback-test")); /* any controller read normalizes the record */
+    CHECK(blocked(&c)&&!strcmp(cJSON_GetStringValue(cJSON_GetObjectItem(record(&c),"state")),"latched")); close_fixture(&c,directory);
+    fixture(&c,directory); physical_cycle(&c);
+    cJSON_ReplaceItemInObject(record(&c),"state",cJSON_CreateString("clear"));
+    cJSON_ReplaceItemInObject(record(&c),"blocked",cJSON_CreateFalse());
+    cJSON_ReplaceItemInObject(record(&c),"reset_pending",cJSON_CreateTrue());
+    cJSON_Delete(controller_state(&c,"rollback-test"));
+    CHECK(blocked(&c)&&!strcmp(cJSON_GetStringValue(cJSON_GetObjectItem(record(&c),"state")),"reset_pending")); close_fixture(&c,directory);
     /* A record written before "kind" existed derives it once from its text. */
     fixture(&c,directory); physical_cycle(&c);
     cJSON_DeleteItemFromObject(record(&c),"kind"); cJSON_DeleteItemFromObject(record(&c),"state");

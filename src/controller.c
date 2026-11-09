@@ -119,10 +119,26 @@ static const char *legacy_kind(const cJSON *r)
     if (!strcmp(reason,"Motors disabled; recovery verification required")) return KIND_POWER;
     return KIND_STOP;
 }
+/* An older build rewrites only the booleans and reason and keeps unknown
+   fields, so after a rollback and upgrade "state"/"kind" can be stale.
+   - state: any disagreement with the booleans resolves to the stricter
+     reading (latched if either side says so, reset-pending likewise).
+   - kind: "kind_reason" records the reason kind was set for. A reason that
+     no longer matches it was written by an older build, so kind is derived
+     again from that text. Rewording messages in code never trips this,
+     because this build always writes reason and kind_reason together. */
 static void record_normalize(cJSON *r)
 {
-    if (!field(r,"state")) str(r,"state",!yes(r,"blocked")?RECORD_CLEAR:yes(r,"reset_pending")?RECORD_RESET_PENDING:RECORD_LATCHED);
-    if (!field(r,"kind")) str(r,"kind",legacy_kind(r));
+    const char *state=text_field(r,"state");
+    bool known=record_state_valid(state);
+    bool latched=yes(r,"blocked")||yes(r,"reset_pending")||(known&&strcmp(state,RECORD_CLEAR));
+    bool pending=yes(r,"reset_pending")||(known&&!strcmp(state,RECORD_RESET_PENDING));
+    const char *derived=!latched?RECORD_CLEAR:pending?RECORD_RESET_PENDING:RECORD_LATCHED;
+    bool state_stale=!known||strcmp(state,derived)||yes(r,"blocked")!=latched||yes(r,"reset_pending")!=pending;
+    if (state_stale) { str(r,"state",derived); flag(r,"blocked",latched); flag(r,"reset_pending",pending); }
+    bool kind_stale=state_stale||!field(r,"kind")||(field(r,"kind_reason")&&strcmp(text_field(r,"kind_reason"),text_field(r,"reason")));
+    if (kind_stale) str(r,"kind",legacy_kind(r));
+    if (kind_stale||!field(r,"kind_reason")) str(r,"kind_reason",text_field(r,"reason"));
     cJSON *event=field(r,"stop_event");
     if (cJSON_IsObject(event)&&!field(event,"kind"))
         str(event,"kind",!strncmp(text_field(event,"reason"),obstruction_prefix,sizeof obstruction_prefix-1)?KIND_OBSTRUCTION:KIND_STOP);
@@ -167,14 +183,14 @@ static bool reset_pending(struct controller *c,const char *id)
 static bool latch(struct controller *c,const char *id,const char *reason,const char *kind,bool pending)
 {
     cJSON *r=record(c,id);
-    str(r,"state",pending?RECORD_RESET_PENDING:RECORD_LATCHED); str(r,"kind",kind); str(r,"reason",reason);
+    str(r,"state",pending?RECORD_RESET_PENDING:RECORD_LATCHED); str(r,"kind",kind); str(r,"reason",reason); str(r,"kind_reason",reason);
     flag(r,"blocked",true); flag(r,"reset_pending",pending);
     return persist(c);
 }
 static bool clear_latch(struct controller *c,const char *id)
 {
     cJSON *r=record(c,id); const cJSON *old=legacy_stop(c,id);
-    str(r,"state",RECORD_CLEAR); str(r,"kind",""); str(r,"reason","");
+    str(r,"state",RECORD_CLEAR); str(r,"kind",""); str(r,"reason",""); str(r,"kind_reason","");
     flag(r,"blocked",false); flag(r,"reset_pending",false);
     flag(r,"stop_event_active",false);
     if (old) str(r,"legacy_ack",text_field(old,"at"));
@@ -1369,10 +1385,12 @@ cJSON *controller_action(struct controller *c,const char *route,const cJSON *bod
         bool failed=false;
         for (unsigned i=0;i<CANBUS_MAX;++i) if (*c->bus.devices[i].id) {
             struct can_device *device=&c->bus.devices[i];
-            struct controller_lane *l=lane_for(c,device->id); assert(l); /* discover_lanes made one per device. */
-            stop_lane(c,l,"Operator global stop.");
+            /* discover_lanes makes one lane per device; if that ever fails,
+               report this arm as unverified and keep stopping the others. */
+            struct controller_lane *l=lane_for(c,device->id);
+            if (l) stop_lane(c,l,"Operator global stop.");
             cJSON *entry=cJSON_CreateObject();str(entry,"device_id",device->id);num(entry,"generation",device->generation);
-            bool delivered=l->stop_delivered;flag(entry,"ok",delivered);str(entry,"message",l->message);cJSON_AddItemToArray(stops,entry);
+            bool delivered=l&&l->stop_delivered;flag(entry,"ok",delivered);str(entry,"message",l?l->message:"No control lane for this arm; STOP was not sent.");cJSON_AddItemToArray(stops,entry);
             failed|=!delivered;
         }
         put(result,"stops",stops);

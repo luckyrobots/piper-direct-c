@@ -123,7 +123,10 @@ int main(void)
     cJSON *r=cJSON_GetObjectItem(cJSON_GetObjectItem(c.saved,"devices"),d->id);
     cJSON_ReplaceItemInObject(r,"state",cJSON_CreateString("reset_pending"));
     action(&c,"verify-disabled",409);
+    /* This build writes state and the legacy booleans together; editing only
+       one now reads as an older build's write and resolves to the stricter. */
     cJSON_ReplaceItemInObject(r,"state",cJSON_CreateString("latched"));
+    cJSON_ReplaceItemInObject(r,"reset_pending",cJSON_CreateFalse());
     action(&c,"verify-disabled",200); CHECK(!recovery(&c)); CHECK(d->tx==tx);
     d->feedback.arm[0].arm_status=5; d->feedback.arm[0].error=63;
     d->feedback.arm[0].status_at=piper_now();
