@@ -77,7 +77,7 @@ public sealed class OrderedSimulationExecution
         if (jaw.Resolved && jaw.Kind != JawReferenceKind.LosingContact && Target.OpeningMm != jaw.Command) jaw = JawReference.None;
         for (int joint = 0; joint < 6; joint++)
             if (Math.Abs(reference.JointDegrees[joint] - hardware.JointDegrees[joint]) > SimulationFollowPolicy.TrackingJointToleranceDegrees)
-                throw new InvalidOperationException($"Real J{joint + 1} is more than 5° from the controller's transmitted reference. Following stopped.");
+                throw new InvalidOperationException($"Real J{joint + 1} is more than {SimulationFollowPolicy.TrackingJointToleranceDegrees:0}° from the controller's transmitted reference. Following stopped.");
         UpdateContactLoss(nowSeconds, hardware.GripperOpeningMm, gripperSpeed, gripperFeedbackTime);
         double expected = ExpectedMeasuredOpeningMm;
         double sourceExpected = phase?.ExpectedMeasuredOpeningMm ?? expectedOpening;
@@ -102,7 +102,7 @@ public sealed class OrderedSimulationExecution
             low = high = jaw.Opening;
         }
         if (hardware.GripperOpeningMm < low - SimulationFollowPolicy.TrackingGripperToleranceMm || hardware.GripperOpeningMm > high + SimulationFollowPolicy.TrackingGripperToleranceMm)
-            throw new InvalidOperationException("Real Pika is more than 10 mm from its retimed jaw phase. Following stopped.");
+            throw new InvalidOperationException($"Real Pika is more than {SimulationFollowPolicy.TrackingGripperToleranceMm:0} mm from its retimed jaw phase. Following stopped.");
         if (jaw.Resolved && !QualifyingLostContact && Math.Abs(hardware.GripperOpeningMm - jaw.Opening) > 2)
             throw new InvalidOperationException("Pika's measured opening changed more than 2 mm from its settled jaw reference. Following stopped.");
         if (phase is null) return Target;
