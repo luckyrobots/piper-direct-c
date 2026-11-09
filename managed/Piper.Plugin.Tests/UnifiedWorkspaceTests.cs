@@ -80,8 +80,8 @@ internal static class UnifiedWorkspaceTests
         var first = new RobotProfile("one", "One", PikaDevice: "/dev/pika/by-host/11-4");
         var second = new RobotProfile("two", "Two", PikaDevice: "/dev/pika/by-host/15-4");
         var snapshot = new JsonObject { ["pikas"] = new JsonArray(
-            new JsonObject { ["device"] = first.PikaDevice, ["distribution"] = "Ubuntu", ["position"] = 1d },
-            new JsonObject { ["device"] = second.PikaDevice, ["distribution"] = "Ubuntu", ["position"] = 2d }) };
+            new JsonObject { ["device"] = first.PikaDevice, ["distribution"] = first.PikaDistribution, ["position"] = 1d },
+            new JsonObject { ["device"] = second.PikaDevice, ["distribution"] = second.PikaDistribution, ["position"] = 2d }) };
         Check(ProfilePikaRouting.Find(snapshot, first)?["position"]?.GetValue<double>() == 1 && ProfilePikaRouting.Find(snapshot, second)?["position"]?.GetValue<double>() == 2,
             "Selecting a second gripper replaced or reused the first device's telemetry");
         Check(ProfilePikaRouting.Find(snapshot, first with { PikaDevice = "/dev/missing" }) is null, "A missing Pika assignment silently fell back to a different gripper");

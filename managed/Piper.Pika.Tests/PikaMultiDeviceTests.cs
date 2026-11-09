@@ -159,7 +159,8 @@ internal static class PikaMultiDeviceTests
         await routing.ExecuteAsync("devices", JsonSerializer.SerializeToElement(new { pika_distribution = (string?)null }), default);
         Check(probe.Requested.Count == 2 && probe.Requested[1] is null,
             "An explicit native-Linux inventory request was turned into the default WSL distribution");
-        Check(PikaDistribution.ForCurrentPlatform(" ") is null && PikaDistribution.Normalize("") is null &&
+        Check(PikaDistribution.ForCurrentPlatform(" ") == (OperatingSystem.IsWindows() ? PikaDistribution.WindowsDefault : null) &&
+            PikaDistribution.ForCurrentPlatform("Debian") == (OperatingSystem.IsWindows() ? "Debian" : null) && PikaDistribution.Normalize("") is null &&
             PikaDistribution.Same("ubuntu", "Ubuntu") && !PikaDistribution.Same(null, "Ubuntu") && PikaDistribution.Same("", null) &&
             PikaDistribution.ToKeyText(null) == "" && PikaDistribution.Transport(null) == "linux-serial" &&
             PikaDistribution.Transport("Ubuntu") == "wsl-linux-serial", "The distribution convention changed");

@@ -52,7 +52,7 @@ public static class BackendActivity
 /// and is being started again) → Idle. Any failure returns to Idle.</summary>
 internal enum BackendRestartPhase { Idle, Confirming, Requested, Relaunching }
 
-public sealed record BackendSettings(string WslDistribution = "Ubuntu", string PikaDevice = "/dev/serial/by-id/usb-" + PikaProtocol.UsbVendorId + "_USB_Serial-if00-port0");
+public sealed record BackendSettings(string WslDistribution = PikaDistribution.WindowsDefault, string PikaDevice = "/dev/serial/by-id/usb-" + PikaProtocol.UsbVendorId + "_USB_Serial-if00-port0");
 
 public sealed partial class PipersPlugin
 {

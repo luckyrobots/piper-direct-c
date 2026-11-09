@@ -6,6 +6,7 @@ using System.Text.Json.Nodes;
 using Grpc.Core;
 using LuckyEngine.PluginSdk;
 using LuckyRobots.Piper.Grpc;
+using LuckyRobots.Piper.Pika;
 using LuckyRobots.Piper.Plugin;
 
 internal static class MeasuredTrackingTests
@@ -204,7 +205,7 @@ internal static class MeasuredTrackingTests
                 }),
                 ["pika"] = new JsonObject
                 {
-                    ["configured"] = true, ["device"] = "/dev/pika-a", ["distribution"] = RobotProfile.PikaDistributionFor("Ubuntu"), ["owner"] = "",
+                    ["configured"] = true, ["device"] = "/dev/pika-a", ["distribution"] = PikaDistribution.ForCurrentPlatform(null), ["owner"] = "",
                     ["connected"] = false, ["fresh"] = true, ["power_requested"] = false, ["power_uncertain"] = false,
                     ["telemetry"] = new JsonObject { ["motor"] = new JsonObject { ["Position"] = 0.0 } }
                 }

@@ -3,6 +3,7 @@ using System.Reflection;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using LuckyEngine.PluginSdk;
+using LuckyRobots.Piper.Pika;
 using LuckyRobots.Piper.Plugin;
 
 internal static class MeasuredGhostPublicationTests
@@ -81,8 +82,8 @@ internal static class MeasuredGhostPublicationTests
         public Fixture()
         {
             Preferences = RobotProfileRouting.Normalize(new Preferences(Robots: [
-                new("a", "First", "can-a", RobotId: "compound", PikaDevice: "/dev/a", WslDistribution: "Ubuntu"),
-                new("b", "Second", "can-b", RobotId: "compound", PikaDevice: "/dev/b", WslDistribution: "Ubuntu", RobotJointPrefix: "piper3_")], ActiveRobotId: "a"));
+                new("a", "First", "can-a", RobotId: "compound", PikaDevice: "/dev/a"),
+                new("b", "Second", "can-b", RobotId: "compound", PikaDevice: "/dev/b", RobotJointPrefix: "piper3_")], ActiveRobotId: "a"));
             SetPreferences(Preferences);
             plugin.passiveMeasuredTrackingStarted = true;
             plugin.ghostCapabilities = new(Ghosts: true, Visibility: true);
@@ -123,7 +124,7 @@ internal static class MeasuredGhostPublicationTests
                 ["fresh"] = true, ["status"] = new JsonObject { ["age_s"] = 0.0 },
                 ["joints"] = new JsonArray(Enumerable.Range(1, 6).Select(_ => (JsonNode)new JsonObject {
                     ["actual_deg"] = angle, ["age_s"] = 0.0, ["fresh"] = true }).ToArray()) };
-            JsonObject Pika(string device, double age) => new() { ["device"] = device, ["distribution"] = RobotProfile.PikaDistributionFor("Ubuntu"), ["connected"] = true,
+            JsonObject Pika(string device, double age) => new() { ["device"] = device, ["distribution"] = PikaDistribution.ForCurrentPlatform(null), ["connected"] = true,
                 ["fresh"] = true, ["age_s"] = age, ["telemetry"] = new JsonObject { ["motor"] = new JsonObject { ["Position"] = 0.0 } } };
             var snapshot = new JsonObject { ["token"] = backend, ["selected"] = "can-a", ["devices"] = new JsonArray(Arm("can-a", first, firstGeneration), Arm("can-b", second, 1)),
                 ["pikas"] = new JsonArray(Pika("/dev/a", firstPikaAge), Pika("/dev/b", 0)) };

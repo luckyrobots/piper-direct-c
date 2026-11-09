@@ -105,7 +105,8 @@ var wristBinding = new SimulationCameraPreferences("scene-a", "wrist-a");
 var legacyProfiles = RobotProfileRouting.Normalize(new Preferences(Speed: 37, Step: 2, Tolerance: .3, RobotId: "scene-robot-a", Bench: sharedBench,
     Gripper: new("wrist-camera-a"), DepthSerial: "depth-a", SimulationCameras: new() { ["bench"] = benchBinding, ["gripper"] = wristBinding }, Backend: new("CustomUbuntu", "/dev/pika-a")));
 Check(legacyProfiles.Robots is { Length: 1 } && legacyProfiles.ActiveRobotId == "piper-1", "Legacy workspace did not migrate to one explicit robot");
-Check(RobotProfileRouting.Active(legacyProfiles) is { PikaDevice: "/dev/pika-a", WslDistribution: "CustomUbuntu", CameraSlot: 0 }, "Legacy Pika identity/distro did not migrate");
+Check(RobotProfileRouting.Active(legacyProfiles) is { PikaDevice: "/dev/pika-a", CameraSlot: 0 } legacyProfile &&
+    legacyProfile.WslDistribution == LuckyRobots.Piper.Pika.PikaDistribution.ForCurrentPlatform("CustomUbuntu"), "Legacy Pika identity/distro did not migrate");
 Check(legacyProfiles.Bench == sharedBench && legacyProfiles.SimulationCameras!["bench"] == benchBinding, "Migration changed the shared bench camera");
 var profileA = RobotProfileRouting.Active(legacyProfiles) with { CanDeviceId = "can-a" };
 var profileB = new RobotProfile("piper-2", "Piper 2", "can-b", 55, 4, .2, "scene-robot-b", new("wrist-camera-b"), new("depth-camera-b"), "depth-b",

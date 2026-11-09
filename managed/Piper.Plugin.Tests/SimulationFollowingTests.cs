@@ -686,7 +686,7 @@ internal static partial class SimulationFollowingTests
                 joint["max_speed_rad_s"] = 1d; joint["max_acceleration_rad_s2"] = 3d; joint["acceleration_fresh"] = true;
             });
             Snapshot = Fixtures.Snapshot("fixture-backend", arm,
-                Fixtures.Pika("/dev/pika-a", RobotProfile.PikaDistributionFor("Ubuntu"), plugin.owner, enabled: true, position: PikaProtocol.Angle(20)),
+                Fixtures.Pika("/dev/pika-a", PikaDistribution.ForCurrentPlatform(null), plugin.owner, enabled: true, position: PikaProtocol.Angle(20)),
                 new JsonObject { ["active"] = false, ["request_id"] = 0L, ["owner"] = plugin.owner,
                     ["following"] = false, ["trajectory_follow"] = false, ["follow_sequence"] = 0L });
             Snapshot["trajectory_follow_supported"] = true;

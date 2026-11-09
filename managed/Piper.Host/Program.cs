@@ -30,7 +30,7 @@ using var mutex = new Mutex(true, mutexName, out bool owns);
 if (!owns) throw new InvalidOperationException("Another managed controller owns this hardware session");
 using var controller = new ControllerService(simulated, directory, simulatedRobotCount);
 string pikaDevice = simulated ? "" : Option("--pika-device", "");
-string? pikaDistribution = OperatingSystem.IsWindows() ? Option("--pika-wsl", "Ubuntu") : null;
+string? pikaDistribution = PikaDistribution.ForCurrentPlatform(Option("--pika-wsl", ""));
 if (!double.TryParse(Option("--pika-command-period-ms", "30"), System.Globalization.NumberStyles.Float,
     System.Globalization.CultureInfo.InvariantCulture, out double pikaCommandPeriodMs)) throw new ArgumentException("Invalid --pika-command-period-ms");
 await using var pika = new PikaSessionRegistry(pikaDevice,

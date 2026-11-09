@@ -5,16 +5,22 @@ namespace LuckyRobots.Piper.Pika;
 /// <item><c>null</c> means native Linux: the backend itself runs on Linux.</item>
 /// <item>A non-empty name means that WSL distribution, on Windows.</item>
 /// </list>
-/// The empty string is never a distribution, and none is implied: a Windows
-/// caller must name one explicitly (there is no implicit "Ubuntu").</summary>
+/// The empty string is never a distribution. The registry never implies one:
+/// an explicit <c>null</c> is never defaulted. Only a profile or launch setting
+/// that names none falls back to <see cref="WindowsDefault"/>, through
+/// <see cref="ForCurrentPlatform"/>.</summary>
 public static class PikaDistribution
 {
     public const int MaximumNameLength = 128;
 
-    /// <summary>Projects a profile's WSL setting onto the running OS: the
-    /// normalized name on Windows, and <c>null</c> (native Linux) elsewhere.</summary>
+    /// <summary>The WSL distribution a Windows setting uses until the operator names another.</summary>
+    public const string WindowsDefault = "Ubuntu";
+
+    /// <summary>Projects a profile or launch WSL setting onto the running OS: the
+    /// normalized name (or <see cref="WindowsDefault"/> when none is named) on
+    /// Windows, and <c>null</c> (native Linux) elsewhere.</summary>
     public static string? ForCurrentPlatform(string? wslDistribution) =>
-        OperatingSystem.IsWindows() ? Normalize(wslDistribution) : null;
+        OperatingSystem.IsWindows() ? Normalize(wslDistribution) ?? WindowsDefault : null;
 
     /// <summary>Maps the legacy empty or whitespace spelling to <c>null</c>.</summary>
     public static string? Normalize(string? distribution) => string.IsNullOrWhiteSpace(distribution) ? null : distribution;
