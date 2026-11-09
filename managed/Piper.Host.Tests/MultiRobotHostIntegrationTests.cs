@@ -39,17 +39,24 @@ internal static class MultiRobotHostIntegrationTests
         }
         JsonObject Identity(string id) => new() { ["device_id"] = id, ["generation"] = generations[id], ["standalone"] = true, ["clear"] = true, ["supported"] = true };
         JsonObject Motion(JsonObject snapshot, string id) => snapshot["motions"]!.AsArray().OfType<JsonObject>().Single(l => l["device_id"]!.GetValue<string>() == id);
+        bool ActiveRequest(JsonObject snapshot, string id, long request) =>
+            Motion(snapshot, id) is var lane && lane["active"]?.GetValue<bool>() == true && lane["request_id"]?.GetValue<long>() == request;
         async Task Poll(Func<JsonObject, bool> condition, string failure, int seconds = 10)
         {
             long began = Stopwatch.GetTimestamp();
             do {
                 state = await Read();
-                foreach (var pair in requests)
-                    if (Motion(state, pair.Key)["active"]?.GetValue<bool>() == true) {
-                        var beat = Identity(pair.Key); beat["request_id"] = pair.Value;
-                        var ack = await Send("/api/heartbeat", beat, pair.Key == "simulation:2");
-                        if (ack.Status >= 400) throw new Exception("Device heartbeat rejected: " + ack.Body);
-                    }
+                foreach (var pair in requests) {
+                    if (!ActiveRequest(state, pair.Key, pair.Value)) continue;
+                    var beat = Identity(pair.Key); beat["request_id"] = pair.Value;
+                    var ack = await Send("/api/heartbeat", beat, pair.Key == "simulation:2");
+                    if (ack.Status < 400) continue;
+                    // The lane can finish between the state read and the renewal.
+                    // Only a lease that is still active for this request is a failure.
+                    if (ack.Status == 409 && ack.Body["error"]?.GetValue<string>() == "No matching active control lease." &&
+                        !ActiveRequest(await Read(), pair.Key, pair.Value)) continue;
+                    throw new Exception("Device heartbeat rejected: " + ack.Body);
+                }
                 if (condition(state)) return;
                 await Task.Delay(50);
             } while (Stopwatch.GetElapsedTime(began).TotalSeconds < seconds);

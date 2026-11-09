@@ -32,12 +32,16 @@ public static class PikaDistribution
     public static string Transport(string? distribution) => distribution is null ? "linux-serial" : "wsl-linux-serial";
 
     /// <summary>Boundary validation for operator and HTTP input. Native Linux
-    /// (<c>null</c>) is rejected on Windows, where WCH COM serial is disabled.</summary>
+    /// (<c>null</c>) is rejected on Windows, where WCH COM serial is disabled,
+    /// and a WSL distribution is rejected everywhere else, where there is no
+    /// WSL to launch and a name would only split one gripper's session key.</summary>
     public static void Validate(string? distribution)
     {
         if (distribution is not null && (distribution.Length is 0 or > MaximumNameLength || distribution.Any(char.IsControl)))
             throw new ArgumentException("Invalid WSL distribution name.");
         if (OperatingSystem.IsWindows() && distribution is null)
             throw new InvalidOperationException("Native Windows WCH serial is disabled. Choose a WSL distribution.");
+        if (!OperatingSystem.IsWindows() && distribution is not null)
+            throw new ArgumentException("WSL distributions exist only on Windows. On Linux, leave the gripper distribution unset (null).");
     }
 }

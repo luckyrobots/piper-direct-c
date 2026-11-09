@@ -9,14 +9,16 @@ internal static class BoundedProcess
 {
     internal readonly record struct Result(int ExitCode, string Output, string Error);
 
+    internal static readonly TimeSpan DefaultTimeout = TimeSpan.FromSeconds(10);
+
     internal static async Task<Result> RunAsync(string executable, IEnumerable<string> arguments, string startFailure,
-        string timeoutMessage, CancellationToken cancellation)
+        string timeoutMessage, CancellationToken cancellation, TimeSpan? timeout = null)
     {
         var start = new ProcessStartInfo(executable) { UseShellExecute = false, CreateNoWindow = true,
             RedirectStandardInput = true, RedirectStandardOutput = true, RedirectStandardError = true };
         foreach (string argument in arguments) start.ArgumentList.Add(argument);
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellation);
-        deadline.CancelAfter(TimeSpan.FromSeconds(10));
+        deadline.CancelAfter(timeout ?? DefaultTimeout);
         using var process = Process.Start(start) ?? throw new IOException(startFailure);
         process.StandardInput.Close();
         using var stop = deadline.Token.Register(() => KillTree(process));

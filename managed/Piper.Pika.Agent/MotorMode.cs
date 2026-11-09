@@ -9,4 +9,17 @@ namespace LuckyRobots.Piper.Pika.Agent;
 //   any ──Disable (operator, watchdog, disconnect, agent exit)──▶ ReadOnly
 // Invariants: Targeting ⇒ no follow session; a Following or Holding follow
 // session ⇒ Armed; Resuming ⇔ the measured-hold resume is pending.
+//
+// Why four modes, not the eight in target-architecture (Pika-E):
+// - EnableRequested and Enabled are Armed split by measured feedback. Every
+//   motor admission (position, follow-start, follow-update) already requires
+//   the measured `enabled`, so a mode would copy that feedback into commanded
+//   intent and could drift from it when the driver drops enable on its own.
+// - Targeting and Resuming are modes here already.
+// - Following and Holding are PikaFollowSession phases, which own their
+//   target, cadence and deadline; Armed is their only legal motor mode.
+// - Disabling has no duration in the agent: Disable() writes the disable
+//   packet and enters ReadOnly in the same step. The wait for disabled
+//   feedback is PikaPowerFeedback, a display acknowledgement that gates
+//   nothing; power evidence is judged by the host from fresh feedback.
 internal enum MotorMode { ReadOnly, Armed, Targeting, Resuming }
