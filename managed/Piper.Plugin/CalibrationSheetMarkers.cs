@@ -25,14 +25,12 @@ public sealed partial class PipersPlugin
         var root = CalibrationPlacement.Read(pose["rootPlacement"]);
         bool changed = Wizard.ModelAssetId != asset || Wizard.ModelRevision != revision;
         if (changed && calibrationIdentity is not null) throw new InvalidOperationException("The recorded model changed. Re-evaluate saved poses with the corrected model before confirming its pointers; the original report is retained.");
+        // A changed model voids the edge proofs and the jaw-tip comparison together.
         if (changed)
-        {
-            calibrationWizard = Wizard with { ModelAssetId = asset, ModelRevision = revision, OperatorSaysTcpMatches = false };
-            Wizard.Answers.Remove("leftedgeconfirmed"); Wizard.Answers.Remove("frame"); Wizard.Answers.Remove("edgeroot");
-        }
-        if (!Wizard.Answers.ContainsKey("sceneconfirmed"))
+            calibrationWizard = Wizard with { ModelAssetId = asset, ModelRevision = revision, Setup = Wizard.Setup.ClearEdges() with { JawTipsConfirmed = false } };
+        if (!Wizard.Setup.SurfaceConfirmed)
             Wizard.Answers["sceney"] = CalibrationNumber(root.Position.Y * 1000);
-        Wizard.Answers["sheetreferencepreview"] = "read-only visual reference; not operator confirmation";
+        UpdateSetup(setup => setup with { ReferencePreviewed = true });
         return root;
     }
 

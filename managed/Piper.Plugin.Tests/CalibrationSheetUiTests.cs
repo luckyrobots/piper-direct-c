@@ -63,11 +63,11 @@ internal static class CalibrationSheetUiTests
         Set("link", new RobotLink("scene-a", "robot-a", joints, device));
         Get<LatestTelemetry>("telemetry").Publish(new(state, "fixture-session", 1, Stopwatch.GetTimestamp(), 0));
         var draft = CalibrationWizardFlow.New("piper-1", 10) with { Step = CalibrationWizardStep.DeskBack, ModelAssetId = "asset-a", ModelRevision = "revision-a" };
-        foreach (var pair in new Dictionary<string, string> { ["tool"] = "calibration_jaw_tips", ["width"] = "1400", ["depth"] = "700", ["precision"] = "5", ["leftedgeconfirmed"] = "proof", ["frame"] = "proof", ["sceney"] = "750", ["sceneconfirmed"] = "confirmed" }) draft.Answers[pair.Key] = pair.Value;
+        foreach (var pair in new Dictionary<string, string> { ["tool"] = "calibration_jaw_tips", ["width"] = "1400", ["depth"] = "700", ["precision"] = "5", ["sceney"] = "750" }) draft.Answers[pair.Key] = pair.Value;
         var identity = new CalibrationIdentity("piper-1", "can-a", 1L, CalibrationCapture.Fingerprint("fixture-session"), "scene-a", "robot-a", "asset-a", "revision-a");
         var root = CalibrationPlacement.At(new(0, .75, 0), 0);
-        draft.Answers["edgeroot"] = root.Json().ToJsonString();
-        draft.Answers["leftedgeconfirmed"] = draft.Answers["frame"] = WizardReferenceHighlightScope.DeskFingerprint(identity, 1400, 700, 750, root);
+        string proof = WizardReferenceHighlightScope.DeskFingerprint(identity, 1400, 700, 750, root);
+        draft = draft with { Setup = new(root.Json().ToJsonString(), proof, proof, SurfaceConfirmed: true) };
         foreach (var pair in new Dictionary<string, string> { ["p0back"] = "200", ["p0left"] = "697", ["p1back"] = "450", ["p1left"] = "800", ["p2back"] = "120", ["p2left"] = "900", ["p3back"] = "450", ["p3left"] = "800" }) draft.Answers[pair.Key] = pair.Value;
         Set("calibrationWizard", draft);
         try
@@ -96,10 +96,10 @@ internal static class CalibrationSheetUiTests
             await Invoke("MaintainWizardHighlight", CancellationToken.None);
             check(Get<WizardHighlightScope?>("wizardHighlightScope") is not null, "Background maintenance replaced the displayed jaw-tip marker");
             await Click("tool.confirm");
-            check(Get<CalibrationWizardDraft>("calibrationWizard").OperatorSaysTcpMatches,
+            check(Get<CalibrationWizardDraft>("calibrationWizard").Setup.JawTipsConfirmed,
                 "The visible Marker matches jaw tips click was lost after Show jaw-tip marker");
             await Click("tool.show");
-            check(Get<CalibrationWizardDraft>("calibrationWizard").OperatorSaysTcpMatches,
+            check(Get<CalibrationWizardDraft>("calibrationWizard").Setup.JawTipsConfirmed,
                 "Showing an unchanged jaw-tip site silently revoked the user's existing confirmation");
             await Patches();
             check(lastPatch![Fixed("sheet.row.status.3")]?["text"]?.GetValue<string>().Contains("overlaps P2") == true,
@@ -116,7 +116,7 @@ internal static class CalibrationSheetUiTests
             // does not require the operator to discover fresh button IDs.
             check(Get<long>("workspaceViewEpoch") == page, "A rejected capture rebuilt the page and invalidated visible controls");
             Get<CalibrationWizardDraft>("calibrationWizard").Answers["precision"] = "5";
-            Get<CalibrationWizardDraft>("calibrationWizard").Answers["leftedgeconfirmed"] = "stale-proof";
+            Set("calibrationWizard", Get<CalibrationWizardDraft>("calibrationWizard") with { Setup = Get<CalibrationWizardDraft>("calibrationWizard").Setup with { LeftProof = "stale-proof" } });
             await Patches();
             check(lastPatch![Wire("tool.confirm")]?["enabled"]?.GetValue<bool>() == false &&
                 lastPatch[Fixed("sheet.setup")]?["text"]?.GetValue<string>().Contains("LEFT pending") == true,

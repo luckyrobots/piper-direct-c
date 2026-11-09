@@ -101,58 +101,22 @@ public sealed partial class PipersPlugin
         LoadSheetRows();
         if (action.StartsWith("field.", StringComparison.Ordinal))
         {
-            string key = action[6..];
-            bool desk = key is "width" or "depth" or "precision";
-            bool point = Enumerable.Range(0, 5).Any(i => key == $"p{i}left" || key == $"p{i}back");
-            if (!desk && !point) throw new InvalidOperationException("Unknown measurement field.");
-            if (desk && calibrationIdentity is not null || point && SheetSample(key[1] - '0') is not null && sheetEditingRow != key[1] - '0')
-                throw new InvalidOperationException("Recorded measurements are fixed. Start a new calibration to change them; the old report is kept.");
-            string text = value.GetString() ?? "";
-            if (text.Length > 32) throw new InvalidOperationException("Enter a measurement in millimetres.");
-            Wizard.Answers[key] = text;
-            if (desk && key != "precision") { Wizard.Answers.Remove("leftedgeconfirmed"); Wizard.Answers.Remove("frame"); Wizard.Answers.Remove("edgeroot"); wizardReferenceAcknowledgedAt = 0; }
-            sheetMarkersDirty = true;
-            await SaveWizard(cancellation); return;
+            await EditSheetField(action[6..], value, cancellation);
+            return;
         }
         if (action == "precision.default")
         {
             if (calibrationIdentity is not null) throw new InvalidOperationException("Accuracy is fixed after the first capture.");
             Wizard.Answers["precision"] = "5";
         }
-        else if (action == "tool.show")
-        {
-            // Leave the legacy edge step before showing a tool marker. Otherwise
-            // background edge renewal immediately replaces it and clears its proof.
-            if (Wizard.Step != CalibrationWizardStep.ModelPoint)
-                calibrationWizard = Wizard with { Step = CalibrationWizardStep.ModelPoint };
-            if (calibrationIdentity is not null) await ShowWizardHighlight(cancellation);
-            else
-            {
-                if (!SheetContactCompatible) throw new InvalidOperationException("Start a new tabletop calibration; the existing report contains raised or grid points and is retained.");
-                await ShowWizardModelPoint(cancellation);
-                if (wizardDiscoveredSites.Count(s => s == "calibration_jaw_tips") == 1 && Wizard.Answers.GetValueOrDefault("tool") != "calibration_jaw_tips")
-                { Wizard.Answers["tool"] = "calibration_jaw_tips"; await ShowWizardModelPoint(cancellation); }
-            }
-        }
+        else if (action == "tool.show") await ShowSheetJawTips(cancellation);
         else if (action == "tool.confirm")
         {
             if (wizardHighlightScope is not { } marker || !WizardHighlightCurrent(marker)) throw new InvalidOperationException("Show the jaw-tip marker first, then compare it with the real midpoint.");
-            calibrationWizard = Wizard with { OperatorSaysTcpMatches = true };
-            Wizard.Answers["physicalpoint"] = "operator confirmed midpoint between both jaw tips";
+            UpdateSetup(setup => setup with { JawTipsConfirmed = true });
             wizardMessage = "Jaw tips confirmed. Next, confirm that the robot base rests on the tabletop.";
         }
-        else if (action == "surface")
-        {
-            if (calibrationIdentity is not null && calibrationReevaluation is null) throw new InvalidOperationException("The tabletop reference is fixed for recorded points.");
-            var root = await ReadWizardMetricRoot(cancellation);
-            if (calibrationIdentity is not null && (calibrationOriginal is null || !calibrationOriginal.Same(root) || Math.Abs(root.Position.Y - calibrationDesk.SurfaceY) > 1e-6))
-                throw new InvalidOperationException("Reconfirming a corrected model cannot change the saved original placement or tabletop height.");
-            Wizard.Answers["sceney"] = CalibrationNumber(root.Position.Y * 1000);
-            Wizard.Answers["sceneconfirmed"] = "operator confirmed simulated base rests on tabletop";
-            calibrationDesk = calibrationDesk with { SurfaceY = root.Position.Y };
-            if (Wizard.Answers.TryGetValue("edgeroot", out string? pinned) && !CalibrationPlacement.Read(JsonNode.Parse(pinned)).Same(root))
-            { Wizard.Answers.Remove("frame"); Wizard.Answers.Remove("leftedgeconfirmed"); Wizard.Answers.Remove("edgeroot"); }
-        }
+        else if (action == "surface") await ConfirmSheetSurface(cancellation);
         else if (action is "left.show" or "back.show" or "left.confirm" or "back.confirm")
         {
             await ReadSheetReference(cancellation);
@@ -162,33 +126,14 @@ public sealed partial class PipersPlugin
             if (action.EndsWith("confirm", StringComparison.Ordinal)) ConfirmWizardReference();
         }
         else if (action == "marks.show") await ShowSheetMarks(cancellation);
-        else if (action.StartsWith("move.", StringComparison.Ordinal) || action.StartsWith("capture.", StringComparison.Ordinal))
+        else if (SheetRowAction(action) is var (verb, row))
         {
-            if (!int.TryParse(action.Split('.')[1], out int row) || row is < 0 or > 4) throw new InvalidOperationException("Unknown point.");
-            if (SheetSample(row) is not null)
+            switch (verb, captured: SheetSample(row) is not null)
             {
-                if (action.StartsWith("move.", StringComparison.Ordinal)) await EditSheetMeasurement(row, cancellation);
-                else await SaveSheetMeasurementCorrection(row, cancellation);
-                await Update(cancellation); return;
-            }
-            if (action.StartsWith("move.", StringComparison.Ordinal))
-            {
-                await ShowSheetMarks(cancellation, frameRow: row);
-                wizardMessage = $"{(row == 4 ? "CHECK" : "P" + (row + 1))} is highlighted in the viewport. In solid-green hand guiding, gently touch this physical cross with the jaw-tip midpoint, hold still, then Capture its row. The preview does not move the real arm.";
-            }
-            else
-            {
-                string blocked = SheetCaptureBlocker(row, Device());
-                if (blocked.Length > 0) throw new InvalidOperationException(blocked);
-                if (row < 4 && row != WizardTrainingCount) throw new InvalidOperationException("Capture reference rows in order: Point " + (WizardTrainingCount + 1) + " is next. You can enter all measurements now.");
-                if (row == 4 && WizardTrainingCount < 4) throw new InvalidOperationException("Capture the four reference points before the final check.");
-                Wizard.Answers["left"] = Wizard.Answers.GetValueOrDefault($"p{row}left", "");
-                Wizard.Answers["back"] = Wizard.Answers.GetValueOrDefault($"p{row}back", "");
-                Wizard.Answers["height"] = "0"; Wizard.Answers["method"] = "edge measurements"; Wizard.Answers["role"] = row == 4 ? "validation" : "training";
-                calibrationWizard = Wizard with { Step = CalibrationWizardStep.Capture };
-                await CaptureWizardPoint(cancellation);
-                Wizard.Answers["sheetselected"] = Math.Min(WizardTrainingCount, 4).ToString();
-                wizardMessage = $"Saved {(row == 4 ? "the final check" : "Point " + (row + 1))}. " + (row < 4 ? "Move by hand to the next mark and capture its row." : "Click Calculate alignment to check the result.");
+                case ("move", captured: true): await EditSheetMeasurement(row, cancellation); await Update(cancellation); return;
+                case ("capture", captured: true): await SaveSheetMeasurementCorrection(row, cancellation); await Update(cancellation); return;
+                case ("move", captured: false): await SelectSheetRow(row, cancellation); break;
+                default: await CaptureSheetRow(row, cancellation); break;
             }
         }
         else if (action == "reevaluate") await ReevaluateCalibrationModel(cancellation);
@@ -207,11 +152,84 @@ public sealed partial class PipersPlugin
         await Update(cancellation);
     }
 
+    // "move.N" or "capture.N" for sheet row N; null for any other action.
+    private static (string Verb, int Row)? SheetRowAction(string action)
+    {
+        string[] parts = action.Split('.');
+        if (parts.Length < 2 || parts[0] is not ("move" or "capture")) return null;
+        if (!int.TryParse(parts[1], out int row) || row is < 0 or > 4) throw new InvalidOperationException("Unknown point.");
+        return (parts[0], row);
+    }
+
+    private async Task EditSheetField(string key, JsonElement value, CancellationToken cancellation)
+    {
+        bool desk = key is "width" or "depth" or "precision";
+        bool point = Enumerable.Range(0, 5).Any(i => key == $"p{i}left" || key == $"p{i}back");
+        if (!desk && !point) throw new InvalidOperationException("Unknown measurement field.");
+        if (desk && calibrationIdentity is not null || point && SheetSample(key[1] - '0') is not null && sheetEditingRow != key[1] - '0')
+            throw new InvalidOperationException("Recorded measurements are fixed. Start a new calibration to change them; the old report is kept.");
+        string text = value.GetString() ?? "";
+        if (text.Length > 32) throw new InvalidOperationException("Enter a measurement in millimetres.");
+        Wizard.Answers[key] = text;
+        if (desk && key != "precision") { UpdateSetup(setup => setup.ClearEdges()); wizardReferenceAcknowledgedAt = 0; }
+        sheetMarkersDirty = true;
+        await SaveWizard(cancellation);
+    }
+
+    private async Task ShowSheetJawTips(CancellationToken cancellation)
+    {
+        // Leave the legacy edge step before showing a tool marker. Otherwise
+        // background edge renewal immediately replaces it and clears its proof.
+        if (Wizard.Step != CalibrationWizardStep.ModelPoint)
+            calibrationWizard = Wizard with { Step = CalibrationWizardStep.ModelPoint };
+        if (calibrationIdentity is not null) { await ShowWizardHighlight(cancellation); return; }
+        if (!SheetContactCompatible) throw new InvalidOperationException("Start a new tabletop calibration; the existing report contains raised or grid points and is retained.");
+        await ShowWizardModelPoint(cancellation);
+        if (wizardDiscoveredSites.Count(s => s == "calibration_jaw_tips") == 1 && Wizard.Answers.GetValueOrDefault("tool") != "calibration_jaw_tips")
+        { Wizard.Answers["tool"] = "calibration_jaw_tips"; await ShowWizardModelPoint(cancellation); }
+    }
+
+    private async Task ConfirmSheetSurface(CancellationToken cancellation)
+    {
+        if (calibrationIdentity is not null && calibrationReevaluation is null) throw new InvalidOperationException("The tabletop reference is fixed for recorded points.");
+        var root = await ReadWizardMetricRoot(cancellation);
+        if (calibrationIdentity is not null && (calibrationOriginal is null || !calibrationOriginal.Same(root) || Math.Abs(root.Position.Y - calibrationDesk.SurfaceY) > 1e-6))
+            throw new InvalidOperationException("Reconfirming a corrected model cannot change the saved original placement or tabletop height.");
+        Wizard.Answers["sceney"] = CalibrationNumber(root.Position.Y * 1000);
+        calibrationDesk = calibrationDesk with { SurfaceY = root.Position.Y };
+        bool rootMoved = Wizard.Setup.EdgeRoot.Length > 0 && !CalibrationPlacement.Read(JsonNode.Parse(Wizard.Setup.EdgeRoot)).Same(root);
+        UpdateSetup(setup => (rootMoved ? setup.ClearEdges() : setup) with { SurfaceConfirmed = true });
+    }
+
+    private async Task SelectSheetRow(int row, CancellationToken cancellation)
+    {
+        await ShowSheetMarks(cancellation, frameRow: row);
+        wizardMessage = $"{(row == 4 ? "CHECK" : "P" + (row + 1))} is highlighted in the viewport. In solid-green hand guiding, gently touch this physical cross with the jaw-tip midpoint, hold still, then Capture its row. The preview does not move the real arm.";
+    }
+
+    private async Task CaptureSheetRow(int row, CancellationToken cancellation)
+    {
+        string blocked = SheetCaptureBlocker(row, Device());
+        if (blocked.Length > 0) throw new InvalidOperationException(blocked);
+        if (row < 4 && row != WizardTrainingCount) throw new InvalidOperationException("Capture reference rows in order: Point " + (WizardTrainingCount + 1) + " is next. You can enter all measurements now.");
+        if (row == 4 && WizardTrainingCount < 4) throw new InvalidOperationException("Capture the four reference points before the final check.");
+        Wizard.Answers["left"] = Wizard.Answers.GetValueOrDefault($"p{row}left", "");
+        Wizard.Answers["back"] = Wizard.Answers.GetValueOrDefault($"p{row}back", "");
+        Wizard.Answers["height"] = "0"; Wizard.Answers["method"] = "edge measurements"; Wizard.Answers["role"] = row == 4 ? "validation" : "training";
+        calibrationWizard = Wizard with { Step = CalibrationWizardStep.Capture };
+        await CaptureWizardPoint(cancellation);
+        Wizard.Answers["sheetselected"] = Math.Min(WizardTrainingCount, 4).ToString();
+        wizardMessage = $"Saved {(row == 4 ? "the final check" : "Point " + (row + 1))}. " + (row < 4 ? "Move by hand to the next mark and capture its row." : "Click Calculate alignment to check the result.");
+    }
+
     private void AddCalibrationSheetPatches(Dictionary<string, JsonObject> patches, JsonObject? device)
     {
-        bool left = SheetEdgeConfirmed("leftedgeconfirmed"), back = left && SheetEdgeConfirmed("frame");
-        bool tool = back && Wizard.OperatorSaysTcpMatches && Wizard.Answers.ContainsKey("physicalpoint");
-        bool surface = tool && Wizard.Answers.ContainsKey("sceneconfirmed");
+        // Compute the setup stage and its blocker once: each costs a desk
+        // fingerprint (JSON plus SHA-256), and every row below needs it.
+        var stage = SheetStage();
+        string setupBlocker = SheetSetupBlocker(stage);
+        bool left = stage > SheetSetupStage.ConfirmLeft, back = stage > SheetSetupStage.ConfirmBack;
+        bool tool = stage > SheetSetupStage.ConfirmJawTips, surface = stage > SheetSetupStage.ConfirmSurface;
         void Step(string action, string text, bool enabled) => patches[SheetId(action)] = new() { ["text"] = text, ["enabled"] = enabled };
         Step("left.confirm", left ? "LEFT confirmed" : "Confirm LEFT", !left);
         Step("back.show", "Show BACK", left);
@@ -226,16 +244,15 @@ public sealed partial class PipersPlugin
         patches["sheet.action.feedback"] = new() { ["text"] = wizardMessage };
         patches["sheet.setup"] = new() { ["text"] = $"LEFT {(left ? "confirmed" : "pending")} · BACK {(back ? "confirmed" : "pending")} · Jaw tips {(tool ? "confirmed" : "pending")} · Desk {(surface ? "confirmed" : "pending")}" };
         int selected = SheetSelectedRow;
-        string next = SheetSetupBlocker();
-        if (next.Length == 0) next = SheetCaptureBlocker(selected, device);
+        string next = setupBlocker.Length > 0 ? setupBlocker : SheetCaptureBlocker(selected, device, setupBlocker);
         patches["sheet.next"] = new() { ["text"] = SheetAppliedAlignmentMatchesModel ? "Saved alignment loaded. Use Check jaw height above for new measurements. The original four-point captures are kept; editing that alignment requires its saved-session checks."
             : SavedModelChanged ? "The simulation model or scene session changed. Re-evaluate saved poses below before calculating or applying alignment."
-            : WizardValidationCount > 0 ? SheetSetupBlocker().Length > 0 ? SheetSetupBlocker() : "All five points captured. Calculate alignment to check the result."
+            : WizardValidationCount > 0 ? setupBlocker.Length > 0 ? setupBlocker : "All five points captured. Calculate alignment to check the result."
             : $"{SheetPointName(selected)}: " + (next.Length > 0 ? next : "Touch this physical cross with the jaw-tip midpoint. Hold still and click Capture.") };
         for (int row = 0; row < 5; row++)
         {
             bool captured = SheetSample(row) is not null;
-            string reason = SheetCaptureBlocker(row, device);
+            string reason = SheetCaptureBlocker(row, device, setupBlocker);
             string measurementError = SheetMeasurementBlocker(row);
             bool editing = sheetEditingRow == row;
             string editStatus = measurementError.Length > 0 ? measurementError : "Correct the entered distances, then Save entry. The captured arm pose stays unchanged.";
@@ -251,8 +268,8 @@ public sealed partial class PipersPlugin
             Step("move." + row, editing ? "Cancel edit" : captured ? "Edit entry" : row == selected ? "Selected " + SheetPointName(row) : "Select " + SheetPointName(row), captured ? SheetCanCorrect : SheetPoint(row) is not null && link is not null);
         }
         patches[SheetId("reevaluate")] = new() { ["visible"] = CanCheckUpdatedModel, ["enabled"] = CanCheckUpdatedModel && sheetEditingRow < 0 && CanReevaluateWithLiveScene };
-        patches[SheetId("fit")] = new() { ["enabled"] = !SavedModelChanged && SheetSetupBlocker().Length == 0 && sheetEditingRow < 0 && SheetContactCompatible && WizardTrainingCount >= 4 && WizardValidationCount >= 1 && !calibrationPlacementUnverified };
-        patches[SheetId("apply")] = new() { ["enabled"] = sheetEditingRow < 0 && SheetSetupBlocker().Length == 0 && calibrationFit?.CanApply == true && calibrationApplied is null && !calibrationPlacementUnverified };
+        patches[SheetId("fit")] = new() { ["enabled"] = !SavedModelChanged && setupBlocker.Length == 0 && sheetEditingRow < 0 && SheetContactCompatible && WizardTrainingCount >= 4 && WizardValidationCount >= 1 && !calibrationPlacementUnverified };
+        patches[SheetId("apply")] = new() { ["enabled"] = sheetEditingRow < 0 && setupBlocker.Length == 0 && calibrationFit?.CanApply == true && calibrationApplied is null && !calibrationPlacementUnverified };
         patches[SheetId("rollback")] = new() { ["enabled"] = calibrationApplied is not null && !calibrationPlacementUnverified };
         patches["sheet.results"] = new() { ["text"] = WizardReviewSummary() };
     }

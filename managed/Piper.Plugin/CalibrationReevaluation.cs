@@ -51,9 +51,7 @@ public sealed partial class PipersPlugin
     private void InvalidateReevaluationSetup(string revision)
     {
         calibrationWizard = Wizard with { ModelAssetId = calibrationIdentity!.ModelAssetId, ModelRevision = revision,
-            OperatorSaysTcpMatches = false, Step = CalibrationWizardStep.ModelPoint };
-        foreach (string key in new[] { "leftedgeconfirmed", "frame", "edgeroot", "physicalpoint", "sceneconfirmed", "sheetreferencepreview" })
-            Wizard.Answers.Remove(key);
+            Setup = new(), Step = CalibrationWizardStep.ModelPoint };
         Wizard.Answers["reevaluatedscene"] = calibrationIdentity.SceneId;
         wizardHighlightScope = null; wizardReferenceHighlightScope = null; wizardReferenceAcknowledgedAt = 0;
         sheetMarkersDirty = true; sheetMarkersPublished = false;
@@ -130,7 +128,7 @@ public sealed partial class PipersPlugin
         {
             reason = "Explicit re-evaluation of saved physical observations after a model correction or reopening the scene; no new hardware capture or motion",
             previousReport = JsonDocument.Parse(previousReport).RootElement.Clone(),
-            previousWizard = Wizard, previousSceneId = saved.SceneId, sceneId = live.SceneId,
+            previousWizard = CalibrationWizardFile.From(Wizard), previousSceneId = saved.SceneId, sceneId = live.SceneId,
             previousModelRevision = saved.ModelRevision, modelRevision = revision, evaluations = receipts
         }, PluginProtocol.Json), cancellation);
         RequireReevaluationScope(saved, live, root, originals);

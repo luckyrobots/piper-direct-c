@@ -74,11 +74,11 @@ internal static class CalibrationReevaluationTests
         check(audit["previousSceneId"]!.GetValue<string>() == "scene-a" && audit["sceneId"]!.GetValue<string>() == "reopened-scene" &&
             audit["previousReport"]!["identity"]!["sceneId"]!.GetValue<string>() == "scene-a", "Scene rebinding lost its original-scene provenance");
         var draft = f.Get<CalibrationWizardDraft>("calibrationWizard");
-        draft.Answers["reevaluatedscene"] = "scene-a"; draft.Answers["frame"] = "old-proof";
-        f.Set("calibrationWizard", draft with { OperatorSaysTcpMatches = true });
+        draft.Answers["reevaluatedscene"] = "scene-a";
+        f.Set("calibrationWizard", draft with { Setup = new("old-root", "old-proof", "old-proof", JawTipsConfirmed: true) });
         typeof(PipersPlugin).GetMethod("ReconcileReevaluatedWizard", Hidden)!.Invoke(f.Plugin, null);
         draft = f.Get<CalibrationWizardDraft>("calibrationWizard");
-        check(draft.Answers["reevaluatedscene"] == "reopened-scene" && !draft.OperatorSaysTcpMatches && !draft.Answers.ContainsKey("frame"),
+        check(draft.Answers["reevaluatedscene"] == "reopened-scene" && draft.Setup == new SheetSetup(),
             "An interrupted scene-only rebind restored confirmations from the old scene when the model revision was unchanged");
         foreach (string action in new[] { "left.show", "left.confirm", "back.show", "back.confirm", "tool.show", "tool.confirm", "surface", "fit" })
             await f.Event(action);
@@ -114,7 +114,7 @@ internal static class CalibrationReevaluationTests
         check(audit["previousReport"]!["identity"]!["modelRevision"]!.GetValue<string>() == "old-model" && audit["evaluations"]!.AsArray().Count == 5 &&
             audit["previousWizard"]!["operatorSaysTcpMatches"]!.GetValue<bool>(), "Re-evaluation audit omitted original report, physical-point confirmation or per-pose receipts");
         var draft = f.Get<CalibrationWizardDraft>("calibrationWizard");
-        check(draft.ModelRevision == "new-model" && !draft.OperatorSaysTcpMatches && !draft.Answers.ContainsKey("leftedgeconfirmed") &&
+        check(draft.ModelRevision == "new-model" && draft.Setup == new SheetSetup() &&
             !draft.Answers.ContainsKey("frame") && !draft.Answers.ContainsKey("sceneconfirmed"), "Old model visual confirmations survived re-evaluation");
         check(draft.Answers["p1left"] == "600" && !f.Patches![f.WidgetId(".sheet.fit")]!["enabled"]!.GetValue<bool>(),
             "Re-evaluation lost ruler coordinates or enabled calculation before confirming the corrected references");
@@ -126,8 +126,8 @@ internal static class CalibrationReevaluationTests
         // saved tabletop/root. Exercise the same visible controls as the user.
         foreach (string action in new[] { "left.show", "left.confirm", "back.show", "back.confirm", "tool.show", "tool.confirm", "surface", "fit" })
             await f.Event(action);
-        check(f.Get<CalibrationWizardDraft>("calibrationWizard").OperatorSaysTcpMatches &&
-            f.Get<CalibrationWizardDraft>("calibrationWizard").Answers.ContainsKey("sceneconfirmed") &&
+        check(f.Get<CalibrationWizardDraft>("calibrationWizard").Setup.Stage(f.Get<CalibrationWizardDraft>("calibrationWizard").Setup.BackProof) == SheetSetupStage.Ready &&
+            f.Get<CalibrationWizardDraft>("calibrationWizard").Setup.SurfaceConfirmed &&
             f.Get<CalibrationFit>("calibrationFit").CanApply && f.Patches![f.WidgetId(".sheet.apply")]!["enabled"]!.GetValue<bool>(),
             "Re-evaluated saved captures became trapped behind confirmations that could not be completed");
         check(f.Get<CalibrationDesk>("calibrationDesk").SurfaceY == .75 && f.Get<List<CalibrationSample>>("calibrationSamples").Count == 5 &&
@@ -135,11 +135,10 @@ internal static class CalibrationReevaluationTests
             "Reconfirming the corrected model changed the fixed tabletop, recaptured poses or wrote placement");
 
         // Simulate report commit followed by an interrupted wizard-draft write.
-        f.Set("calibrationWizard", draft with { ModelRevision = "old-model", OperatorSaysTcpMatches = true });
-        f.Get<CalibrationWizardDraft>("calibrationWizard").Answers["frame"] = "old-proof";
+        f.Set("calibrationWizard", draft with { ModelRevision = "old-model", Setup = new("old-root", "old-proof", "old-proof", JawTipsConfirmed: true) });
         typeof(PipersPlugin).GetMethod("ReconcileReevaluatedWizard", Hidden)!.Invoke(f.Plugin, null);
         draft = f.Get<CalibrationWizardDraft>("calibrationWizard");
-        check(draft.ModelRevision == "new-model" && !draft.OperatorSaysTcpMatches && !draft.Answers.ContainsKey("frame"),
+        check(draft.ModelRevision == "new-model" && draft.Setup == new SheetSetup(),
             "A stale wizard draft restored the old model and approvals after the recomputed report committed");
     }
 
@@ -212,9 +211,10 @@ internal static class CalibrationReevaluationTests
             Set("calibrationProfile", "piper-1"); Set("wizardProfile", "piper-1"); Set("calibrationIdentity", Identity);
             Set("calibrationOriginal", Root); Set("calibrationFit", originalFit); Set("calibrationDesk", desk); Set("calibrationPath", ReportPath);
             Get<List<CalibrationSample>>("calibrationSamples").AddRange(Originals);
-            var wizard = CalibrationWizardFlow.New("piper-1") with { ModelAssetId = "asset-a", ModelRevision = "old-model", OperatorSaysTcpMatches = true };
+            var wizard = CalibrationWizardFlow.New("piper-1") with { ModelAssetId = "asset-a", ModelRevision = "old-model",
+                Setup = new(Root.Json().ToJsonString(), "old-left", "old-back", JawTipsConfirmed: true, SurfaceConfirmed: true) };
             foreach (var (key, text) in new[] { ("tool", "calibration_jaw_tips"), ("width", "1400"), ("depth", "700"), ("precision", "5"),
-                ("sceney", "750"), ("sceneconfirmed", "confirmed"), ("physicalpoint", "closed jaw tips"), ("leftedgeconfirmed", "old-left"), ("frame", "old-back") }) wizard.Answers[key] = text;
+                ("sceney", "750") }) wizard.Answers[key] = text;
             Set("calibrationWizard", wizard); Fresh();
         }
 

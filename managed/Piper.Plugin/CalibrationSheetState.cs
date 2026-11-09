@@ -1,6 +1,52 @@
+using System.Diagnostics;
 using System.Text.Json.Nodes;
 
 namespace LuckyRobots.Piper.Plugin;
+
+/// <summary>The next confirmation the calibration sheet needs before capture.</summary>
+public enum SheetSetupStage { ConfirmLeft, ConfirmBack, ConfirmJawTips, ConfirmSurface, Ready }
+
+/// <summary>
+/// The operator's sheet confirmations. The stage advances in this order:
+///   ConfirmLeft -> ConfirmBack -> ConfirmJawTips -> ConfirmSurface -> Ready
+/// LEFT pins the simulated root (EdgeRoot) and a desk fingerprint (LeftProof);
+/// BACK must repeat that fingerprint. An edge counts only while its proof
+/// equals the fingerprint of the current robot, desk and pinned root, so a
+/// changed desk or model sends the stage back to ConfirmLeft.
+/// Invariants: BackProof is set only with LeftProof, and LeftProof only with EdgeRoot.
+/// </summary>
+public sealed record SheetSetup(string EdgeRoot = "", string LeftProof = "", string BackProof = "",
+    bool JawTipsConfirmed = false, bool SurfaceConfirmed = false, bool ReferencePreviewed = false)
+{
+    /// <summary>Restores saved confirmations, dropping any that lost the confirmation before them.</summary>
+    public static SheetSetup Restore(string edgeRoot, string leftProof, string backProof, bool jawTips, bool surface, bool previewed)
+    {
+        if (edgeRoot.Length > 512 || leftProof.Length > 512 || backProof.Length > 512)
+            throw new InvalidOperationException("Saved wizard progress is invalid. Keep its report and start a new draft.");
+        if (edgeRoot.Length == 0) leftProof = "";
+        if (leftProof.Length == 0) backProof = "";
+        return new(edgeRoot, leftProof, backProof, jawTips, surface, previewed);
+    }
+
+    public SheetSetup ConfirmLeft(string edgeRoot, string proof) => Checked(this with { EdgeRoot = edgeRoot, LeftProof = proof });
+    public SheetSetup ConfirmBack(string proof) => LeftProof == proof && proof.Length > 0 ? Checked(this with { BackProof = proof })
+        : throw new InvalidOperationException("The desk or robot changed since LEFT was confirmed. Go back and confirm the LEFT edge again.");
+    public SheetSetup ClearEdges() => this with { EdgeRoot = "", LeftProof = "", BackProof = "" };
+
+    public SheetSetupStage Stage(string? deskProof) =>
+        deskProof is null || LeftProof != deskProof ? SheetSetupStage.ConfirmLeft
+        : BackProof != deskProof ? SheetSetupStage.ConfirmBack
+        : !JawTipsConfirmed ? SheetSetupStage.ConfirmJawTips
+        : !SurfaceConfirmed ? SheetSetupStage.ConfirmSurface
+        : SheetSetupStage.Ready;
+
+    private static SheetSetup Checked(SheetSetup next)
+    {
+        Debug.Assert((next.BackProof.Length == 0 || next.LeftProof.Length > 0) && (next.LeftProof.Length == 0 || next.EdgeRoot.Length > 0),
+            "A sheet edge confirmation lost the confirmation before it.");
+        return next;
+    }
+}
 
 public sealed partial class PipersPlugin
 {
@@ -12,20 +58,27 @@ public sealed partial class PipersPlugin
     private bool SheetAppliedAlignmentMatchesModel => calibrationApplied is not null && calibrationIdentity is { } saved &&
         AcknowledgedModelRevision == saved.ModelRevision;
 
-    private bool SheetEdgeConfirmed(string key)
+    private void UpdateSetup(Func<SheetSetup, SheetSetup> change) => calibrationWizard = Wizard with { Setup = change(Wizard.Setup) };
+
+    // The fingerprint LEFT and BACK must match: the current robot, desk size,
+    // tabletop and pinned root. Null when there is no pinned root or valid desk.
+    private string? SheetDeskProof()
     {
+        if (Wizard.Setup.EdgeRoot.Length == 0) return null;
         try
         {
-            if (!Wizard.Answers.TryGetValue("edgeroot", out string? root)) return false;
-            string proof = WizardReferenceHighlightScope.DeskFingerprint(WizardReferenceIdentity(),
+            return WizardReferenceHighlightScope.DeskFingerprint(WizardReferenceIdentity(),
                 CalibrationWizardFlow.Number(Wizard, "width", 100, 10000), CalibrationWizardFlow.Number(Wizard, "depth", 100, 10000),
-                CalibrationWizardFlow.SceneSurface(Wizard), CalibrationPlacement.Read(JsonNode.Parse(root)));
-            return Wizard.Answers.GetValueOrDefault(key) == proof;
+                CalibrationWizardFlow.SceneSurface(Wizard), CalibrationPlacement.Read(JsonNode.Parse(Wizard.Setup.EdgeRoot)));
         }
-        catch (InvalidOperationException) { return false; }
+        catch (InvalidOperationException) { return null; }
     }
 
-    private string SheetSetupBlocker()
+    private SheetSetupStage SheetStage() => Wizard.Setup.Stage(SheetDeskProof());
+
+    private string SheetSetupBlocker() => SheetSetupBlocker(SheetStage());
+
+    private string SheetSetupBlocker(SheetSetupStage stage)
     {
         if (link is null) return "Link this robot in Robot controls first. Linking displays its measured pose without moving hardware.";
         try
@@ -34,10 +87,13 @@ public sealed partial class PipersPlugin
             _ = CalibrationWizardFlow.Number(Wizard, "depth", 100, 10000);
         }
         catch (InvalidOperationException) { return "Enter the desk width and depth in millimetres."; }
-        if (!SheetEdgeConfirmed("leftedgeconfirmed")) return "Show LEFT, compare it with your physical desk edge, then Confirm LEFT. Reconfirm after a connection or model change.";
-        if (!SheetEdgeConfirmed("frame")) return "Show BACK, compare it with your physical desk edge, then Confirm BACK.";
-        if (!Wizard.OperatorSaysTcpMatches || !Wizard.Answers.ContainsKey("physicalpoint")) return "Show jaw tips. If the marker is between the simulated jaw tips, click Confirm jaw tips.";
-        if (!Wizard.Answers.ContainsKey("sceneconfirmed")) return "Confirm that the simulated robot base is on the desk (Base is on desk).";
+        switch (stage)
+        {
+            case SheetSetupStage.ConfirmLeft: return "Show LEFT, compare it with your physical desk edge, then Confirm LEFT. Reconfirm after a connection or model change.";
+            case SheetSetupStage.ConfirmBack: return "Show BACK, compare it with your physical desk edge, then Confirm BACK.";
+            case SheetSetupStage.ConfirmJawTips: return "Show jaw tips. If the marker is between the simulated jaw tips, click Confirm jaw tips.";
+            case SheetSetupStage.ConfirmSurface: return "Confirm that the simulated robot base is on the desk (Base is on desk).";
+        }
         try { _ = CalibrationWizardFlow.Number(Wizard, "precision", 1, 10); }
         catch (InvalidOperationException) { return "Measurement accuracy cannot be 0. Enter ±1–10 mm, or click Use ±5 mm."; }
         if (!SheetContactCompatible) return "This saved report uses raised or grid points. Start New calibration for tabletop contacts.";
@@ -68,13 +124,15 @@ public sealed partial class PipersPlugin
             ? "Keep the centre cross and the 50 mm around it for the final independent check. Choose another reference cross."
             : "";
 
-    private string SheetCaptureBlocker(int row, JsonObject? device)
+    private string SheetCaptureBlocker(int row, JsonObject? device) => SheetCaptureBlocker(row, device, SheetSetupBlocker());
+
+    // setupBlocker is SheetSetupBlocker(), computed once per patch pass.
+    private string SheetCaptureBlocker(int row, JsonObject? device, string setupBlocker)
     {
         if (SheetSample(row) is not null) return "Already captured.";
         string error = SheetMeasurementBlocker(row);
         if (error.Length > 0) return error;
-        error = SheetSetupBlocker();
-        if (error.Length > 0) return error;
+        if (setupBlocker.Length > 0) return setupBlocker;
         if (row != Math.Min(WizardTrainingCount, 4)) return "Capture " + SheetPointName(Math.Min(WizardTrainingCount, 4)) + " first.";
         if (device is null || device["fresh"]?.GetValue<bool>() != true) return "Waiting for fresh robot feedback. Keep the robot connected.";
         if (!TeachingState.Inspect(device).HandGuiding) return "Single-click the physical teach button for solid green, then move the arm by hand to this cross.";

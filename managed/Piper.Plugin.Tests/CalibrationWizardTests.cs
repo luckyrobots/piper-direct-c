@@ -12,7 +12,7 @@ public static class CalibrationWizardTests
             check(false, description);
         }
         var draft = CalibrationWizardFlow.New("robot-a");
-        check(draft.Step == CalibrationWizardStep.Prepare && !draft.OperatorSaysTcpMatches, "A new wizard skipped preparation or invented point verification");
+        check(draft.Step == CalibrationWizardStep.Prepare && draft.Setup == new SheetSetup(), "A new wizard skipped preparation or invented point verification");
         foreach (string missing in new[] { "width", "depth", "sceney", "floory", "tableheight", "left", "back", "height", "square", "column", "row" })
             check(!draft.Answers.ContainsKey(missing), "A new user received a fabricated measurement: " + missing);
         Reject(() => CalibrationWizardFlow.Number(draft, "tableheight", 1, 3000), "Unknown physical tabletop height silently defaulted to750mm");
@@ -49,8 +49,8 @@ public static class CalibrationWizardTests
         check(CalibrationWizardFlow.Legacy((CalibrationWizardStep)5) == CalibrationWizardStep.Prepare && CalibrationWizardFlow.Legacy((CalibrationWizardStep)20) == CalibrationWizardStep.PointIntro &&
             CalibrationWizardFlow.Legacy(CalibrationWizardStep.DeskBack) == CalibrationWizardStep.DeskBack, "An old draft still forced irrelevant floor questions on resume/back");
         var abstractLegacy = CalibrationWizardFlow.TabletopDefault(tabletopDraft with { Schema = 1, Step = CalibrationWizardStep.PointIntro,
-            Answers = new(tabletopDraft.Answers) { ["frame"] = "old technical frame confirmation" } });
-        check(abstractLegacy.Schema == 2 && abstractLegacy.Step == CalibrationWizardStep.Prepare && !abstractLegacy.Answers.ContainsKey("frame") && abstractLegacy.Epoch > tabletopDraft.Epoch,
+            Setup = new("root", "old proof", "old proof", JawTipsConfirmed: true) });
+        check(abstractLegacy.Schema == 2 && abstractLegacy.Step == CalibrationWizardStep.Prepare && abstractLegacy.Setup == new SheetSetup(JawTipsConfirmed: true) && abstractLegacy.Epoch > tabletopDraft.Epoch,
             "An uncaptured old draft invented confirmation of the new desk-edge pointers");
         var savedLegacy = CalibrationWizardFlow.TabletopDefault(tabletopDraft with { Schema = 1, Step = CalibrationWizardStep.InspectSaved, ReportFile = "saved-calibration.json" });
         check(savedLegacy.Step == CalibrationWizardStep.InspectSaved && savedLegacy.ReportFile == "saved-calibration.json", "Pointer-question migration discarded a saved placement inspection/report");
@@ -68,9 +68,22 @@ public static class CalibrationWizardTests
         var wrongTip = relativeSamples.Select(s => s with { SceneWorld = new(s.SceneWorld.X, s.SceneWorld.Y + .03, s.SceneWorld.Z) }).ToArray();
         var wrongTipFit = CalibrationSolver.Fit(tabletop.Desk, CalibrationPlacement.At(new(.1, .8, .05), 0), wrongTip);
         check(!wrongTipFit.CanApply && wrongTipFit.VerticalRmsMm > 20 && wrongTipFit.ProposedPlacement.Position.Y == .8, "Removing the floor gate hid a wrong TCP vertical residual or floated the base");
-        var stored = JsonSerializer.Deserialize<CalibrationWizardDraft>(JsonSerializer.Serialize(measured))!;
+        var stored = JsonSerializer.Deserialize<CalibrationWizardFile>(JsonSerializer.Serialize(CalibrationWizardFile.From(measured)))!.ToDraft();
         CalibrationWizardFlow.ValidateDraft(stored, "robot-a");
-        check(stored.Answers["tableheight"] == "755.5" && !stored.OperatorSaysTcpMatches, "Draft persistence invented defaults or promoted model verification");
+        check(stored.Answers["tableheight"] == "755.5" && stored.Setup == new SheetSetup(), "Draft persistence invented defaults or promoted model verification");
+        // The saved file keeps the keys earlier versions wrote; a file where only
+        // the flag was cleared (the old physicalpoint/flag disagreement) restores unconfirmed.
+        var confirmed = measured with { Setup = new("root", "proof", "proof", JawTipsConfirmed: true, SurfaceConfirmed: true, ReferencePreviewed: true) };
+        var savedFile = CalibrationWizardFile.From(confirmed);
+        check(savedFile.OperatorSaysTcpMatches && savedFile.Answers["edgeroot"] == "root" && savedFile.Answers["leftedgeconfirmed"] == "proof" && savedFile.Answers["frame"] == "proof" &&
+            savedFile.Answers.ContainsKey("physicalpoint") && savedFile.Answers.ContainsKey("sceneconfirmed") && savedFile.Answers.ContainsKey("sheetreferencepreview") &&
+            !confirmed.Answers.ContainsKey("frame"), "Saved sheet confirmations changed the draft file format or leaked into the measurements");
+        var reloaded = JsonSerializer.Deserialize<CalibrationWizardFile>(JsonSerializer.Serialize(savedFile))!.ToDraft();
+        check(reloaded.Setup == confirmed.Setup && !reloaded.Answers.ContainsKey("frame") && !reloaded.Answers.ContainsKey("physicalpoint"), "Sheet confirmations did not survive a draft save and load");
+        check(!(savedFile with { OperatorSaysTcpMatches = false }).ToDraft().Setup.JawTipsConfirmed, "A saved physical point without the operator flag restored jaw-tip confirmation");
+        check((savedFile with { Answers = new(savedFile.Answers.Where(p => p.Key != "leftedgeconfirmed")) }).ToDraft().Setup.BackProof.Length == 0,
+            "A saved BACK confirmation without LEFT was restored");
+        check((savedFile with { Step = (CalibrationWizardStep)19 }).ToDraft().Step == CalibrationWizardStep.PointIntro, "An old question step was not mapped on load");
         Reject(() => CalibrationWizardFlow.ValidateDraft(stored, "robot-b"), "A restored draft crossed robot identities");
         Reject(() => CalibrationWizardFlow.ValidateDraft(stored with { ReportFile = "../another-profile/report.json" }, "robot-a"), "A draft report path escaped its per-robot settings folder");
         Reject(() => CalibrationWizardFlow.ValidateDraft(stored with { ReportFile = "settings.json" }, "robot-a"), "A draft could overwrite settings with a report evidence sidecar");
@@ -92,14 +105,12 @@ public static class CalibrationWizardTests
         check(clear["entityId"]!.GetValue<string>() == "model-root-a" && clear["sceneId"]!.GetValue<string>() == "scene-a" && clear["expectedModelRevision"]!.GetValue<string>() == "revision-a" && !clear["visible"]!.GetValue<bool>(), "Clearing substituted a newly selected root instead of the pinned marker context");
         check(marker.Request(true)["durationSeconds"]!.GetValue<int>() == 30, "Temporary marker lost its bounded native expiry");
         var edgeDraft = tabletopDraft with { Step = CalibrationWizardStep.DeskFrame, ModelAssetId = live.ModelAssetId, ModelRevision = live.ModelRevision,
-            Answers = new(tabletopDraft.Answers) { ["sceneconfirmed"] = "operator confirmed simulated tabletop" } };
+            Setup = new(SurfaceConfirmed: true) };
         var edgeRoot = CalibrationPlacement.At(new(.1, .8, -.2), .2);
         var leftEdge = WizardReferenceHighlightScope.Create(live, edgeDraft, edgeRoot);
         check(leftEdge.Point.Distance(new(-.7, .803, 0)) < 1e-12 && leftEdge.Label == "LEFT desk edge", "LEFT pointer did not mark the measured desk's short-edge midpoint just above its confirmed surface");
-        var previewAnswers = new Dictionary<string, string>(edgeDraft.Answers);
-        previewAnswers.Remove("sceneconfirmed"); previewAnswers["sheetreferencepreview"] = "read-only preview";
-        var previewDraft = edgeDraft with { Answers = previewAnswers };
-        check(WizardReferenceHighlightScope.Create(live, previewDraft, edgeRoot).Point == leftEdge.Point && !previewDraft.Answers.ContainsKey("sceneconfirmed"), "A visual edge preview required or invented physical tabletop confirmation");
+        var previewDraft = edgeDraft with { Setup = new(ReferencePreviewed: true) };
+        check(WizardReferenceHighlightScope.Create(live, previewDraft, edgeRoot).Point == leftEdge.Point && !previewDraft.Setup.SurfaceConfirmed, "A visual edge preview required or invented physical tabletop confirmation");
         var backDraft = edgeDraft with { Step = CalibrationWizardStep.DeskBack, Epoch = edgeDraft.Epoch + 1 };
         var backEdge = WizardReferenceHighlightScope.Create(live, backDraft, edgeRoot);
         check(backEdge.Point.Distance(new(0, .803, -.35)) < 1e-12 && backEdge.Label == "BACK desk edge", "BACK pointer did not mark the measured far long edge");
@@ -117,7 +128,7 @@ public static class CalibrationWizardTests
             check(!leftEdge.Matches(live, edgeDraft with { Answers = new(edgeDraft.Answers) { [changedKey] = changedKey == "sceney" ? "900" : "1000" } }, edgeRoot, true, true), "A desk pointer survived changed measurements: " + changedKey);
         check(!leftEdge.Matches(live, edgeDraft, edgeRoot, false, true) && !leftEdge.Matches(live, edgeDraft, edgeRoot, true, false), "A pointer remained confirmable after leaving the page or losing fresh feedback");
         Reject(() => WizardReferenceHighlightScope.Create(live, edgeDraft with { Answers = new(edgeDraft.Answers.Where(p => p.Key != "width")) }, edgeRoot), "Pointer guessed an unmeasured desk width");
-        Reject(() => WizardReferenceHighlightScope.Create(live, edgeDraft with { Answers = new(edgeDraft.Answers.Where(p => p.Key != "sceneconfirmed")) }, edgeRoot), "Pointer assumed an unconfirmed simulated tabletop");
+        Reject(() => WizardReferenceHighlightScope.Create(live, edgeDraft with { Setup = new() }, edgeRoot), "Pointer assumed an unconfirmed simulated tabletop");
         var edgeReply = JsonSerializer.SerializeToElement(new { highlighted = true, label = leftEdge.Label, point = new[] { -.7, .803, 0 }, rootPlacement = edgeRoot.Json(), framed = false });
         check(leftEdge.Acknowledged(edgeReply), "Exact native desk-pointer echo was rejected");
         check(!backEdge.Acknowledged(edgeReply), "A returned LEFT pointer was accepted for the BACK question");
