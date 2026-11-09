@@ -42,7 +42,7 @@ public sealed partial class PipersPlugin : ILuckyPlugin
     private readonly ConcurrentDictionary<string, string> cameraStatus = new();
     private readonly ConcurrentDictionary<string, (int Width, int Height)> cameraDimensions = new();
 
-    public PipersPlugin(string address = "http://127.0.0.1:8766") : this(address, TimeProvider.System) { }
+    public PipersPlugin(string address = ControllerEndpoint.GrpcAddress) : this(address, TimeProvider.System) { }
 
     internal PipersPlugin(string address, TimeProvider followClock)
     {

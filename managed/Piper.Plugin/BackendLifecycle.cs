@@ -5,13 +5,23 @@ using LuckyEngine.PluginSdk;
 
 namespace LuckyRobots.Piper.Plugin;
 
+/// <summary>The local controller's fixed loopback endpoints (Piper.Host defaults).</summary>
+internal static class ControllerEndpoint
+{
+    public const string Loopback = "127.0.0.1";
+    public const int HttpPort = 8765, GrpcPort = 8766;
+    public const string GrpcAddress = "http://" + Loopback + ":8766";
+    private const string Http = "http://" + Loopback + ":8765";
+    public const string StateUrl = Http + "/api/state", StopUrl = Http + "/api/stop", ShutdownUrl = Http + "/api/shutdown";
+}
+
 public sealed record BackendSettings(string WslDistribution = "Ubuntu", string PikaDevice = "/dev/serial/by-id/usb-1a86_USB_Serial-if00-port0");
 
 public sealed partial class PipersPlugin
 {
     private Process? ownedBackend;
     private string? ownedBackendToken;
-    private string backendStatus = "Use the existing controller, or start the bundled server when ports 8765/8766 are free.";
+    private string backendStatus = $"Use the existing controller, or start the bundled server when ports {ControllerEndpoint.HttpPort}/{ControllerEndpoint.GrpcPort} are free.";
     private string setupStatus = "Windows Pika requires WSL 2 + a Linux distribution and usbipd-win. Share only the Pika USB device with WSL. Driver/USB setup is explicit; see plugin instructions.";
     private BackendSettings BackendOptions => preferences.Backend ?? new();
 
@@ -57,9 +67,9 @@ public sealed partial class PipersPlugin
         catch (IOException) { backendStatus = "Another Pipers instance is starting the controller. Waiting for its endpoint."; return; }
         using (startupLock)
         {
-            if (await BackendGuards.PortOccupied(8765, cancellation) || await BackendGuards.PortOccupied(8766, cancellation))
+            if (await BackendGuards.PortOccupied(ControllerEndpoint.HttpPort, cancellation) || await BackendGuards.PortOccupied(ControllerEndpoint.GrpcPort, cancellation))
             {
-                backendStatus = "A local service is already listening on 8765/8766. Waiting for a compatible controller endpoint; no second server was started.";
+                backendStatus = $"A local service is already listening on {ControllerEndpoint.HttpPort}/{ControllerEndpoint.GrpcPort}. Waiting for a compatible controller endpoint; no second server was started.";
                 return;
             }
             string directory = Path.Combine(engine.Start.PackageDirectory, "server");
@@ -68,7 +78,8 @@ public sealed partial class PipersPlugin
             if (OperatingSystem.IsLinux()) File.SetUnixFileMode(executable, File.GetUnixFileMode(executable) | UnixFileMode.UserExecute);
             var start = new ProcessStartInfo(executable) { WorkingDirectory = directory, UseShellExecute = false, CreateNoWindow = true,
                 RedirectStandardInput = true, RedirectStandardOutput = true, RedirectStandardError = true };
-            foreach (string argument in new[] { "--port", "8765", "--grpc-port", "8766", "--web-root", Path.Combine(engine.Start.PackageDirectory, "web"),
+            foreach (string argument in new[] { "--port", ControllerEndpoint.HttpPort.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                "--grpc-port", ControllerEndpoint.GrpcPort.ToString(System.Globalization.CultureInfo.InvariantCulture), "--web-root", Path.Combine(engine.Start.PackageDirectory, "web"),
                 "--state-dir", Path.Combine(global, "controller"), "--session-owner", owner, "--pika-device", BackendOptions.PikaDevice }) start.ArgumentList.Add(argument);
             if (OperatingSystem.IsWindows()) { start.ArgumentList.Add("--pika-wsl"); start.ArgumentList.Add(BackendOptions.WslDistribution); }
             ownedBackend?.Dispose();
@@ -84,7 +95,7 @@ public sealed partial class PipersPlugin
                 if (ownedBackend.HasExited) { backendStatus = $"Bundled server exited ({ownedBackend.ExitCode}). See {global}. Check USB/controller prerequisites."; return; }
                 try
                 {
-                    var snapshot = JsonNode.Parse(await http.GetStringAsync("http://127.0.0.1:8765/api/state", cancellation));
+                    var snapshot = JsonNode.Parse(await http.GetStringAsync(ControllerEndpoint.StateUrl, cancellation));
                     if (snapshot is not null && BackendGuards.IsOwned(snapshot, ownedBackend.Id, null))
                     {
                         ownedBackendToken = snapshot["token"]!.GetValue<string>();
@@ -160,7 +171,7 @@ public sealed partial class PipersPlugin
             if (process.HasExited) return;
             using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(4));
             using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(1) };
-            var snapshot = JsonNode.Parse(await http.GetStringAsync("http://127.0.0.1:8765/api/state", deadline.Token))!;
+            var snapshot = JsonNode.Parse(await http.GetStringAsync(ControllerEndpoint.StateUrl, deadline.Token))!;
             if (!BackendGuards.IsOwned(snapshot, process.Id, ownedBackendToken)) return;
             string currentToken = snapshot["token"]!.GetValue<string>();
             if (BackendActivity.AnyMotion(snapshot))
@@ -171,12 +182,12 @@ public sealed partial class PipersPlugin
                 if (motions.Any(lane => lane?["active"]?.GetValue<bool>() == true && lane["owner"]?.GetValue<string>() != owner))
                 { Trace.TraceWarning("Bundled server has another client's active lease; no stop or shutdown was sent."); return; }
                 var stop = new JsonObject { ["owner"] = owner };
-                using var stopRequest = new HttpRequestMessage(HttpMethod.Post, "http://127.0.0.1:8765/api/stop") { Content = new StringContent(stop.ToJsonString(), Encoding.UTF8, "application/json") };
+                using var stopRequest = new HttpRequestMessage(HttpMethod.Post, ControllerEndpoint.StopUrl) { Content = new StringContent(stop.ToJsonString(), Encoding.UTF8, "application/json") };
                 stopRequest.Headers.Add("X-Piper-Token", currentToken);
                 using var stopped = await http.SendAsync(stopRequest, deadline.Token);
                 stopped.EnsureSuccessStatusCode();
             }
-            using var request = new HttpRequestMessage(HttpMethod.Post, "http://127.0.0.1:8765/api/shutdown") { Content = new StringContent(new JsonObject { ["owner"] = owner }.ToJsonString(), Encoding.UTF8, "application/json") };
+            using var request = new HttpRequestMessage(HttpMethod.Post, ControllerEndpoint.ShutdownUrl) { Content = new StringContent(new JsonObject { ["owner"] = owner }.ToJsonString(), Encoding.UTF8, "application/json") };
             request.Headers.Add("X-Piper-Token", currentToken);
             using var response = await http.SendAsync(request, deadline.Token);
             response.EnsureSuccessStatusCode();

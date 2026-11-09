@@ -126,10 +126,10 @@ public sealed partial class PipersPlugin
     private void AddRecoveryHomePatches(Dictionary<string, JsonObject> patches)
     {
         string? blocked = RecoveryHomeBlocker();
-        patches["recovery.home"] = new() { ["text"] = recoveryHomeBusy ? "Recovering to zero…" : "Arm resting, path clear — recover to zero",
+        patches["recovery.home"] = new() { ["text"] = RecoveryHomeBusy ? "Recovering to zero…" : "Arm resting, path clear — recover to zero",
             ["enabled"] = blocked is null, ["hint"] = blocked ??
             "Rest the arm securely on a support and clear its path to zero. The controller verifies recovery and moves at 10%." };
-        if (!recoveryHomeBusy) return;
+        if (!RecoveryHomeBusy) return;
         patches["recovery.next"]["text"] = recoveryHomeProgress;
         patches["status"] = new() { ["text"] = recoveryHomeProgress };
         foreach (string id in patches.Keys.Where(id => id != "recovery.home" &&

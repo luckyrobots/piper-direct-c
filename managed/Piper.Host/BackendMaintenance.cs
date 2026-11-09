@@ -178,7 +178,7 @@ public sealed class BackendMaintenance
     {
         var arms = armSnapshot();
         if (ControllerActivity.AnyMotion(arms) || ControllerActivity.AnyQuery(arms))
-            return "Stop active arm actions and finish queries before restarting the server";
+            return "Stop active arm actions and finish queries before shutting down the server.";
         if (pikaSnapshots().OfType<JsonObject>().Any(pika => pika["pending"]?.GetValue<bool>() == true ||
             pika["following"]?.GetValue<bool>() == true || pika["resuming_hold"]?.GetValue<bool>() == true ||
             pika["connected"]?.GetValue<bool>() == true && Finite(pika["telemetry"]?["motor"] as JsonObject, "Speed", out double speed) && Math.Abs(speed) > .02))

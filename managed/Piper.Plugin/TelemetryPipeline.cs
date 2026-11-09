@@ -406,7 +406,7 @@ public sealed partial class PipersPlugin
 
     private async Task ObserveRecovery(CancellationToken cancellation)
     {
-        if (recoveryHomeBusy) return;
+        if (RecoveryHomeBusy) return;
         if (!recoveryInProgress || !HasFreshControlTelemetry(out var receipt)) return;
         var device = Device(expectedToken: receipt!.BackendToken, sourceReceipt: receipt);
         if (device["recovery_required"]?.GetValue<bool>() != true && device["reset_pending"]?.GetValue<bool>() != true)

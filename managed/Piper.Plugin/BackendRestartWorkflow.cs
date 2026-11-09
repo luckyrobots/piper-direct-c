@@ -65,7 +65,7 @@ public sealed partial class PipersPlugin
                 }
                 try
                 {
-                    var next = JsonNode.Parse(await http.GetStringAsync("http://127.0.0.1:8765/api/state", deadline.Token));
+                    var next = JsonNode.Parse(await http.GetStringAsync(ControllerEndpoint.StateUrl, deadline.Token));
                     if (next?["backend_instance_id"]?.GetValue<string>() == previousInstance &&
                         next["backend_restart"]?["pending"]?.GetValue<bool>() == false &&
                         next["backend_restart"]?["last_failure"]?.GetValue<string>() is { Length: > 0 } failure)

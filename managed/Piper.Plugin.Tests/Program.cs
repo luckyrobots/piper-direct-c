@@ -75,6 +75,9 @@ using (var absent = System.Text.Json.JsonDocument.Parse("{}"))
         Check(!LuckyRobots.Piper.SessionOwnerGuard.Allows("plugin-session", route, absent.RootElement), "Missing owner accepted for " + route);
     }
 }
+Check(ControllerEndpoint.GrpcAddress == $"http://{ControllerEndpoint.Loopback}:{ControllerEndpoint.GrpcPort}" &&
+    ControllerEndpoint.StateUrl == $"http://{ControllerEndpoint.Loopback}:{ControllerEndpoint.HttpPort}/api/state",
+    "Controller endpoint constants disagree with their ports");
 var followerPreferences = RobotProfileRouting.Normalize(new Preferences(Robots: [
     new("first", "First", FollowSimulationSelected: true), new("second", "Second")], ActiveRobotId: "first"));
 followerPreferences = RobotProfileRouting.Activate(followerPreferences, "second");

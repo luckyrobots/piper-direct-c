@@ -27,8 +27,8 @@ public sealed partial class PipersPlugin
 
     private RecoveryOperation? recoveryOperation;
     private RecoveryOperation? CurrentRecovery => Volatile.Read(ref recoveryOperation);
-    private bool supportedRecoveryBusy => CurrentRecovery?.Kind == RecoveryKind.HoldHere;
-    private bool recoveryHomeBusy => CurrentRecovery?.Kind == RecoveryKind.ReturnToZero;
+    private bool SupportedRecoveryBusy => CurrentRecovery?.Kind == RecoveryKind.HoldHere;
+    private bool RecoveryHomeBusy => CurrentRecovery?.Kind == RecoveryKind.ReturnToZero;
 
     private RecoveryOperation BeginRecovery(RecoveryKind kind, JsonObject device, long expectedEpoch, CancellationToken cancellation)
     {

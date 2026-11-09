@@ -133,7 +133,7 @@ public sealed partial class PipersPlugin
     private bool RecoveryGuideFor(JsonObject? device) => device is not null && recoveryGuideOpen && recoveryGuideScope == RecoveryConnectionIdentity(device);
 
     private RecoveryWorkspaceState RecoveryCardState(JsonObject? device) => RecoveryWorkspaceState.Inspect(device,
-        state?["motion"]?["active"]?.GetValue<bool>() == true, recoveryInProgress || supportedRecoveryBusy && RecoveryGuideFor(device));
+        state?["motion"]?["active"]?.GetValue<bool>() == true, recoveryInProgress || SupportedRecoveryBusy && RecoveryGuideFor(device));
 
     private bool RecoveryCardCanRun(RecoveryWorkspaceState view) => view.CanAct && !switchingProfile && CurrentRecovery is null && !GroupFollowActive;
 
