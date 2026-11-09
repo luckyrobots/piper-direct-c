@@ -28,9 +28,9 @@ public sealed record WizardReferenceHighlightScope(CalibrationIdentity Identity,
             left ? new(-width / 2000, surface / 1000 + .003, 0) : new(0, surface / 1000 + .003, -depth / 2000),
             left ? "LEFT desk edge" : "BACK desk edge", rootPlacement);
     }
-    public bool Matches(CalibrationIdentity live, CalibrationWizardDraft draft, CalibrationPlacement rootPlacement, bool calibrationOpen, bool fresh)
+    public bool Matches(CalibrationIdentity live, CalibrationWizardDraft draft, CalibrationPlacement rootPlacement, bool calibrationOpen)
     {
-        if (!calibrationOpen || !fresh) return false;
+        if (!calibrationOpen) return false;
         try
         {
             var expected = Create(live, draft, rootPlacement);
@@ -89,7 +89,7 @@ public sealed partial class PipersPlugin
         try
         {
             _ = Device(scope.Identity.DeviceId, scope.Identity.Generation);
-            return calibrationWizard is not null && scope.Matches(WizardReferenceIdentity(), Wizard, scope.RootPlacement, calibrationOpen, true);
+            return calibrationWizard is not null && scope.Matches(WizardReferenceIdentity(), Wizard, scope.RootPlacement, calibrationOpen);
         }
         catch (InvalidOperationException) { return false; }
     }
