@@ -120,7 +120,7 @@ bool piper_decode(struct piper_feedback *state, uint32_t id,
         return true;
     }
     if (len != 8) return false;
-    if ((id >= 0x150 && id <= 0x18f) || id == 0x471 || id == 0x470) {
+    if (piper_foreign_command(id)) {
         state->foreign_at = now; state->foreign_seen = true;
     }
     if (id == 0x473 && data[0] >= 1 && data[0] <= 6) {
@@ -223,6 +223,12 @@ struct can_frame piper_power(unsigned joint, bool enabled)
 {
     /* Callers address 1..6 explicitly; never use the ambiguous all-motor index. */
     return (struct can_frame){.can_id=0x471,.len=8,.data={(uint8_t)joint,enabled?2:1,0,0,0,0,0,0}};
+}
+struct can_frame piper_firmware_query(void) { return (struct can_frame){.can_id=0x4af,.len=8,.data={1}}; }
+struct can_frame piper_gripper_config_query(void) { return (struct can_frame){.can_id=0x477,.len=8,.data={4,0,0,0,3,0,0,0}}; }
+struct can_frame piper_limit_query(unsigned joint, bool acceleration)
+{
+    return (struct can_frame){.can_id=0x472,.len=8,.data={(uint8_t)joint,acceleration?2:1}};
 }
 struct can_frame piper_stop_frame(void) { return (struct can_frame){.can_id=0x150,.len=8,.data={1}}; }
 struct can_frame piper_reset_frame(void) { return (struct can_frame){.can_id=0x150,.len=8,.data={2}}; }

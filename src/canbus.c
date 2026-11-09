@@ -284,12 +284,12 @@ void can_bus_ingest(struct can_device *d,const struct can_frame *f,bool local,do
 {
     if (f->can_id&CAN_ERR_FLAG) {
         ++d->errors;
-        if (f->can_id&0x40) lost(d,"CAN bus-off; inspect connection before reopening");
+        if (f->can_id&CAN_ERR_BUSOFF) lost(d,"CAN bus-off; inspect connection before reopening");
         return;
     }
     if (local) {
         ++d->local;
-        if ((f->can_id>=0x150&&f->can_id<=0x18f)||f->can_id==0x471||f->can_id==0x470) {
+        if (piper_foreign_command(f->can_id)) {
             d->feedback.foreign_seen=true; d->feedback.foreign_at=now;
         }
         return;
@@ -313,7 +313,7 @@ static void simulation(struct can_bus *b,struct can_device *d,double now)
     struct can_frame frames[3]; double angles[6]; bool reached=true;
     for (unsigned i=0;i<6;++i) {
         double current=f->arm[0].deg[i],error=targets[i]-current;
-        bool teaching=f->arm[0].control==2||f->arm[0].teach==1||f->arm[0].teach==3||f->arm[0].teach==4||f->arm[0].teach==5||f->arm[0].teach==7;
+        bool teaching=f->arm[0].control==PIPER_CONTROL_TEACH||piper_teach_active(f->arm[0].teach);
         angles[i]=current+(((*powered)&(1u<<i))&&f->arm[0].control==1&&!teaching?copysign(fmin(fabs(error),8*dt),error):0);
         if (fabs(targets[i]-angles[i])>.02) reached=false;
     }
@@ -386,8 +386,7 @@ bool can_bus_batch_allowed(const struct can_device *d,const struct can_frame *fr
         if (f->can_id==0x472) { allowed=f->data[0]>=1&&f->data[0]<=6&&(f->data[1]==1||f->data[1]==2); tail=2; }
         if (f->can_id==0x4af) { allowed=f->data[0]==1; tail=1; }
         if (f->can_id==0x477) {
-            const uint8_t query[8]={4,0,0,0,3,0,0,0};
-            allowed=memcmp(f->data,query,8)==0;
+            allowed=memcmp(f->data,piper_gripper_config_query().data,8)==0;
         }
         if (f->can_id==0x159) {
             uint32_t width=((uint32_t)f->data[0]<<24)|((uint32_t)f->data[1]<<16)|((uint32_t)f->data[2]<<8)|f->data[3];

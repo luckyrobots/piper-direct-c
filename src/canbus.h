@@ -3,8 +3,16 @@
 #include "protocol.h"
 #ifdef _WIN32
 #define IF_NAMESIZE 32
+/* Values from the Linux CAN headers, used by the shared transport guards. */
+#define CAN_ERR_BUSOFF 0x40u
+#define CAN_STATE_BUS_OFF 3
+#define CAN_CTRLMODE_LOOPBACK 1
+#define CAN_CTRLMODE_LISTENONLY 2
+#define CAN_CTRLMODE_FD 32
 #else
 #include <net/if.h>
+#include <linux/can/error.h>
+#include <linux/can/netlink.h>
 #endif
 #define CANBUS_MAX 16
 #define CANBUS_STATIONARY_SAMPLES 5

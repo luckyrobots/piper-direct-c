@@ -111,6 +111,14 @@ int main(void)
         piper_decode(&corrupt,0x4af,(const uint8_t *)malformed+i,n,60);
     }
     assert(!*corrupt.version&&!piper_supported(&corrupt));
+    /* Read-only query frames, previously hand-built in the controller. */
+    struct can_frame q=piper_firmware_query(); assert(q.can_id==0x4af&&q.len==8&&q.data[0]==1&&!q.data[1]);
+    q=piper_gripper_config_query(); assert(q.can_id==0x477&&q.data[0]==4&&q.data[4]==3&&!q.data[1]&&!q.data[5]);
+    q=piper_limit_query(3,false); assert(q.can_id==0x472&&q.data[0]==3&&q.data[1]==1&&!q.data[2]);
+    q=piper_limit_query(6,true); assert(q.data[0]==6&&q.data[1]==2);
+    assert(piper_foreign_command(0x150)&&piper_foreign_command(0x18f)&&piper_foreign_command(0x470)&&piper_foreign_command(0x471));
+    assert(!piper_foreign_command(0x14f)&&!piper_foreign_command(0x190)&&!piper_foreign_command(0x472));
+    for (unsigned t=0;t<9;++t) assert(piper_teach_active((uint8_t)t)==(t==1||t==3||t==4||t==5||t==7)&&piper_teach_idle((uint8_t)t)==(t==0||t==2||t==6));
     puts("Protocol fixtures passed: signs, units, status, freshness, bad frames, separate addresses.");
     return 0;
 }
