@@ -269,6 +269,23 @@ internal static class EmergencyStopTests
             Check(fixture.Rpc.Routes.IsEmpty && fixture.Authority.Current.Approvals.Count == 1,
                 "An assigned Pika alias was found in telemetry but Enable reconfigured the already-owned canonical gripper");
         }
+        foreach (bool resetPending in new[] { true, false })
+        {
+            using var fixture = new Fixture();
+            var telemetry = fixture.Plugin.telemetry;
+            var receipt = telemetry.Latest!;
+            var snapshot = receipt.State.DeepClone().AsObject();
+            snapshot["devices"]![0]!["recovery_required"] = true;
+            snapshot["devices"]![0]!["reset_pending"] = resetPending;
+            fixture.Plugin.state = snapshot;
+            telemetry.Publish(receipt with { State = snapshot, Sequence = 2 });
+            fixture.Plugin.approved = true;
+            bool refused = false;
+            try { await fixture.Plugin.Enable(CancellationToken.None, true, null, null); }
+            catch (InvalidOperationException error) { refused = error.Message.Contains("Recover robot on Controls"); }
+            Check(refused && fixture.Rpc.Routes.IsEmpty,
+                "Enable sent a control-purpose recovery verification instead of routing to the Controls recovery card (reset_pending=" + resetPending + ")");
+        }
         foreach (StatusCode status in new[] { StatusCode.InvalidArgument, StatusCode.Unimplemented })
         {
             using var fixture = new Fixture();

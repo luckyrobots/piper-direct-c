@@ -505,11 +505,13 @@ public sealed partial class PipersPlugin : ILuckyPlugin
             if (teaching.BlocksTargets) throw new InvalidOperationException(teaching.NextStep);
             return current;
         }
-        CheckEnableScope();
+        // Enable never verifies or clears a controller latch: only the Controls
+        // recovery card sends recovery-purpose verification (with the operator's
+        // reset acknowledgement), and readiness already routes there.
+        var initial = CheckEnableScope();
+        if (initial["recovery_required"]?.GetValue<bool>() == true || initial["reset_pending"]?.GetValue<bool>() == true)
+            throw new InvalidOperationException("The controller needs recovery first. Use Recover robot on Controls; Enable will not clear STOP or verify a reset.");
         if (includePika) { await ConfigureProfilePika(expectedToken, cancellation); CheckEnableScope(); }
-        if (device["recovery_required"]?.GetValue<bool>() == true)
-            await Command(device["reset_pending"]?.GetValue<bool>() == true ? "verify-reset" : "verify-current", null, cancellation,
-                expected: scope, expectedPermissionEpoch: enableEpoch);
         if (!device["joints"]!.AsArray().All(j => j?["enabled"]?.GetValue<bool>() == true))
         {
             await Command("enable", null, cancellation, expected: scope, expectedPermissionEpoch: enableEpoch);
