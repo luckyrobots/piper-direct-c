@@ -303,8 +303,8 @@ public sealed class PikaProcessService : IPikaSession
         {
             if (Attached is { } current && current.Owner == requestedOwner) return new JsonObject { ["ok"] = true, ["message"] = "Session already connected" };
             replace = Attached is not null;
-            // A foreign owner already required take_over above. Nothing else
-            // changes the slot under this gate.
+            // A foreign owner already required take_over above. Owners change
+            // only under this gate; the pump changes just the phase.
             Debug.Assert(!replace || takeOver, "A foreign live Pika session reached replacement without take_over.");
         }
         // EOF disables the old session before another agent opens the port.
