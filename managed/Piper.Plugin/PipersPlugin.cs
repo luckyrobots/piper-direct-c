@@ -31,7 +31,7 @@ public sealed partial class PipersPlugin : ILuckyPlugin
     private string token = "", message = "Connecting to the existing Piper server…";
     private string uiActionError = "";
     internal RobotCommandAuthority CommandAuthority { get; } = new();
-    private volatile bool approved, pikaOwned;
+    private volatile bool approved;
     private volatile RobotLink? link;
     private volatile bool linkCommandsEnabled, recoveryInProgress;
     private double? linkErrorDegrees;
@@ -516,7 +516,7 @@ public sealed partial class PipersPlugin : ILuckyPlugin
             {
                 await Call("/api/pika/connect", new JsonObject { ["owner"] = owner, ["take_over"] = true }, cancellation, expectedToken);
                 CheckEnableScope();
-                pikaOwned = pikaMonitoring = true;
+                SetPikaRole(PikaSessionRole.Owned);
                 pikaMonitorStatus = "Pika control session active.";
                 long started = Stopwatch.GetTimestamp();
                 while (state?["pika"]?["fresh"]?.GetValue<bool>() != true)

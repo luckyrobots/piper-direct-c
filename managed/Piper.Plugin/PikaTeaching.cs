@@ -6,9 +6,9 @@ using System.Text.Json.Nodes;
 namespace LuckyRobots.Piper.Plugin;
 
 public sealed record PikaTeachingIdentity(string ProfileId, string CanDeviceId, long Generation,
-    string PikaDevice, string Distribution, string BackendSessionSha256)
+    string PikaDevice, string? Distribution, string BackendSessionSha256)
 {
-    public static PikaTeachingIdentity Create(string profile, string can, long generation, string pika, string distribution, string backendToken) =>
+    public static PikaTeachingIdentity Create(string profile, string can, long generation, string pika, string? distribution, string backendToken) =>
         new(profile, can, generation, pika, distribution, Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(backendToken))).ToLowerInvariant());
 }
 
@@ -32,7 +32,7 @@ public sealed class PikaTeachingRecorder
 {
     public const double MaximumDurationSeconds = 180;
     public const int MaximumFrames = 9000;
-    public const double MaximumEvidenceAgeMs = 500;
+    public const double MaximumEvidenceAgeMs = TelemetryReceipt.MaximumAgeMilliseconds;
     private readonly List<PikaTeachingFrame> frames = [];
     private readonly List<PikaTeachingGap> gaps = [];
     private readonly List<PikaTeachingMotorEvent> events = [];
@@ -61,7 +61,7 @@ public sealed class PikaTeachingRecorder
         if (identity.Generation <= 0 || string.IsNullOrWhiteSpace(identity.ProfileId) || string.IsNullOrWhiteSpace(identity.CanDeviceId) ||
             string.IsNullOrWhiteSpace(identity.PikaDevice) || identity.BackendSessionSha256.Length != 64 ||
             !identity.BackendSessionSha256.All(Uri.IsHexDigit) || string.IsNullOrWhiteSpace(disabledMotorRequestId) || startTicks < 0 ||
-            closedDisplayReference is double reference && (!double.IsFinite(reference) || Math.Abs(reference) > .15))
+            closedDisplayReference is double reference && (!double.IsFinite(reference) || Math.Abs(reference) > PikaClosedDisplayReference.MaximumMotorAngleRad))
             throw new ArgumentException("A verified robot/Pika/backend identity, disabled request and display reference are required.");
         this.identity = identity; disabledRequest = disabledMotorRequestId; displayReference = closedDisplayReference;
         CurrentMotorRequestId = disabledMotorRequestId;

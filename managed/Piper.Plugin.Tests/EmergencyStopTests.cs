@@ -264,7 +264,7 @@ internal static class EmergencyStopTests
             fixture.Set("state", snapshot);
             telemetry.Publish(receipt with { State = snapshot, Sequence = 2 });
             fixture.Set("approved", true);
-            fixture.Set("pikaOwned", true);
+            fixture.Set("pikaRole", (int)PikaSessionRole.Owned);
             await fixture.Invoke("Enable", CancellationToken.None, true, null, null, null, null);
             check(fixture.Rpc.Routes.IsEmpty && fixture.Authority.Current.Approvals.Count == 1,
                 "An assigned Pika alias was found in telemetry but Enable reconfigured the already-owned canonical gripper");

@@ -19,7 +19,7 @@ public sealed partial class PipersPlugin
         var device = RobotProfileRouting.Device(preferences, receipt.State);
         if (receipt.BackendToken != token || !receipt.HasFreshDevice(device, Stopwatch.GetTimestamp()))
         { device = (JsonObject)device.DeepClone(); device["fresh"] = false; }
-        long captured = receipt.ReceivedTicks - (long)(receipt.SourceAgeMilliseconds * Stopwatch.Frequency / 1000);
+        long captured = (long)receipt.CapturedTicks(Stopwatch.Frequency);
         return new(device, receipt.State["motion"]?.AsObject() ?? new(), receipt.State["phase"]?.GetValue<string>() ?? "",
             receipt.State["message"]?.GetValue<string>() ?? "Controller state unavailable", receipt.Sequence, captured);
     }

@@ -16,7 +16,7 @@ internal static class PikaTeachingTests
             PipersPlugin.MeasuredPikaHoldStatus(false, true).Contains("observation recording is stopped", StringComparison.Ordinal) &&
             PipersPlugin.MeasuredPikaHoldStatus(true, false).Contains("session is finishing", StringComparison.Ordinal),
             "Measured-hold status ignored the independent hand-guiding and observation-recording states");
-        var identity = PikaTeachingIdentity.Create("robot-one", "CAN-one", 1, "/dev/pika-one", "Ubuntu", "DO-NOT-SAVE-THIS-TOKEN");
+        var identity = PikaTeachingIdentity.Create("robot-one", "CAN-one", 1, "/dev/pika-one", new RobotProfile("robot-one", "Robot one").PikaDistribution, "DO-NOT-SAVE-THIS-TOKEN");
         check(identity.BackendSessionSha256.Length == 64 && !JsonSerializer.Serialize(identity).Contains("DO-NOT-SAVE"), "Teaching report exposed an authorization token");
         var pika = new JsonObject { ["owner"] = "our-owner", ["connected"] = true, ["fresh"] = true, ["enabled"] = false,
             ["armed"] = false, ["pending"] = false, ["following"] = false, ["power_uncertain"] = false,
@@ -90,8 +90,12 @@ internal static class PikaTeachingTests
         typeof(PipersPlugin).GetField("preferences", fields)!.SetValue(plugin, RobotProfileRouting.Normalize(new()));
         changed = new(identity, "disable-one", null, origin, DateTimeOffset.UnixEpoch);
         changed.RequestMotorMode("hold-two", true, Tick(.1));
-        typeof(PipersPlugin).GetField("pikaTeachingRecorder", fields)!.SetValue(plugin, changed);
-        typeof(PipersPlugin).GetField("pikaTeachingConfirmation", fields)!.SetValue(plugin, true);
+        var teachingField = typeof(PipersPlugin).GetField("pikaTeaching", fields)!;
+        object teaching = teachingField.GetValue(plugin)!;
+        teaching = teaching.GetType().GetMethod("<Clone>$")!.Invoke(teaching, null)!;
+        teaching.GetType().GetProperty("Recorder")!.SetValue(teaching, changed);
+        teaching.GetType().GetProperty("ConfirmationIdentity")!.SetValue(teaching, "pending-confirmation");
+        teachingField.SetValue(plugin, teaching);
         var patches = new Dictionary<string, JsonObject>();
         var handGuiding = new JsonObject { ["fresh"] = true, ["status"] = new JsonObject { ["control"] = 2, ["teach_state"] = 1 } };
         typeof(PipersPlugin).GetMethod("AddPikaTeachingPatches", fields)!.Invoke(plugin, [patches, handGuiding]);

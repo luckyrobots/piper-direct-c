@@ -6,12 +6,19 @@ using LuckyRobots.Piper.Pika;
 
 namespace LuckyRobots.Piper.Plugin;
 
+public sealed record AlignmentReference(string Name = "Desk cross / reference object", double X = 0, double DeskY = 0, double Z = 0,
+    double ObjectHeightMm = 0, string ToolPoint = "grasp_site");
+
 public sealed record RobotProfile(string Id, string Name, string CanDeviceId = "", double Speed = 10, double Step = 1, double Tolerance = .5,
     string RobotId = "", CameraPreferences? Gripper = null, CameraPreferences? Depth = null, string DepthSerial = "",
     Dictionary<string, SimulationCameraPreferences>? SimulationCameras = null, string PikaDevice = "", string WslDistribution = "Ubuntu", int CameraSlot = -1,
     AlignmentReference? Alignment = null, bool? RememberMeasuredLink = null, string SimulationTransport = SimulationTrajectoryTransport.PositionVelocity, string RobotJointPrefix = "", bool FollowSimulationSelected = false)
 {
-    internal string? PikaDistribution => OperatingSystem.IsWindows() ? WslDistribution : null;
+    /// <summary>The Pika agent distribution for this host. <c>null</c> means a native
+    /// Linux agent; Windows runs it inside the profile's WSL distribution. This is
+    /// the only place that convention is decided.</summary>
+    internal string? PikaDistribution => PikaDistributionFor(WslDistribution);
+    internal static string? PikaDistributionFor(string wslDistribution) => OperatingSystem.IsWindows() ? wslDistribution : null;
 }
 
 /// <summary>Persistent identity and settings projection, independent of the editor and hardware.</summary>
@@ -70,15 +77,6 @@ public static class RobotProfileRouting
 
     public static string CanInventoryKey(JsonObject snapshot) => JsonSerializer.Serialize(snapshot["devices"]!.AsArray().OfType<JsonObject>()
         .Select(d => new { Id = d["id"]?.GetValue<string>(), Name = d["name"]?.GetValue<string>(), Present = d["present"]?.GetValue<bool>() == true }).OrderBy(d => d.Id, StringComparer.Ordinal));
-
-    public static Preferences RefreshCameraBindings(Preferences value, string sceneId, IEnumerable<string> cameraIds)
-    {
-        var available = cameraIds.ToHashSet(StringComparer.Ordinal);
-        Dictionary<string, SimulationCameraPreferences>? Refresh(Dictionary<string, SimulationCameraPreferences>? bindings) => bindings?.ToDictionary(pair => pair.Key,
-            pair => available.Contains(pair.Value.CameraId) ? pair.Value with { SceneId = sceneId } : pair.Value);
-        return value with { SimulationCameras = Refresh(value.SimulationCameras),
-            Robots = value.Robots?.Select(p => p with { SimulationCameras = Refresh(p.SimulationCameras) }).ToArray() };
-    }
 
     private static Dictionary<string, SimulationCameraPreferences> RobotCameras(Dictionary<string, SimulationCameraPreferences>? cameras) =>
         new((cameras ?? []).Where(p => p.Key != "bench"));
@@ -292,8 +290,8 @@ public sealed partial class PipersPlugin
         // independent gripper session. All owned sessions keep heartbeating.
         if (link is not null) await engine.RequestAsync("robot.unsubscribe", cancellation: cancellation);
         CommandAuthority.Revoke();
-        teleoperating = false; followInput.End(); followRequest = 0;
-        approved = pikaOwned = pikaMonitoring = linkCommandsEnabled = recoveryInProgress = false; link = null; linkErrorDegrees = null;
+        StopViewportDrag();
+        approved = linkCommandsEnabled = recoveryInProgress = false; ReleasePikaRole(); link = null; linkErrorDegrees = null;
         CancelHandGuideRecovery();
     }
 
@@ -308,7 +306,7 @@ public sealed partial class PipersPlugin
         try
         {
             if (!groupViewOnly) await ReleaseProfileControl(cancellation);
-            else { CommandAuthority.Revoke(); link = null; approved = pikaOwned = pikaMonitoring = linkCommandsEnabled = false; }
+            else { CommandAuthority.Revoke(); link = null; approved = linkCommandsEnabled = false; ReleasePikaRole(); }
             await FinishPikaTeaching("Robot profile or hardware assignment changed", cancellation);
             StorePikaTeachingWorkspace(ActiveProfile);
             preferences = RobotProfileRouting.Capture(preferences);

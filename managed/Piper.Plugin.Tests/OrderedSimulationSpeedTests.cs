@@ -20,11 +20,7 @@ internal static class OrderedSimulationSpeedTests
                 phase.RetimingIterations == full.RetimingIterations,
                 "Increasing joint speed reran a different local stretch solution or failed predictable inverse timing");
             previousDuration = phase.DurationSeconds;
-            check(phase.PeakVelocityDegreesPerSecond.Zip(full.PeakVelocityDegreesPerSecond, (a, b) => Math.Abs(a - b * speed)).All(e => e < 1e-9) &&
-                phase.PeakAccelerationDegreesPerSecondSquared.Zip(full.PeakAccelerationDegreesPerSecondSquared, (a, b) => Math.Abs(a - b * speed * speed)).All(e => e < 1e-9),
-                "Slower joint playback did not preserve the analytic velocity/acceleration scaling");
-            check(phase.PeakVelocityDegreesPerSecond.All(v => v <= 50 * speed + 1e-9) &&
-                phase.PeakAccelerationDegreesPerSecondSquared.All(a => a <= 20 * speed * speed + 1e-9),
+            check(OrderedSimulationPathTests.WithinSampledLimits(phase, 50 * speed, 20 * speed * speed),
                 "Uniform joint clock dilation exceeded the reported physical bounds");
             for (int node = 0; node < frames.Length; node++)
             {

@@ -46,10 +46,11 @@ internal static class SimulationFollowDiagnosticsTests
                 nameof(InvalidOperationException), "The real arm or Pika did not settle.", 77, 12,
                 new("source", "run", "robot", "model", "revision", "can-a", 7, "pika-a", 1),
                 new("play", 99, 1, 1, 1, new double[6], new double[6], 80, 80, 11.82), null, Ordered: ordered);
-            check(diagnostics.Capture(failure) && !diagnostics.Capture(failure with { Reason = "Later cleanup" }),
-                "Queued diagnostics replaced the immutable original failure with cleanup");
+            diagnostics.Capture(failure); diagnostics.Capture(failure with { Reason = "Later cleanup" });
             await diagnostics.Completion;
-            var saved = JsonNode.Parse(await File.ReadAllTextAsync(diagnostics.Pathname))!["firstFailure"]!;
+            var saved = JsonNode.Parse(await File.ReadAllTextAsync(Path.Combine(directory, "test.json")))!["firstFailure"]!;
+            check(!saved["Reason"]!.GetValue<string>().Contains("Later cleanup", StringComparison.Ordinal),
+                "Queued diagnostics replaced the immutable original failure with cleanup");
             check(saved["Ordered"]!["ActualJointDegrees"]![1]!.GetValue<double>() == 116.52 &&
                 saved["Runtime"]!["CommandDegrees"]![1]!.GetValue<double>() == 0 &&
                 saved["Reason"]!.GetValue<string>().Contains(description, StringComparison.Ordinal) && reported.Contains(description, StringComparison.Ordinal),

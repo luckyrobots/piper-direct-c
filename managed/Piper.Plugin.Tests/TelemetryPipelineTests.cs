@@ -50,28 +50,28 @@ internal static class TelemetryPipelineTests
         ackDevice["status"]!["age_s"] = .45; ackDevice["joints"]![4]!["age_s"] = .45;
         check(ackReceipt.HasFreshDevice(ackDevice, ticks) && ackReceipt.IsFresh(At(300)), "Acknowledgement fixture did not isolate source-sample age from wrapper age");
         check(Math.Abs(ackReceipt.DeviceEvidenceAgeMilliseconds(ackDevice, At(300)) - 750) < .001 && !ackReceipt.HasFreshDevice(ackDevice, At(300)),
-            "A 450ms source sample plus300ms editor wait was accepted/stamped as a fresh acknowledgement");
+            "A 450ms source sample plus 300ms editor wait was accepted/stamped as a fresh acknowledgement");
         var pikaState = State();
         var pika = pikaState["pika"]!.AsObject();
         pika["connected"] = true; pika["fresh"] = true; pika["age_s"] = .15;
         var pikaReceipt = new TelemetryReceipt(pikaState, "session-a", 4, ticks, 100);
         double pikaDeadline = SimulationFollowPolicy.MaximumGripperFeedbackAgeMilliseconds;
-        check(Math.Abs(pikaReceipt.PikaEvidenceAgeMilliseconds(ticks) - 250) < .001 && pikaReceipt.HasFreshPika(ticks, pikaDeadline),
+        check(Math.Abs(pikaReceipt.PikaEvidenceAgeMilliseconds(ticks) - 250) < .001 && pikaReceipt.HasFreshPika(pikaReceipt.State["pika"] as JsonObject, ticks, pikaDeadline),
             "Pika age did not include its source sample age and envelope delay at the 250ms boundary");
-        check(!pikaReceipt.HasFreshPika(At(1), pikaDeadline), "An aged Pika receipt renewed its 250ms evidence window");
+        check(!pikaReceipt.HasFreshPika(pikaReceipt.State["pika"] as JsonObject, At(1), pikaDeadline), "An aged Pika receipt renewed its 250ms evidence window");
         pika["age_s"] = .3;
-        check(!pikaReceipt.HasFreshPika(ticks, pikaDeadline), "A true Pika fresh flag hid a sample too old for physical following");
+        check(!pikaReceipt.HasFreshPika(pikaReceipt.State["pika"] as JsonObject, ticks, pikaDeadline), "A true Pika fresh flag hid a sample too old for physical following");
         foreach (JsonNode? invalidAge in new JsonNode?[] { null, JsonValue.Create(-.001), JsonValue.Create(double.NaN), JsonValue.Create(double.PositiveInfinity), JsonValue.Create("0.01") })
         {
             pika["age_s"] = invalidAge;
-            check(!pikaReceipt.HasFreshPika(ticks, pikaDeadline), "Missing or invalid Pika source age authorized following");
+            check(!pikaReceipt.HasFreshPika(pikaReceipt.State["pika"] as JsonObject, ticks, pikaDeadline), "Missing or invalid Pika source age authorized following");
         }
         pika["age_s"] = .001; pika["connected"] = false;
-        check(!pikaReceipt.HasFreshPika(ticks, pikaDeadline), "Disconnected Pika feedback authorized following");
+        check(!pikaReceipt.HasFreshPika(pikaReceipt.State["pika"] as JsonObject, ticks, pikaDeadline), "Disconnected Pika feedback authorized following");
         pika["connected"] = true; pika["fresh"] = false;
-        check(!pikaReceipt.HasFreshPika(ticks, pikaDeadline), "A false Pika fresh flag authorized following");
+        check(!pikaReceipt.HasFreshPika(pikaReceipt.State["pika"] as JsonObject, ticks, pikaDeadline), "A false Pika fresh flag authorized following");
         pika["fresh"] = true;
-        check(!(pikaReceipt with { Connected = false }).HasFreshPika(ticks, pikaDeadline), "A disconnected telemetry envelope authorized Pika following");
+        check(!(pikaReceipt with { Connected = false }).HasFreshPika(pikaReceipt.State["pika"] as JsonObject, ticks, pikaDeadline), "A disconnected telemetry envelope authorized Pika following");
         check(!Prepare(State(), 2, utc - 501_000, "host-utc", utc, ticks, out _), "A queued old frame was stamped fresh on arrival");
         check(ReferenceEquals(inbox.Latest, first), "Rejecting an aged frame replaced the last verified receipt");
         check(!Prepare(State(), 2, utc + 101_000, "host-utc", utc, ticks, out _), "An unbounded future source clock passed freshness checks");
@@ -169,17 +169,17 @@ internal static class TelemetryPipelineTests
             Volatile.Write(ref editorMode, 1);
             await Until(() => Volatile.Read(ref sceneRequests) > beforeModeChange && Get<string>("sceneTrackingStatus").StartsWith("Measured scene update deferred", StringComparison.Ordinal),
                 "The slow fake request did not drain before the leader/ghost check");
-            Set("teleoperating", true); Set("linkCommandsEnabled", true); Set("followRequest", 7L);
+            Set("viewportDrag", new ViewportDrag(ViewportDragPhase.Following, Request: 7)); Set("linkCommandsEnabled", true);
             authority.TryAcknowledge(authority.Epoch, commandScope, 7);
             int beforeGhost = Volatile.Read(ref sceneRequests);
             await Until(() => Volatile.Read(ref sceneRequests) > beforeGhost && Get<string>("sceneTrackingStatus").StartsWith("Leader target + measured ghost", StringComparison.Ordinal), "Native leader/ghost feedback was not recognized");
-            check(Get<bool>("teleoperating") && Get<bool>("linkCommandsEnabled") && Get<long>("followRequest") == 7 && authority.Current.Lease?.Request == 7,
+            check(Get<ViewportDrag>("viewportDrag").Phase != ViewportDragPhase.Off && Get<bool>("linkCommandsEnabled") && Get<ViewportDrag>("viewportDrag") is { Phase: ViewportDragPhase.Following, Request: 7 } && authority.Current.Lease?.Request == 7,
                 "Expected native applied:false leader/ghost feedback stopped a valid drag or finishing target");
             check(Get<JsonObject?>("acknowledgedScenePose") is null,
                 "Leader/ghost feedback was incorrectly promoted to a calibration pose acknowledgement");
             Volatile.Write(ref editorMode, 2);
-            await Until(() => !Get<bool>("teleoperating"), "A remote teleoperation stop did not pause local following");
-            check(!Get<bool>("linkCommandsEnabled") && Get<long>("followRequest") == 0 && authority.Current.Lease is null,
+            await Until(() => Get<ViewportDrag>("viewportDrag").Phase == ViewportDragPhase.Off, "A remote teleoperation stop did not pause local following");
+            check(!Get<bool>("linkCommandsEnabled") && Get<ViewportDrag>("viewportDrag").Phase != ViewportDragPhase.Following && authority.Current.Lease is null,
                 "Unexpected remote editor deferral kept viewport targets armed");
             await feeding.CancelAsync(); await producer;
             await Until(() => !Get<bool>("approved") && authority.Current.Lease is null, "Real telemetry loss did not disarm commands/deadlines", 1500);

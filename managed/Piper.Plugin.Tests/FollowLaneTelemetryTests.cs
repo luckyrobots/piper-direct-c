@@ -37,8 +37,8 @@ internal static class FollowLaneTelemetryTests
         });
         clock.AdvanceMilliseconds(199);
         _ = reader.Read("backend").Hardware("owner", clock.GetTimestamp());
-        controller.Arm(FollowArmAction.Update, new() { ["request_id"] = 77L, ["sequence"] = 13L }).GetAwaiter().GetResult();
-        controller.Pika(FollowPikaAction.Hold, null).GetAwaiter().GetResult();
+        controller.Arm(FollowOp.Update, new() { ["request_id"] = 77L, ["sequence"] = 13L }).GetAwaiter().GetResult();
+        controller.Pika(FollowOp.Hold, null).GetAwaiter().GetResult();
         using var cancellation = new CancellationTokenSource();
         controller.Heartbeat(77, cancellation.Token).GetAwaiter().GetResult();
         check(sent.Count == 3 && sent.All(s => s.Backend == "backend" && s.Body["owner"]?.GetValue<string>() == "owner") &&
@@ -49,6 +49,16 @@ internal static class FollowLaneTelemetryTests
             sent[1].Body["pika_distribution"]?.GetValue<string>() == (OperatingSystem.IsWindows() ? "Pika-WSL" : null) &&
             sent[2] is { Route: "/api/heartbeat", Cancelable: true } &&
             sent[2].Body["request_id"]?.GetValue<long>() == 77, "Typed controller changed lane routing, request sequence or cancellation policy");
+        check(sent[0].Body["standalone"]?.GetValue<bool>() == true && !sent[0].Body.ContainsKey("clear") &&
+            !sent[0].Body.ContainsKey("supported") && !sent[0].Body.ContainsKey("reset_completed"),
+            "Follow update carried safety declarations that only other actions read");
+        sent.Clear();
+        foreach (var action in new[] { FollowOp.Match, FollowOp.Start, FollowOp.Hold })
+            controller.Arm(action, null).GetAwaiter().GetResult();
+        check(sent.All(s => s.Body["standalone"]?.GetValue<bool>() == true && !s.Body.ContainsKey("supported") &&
+                !s.Body.ContainsKey("reset_completed")) &&
+            sent[0].Body["clear"]?.GetValue<bool>() == true && sent[1].Body["clear"]?.GetValue<bool>() == true &&
+            !sent[2].Body.ContainsKey("clear"), "Follow sent clear, supported or reset_completed beyond the actions that read them");
 
         clock.AdvanceMilliseconds(2);
         Reject(() => _ = reader.Read("backend").Hardware("owner", clock.GetTimestamp()), "Cached Pika evidence gained a new 250 ms window");

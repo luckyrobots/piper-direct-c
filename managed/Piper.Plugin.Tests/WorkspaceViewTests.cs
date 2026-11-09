@@ -215,7 +215,7 @@ internal static class WorkspaceViewTests
                         HeaderPatch("workspace.power")["hint"]?.GetValue<string>()?.Contains("All six motors report enabled", StringComparison.Ordinal) == true,
                         "Teaching hid the distinction between powered motors and blocked plugin controls");
             }
-            Set("preferences", prefs); Set("link", null); Set("pikaOwned", false);
+            Set("preferences", prefs); Set("link", null); Set("pikaRole", (int)PikaSessionRole.None);
             // A real disconnect invalidates the receipt while leaving its last
             // complete snapshot available to the settings projection.
             Get<LatestTelemetry>("telemetry").Disconnect(); Set("approved", false);
@@ -264,8 +264,7 @@ internal static class WorkspaceViewTests
             }
             finally { Set("groupSimulation", null); }
             await CheckView("recording");
-            Set("replayArtifact", EpisodeReplayTests.ValidArtifact());
-            Set("replayProfile", "piper-1");
+            Set("replayReview", new ReplayReview(EpisodeReplayTests.ValidArtifact(), "piper-1"));
             await CheckView("replay");
             var replayStart = Walk(rendered!).Single(n => n["id"]?.GetValue<string>()?.EndsWith(".replay.start", StringComparison.Ordinal) == true);
             check(replayStart["enabled"]?.GetValue<bool>() == false && replayStart["hint"]?.GetValue<string>() == EpisodeReplayAvailability.Reason,
@@ -321,14 +320,14 @@ internal static class WorkspaceViewTests
             Set("client", new PiperControl.PiperControlClient(calls)); Set("state", state); Set("token", "fixture-session");
             Get<LatestTelemetry>("telemetry").Publish(new(state, "fixture-session", 1, Stopwatch.GetTimestamp(), 0));
             Set("workspacePage", "controls"); Set("calibrationOpen", false); Set("approved", true); Set("linkCommandsEnabled", true);
-            Set("approvalBeforeTeaching", true); Set("teleoperating", true); Set("followRequest", 7L);
+            Set("approvalBeforeTeaching", true); Set("viewportDrag", new ViewportDrag(ViewportDragPhase.Following, Request: 7));
             plugin.CommandAuthority.TryAcknowledge(plugin.CommandAuthority.Epoch, new("piper-1", "fixture-session", binding.DeviceId, binding.Generation), 7);
             Set("link", binding); Set("linkBackendToken", "fixture-session");
             long previousPermission = plugin.CommandAuthority.Epoch;
             await Invoke("WorkspaceEvent", "settings.robot", CancellationToken.None);
             check(calls.Requests.Count == 1 && calls.Requests[0].Route == "/api/command" &&
                 JsonNode.Parse(calls.Requests[0].Json)?["action"]?.GetValue<string>() == "follow-end", "Leaving Controls replayed a target or failed to end its gesture");
-            check(Get<bool>("approved") && Get<bool>("approvalBeforeTeaching") && Get<bool>("linkCommandsEnabled") && !Get<bool>("teleoperating") && Get<long>("followRequest") == 0,
+            check(Get<bool>("approved") && Get<bool>("approvalBeforeTeaching") && Get<bool>("linkCommandsEnabled") && Get<ViewportDrag>("viewportDrag").Phase == ViewportDragPhase.Off && Get<ViewportDrag>("viewportDrag").Phase != ViewportDragPhase.Following,
                 "Browsing settings revoked readiness or retained a live viewport gesture");
             check(ReferenceEquals(Get<RobotLink>("link"), binding) && plugin.CommandAuthority.Epoch == previousPermission,
                 "Browsing settings dropped the measured binding or revoked healthy idle approval");

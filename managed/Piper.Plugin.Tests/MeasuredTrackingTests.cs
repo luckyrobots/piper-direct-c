@@ -49,7 +49,7 @@ internal static class MeasuredTrackingTests
             check(f.Requests.Select(r => r.Method).SequenceEqual(new[] { "scene.robots", "robot.feedback", "robot.subscribe" }),
                 "Passive linking did not validate/apply/ack/subscribe in order during hand-guiding");
             check(f.Get<RobotLink?>("link") is { EntityId: "robot-a", DeviceId: "can-a", Generation: 7 } &&
-                !f.Get<bool>("approved") && !f.Get<bool>("linkCommandsEnabled") && !f.Get<bool>("teleoperating") && f.Authority.Current.Lease is null,
+                !f.Get<bool>("approved") && !f.Get<bool>("linkCommandsEnabled") && f.Get<ViewportDrag>("viewportDrag").Phase == ViewportDragPhase.Off && f.Authority.Current.Lease is null,
                 "Passive measured linking granted control, teleoperation or a previous motion lease");
             var feedback = f.Requests.Single(r => r.Method == "robot.feedback").Body;
             check(feedback["joints"]?["joint7"]?.GetValue<double>() is double jaw && Math.Abs(jaw + .047) < 1e-8,
@@ -64,7 +64,7 @@ internal static class MeasuredTrackingTests
             check(f.Rpc.Routes.Count == 1 && f.Rpc.Routes.Single().Route == "/api/pika/connect" &&
                 f.Rpc.Routes.Single().Body["take_over"]?.GetValue<bool>() == false,
                 "Automatic tracking sent a physical request beyond Pika's monitor-only connection");
-            check(!f.Get<bool>("pikaOwned") && f.Get<bool>("pikaMonitoring"), "Monitoring silently acquired gripper motor control");
+            check(f.Get<int>("pikaRole") == (int)PikaSessionRole.Monitoring, "Monitoring silently acquired gripper motor control");
 
             f.Set("measuredTrackingAttemptAt", 0L); f.Fresh(); before = f.Requests.Count;
             await f.Restore();
@@ -121,8 +121,8 @@ internal static class MeasuredTrackingTests
         foreach (string active in new[] { "teleoperation", "follow", "motion" })
         {
             using var f = new Fixture(started: true);
-            if (active == "teleoperation") f.Set("teleoperating", true);
-            if (active == "follow") f.Set("followRequest", 7L);
+            if (active == "teleoperation") f.Set("viewportDrag", new ViewportDrag(ViewportDragPhase.Teleoperating));
+            if (active == "follow") f.Set("viewportDrag", new ViewportDrag(ViewportDragPhase.Following, Request: 7));
             if (active == "motion") f.Snapshot["motion"]!["active"] = true;
             f.Fresh(); await f.Restore();
             check(f.Requests.Count == 0 && f.Commands.CurrentCount == 1, "Passive discovery interfered with active " + active + " inputs");
@@ -139,7 +139,7 @@ internal static class MeasuredTrackingTests
             // Exercise the real public Link toggle without StartAsync, cameras
             // or a real server. Persisted false must survive a new instance.
             await f.Restore(); await f.DrainMonitor();
-            f.Set("pikaMonitoring", false); f.Set("pikaMonitorStopping", true);
+            f.Set("pikaRole", (int)PikaSessionRole.None); f.Set("pikaMonitorStopping", true);
             await f.LinkEvent();
             var saved = JsonSerializer.Deserialize<Preferences>(await File.ReadAllTextAsync(Path.Combine(f.Folder, "preferences.json")), PluginProtocol.Json)!;
             check(RobotProfileRouting.Active(saved).RememberMeasuredLink == false && f.Get<RobotLink?>("link") is null,
@@ -208,7 +208,7 @@ internal static class MeasuredTrackingTests
                 }),
                 ["pika"] = new JsonObject
                 {
-                    ["configured"] = true, ["device"] = "/dev/pika-a", ["distribution"] = "Ubuntu", ["owner"] = "",
+                    ["configured"] = true, ["device"] = "/dev/pika-a", ["distribution"] = RobotProfile.PikaDistributionFor("Ubuntu"), ["owner"] = "",
                     ["connected"] = false, ["fresh"] = true, ["power_requested"] = false, ["power_uncertain"] = false,
                     ["telemetry"] = new JsonObject { ["motor"] = new JsonObject { ["Position"] = 0.0 } }
                 }

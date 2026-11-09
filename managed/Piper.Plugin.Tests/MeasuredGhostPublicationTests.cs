@@ -85,8 +85,7 @@ internal static class MeasuredGhostPublicationTests
                 new("b", "Second", "can-b", RobotId: "compound", PikaDevice: "/dev/b", WslDistribution: "Ubuntu", RobotJointPrefix: "piper3_")], ActiveRobotId: "a"));
             SetPreferences(Preferences);
             Set("passiveMeasuredTrackingStarted", true);
-            Set("measuredGhostSupported", true);
-            Set("ghostVisibilitySupported", true);
+            Set("ghostCapabilities", Activator.CreateInstance(typeof(PipersPlugin).GetNestedType("GhostCapabilities", System.Reflection.BindingFlags.NonPublic)!, true, true));
             Set("publishedGhostVisibility", true);
             Set("token", "backend");
             var joints = new JsonArray();
@@ -125,7 +124,7 @@ internal static class MeasuredGhostPublicationTests
                 ["fresh"] = true, ["status"] = new JsonObject { ["age_s"] = 0.0 },
                 ["joints"] = new JsonArray(Enumerable.Range(1, 6).Select(_ => (JsonNode)new JsonObject {
                     ["actual_deg"] = angle, ["age_s"] = 0.0, ["fresh"] = true }).ToArray()) };
-            JsonObject Pika(string device, double age) => new() { ["device"] = device, ["distribution"] = "Ubuntu", ["connected"] = true,
+            JsonObject Pika(string device, double age) => new() { ["device"] = device, ["distribution"] = RobotProfile.PikaDistributionFor("Ubuntu"), ["connected"] = true,
                 ["fresh"] = true, ["age_s"] = age, ["telemetry"] = new JsonObject { ["motor"] = new JsonObject { ["Position"] = 0.0 } } };
             var snapshot = new JsonObject { ["token"] = backend, ["selected"] = "can-a", ["devices"] = new JsonArray(Arm("can-a", first, firstGeneration), Arm("can-b", second, 1)),
                 ["pikas"] = new JsonArray(Pika("/dev/a", firstPikaAge), Pika("/dev/b", 0)) };

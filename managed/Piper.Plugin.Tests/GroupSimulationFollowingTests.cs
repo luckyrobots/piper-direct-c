@@ -36,8 +36,8 @@ internal static class GroupSimulationFollowingTests
         SimulationFollowHardware Hardware(string id, double[] pose, long sequence = 0) => new(id,7,true,true,true,pose,limits,20,new(id,7,77,sequence,pose));
         OrderedSimulationFrame Node(ulong cursor, double time, string phase, double joint) => new(cursor,(long)(time*1e9),time,
             new double[] {joint,0,0,0,0,0},new double[6],20,20,"episode-a",0,phase,false,false);
-        var first = new OrderedSimulationExecution(initial,Hardware("can-a",new double[6]),1,true);
-        var second = new OrderedSimulationExecution(initial,Hardware("can-b",new double[6]),1,true);
+        var first = new OrderedSimulationExecution(initial,Hardware("can-a",new double[6]),1);
+        var second = new OrderedSimulationExecution(initial,Hardware("can-b",new double[6]),1);
         first.Path.Append([Node(1,0,"arm:1",0),Node(2,.02,"arm:1",0),Node(3,.04,"arm:2",2),Node(4,.06,"wait:3",2)]);
         second.Path.Append([Node(1,0,"arm:1",0),Node(2,.02,"arm:1",0),Node(3,.04,"arm:2",3),Node(4,.06,"wait:3",3)]);
         check(first.Path.Current!.End.Cursor == 2 && second.Path.Current!.End.Cursor == 2,

@@ -3,13 +3,44 @@ using System.Text.Json.Nodes;
 
 namespace LuckyRobots.Piper.Plugin;
 
+/// <summary>Plugin-C viewport joint drag.
+/// <code>
+///   Off --select joint--> Teleoperating(joint) --gesture begin + follow-start ack--> Following(request)
+///   Following --gesture end, hold, commit release, ownership change--> Teleoperating
+///   any --pause, permission or link loss, profile switch, recovery--> Off
+/// </code>
+/// A follow request therefore always belongs to an active teleoperation.</summary>
+internal enum ViewportDragPhase { Off, Teleoperating, Following }
+internal sealed record ViewportDrag(ViewportDragPhase Phase, string Joint = "joint6", long Request = 0, string FollowJoint = "joint6")
+{
+    public static readonly ViewportDrag Off = new(ViewportDragPhase.Off);
+}
+
 public sealed partial class PipersPlugin
 {
     private readonly FollowInputGate followInput = new();
-    private volatile bool teleoperating;
-    private long followRequest;
-    private string teleoperationJoint = "joint6";
-    private string followJoint = "joint6";
+    // One state field, written only by the transitions below; readers use the projections.
+    private ViewportDrag viewportDrag = ViewportDrag.Off;
+    private ViewportDrag Drag => Volatile.Read(ref viewportDrag);
+    private bool teleoperating => Drag.Phase != ViewportDragPhase.Off;
+    private long followRequest => Drag is { Phase: ViewportDragPhase.Following } drag ? drag.Request : 0;
+    private string teleoperationJoint => Drag.Joint;
+    private string followJoint => Drag.FollowJoint;
+
+    /// <summary>Leaves teleoperation entirely and discards any gesture.</summary>
+    private void StopViewportDrag()
+    {
+        Volatile.Write(ref viewportDrag, ViewportDrag.Off with { Joint = Drag.Joint });
+        followInput.End();
+    }
+
+    /// <summary>Ends the current gesture; teleoperation, if active, stays selected.</summary>
+    private void EndViewportGesture()
+    {
+        var current = Drag;
+        if (current.Phase == ViewportDragPhase.Following) Volatile.Write(ref viewportDrag, current with { Phase = ViewportDragPhase.Teleoperating, Request = 0 });
+        followInput.End();
+    }
 
     private async Task SelectTeleoperationJoint(string joint, CancellationToken cancellation)
     {
@@ -29,15 +60,20 @@ public sealed partial class PipersPlugin
         await engine.RequestAsync("robot.teleoperate", new JsonObject {
             ["sceneId"] = linked.SceneId, ["entityId"] = linked.EntityId,
             ["enabled"] = true, ["joint"] = joint }, cancellation);
-        teleoperationJoint = joint; teleoperating = true;
+        Volatile.Write(ref viewportDrag, new(ViewportDragPhase.Teleoperating, joint));
         message = "Teleoperate · drag the blue ring · release to finish the target · Esc or Stop movement to hold";
     }
 
-    private async Task HoldFollowing(CancellationToken cancellation)
+    private Task HoldFollowing(CancellationToken cancellation)
     {
         long request = followRequest;
+        EndViewportGesture();
+        return SendFollowEnd(request, cancellation);
+    }
+
+    private async Task SendFollowEnd(long request, CancellationToken cancellation)
+    {
         string expectedToken = linkBackendToken;
-        followRequest = 0; followInput.End();
         if (request == 0 || link is not { } linked) return;
         if (state?["motion"]?["request_id"]?.GetValue<long>() == request && state["motion"]?["active"]?.GetValue<bool>() == false) return;
         await Call("/api/command", new JsonObject {
@@ -47,8 +83,9 @@ public sealed partial class PipersPlugin
 
     private async Task PauseTeleoperation(CancellationToken cancellation)
     {
-        teleoperating = false;
-        try { await HoldFollowing(cancellation); }
+        long request = followRequest;
+        StopViewportDrag();
+        try { await SendFollowEnd(request, cancellation); }
         finally
         {
             if (link is { } linked)
@@ -83,9 +120,17 @@ public sealed partial class PipersPlugin
             double[] target = linked.Target(input, Device(linked.DeviceId, linked.Generation, expectedToken));
             if (phase == "begin")
             {
-                followJoint = input["editedJoint"]!.GetValue<string>();
+                string edited = input["editedJoint"]!.GetValue<string>();
                 var acknowledgement = await Command("follow-start", null, cancellation);
-                followRequest = acknowledgement["request_id"]?.GetValue<long>() ?? 0;
+                long admitted = acknowledgement["request_id"]?.GetValue<long>() ?? 0;
+                // Only a live teleoperation can enter Following; a concurrent pause wins.
+                if (admitted > 0 && Drag is { Phase: ViewportDragPhase.Teleoperating } idle)
+                    Volatile.Write(ref viewportDrag, idle with { Phase = ViewportDragPhase.Following, Request = admitted, FollowJoint = edited });
+                else if (admitted > 0)
+                {
+                    await SendFollowEnd(admitted, cancellation);
+                    throw new InvalidOperationException("Teleoperate was paused while the drag started; that drag was ended.");
+                }
             }
             if (followRequest == 0) throw new InvalidOperationException("Following expired. Start a new drag.");
             if (permissionEpoch != CommandAuthority.Epoch || sceneEpoch != Interlocked.Read(ref scenePermissionEpoch) || !ReferenceEquals(link, linked))

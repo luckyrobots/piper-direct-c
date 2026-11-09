@@ -3,23 +3,28 @@ using System.Text.Json.Nodes;
 
 namespace LuckyRobots.Piper.Plugin;
 
-public static class PikaMonitorPolicy
-{
-    public static bool MayConnect(JsonObject? pika, bool matchesProfile, string owner) => matchesProfile &&
-        pika?["configured"]?.GetValue<bool>() == true &&
-        pika["power_requested"]?.GetValue<bool>() != true && pika["power_uncertain"]?.GetValue<bool>() != true &&
-        (string.IsNullOrEmpty(pika["owner"]?.GetValue<string>()) || pika["owner"]?.GetValue<string>() == owner ||
-            pika["connected"]?.GetValue<bool>() == false && pika["fresh"]?.GetValue<bool>() == false &&
-            pika["power_requested"]?.GetValue<bool>() == false && pika["power_uncertain"]?.GetValue<bool>() == false);
-
-    public static bool ShouldRetry(JsonObject? pika, bool matchesProfile, string owner, bool linked, bool ownsPower, bool monitoring,
-        bool armMoving = false, bool teleoperating = false) => linked && !ownsPower && !armMoving && !teleoperating &&
-        MayConnect(pika, matchesProfile, owner) && (!monitoring || pika?["connected"]?.GetValue<bool>() != true);
-}
+/// <summary>This plugin's relationship to the active profile's Pika session.
+/// <code>
+///   None --read-only connect--> Monitoring --explicit Enable--> Owned
+///   None --explicit Enable--> Owned;  Owned --jaws freed for teaching--> Monitoring
+///   Monitoring --teaching measured hold verified--> Owned
+///   any --backend/telemetry loss, profile switch, restart, failed heartbeat--> None
+/// </code></summary>
+internal enum PikaSessionRole { None, Monitoring, Owned }
 
 public sealed partial class PipersPlugin
 {
-    private bool pikaMonitoring;
+    // One field, written only through SetPikaRole/TryEnterPikaRole/ReleasePikaRole.
+    private int pikaRole;
+    private PikaSessionRole PikaRole => (PikaSessionRole)Volatile.Read(ref pikaRole);
+    private bool pikaOwned => PikaRole == PikaSessionRole.Owned;
+    private void SetPikaRole(PikaSessionRole next) => Volatile.Write(ref pikaRole, (int)next);
+    /// <summary>Moves only from <paramref name="expected"/>, so a revocation that
+    /// raced an in-flight connect is not overwritten.</summary>
+    private bool TryEnterPikaRole(PikaSessionRole expected, PikaSessionRole next) =>
+        Interlocked.CompareExchange(ref pikaRole, (int)next, (int)expected) == (int)expected;
+    private void ReleasePikaRole() => SetPikaRole(PikaSessionRole.None);
+
     private string pikaMonitorStatus = "Pika telemetry starts read-only when the scene is linked.";
     private long pikaMonitorAttemptAt;
     private Task? pikaMonitorWorker;
@@ -27,7 +32,7 @@ public sealed partial class PipersPlugin
     private bool pikaMonitorStopping;
 
     private bool PikaMonitorRetryNeeded() => TelemetryIsFresh() && !switchingProfile && CurrentRecovery is null &&
-        PikaMonitorPolicy.ShouldRetry(state?["pika"] as JsonObject, PikaMatchesProfile(), owner, link is not null, pikaOwned, pikaMonitoring,
+        PikaMonitorConnectionPolicy.ShouldRetry(state?["pika"] as JsonObject, PikaMatchesProfile(), owner, link is not null, PikaRole,
             state?["motion"]?["active"]?.GetValue<bool>() == true, teleoperating);
 
     private void RetryLinkedPikaMonitor()
@@ -71,9 +76,9 @@ public sealed partial class PipersPlugin
         string expectedToken = token, expectedProfile = ActiveProfile.Id;
         var pika = state?["pika"] as JsonObject;
         bool matches = PikaMatchesProfile();
-        if (!PikaMonitorPolicy.MayConnect(pika, matches, owner))
+        if (!PikaMonitorConnectionPolicy.MayConnect(pika, matches, owner))
         {
-            if (pika?["owner"]?.GetValue<string>() != owner) pikaOwned = pikaMonitoring = false;
+            if (pika?["owner"]?.GetValue<string>() != owner) ReleasePikaRole();
             pikaMonitorStatus = !matches ? "Pika assignment is unconfigured or differs from this robot."
                 : pika?["owner"]?.GetValue<string>() == owner ? pikaOwned ? "Pika control session active."
                     : "This Pika session has a recorded power request; use its explicit control or cleanup flow."
@@ -90,16 +95,16 @@ public sealed partial class PipersPlugin
             _ = Device(expectedLink.DeviceId, expectedLink.Generation, expectedToken);
             if (!ReferenceEquals(link, expectedLink) || token != expectedToken || ActiveProfile.Id != expectedProfile || !PikaMatchesProfile())
             {
-                pikaMonitoring = false;
+                TryEnterPikaRole(PikaSessionRole.Monitoring, PikaSessionRole.None);
                 pikaMonitorStatus = "Pika monitor scope changed while connecting; no control permission was granted.";
                 return;
             }
-            pikaMonitoring = true;
+            TryEnterPikaRole(PikaSessionRole.None, PikaSessionRole.Monitoring);
             pikaMonitorStatus = pikaOwned ? "Pika control session active." : "Pika monitoring only · motor power unchanged.";
         }
         catch (Exception error) when (error is not OperationCanceledException)
         {
-            pikaMonitoring = false;
+            TryEnterPikaRole(PikaSessionRole.Monitoring, PikaSessionRole.None);
             pikaMonitorStatus = "Pika monitor unavailable: " + error.Message;
         }
     }

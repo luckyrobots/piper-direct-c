@@ -35,7 +35,7 @@ public sealed partial class PipersPlugin
         var selected = ProfilePikaRouting.Find(snapshot, profile);
         if (snapshot["pikas"] is JsonArray || selected is not null)
             snapshot["pika"] = selected?.DeepClone() ?? new JsonObject { ["device"] = profile.PikaDevice,
-                ["distribution"] = profile.WslDistribution, ["configured"] = false, ["connected"] = false, ["fresh"] = false };
+                ["distribution"] = profile.PikaDistribution, ["configured"] = false, ["connected"] = false, ["fresh"] = false };
     }
 
     private JsonObject[] OwnedPikaSessions(JsonObject snapshot) => (snapshot["pikas"] is JsonArray sessions
@@ -83,8 +83,7 @@ public sealed partial class PipersPlugin
         {
             approved = true;
             linkCommandsEnabled = link is not null;
-            pikaOwned = owns;
-            pikaMonitoring = monitoring;
+            SetPikaRole(owns ? PikaSessionRole.Owned : monitoring ? PikaSessionRole.Monitoring : PikaSessionRole.None);
         });
     }
 
@@ -155,7 +154,7 @@ public sealed partial class PipersPlugin
                     {
                         cancellation.ThrowIfCancellationRequested();
                         if (ReadOwned() is not { } current) return;
-                        if (current.Receipt.HasFreshPika(current.Gripper, System.Diagnostics.Stopwatch.GetTimestamp(), 500) &&
+                        if (current.Receipt.HasFreshPika(current.Gripper, System.Diagnostics.Stopwatch.GetTimestamp(), TelemetryReceipt.MaximumAgeMilliseconds) &&
                             current.Gripper["last_motor_request"]?.GetValue<string>() == request &&
                             Pika.PikaDisabledEvidence.Confirmed(current.Gripper, owner)) break;
                         await Task.Delay(25, cancellation);

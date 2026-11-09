@@ -19,7 +19,6 @@ public sealed partial class PipersPlugin
         public readonly FollowLaneTelemetry Feedback = feedback;
         public readonly FollowLaneController Controller = controller;
         public SimulationFollowSample? First, LastSample;
-        public SimulationFollowPolicy? Policy;
         public OrderedSimulationExecution? Execution;
         public SimulationFollowDiagnostics? Diagnostics;
         public readonly SimulationPublishDiagnostics Publications = new();
@@ -27,11 +26,43 @@ public sealed partial class PipersPlugin
         public SimulationFollowHardware? LastHardware;
         public bool LastStationary;
         public double LastGripperSpeed, LastGripperFeedback;
-        public long ArmRequest, Sequence, AdmissionTicks, AdmissionSequence, ArmAdmissionRetiredTicks;
-        public string PikaSession = "";
-        public bool ArmTouched, PikaTouched;
-        public double SettledFeedback;
-        public long SettledAt, SettledSequence;
+        public long Sequence, ArmAdmissionRetiredTicks;
+
+        // Arm and Pika admission are immutable records published with Volatile:
+        // the coordinator writes them, heartbeats and retirement read them.
+        private LaneArm arm = LaneArm.Untouched;
+        private LanePika pika = LanePika.Untouched;
+        public LaneArm Arm => Volatile.Read(ref arm);
+        public LanePika Pika => Volatile.Read(ref pika);
+        public void TouchArm() { if (Arm.Phase == LanePhase.Untouched) Volatile.Write(ref arm, LaneArm.Touched); }
+        public void MatchRequested(long request) => Volatile.Write(ref arm, new(LanePhase.Matching, MatchRequest: request));
+        public void Matched() { if (Arm.Phase == LanePhase.Matching) Volatile.Write(ref arm, LaneArm.MatchedPose); }
+        public void FollowAdmitted(long request, long ticks, long sequence) =>
+            Volatile.Write(ref arm, new(LanePhase.Following, FollowRequest: request, AdmissionTicks: ticks, AdmissionSequence: sequence));
+        public void TouchPika() { if (!Pika.Touched) Volatile.Write(ref pika, LanePika.TouchedOnly); }
+        public void PikaFollowing(string session) => Volatile.Write(ref pika, new(true, session));
+    }
+
+    /// <summary>Plugin-A lane arm admission.
+    /// <code>
+    ///   Untouched --pose or follow-start sent--> Touched
+    ///   Touched --pose acknowledged--> Matching(MatchRequest) --every lane settled--> Matched
+    ///   Untouched|Touched|Matched --follow-start acknowledged--> Following(FollowRequest, admission ticks/sequence)
+    /// </code>
+    /// A pose request and a follow request are separate fields; only the current
+    /// one is heartbeated and held at retirement.</summary>
+    private enum LanePhase { Untouched, Touched, Matching, Matched, Following }
+
+    private sealed record LaneArm(LanePhase Phase, long MatchRequest = 0, long FollowRequest = 0, long AdmissionTicks = 0, long AdmissionSequence = 0)
+    {
+        public static readonly LaneArm Untouched = new(LanePhase.Untouched), Touched = new(LanePhase.Touched), MatchedPose = new(LanePhase.Matched);
+        public long CurrentRequest => Phase switch { LanePhase.Matching => MatchRequest, LanePhase.Following => FollowRequest, _ => 0 };
+    }
+
+    /// <summary>A Pika session exists only on a touched channel.</summary>
+    private sealed record LanePika(bool Touched, string Session = "")
+    {
+        public static readonly LanePika Untouched = new(false), TouchedOnly = new(true);
     }
 
     private sealed class GroupSession(string backend, string sceneId, string entityId, string asset, string revision, GroupLane[] lanes, long inputEpoch,
@@ -120,13 +151,25 @@ public sealed partial class PipersPlugin
 
     private readonly TimeProvider followClock;
     private GroupSession? groupSimulation;
-    private GroupRetirement? groupRetirement;
+    /// <summary>Outer Follow lifecycle around a <see cref="GroupSession"/> (whose own phase is <see cref="GroupFollowPhase"/>).
+    /// <code>
+    ///   Idle/Summary/SetupFailed --arm--> Discovering --session installed--> Session --retired--> Summary
+    ///   Discovering --setup error or cancel--> SetupFailed / Idle;  any idle stage --selection change--> Idle
+    /// </code>
+    /// Session is derived from <c>groupSimulation</c>; the other stages are one immutable outcome,
+    /// so a setup failure and a retirement summary can no longer both be set.</summary>
+    private enum GroupFollowStage { Idle, Discovering, Session, Summary, SetupFailed }
+    private sealed record GroupFollowOutcome(GroupFollowStage Stage, string Summary = "");
+    private static readonly GroupFollowOutcome GroupFollowIdle = new(GroupFollowStage.Idle);
+    private GroupFollowOutcome groupFollowOutcome = GroupFollowIdle;
+    private GroupFollowStage GroupStage => GroupFollowActive ? GroupFollowStage.Session : Volatile.Read(ref groupFollowOutcome).Stage;
+    private void SetGroupOutcome(GroupFollowOutcome next) => Volatile.Write(ref groupFollowOutcome, next);
     private long groupInputEpoch;
     private long groupControlEpoch;
     private bool GroupFollowActive => Volatile.Read(ref groupSimulation) is not null;
     private bool SimulationFollowingActive => GroupFollowActive;
-    private string GroupFollowStatus = "Simulation only";
-    private string GroupFollowDetail = "Choose the robots that should follow, then arm Follow simulation. Playback begins only when you press the editor's Play button.";
+    private string groupFollowStatus = "Simulation only";
+    private string groupFollowDetail = "Choose the robots that should follow, then arm Follow simulation. Playback begins only when you press the editor's Play button.";
     private bool GroupFollowIncludes(string profileId) => Volatile.Read(ref groupSimulation)?.Lanes.Any(l => l.Profile.Id == profileId) == true;
     private bool GroupWaitingForUserPlay(GroupSession group) =>
         group.Phase is GroupFollowPhase.Arming or GroupFollowPhase.Armed && group.RunId.Length == 0 && GroupScopeCurrent(group);
@@ -153,7 +196,7 @@ public sealed partial class PipersPlugin
     {
         Interlocked.Increment(ref groupInputEpoch); // Also retires read-only discovery before a session exists.
         if (Volatile.Read(ref groupSimulation) is not { } group) return null;
-        GroupFollowStatus = reason;
+        groupFollowStatus = reason;
         group.BeginRetirement();
         return group;
     }
@@ -167,8 +210,7 @@ public sealed partial class PipersPlugin
         if (GroupFollowActive)
         { await StopGroupSimulationFollowing("Stopping all selected followers · holding", cancellation); return; }
         if (action == "cancel") return;
-        groupFollowFailure = "";
-        Volatile.Write(ref groupRetirement, null);
+        SetGroupOutcome(new(GroupFollowStage.Discovering));
         long inputEpoch = Interlocked.Read(ref groupInputEpoch);
         try
         {
@@ -204,18 +246,7 @@ public sealed partial class PipersPlugin
                     throw new InvalidOperationException(profile.Name + ": use Enable robot and confirm its workspace before selecting it as a follower.");
                 var robot = new RobotLink(sceneId, entity, model["joints"]!.AsArray(), device, profile.RobotJointPrefix);
                 var pika = ProfilePikaRouting.Find(receipt.State, profile);
-                double? closedReference = null;
-                try
-                {
-                    string distribution = OperatingSystem.IsWindows() ? profile.WslDistribution : "";
-                    string path = Path.Combine(engine.Start.SettingsDirectory, "gripper-reference", profile.Id + ".json");
-                    if (File.Exists(path))
-                    {
-                        var saved = JsonSerializer.Deserialize<PikaClosedDisplayReference>(File.ReadAllText(path), PluginProtocol.Json);
-                        if (saved?.Matches(profile.Id, profile.PikaDevice, distribution, pika) == true) closedReference = saved.MotorAngle;
-                    }
-                }
-                catch (Exception error) when (error is IOException or JsonException) { }
+                double? closedReference = PikaClosedDisplayReference.TryLoad(engine.Start.SettingsDirectory, profile)?.AngleFor(profile, pika);
                 lanes.Add(new(profile, robot, approval, closedReference,
                     new(profile, generation, closedReference, () => telemetry.Latest, followClock),
                     new(receipt.BackendToken, owner, profile, generation, Call)));
@@ -232,7 +263,8 @@ public sealed partial class PipersPlugin
             _ = Task.Run(() => RunGroupSimulation(group));
             await group.Armed.Task.WaitAsync(cancellation);
         }
-        catch (OperationCanceledException) when (inputEpoch != Interlocked.Read(ref groupInputEpoch)) { }
+        catch (OperationCanceledException) when (inputEpoch != Interlocked.Read(ref groupInputEpoch))
+        { if (!GroupFollowActive && GroupStage == GroupFollowStage.Discovering) SetGroupOutcome(GroupFollowIdle); }
         catch (Exception error) when (!cancellation.IsCancellationRequested)
         {
             // This includes failures before a group exists. The sidebar must
@@ -240,9 +272,9 @@ public sealed partial class PipersPlugin
             string reason = error.Message;
             foreach (string secret in new[] { token, owner })
                 if (secret.Length > 0) reason = reason.Replace(secret, "[redacted]", StringComparison.Ordinal);
-            groupFollowFailure = "Follow not armed\n" + reason;
-            GroupFollowStatus = "Follow not armed";
-            GroupFollowDetail = reason;
+            SetGroupOutcome(new(GroupFollowStage.SetupFailed, "Follow not armed\n" + reason));
+            groupFollowStatus = "Follow not armed";
+            groupFollowDetail = reason;
             throw;
         }
     }
@@ -253,50 +285,64 @@ public sealed partial class PipersPlugin
                 p.RobotJointPrefix == l.Profile.RobotJointPrefix && p.PikaDevice == l.Profile.PikaDevice && p.WslDistribution == l.Profile.WslDistribution) == true &&
             controlApprovals.TryGetValue(l.Profile.Id, out var approval) && approval == l.Approval);
 
-    private FollowLaneObservation GroupObservation(GroupSession group, GroupLane lane, TelemetryReceipt? source = null)
+    private void RequireGroupScope(GroupSession group)
     {
-        if (!GroupScopeCurrent(group))
-        {
-            if (group.IsRetiring) throw new OperationCanceledException("Grouped following was disarmed.", group.Stop.Token);
-            throw new InvalidOperationException("A selected follower assignment, confirmation or backend changed; previous targets were discarded.");
-        }
-        return lane.Feedback.Read(group.Backend, source);
+        if (GroupScopeCurrent(group)) return;
+        if (group.IsRetiring) throw new OperationCanceledException("Grouped following was disarmed.", group.Stop.Token);
+        throw new InvalidOperationException("A selected follower assignment, confirmation or backend changed; previous targets were discarded.");
     }
 
-    private SimulationFollowHardware GroupHardware(GroupSession group, GroupLane lane, bool native = false, TelemetryReceipt? source = null)
+    /// <summary>One scope check and one immutable observation per lane, all from one receipt.</summary>
+    private FollowLaneObservation[] ObserveGroup(GroupSession group, TelemetryReceipt? source = null)
     {
-        var observation = GroupObservation(group, lane, source);
-        return observation.Hardware(owner, group.Clock.GetTimestamp(), native ? lane.ArmRequest : null,
+        RequireGroupScope(group);
+        var receipt = source ?? telemetry.Latest ?? throw new InvalidOperationException("Controller feedback is unavailable.");
+        return Array.ConvertAll(group.Lanes, lane => lane.Feedback.Read(group.Backend, receipt));
+    }
+
+    private FollowLaneObservation ObserveLane(GroupSession group, GroupLane lane)
+    {
+        RequireGroupScope(group);
+        return lane.Feedback.Read(group.Backend);
+    }
+
+    private SimulationFollowHardware LaneHardware(GroupSession group, GroupLane lane, FollowLaneObservation observation, bool native = false) =>
+        observation.Hardware(owner, group.Clock.GetTimestamp(), native ? lane.Arm.CurrentRequest : null,
             native ? Interlocked.Read(ref lane.Sequence) : 0);
+
+    /// <summary>Fresh, healthy, owned hardware for every lane from one receipt.</summary>
+    private SimulationFollowHardware[] GroupHardware(GroupSession group)
+    {
+        var observations = ObserveGroup(group);
+        var hardware = new SimulationFollowHardware[group.Lanes.Length];
+        for (int i = 0; i < hardware.Length; i++) hardware[i] = LaneHardware(group, group.Lanes[i], observations[i]);
+        return hardware;
     }
 
-    private async Task<JsonObject> GroupArmCommand(GroupSession group, GroupLane lane, FollowArmAction action, JsonObject? fields = null)
+    private enum FollowChannel { Arm, Pika }
+
+    /// <summary>The single path for every arm and Pika Follow command. Match and
+    /// Start belong to their group phases and mark the channel touched, so
+    /// retirement holds it; Hold runs only while retiring.</summary>
+    private async Task<JsonObject> GroupCommand(GroupSession group, GroupLane lane, FollowChannel channel, FollowOp op, JsonObject? fields = null,
+        bool prevalidated = false)
     {
-        switch (action)
+        GroupFollowPhase? phase = op switch
         {
-            case FollowArmAction.MatchPose: group.Require(GroupFollowPhase.Matching); break;
-            case FollowArmAction.Start: group.Require(GroupFollowPhase.Admitting); break;
-            case FollowArmAction.Hold: group.Require(GroupFollowPhase.Retiring); break;
+            FollowOp.Match => GroupFollowPhase.Matching, FollowOp.Start => GroupFollowPhase.Admitting,
+            FollowOp.Hold => GroupFollowPhase.Retiring, _ => null
+        };
+        if (phase is { } required) group.Require(required);
+        if (op != FollowOp.Hold && !prevalidated) _ = LaneHardware(group, lane, ObserveLane(group, lane));
+        if (op == FollowOp.Update) group.RequireTargetPublication();
+        bool admission = op is FollowOp.Match or FollowOp.Start;
+        if (channel == FollowChannel.Pika)
+        {
+            if (admission) lane.TouchPika();
+            return await lane.Controller.Pika(op, fields);
         }
-        if (action != FollowArmAction.Hold) _ = GroupHardware(group, lane);
-        if (action == FollowArmAction.Update) group.RequireTargetPublication();
-        bool admission = action is FollowArmAction.MatchPose or FollowArmAction.Start;
-        if (admission) lane.ArmTouched = true;
-        try { return await lane.Controller.Arm(action, fields); }
+        if (admission) lane.TouchArm();
+        try { return await lane.Controller.Arm(op, fields); }
         finally { if (admission) Volatile.Write(ref lane.ArmAdmissionRetiredTicks, group.Clock.GetTimestamp()); }
-    }
-
-    private async Task<JsonObject> GroupPika(GroupSession group, GroupLane lane, FollowPikaAction action, JsonObject? fields = null)
-    {
-        switch (action)
-        {
-            case FollowPikaAction.MatchOpening: group.Require(GroupFollowPhase.Matching); break;
-            case FollowPikaAction.Start: group.Require(GroupFollowPhase.Admitting); break;
-            case FollowPikaAction.Hold: group.Require(GroupFollowPhase.Retiring); break;
-        }
-        if (action != FollowPikaAction.Hold) _ = GroupHardware(group, lane);
-        if (action == FollowPikaAction.Update) group.RequireTargetPublication();
-        if (action is FollowPikaAction.MatchOpening or FollowPikaAction.Start) lane.PikaTouched = true;
-        return await lane.Controller.Pika(action, fields);
     }
 }

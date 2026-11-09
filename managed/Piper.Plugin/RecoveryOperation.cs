@@ -38,7 +38,7 @@ public sealed partial class PipersPlugin
         // The actor retires queued targets by epoch. Revoke under the original
         // admission epoch so STOP cannot turn this click into a fresh grant.
         long epoch = CommandAuthority.Revoke(forgetApproval: scope.ProfileId,
-            revokeLocalApproval: () => approved = linkCommandsEnabled = teleoperating = recoveryInProgress = false,
+            revokeLocalApproval: () => { approved = linkCommandsEnabled = recoveryInProgress = false; StopViewportDrag(); },
             expectedEpoch: expectedEpoch);
         var lifetime = CancellationTokenSource.CreateLinkedTokenSource(cancellation, shutdown.Token);
         if (kind == RecoveryKind.ReturnToZero) lifetime.CancelAfter(TimeSpan.FromSeconds(90));
@@ -48,7 +48,7 @@ public sealed partial class PipersPlugin
             operation.Dispose();
             throw new InvalidOperationException("STOP cancelled the recovery before it started.");
         }
-        followRequest = 0; followInput.End();
+        StopViewportDrag();
         return operation;
     }
 
@@ -69,7 +69,7 @@ public sealed partial class PipersPlugin
         var scope = operation.Scope;
         if (resetAt == 0) return false;
         if (operation.Kind == RecoveryKind.ReturnToZero)
-            return TeachingResetAssisted.ExpectedFeedbackGap(true, receipt.State, scope.Device, scope.Generation);
+            return TeachingResetAssisted.ExpectedFeedbackGap(receipt.State, scope.Device, scope.Generation);
         if (Stopwatch.GetElapsedTime(resetAt).TotalSeconds > 5 || receipt.State["selected"]?.GetValue<string>() != scope.Device) return false;
         var device = receipt.State["devices"]?.AsArray().OfType<JsonObject>().SingleOrDefault(d => d["id"]?.GetValue<string>() == scope.Device);
         return device?["generation"]?.GetValue<long>() == scope.Generation && device["present"]?.GetValue<bool>() == true &&

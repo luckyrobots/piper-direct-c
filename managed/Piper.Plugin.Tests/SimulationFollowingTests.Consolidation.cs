@@ -6,6 +6,10 @@ using LuckyRobots.Piper.Pika;
 
 internal static partial class SimulationFollowingTests
 {
+    private static string DiagnosticPath(Fixture fixture, object session, string profileId) => Path.Combine(
+        fixture.Get<LuckyEngine.PluginSdk.PluginContext>("engine").Start.SettingsDirectory, "diagnostics", "simulation-follow",
+        (string)session.GetType().GetField("PrepareId")!.GetValue(session)! + "-" + profileId + ".json");
+
     internal static async Task RunUnifiedFollowing(Action<bool, string> check)
     {
         const BindingFlags fields = BindingFlags.Instance | BindingFlags.NonPublic;
@@ -34,7 +38,7 @@ internal static partial class SimulationFollowingTests
             {
                 await f.Click("group.follow.toggle");
                 await Until(() => supportedRecovery ? f.Get<string>("message").StartsWith("Recovery is in progress", StringComparison.Ordinal) :
-                    f.Get<string>("groupFollowFailure").Length > 0, "A conflicting ordinary operation did not block group preparation");
+                    f.GroupSetupFailure().Length > 0, "A conflicting ordinary operation did not block group preparation");
                 check(!f.GroupActive && f.SidebarStatus().Contains(supportedRecovery ? "recovery" : "First", StringComparison.Ordinal) &&
                     !f.EngineRequests.Any(r => r.Action == "arm-next-play") && f.Rpc.Requests.IsEmpty,
                     "Follow armed alongside a tracked ordinary arm lease or supported recovery on an unchecked robot");
@@ -95,7 +99,7 @@ internal static partial class SimulationFollowingTests
                 check(Renewed("/dev/pika-b") == 1, "A stalled gripper accumulated duplicate heartbeat requests");
                 f.Rpc.ReleaseDelayed.TrySetResult();
                 await Until(() => Renewed("/dev/pika-a") >= 3, "A failed Pika heartbeat retired the healthy gripper's renewal");
-                check(f.Get<bool>("pikaOwned"), "A partner Pika heartbeat failure cleared ownership of the healthy selected gripper");
+                check(f.Get<int>("pikaRole") == (int)PikaSessionRole.Owned, "A partner Pika heartbeat failure cleared ownership of the healthy selected gripper");
             }
             finally
             {
@@ -186,7 +190,7 @@ internal static partial class SimulationFollowingTests
                 "Single-participant arming entered Play or sent a target before user Play");
             f.RequestGroupPlay();
             await Until(() => f.GroupPhase == GroupFollowPhase.Following || !f.GroupActive, "One grouped participant did not start");
-            check(f.GroupActive && f.Mode == "play", "The shared executor rejected a single selected participant: " + f.Get<string>("GroupFollowStatus"));
+            check(f.GroupActive && f.Mode == "play", "The shared executor rejected a single selected participant: " + f.Get<string>("groupFollowStatus"));
             string can = selected == "piper-1" ? "can-a" : "can-b", pika = selected == "piper-1" ? "/dev/pika-a" : "/dev/pika-b";
             check(f.Rpc.Requests.Where(r => r.Body["action"]?.GetValue<string>() == "follow-start").All(r => r.Body["device_id"]?.GetValue<string>() == can) &&
                 f.Rpc.Requests.Where(r => r.Route == "/api/pika/follow-start").All(r => r.Body["pika_device"]?.GetValue<string>() == pika),
@@ -268,8 +272,9 @@ internal static partial class SimulationFollowingTests
             var lane = ((Array)session.GetType().GetField("Lanes")!.GetValue(session)!).GetValue(0)!;
             var diagnostic = (SimulationFollowDiagnostics)lane.GetType().GetField("Diagnostics")!.GetValue(lane)!;
             await diagnostic.Completion;
-            check(File.Exists(diagnostic.Pathname) && diagnostic.FirstReason.Length > 0 &&
-                !File.ReadAllText(diagnostic.Pathname).Contains("fixture-backend", StringComparison.Ordinal),
+            string diagnosticPath = DiagnosticPath(f, session, "piper-1");
+            check(File.Exists(diagnosticPath) && JsonNode.Parse(File.ReadAllText(diagnosticPath))!["firstFailure"]!["Reason"]!.GetValue<string>().Length > 0 &&
+                !File.ReadAllText(diagnosticPath).Contains("fixture-backend", StringComparison.Ordinal),
                 "The sole executor lost its scoped first-failure diagnostic or leaked its backend token: " + name);
             check(!f.Rpc.Requests.Any(r => r.Body["action"]?.GetValue<string>() is "disable" or "reset"),
                 "A failed source boundary reset the arm or removed holding power: " + name);
@@ -301,7 +306,7 @@ internal static partial class SimulationFollowingTests
             await f.Click("group.follow.toggle"); await Until(() => f.GroupArmedForPlay, "Missed-grasp fixture did not arm");
             f.RequestGroupPlay(); await Until(() => !f.GroupActive, "A missed grasp failed to complete release and home");
             var openings = f.Rpc.Requests.Where(r => r.Route == "/api/pika/follow-update").Select(r => r.Body["opening_mm"]!.GetValue<double>()).ToArray();
-            check(f.Get<string>("GroupFollowStatus").Contains("Grasp not confirmed") && !f.EngineRequests.Any(r => r.Action == "ack-episode") &&
+            check(f.Get<string>("groupFollowStatus").Contains("Grasp not confirmed") && !f.EngineRequests.Any(r => r.Action == "ack-episode") &&
                 openings.Contains(10) && openings.Last() == 20 && f.Mode == "pause" && f.Snapshot["devices"]![0]!["joints"]!.AsArray().All(j => j!["enabled"]!.GetValue<bool>()),
                 "Source/physical grasp failure skipped home, claimed success, or disabled the arm");
         }
@@ -349,7 +354,7 @@ internal static partial class SimulationFollowingTests
             await Until(() => !f.GroupActive, "A negative arm/Pika ACK retained publication authority");
             var lane = ((Array)group.GetType().GetField("Lanes")!.GetValue(group)!).GetValue(0)!;
             var diagnostic = (SimulationFollowDiagnostics)lane.GetType().GetField("Diagnostics")!.GetValue(lane)!; await diagnostic.Completion;
-            var saved = JsonNode.Parse(await File.ReadAllTextAsync(diagnostic.Pathname))!["firstFailure"]!;
+            var saved = JsonNode.Parse(await File.ReadAllTextAsync(DiagnosticPath(f, group, "piper-1")))!["firstFailure"]!;
             check(saved["Hardware"]!["Pika"]!["FollowAudit"]!["LastRetirement"]!["Cause"]!.GetValue<string>() == "input-expired" &&
                 saved["Hardware"]!["Pika"]!["FollowAudit"]!["LastRetirement"]!["LastInputSequence"]!.GetValue<long>() == 12,
                 "An independent negative Pika ACK audit was overwritten by the arm failure or older telemetry");
