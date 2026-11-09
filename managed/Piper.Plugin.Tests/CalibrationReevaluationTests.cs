@@ -1,5 +1,4 @@
 using System.Diagnostics;
-using System.Reflection;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using LuckyEngine.PluginSdk;
@@ -176,8 +175,7 @@ internal static class CalibrationReevaluationTests
                 ["joints"] = new JsonArray(Enumerable.Range(1, 6).Select(_ => (JsonNode)new JsonObject { ["actual_deg"] = 0.0,
                     ["fresh"] = true, ["age_s"] = 0.0, ["fault"] = 0, ["enabled"] = false }).ToArray()) };
             State = new() { ["token"] = "session", ["selected"] = "can-a", ["devices"] = new JsonArray(device), ["motion"] = new JsonObject { ["active"] = false } };
-            var context = (PluginContext)Activator.CreateInstance(typeof(PluginContext), BindingFlags.Instance | BindingFlags.NonPublic, null,
-                [new PluginStart("fixture", Directory, Directory), (Func<object, CancellationToken, Task>)((message, _) =>
+            var context = Fixtures.Context(new PluginStart("fixture", Directory, Directory), (Func<object, CancellationToken, Task>)((message, _) =>
                 {
                     var json = JsonSerializer.SerializeToNode(message, PluginProtocol.Json)!.AsObject();
                     if (json["type"]?.GetValue<string>() == "view") View = json["root"]!.AsObject();
@@ -196,7 +194,7 @@ internal static class CalibrationReevaluationTests
                         _ => throw new Exception("Unexpected mutation: " + method)
                     };
                     return Task.FromResult(JsonSerializer.SerializeToElement(response));
-                })], null)!;
+                }));
             var prefs = RobotProfileRouting.Normalize(new Preferences(Robots: [new("piper-1", "Fixture", "can-a", RobotId: "robot-a")], ActiveRobotId: "piper-1"));
             Plugin.engine = context; Plugin.preferences = prefs; Plugin.state = State; Plugin.token = "session";
             Plugin.link = new RobotLink(liveScene, liveEntity, Pose()["joints"]!.AsArray(), device);

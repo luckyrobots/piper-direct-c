@@ -1,5 +1,4 @@
 using System.Diagnostics;
-using System.Reflection;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Threading.Channels;
@@ -100,8 +99,7 @@ internal static class TelemetryPipelineTests
         plugin.link = binding; plugin.linkBackendToken = "session-a"; plugin.approved = true; plugin.linkCommandsEnabled = true;
         authority.TryAcknowledge(authority.Epoch, commandScope, 7);
         int sceneRequests = 0, editorMode = 0;
-        var context = (PluginContext)Activator.CreateInstance(typeof(PluginContext), BindingFlags.Instance | BindingFlags.NonPublic, null,
-            [new PluginStart("fixture", Path.GetTempPath(), Path.GetTempPath()),
+        var context = Fixtures.Context(new PluginStart("fixture", Path.GetTempPath(), Path.GetTempPath()),
                 (Func<object, CancellationToken, Task>)((_, _) => Task.CompletedTask),
                 (Func<string, JsonObject, CancellationToken, Task<JsonElement>>)(async (method, _, cancellation) =>
                 {
@@ -113,7 +111,7 @@ internal static class TelemetryPipelineTests
                         else return JsonSerializer.SerializeToElement(new { applied = false, teleoperating = selectedMode == 1 });
                     }
                     return JsonSerializer.SerializeToElement(new { applied = false });
-                })], null)!;
+                }));
         plugin.engine = context;
         using var lifetime = new CancellationTokenSource(TimeSpan.FromSeconds(15));
         using var feeding = CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token);

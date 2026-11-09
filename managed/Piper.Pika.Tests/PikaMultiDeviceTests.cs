@@ -181,7 +181,8 @@ internal static class PikaMultiDeviceTests
                 "An explicit null distribution split the native Linux session from the default one");
         }
         await VerifyPlatformBoundary(routing, a, ownerA, routed);
-        Check(PikaDistribution.ForCurrentPlatform(" ") is null && PikaDistribution.Normalize("") is null &&
+        Check(PikaDistribution.ForCurrentPlatform(" ") == (OperatingSystem.IsWindows() ? PikaDistribution.WindowsDefault : null) &&
+            PikaDistribution.ForCurrentPlatform("Debian") == (OperatingSystem.IsWindows() ? "Debian" : null) && PikaDistribution.Normalize("") is null &&
             PikaDistribution.Same("ubuntu", "Ubuntu") && !PikaDistribution.Same(null, "Ubuntu") && PikaDistribution.Same("", null) &&
             PikaDistribution.ToKeyText(null) == "" && PikaDistribution.Transport(null) == "linux-serial" &&
             PikaDistribution.Transport("Ubuntu") == "wsl-linux-serial", "The distribution convention changed");

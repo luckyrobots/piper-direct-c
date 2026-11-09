@@ -5,7 +5,7 @@ internal static class OrderedPhysicalContactTests
 {
     public static void Run()
     {
-        var raw = SimulationFollowTests.Pose();
+        var raw = Fixtures.SimulationPose();
         const double gap = 94.0443824782372;
         foreach (var joint in raw["joints"]!.AsArray().OfType<JsonObject>())
         {

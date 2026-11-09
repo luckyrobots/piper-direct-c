@@ -1,6 +1,5 @@
 using System.Collections.Concurrent;
 using System.Diagnostics;
-using System.Reflection;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using Grpc.Core;
@@ -365,13 +364,12 @@ internal static class EmergencyStopTests
                 [new("piper-1", "Fixture", "can-one", PikaDevice: "/dev/pika-one")], ActiveRobotId: "piper-1"));
             plugin.token = "fake-backend-session";
             var snapshot = Fixtures.Snapshot("fake-backend-session", Fixtures.Arm("can-one", generation: 1),
-                Fixtures.Pika("/dev/pika-one", "Ubuntu", plugin.owner, enabled: true, position: .1));
+                Fixtures.Pika("/dev/pika-one", RobotProfileRouting.Active(plugin.preferences).PikaDistribution, plugin.owner, enabled: true, position: .1));
             plugin.state = snapshot;
             plugin.telemetry.Publish(new(snapshot, "fake-backend-session", 1, Stopwatch.GetTimestamp(), 0));
-            var context = (PluginContext)Activator.CreateInstance(typeof(PluginContext), BindingFlags.Instance | BindingFlags.NonPublic, null,
-                [new PluginStart("fixture", Path.Combine(Path.GetTempPath(), "piper-emergency-" + Guid.NewGuid().ToString("N")), Path.GetTempPath()),
+            var context = Fixtures.Context(new PluginStart("fixture", Path.Combine(Path.GetTempPath(), "piper-emergency-" + Guid.NewGuid().ToString("N")), Path.GetTempPath()),
                     (Func<object, CancellationToken, Task>)((_, _) => Task.CompletedTask),
-                    (Func<string, JsonObject, CancellationToken, Task<JsonElement>>)((_, _, _) => Task.FromResult(JsonSerializer.SerializeToElement(new { applied = false })))], null)!;
+                    (Func<string, JsonObject, CancellationToken, Task<JsonElement>>)((_, _, _) => Task.FromResult(JsonSerializer.SerializeToElement(new { applied = false }))));
             plugin.engine = context;
         }
 

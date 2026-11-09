@@ -90,12 +90,12 @@ public static class CalibrationWizardTests
         Check(!CalibrationWizardFlow.AlreadyRecorded(next, savedSample with { Measurement = measurement with { LeftMm = 250 } }), "A different measured point was silently marked captured on resume");
         var live = new CalibrationIdentity("robot-a", "can-a", 3, "backend-a", "scene-a", "model-root-a", "asset-a", "revision-a");
         var marker = new WizardHighlightScope(live.ProfileId, live.DeviceId, live.Generation, live.BackendSessionFingerprint, live.SceneId, live.RobotId, live.ModelAssetId, live.ModelRevision, "grasp_site");
-        Check(marker.Matches(live, "grasp_site", "asset-a", "revision-a", true, true), "A matching fresh read-only marker context was rejected");
+        Check(marker.Matches(live, "grasp_site", "asset-a", "revision-a", true), "A matching fresh read-only marker context was rejected");
         foreach (var changed in new[] { live with { ProfileId = "robot-b" }, live with { DeviceId = "can-b" }, live with { Generation = 4 }, live with { BackendSessionFingerprint = "backend-b" }, live with { SceneId = "scene-b" }, live with { RobotId = "root-b" } })
-            Check(!marker.Matches(changed, "grasp_site", "asset-a", "revision-a", true, true), "A temporary marker crossed robot/backend/subscription identity");
-        Check(!marker.Matches(live, "grasp_site", "asset-a", "revision-b", true, true), "A marker renewed against changed compiled geometry");
-        Check(!marker.Matches(live, "another_site", "asset-a", "revision-a", true, true), "A marker silently followed a changed selected site");
-        Check(!marker.Matches(live, "grasp_site", "asset-a", "revision-a", false, true) && !marker.Matches(live, "grasp_site", "asset-a", "revision-a", true, false), "A marker renewed after leaving calibration or stale robot feedback");
+            Check(!marker.Matches(changed, "grasp_site", "asset-a", "revision-a", true), "A temporary marker crossed robot/backend/subscription identity");
+        Check(!marker.Matches(live, "grasp_site", "asset-a", "revision-b", true), "A marker renewed against changed compiled geometry");
+        Check(!marker.Matches(live, "another_site", "asset-a", "revision-a", true), "A marker silently followed a changed selected site");
+        Check(!marker.Matches(live, "grasp_site", "asset-a", "revision-a", false), "A marker renewed after leaving calibration");
         var clear = marker.Request(false);
         Check(clear["entityId"]!.GetValue<string>() == "model-root-a" && clear["sceneId"]!.GetValue<string>() == "scene-a" && clear["expectedModelRevision"]!.GetValue<string>() == "revision-a" && !clear["visible"]!.GetValue<bool>(), "Clearing substituted a newly selected root instead of the pinned marker context");
         Check(marker.Request(true)["durationSeconds"]!.GetValue<int>() == 30, "Temporary marker lost its bounded native expiry");
@@ -115,13 +115,13 @@ public static class CalibrationWizardTests
         Check(!WizardReferenceHighlightScope.RefreshDue(leftEdge, edgeDraft, TimeSpan.FromSeconds(9.9)) && WizardReferenceHighlightScope.RefreshDue(leftEdge, edgeDraft, TimeSpan.FromSeconds(10)),
             "Same-question renewals lost the ten-second limit or repeatedly stole viewport navigation");
         Check(leftEdge.DeskFingerprint() == backEdge.DeskFingerprint(), "Sequential LEFT/BACK confirmations did not refer to one fixed robot/desk reference");
-        Check(leftEdge.Matches(live, edgeDraft, edgeRoot, true, true) && !leftEdge.Matches(live, backDraft, edgeRoot, true, true), "A LEFT pointer acknowledgement authorized the BACK question");
-        Check(!leftEdge.Matches(live, edgeDraft with { Epoch = edgeDraft.Epoch + 1 }, edgeRoot, true, true), "A stale pointer survived returning to an earlier question");
+        Check(leftEdge.Matches(live, edgeDraft, edgeRoot, true) && !leftEdge.Matches(live, backDraft, edgeRoot, true), "A LEFT pointer acknowledgement authorized the BACK question");
+        Check(!leftEdge.Matches(live, edgeDraft with { Epoch = edgeDraft.Epoch + 1 }, edgeRoot, true), "A stale pointer survived returning to an earlier question");
         foreach (var changed in new[] { live with { ProfileId = "robot-b" }, live with { DeviceId = "can-b" }, live with { Generation = 4 }, live with { BackendSessionFingerprint = "backend-b" }, live with { SceneId = "scene-b" }, live with { RobotId = "root-b" }, live with { ModelRevision = "revision-b" } })
-            Check(!leftEdge.Matches(changed, edgeDraft, edgeRoot, true, true), "A desk pointer acknowledgement crossed its robot/backend/model identity");
+            Check(!leftEdge.Matches(changed, edgeDraft, edgeRoot, true), "A desk pointer acknowledgement crossed its robot/backend/model identity");
         foreach (string changedKey in new[] { "width", "depth", "sceney" })
-            Check(!leftEdge.Matches(live, edgeDraft with { Answers = new(edgeDraft.Answers) { [changedKey] = changedKey == "sceney" ? "900" : "1000" } }, edgeRoot, true, true), "A desk pointer survived changed measurements: " + changedKey);
-        Check(!leftEdge.Matches(live, edgeDraft, edgeRoot, false, true) && !leftEdge.Matches(live, edgeDraft, edgeRoot, true, false), "A pointer remained confirmable after leaving the page or losing fresh feedback");
+            Check(!leftEdge.Matches(live, edgeDraft with { Answers = new(edgeDraft.Answers) { [changedKey] = changedKey == "sceney" ? "900" : "1000" } }, edgeRoot, true), "A desk pointer survived changed measurements: " + changedKey);
+        Check(!leftEdge.Matches(live, edgeDraft, edgeRoot, false), "A pointer remained confirmable after leaving the page");
         Reject(() => WizardReferenceHighlightScope.Create(live, edgeDraft with { Answers = new(edgeDraft.Answers.Where(p => p.Key != "width")) }, edgeRoot), "Pointer guessed an unmeasured desk width");
         Reject(() => WizardReferenceHighlightScope.Create(live, edgeDraft with { Setup = new() }, edgeRoot), "Pointer assumed an unconfirmed simulated tabletop");
         var edgeReply = JsonSerializer.SerializeToElement(new { highlighted = true, label = leftEdge.Label, point = new[] { -.7, .803, 0 }, rootPlacement = edgeRoot.Json(), framed = false });
@@ -144,12 +144,12 @@ public static class CalibrationWizardTests
             "Capture could reuse an old LEFT/BACK confirmation after the robot model revision changed");
         foreach (var changedRoot in new[] { CalibrationPlacement.At(new(.2, .8, -.2), .2), CalibrationPlacement.At(new(.1, .8, -.2), .3) })
         {
-            Check(!leftEdge.Matches(live, edgeDraft, changedRoot, true, true), "A reference pointer silently repinned a moved/rotated simulated robot");
+            Check(!leftEdge.Matches(live, edgeDraft, changedRoot, true), "A reference pointer silently repinned a moved/rotated simulated robot");
             Check(!leftEdge.Acknowledged(JsonSerializer.SerializeToElement(new { highlighted = true, label = leftEdge.Label, point = new[] { -.7, .803, 0 }, rootPlacement = changedRoot.Json(), framed = false })),
                 "A pointer acknowledgement for a changed root placement was accepted");
             Check(WizardReferenceHighlightScope.DeskFingerprint(live, 1400, 700, 800, changedRoot) != leftEdge.DeskFingerprint(), "LEFT/BACK proof was not bound to the simulated robot placement");
         }
-        Check(leftEdge.Matches(live, edgeDraft, new(edgeRoot.Position, edgeRoot.Rotation.Select(x => -x).ToArray()), true, true), "Sign-equivalent quaternion changed a pinned pointer's orientation");
+        Check(leftEdge.Matches(live, edgeDraft, new(edgeRoot.Position, edgeRoot.Rotation.Select(x => -x).ToArray()), true), "Sign-equivalent quaternion changed a pinned pointer's orientation");
         Check(leftEdge.Request(true, frame: true)["frame"]!.GetValue<bool>() && !leftEdge.Request(true)["frame"]!.GetValue<bool>() &&
             CalibrationPlacement.Read(leftEdge.Request(true)["expectedRootPlacement"]).Same(edgeRoot), "First/manual framing or non-framing renewals lost their exact expected root pose");
         Check(leftEdge.Acknowledged(JsonSerializer.SerializeToElement(new { highlighted = true, label = leftEdge.Label, point = new[] { -.7, .803, 0 }, rootPlacement = edgeRoot.Json(), framed = true }), true),

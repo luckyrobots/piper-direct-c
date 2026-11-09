@@ -1,6 +1,5 @@
 using System.Collections.Concurrent;
 using System.Diagnostics;
-using System.Reflection;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using LuckyEngine.PluginSdk;
@@ -62,8 +61,7 @@ internal static class CalibrationSheetIntegrationTests
         var deskMarkerReached = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var releaseDeskMarker = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         int pauseDeskMarker = 0;
-        var context = (PluginContext)Activator.CreateInstance(typeof(PluginContext), BindingFlags.Instance | BindingFlags.NonPublic, null,
-            [new PluginStart("fixture", folder, folder),
+        var context = Fixtures.Context(new PluginStart("fixture", folder, folder),
                 (Func<object, CancellationToken, Task>)((message, _) =>
                 {
                     var json = JsonSerializer.SerializeToNode(message, PluginProtocol.Json)!.AsObject();
@@ -93,7 +91,7 @@ internal static class CalibrationSheetIntegrationTests
                         _ => throw new InvalidOperationException("Unexpected engine mutation: " + method)
                     };
                     return JsonSerializer.SerializeToElement(response);
-                })], null)!;
+                }));
         plugin.engine = context; plugin.token = "fixture-session"; plugin.state = snapshot; Fresh();
         plugin.link = new RobotLink("fixture-scene", "fixture-robot", Pose()["joints"]!.AsArray(), device);
         plugin.linkBackendToken = "fixture-session"; plugin.Navigation = WorkspaceNavigation.Calibration;

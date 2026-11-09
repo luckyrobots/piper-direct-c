@@ -328,7 +328,7 @@ public sealed partial class PipersPlugin
                 foreach (var session in OwnedPikaSessions(receipt.State))
                 {
                     var key = (receipt.BackendToken, session["device"]!.GetValue<string>(), session["distribution"]?.GetValue<string>());
-                    if (!pending.ContainsKey(key)) pending.Add(key, Renew(key, PikaMatchesProfile(profile, session) ? profile : null));
+                    if (!pending.ContainsKey(key)) pending.Add(key, Renew(key, ProfilePikaRouting.Matches(profile, session) ? profile : null));
                 }
             } while (await timer.WaitForNextTickAsync(cancellation));
         }

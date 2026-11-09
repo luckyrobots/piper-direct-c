@@ -1,4 +1,3 @@
-using System.Reflection;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using LuckyEngine.PluginSdk;
@@ -139,8 +138,7 @@ internal static class WorkspacePublicationTests
         public Fixture()
         {
             plugin.preferences = RobotProfileRouting.Normalize(new Preferences(Robots: [new("one", "Piper 1")], ActiveRobotId: "one"));
-            var context = (PluginContext)Activator.CreateInstance(typeof(PluginContext), BindingFlags.Instance | BindingFlags.NonPublic, null,
-                [new PluginStart("fixture", Path.GetTempPath(), Path.GetTempPath()),
+            var context = Fixtures.Context(new PluginStart("fixture", Path.GetTempPath(), Path.GetTempPath()),
                     (Func<object, CancellationToken, Task>)(async (message, ct) =>
                     {
                         if (message.GetType().GetProperty("root")?.GetValue(message) is Widget root)
@@ -152,7 +150,7 @@ internal static class WorkspacePublicationTests
                             await PublishPatch(widgets, ct);
                         else throw new InvalidOperationException("Unexpected fixture publication");
                     }),
-                    (Func<string, JsonObject, CancellationToken, Task<JsonElement>>)((_, _, _) => throw new InvalidOperationException("Unexpected engine request"))], null)!;
+                    (Func<string, JsonObject, CancellationToken, Task<JsonElement>>)((_, _, _) => throw new InvalidOperationException("Unexpected engine request")));
             plugin.engine = context;
         }
         public long Epoch => plugin.workspaceViewEpoch;

@@ -1,8 +1,8 @@
 using System.Diagnostics;
-using System.Reflection;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using LuckyEngine.PluginSdk;
+using LuckyRobots.Piper.Pika;
 using LuckyRobots.Piper.Plugin;
 
 internal static class MeasuredGhostPublicationTests
@@ -81,8 +81,8 @@ internal static class MeasuredGhostPublicationTests
         public Fixture()
         {
             Preferences = RobotProfileRouting.Normalize(new Preferences(Robots: [
-                new("a", "First", "can-a", RobotId: "compound", PikaDevice: "/dev/a", WslDistribution: "Ubuntu"),
-                new("b", "Second", "can-b", RobotId: "compound", PikaDevice: "/dev/b", WslDistribution: "Ubuntu", RobotJointPrefix: "piper3_")], ActiveRobotId: "a"));
+                new("a", "First", "can-a", RobotId: "compound", PikaDevice: "/dev/a"),
+                new("b", "Second", "can-b", RobotId: "compound", PikaDevice: "/dev/b", RobotJointPrefix: "piper3_")], ActiveRobotId: "a"));
             SetPreferences(Preferences);
             plugin.passiveMeasuredTrackingStarted = true;
             plugin.ghostCapabilities = new(Ghosts: true, Visibility: true);
@@ -97,8 +97,7 @@ internal static class MeasuredGhostPublicationTests
             }
             plugin.scene = new JsonObject { ["sceneId"] = "source", ["robots"] = new JsonArray(new JsonObject {
                 ["entityId"] = "compound", ["modelAssetId"] = "asset", ["modelRevision"] = "revision", ["joints"] = joints }) };
-            var context = (PluginContext)Activator.CreateInstance(typeof(PluginContext), BindingFlags.Instance | BindingFlags.NonPublic, null,
-                [new PluginStart("fixture", folder, folder), (Func<object, CancellationToken, Task>)((_, _) => Task.CompletedTask),
+            var context = Fixtures.Context(new PluginStart("fixture", folder, folder), (Func<object, CancellationToken, Task>)((_, _) => Task.CompletedTask),
                     (Func<string, JsonObject, CancellationToken, Task<JsonElement>>)(async (method, arguments, _) =>
                     {
                         if (method == "robot.runtime.read")
@@ -109,7 +108,7 @@ internal static class MeasuredGhostPublicationTests
                         if (method != "robot.feedback") throw new InvalidOperationException("Unexpected ghost request: " + method);
                         Ghosts.Add(arguments.DeepClone().AsObject());
                         return JsonSerializer.SerializeToElement(new { applied = false, renderMode = "ghost" });
-                    })], null)!;
+                    }));
             plugin.engine = context;
             Fresh();
         }
@@ -123,7 +122,7 @@ internal static class MeasuredGhostPublicationTests
                 ["fresh"] = true, ["status"] = new JsonObject { ["age_s"] = 0.0 },
                 ["joints"] = new JsonArray(Enumerable.Range(1, 6).Select(_ => (JsonNode)new JsonObject {
                     ["actual_deg"] = angle, ["age_s"] = 0.0, ["fresh"] = true }).ToArray()) };
-            JsonObject Pika(string device, double age) => new() { ["device"] = device, ["distribution"] = RobotProfile.PikaDistributionFor("Ubuntu"), ["connected"] = true,
+            JsonObject Pika(string device, double age) => new() { ["device"] = device, ["distribution"] = PikaDistribution.ForCurrentPlatform(null), ["connected"] = true,
                 ["fresh"] = true, ["age_s"] = age, ["telemetry"] = new JsonObject { ["motor"] = new JsonObject { ["Position"] = 0.0 } } };
             var snapshot = new JsonObject { ["token"] = backend, ["selected"] = "can-a", ["devices"] = new JsonArray(Arm("can-a", first, firstGeneration), Arm("can-b", second, 1)),
                 ["pikas"] = new JsonArray(Pika("/dev/a", firstPikaAge), Pika("/dev/b", 0)) };

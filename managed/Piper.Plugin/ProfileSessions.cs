@@ -1,4 +1,5 @@
 using System.Text.Json.Nodes;
+using LuckyRobots.Piper.Pika;
 
 namespace LuckyRobots.Piper.Plugin;
 
@@ -22,7 +23,7 @@ public static class ProfilePikaRouting
     internal static bool Matches(RobotProfile profile, JsonObject? pika) => profile.PikaDevice.Length > 0 && pika is not null &&
         (pika["device"]?.GetValue<string>() == profile.PikaDevice ||
             pika["aliases"] is JsonArray aliases && aliases.OfType<JsonValue>().Any(a => a.TryGetValue<string>(out var alias) && alias == profile.PikaDevice)) &&
-        (!OperatingSystem.IsWindows() || pika["distribution"]?.GetValue<string>() == profile.PikaDistribution);
+        (!OperatingSystem.IsWindows() || PikaDistribution.Same(pika["distribution"]?.GetValue<string>(), profile.PikaDistribution));
 }
 
 public sealed partial class PipersPlugin
@@ -78,7 +79,7 @@ public sealed partial class PipersPlugin
         if (d["recovery_required"]?.GetValue<bool>() == true || d["reset_pending"]?.GetValue<bool>() == true || teaching.BlocksTargets ||
             !RobotPowerState.Inspect(d).AllEnabled || !string.IsNullOrEmpty(d["blocker"]?.GetValue<string>())) return;
         var pika = receipt.State["pika"] as JsonObject;
-        bool monitoring = PikaMatchesProfile(profile, pika) && pika?["owner"]?.GetValue<string>() == owner;
+        bool monitoring = ProfilePikaRouting.Matches(profile, pika) && pika?["owner"]?.GetValue<string>() == owner;
         bool owns = monitoring && pika?["armed"]?.GetValue<bool>() == true;
         CommandAuthority.TryRestoreApproval(permission.Epoch, profile.Id, saved, () =>
         {

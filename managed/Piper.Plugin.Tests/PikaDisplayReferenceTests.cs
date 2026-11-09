@@ -1,5 +1,4 @@
 using System.Diagnostics;
-using System.Reflection;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using Grpc.Core;
@@ -102,8 +101,7 @@ internal static class PikaDisplayReferenceTests
         void Fresh() => plugin.telemetry.Publish(new(state, "fixture-session", 1, Stopwatch.GetTimestamp(), 0));
         var engineCalls = new List<string>(); var feedback = new List<JsonObject>();
         var rpc = new FakeCalls(); plugin.client = new PiperControl.PiperControlClient(rpc);
-        var context = (PluginContext)Activator.CreateInstance(typeof(PluginContext), BindingFlags.Instance | BindingFlags.NonPublic, null,
-            [new PluginStart("fixture", folder, folder), (Func<object, CancellationToken, Task>)((_, _) => Task.CompletedTask),
+        var context = Fixtures.Context(new PluginStart("fixture", folder, folder), (Func<object, CancellationToken, Task>)((_, _) => Task.CompletedTask),
                 (Func<string, JsonObject, CancellationToken, Task<JsonElement>>)((method, args, _) =>
                 {
                     engineCalls.Add(method); Fresh();
@@ -117,7 +115,7 @@ internal static class PikaDisplayReferenceTests
                     else if (method == "robot.subscribe") reply = new() { ["sceneId"] = "fixture-scene", ["entityId"] = "fixture-robot", ["joints"] = model.DeepClone() };
                     else throw new InvalidOperationException("Unexpected display-reference engine request: " + method);
                     return Task.FromResult(JsonSerializer.SerializeToElement(reply));
-                })], null)!;
+                }));
         plugin.engine = context;
         async Task Event(string id, double? value = null)
         {
@@ -130,7 +128,7 @@ internal static class PikaDisplayReferenceTests
             string path = Path.Combine(folder, "gripper-reference", "piper-1.json");
             Check(File.Exists(path) && JsonSerializer.Deserialize<PikaClosedDisplayReference>(File.ReadAllText(path), PluginProtocol.Json)?.MotorAngle == ClosedAngle,
                 "Actual display-reference action did not atomically persist the observed closed position");
-            plugin.pikaDisplayReferenceKey = ""; plugin.pikaDisplayReference = null;
+            plugin.pikaDisplayReferenceKey = null; plugin.pikaDisplayReference = null;
             await Event("link");
             Check(feedback.Count == 1 && feedback[0]["joints"]?["joint7"]?.GetValue<double>() == -travel && feedback[0]["joints"]?["joint8"]?.GetValue<double>() == travel,
                 "Initial link failed to restore the saved reference and send both closed finger positions");

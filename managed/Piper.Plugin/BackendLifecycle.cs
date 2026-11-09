@@ -19,6 +19,8 @@ internal static class ControllerEndpoint
 
 public static class BackendGuards
 {
+    private static readonly TimeSpan PortProbeTimeout = TimeSpan.FromMilliseconds(500);
+
     public static bool IsOwned(JsonNode snapshot, int processId, string? sessionToken) =>
         snapshot["backend_process_id"]?.GetValue<int>() == processId &&
         !string.IsNullOrEmpty(snapshot["token"]?.GetValue<string>()) &&
@@ -28,7 +30,7 @@ public static class BackendGuards
     {
         using var client = new TcpClient();
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellation);
-        deadline.CancelAfter(TimeSpan.FromMilliseconds(500));
+        deadline.CancelAfter(PortProbeTimeout);
         try { await client.ConnectAsync("127.0.0.1", port, deadline.Token); return true; }
         catch (SocketException) { return false; }
         catch (OperationCanceledException) when (!cancellation.IsCancellationRequested) { return false; }
@@ -52,7 +54,7 @@ public static class BackendActivity
 /// and is being started again) → Idle. Any failure returns to Idle.</summary>
 internal enum BackendRestartPhase { Idle, Confirming, Requested, Relaunching }
 
-public sealed record BackendSettings(string WslDistribution = "Ubuntu", string PikaDevice = "/dev/serial/by-id/usb-" + PikaProtocol.UsbVendorId + "_USB_Serial-if00-port0");
+public sealed record BackendSettings(string WslDistribution = PikaDistribution.WindowsDefault, string PikaDevice = "/dev/serial/by-id/usb-" + PikaProtocol.UsbVendorId + "_USB_Serial-if00-port0");
 
 public sealed partial class PipersPlugin
 {

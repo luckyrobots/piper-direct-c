@@ -3,6 +3,7 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using LuckyEngine.PluginSdk;
 using LuckyRobots.Piper.Pika;
+using Distribution = LuckyRobots.Piper.Pika.PikaDistribution;
 
 namespace LuckyRobots.Piper.Plugin;
 
@@ -11,14 +12,19 @@ public sealed record AlignmentReference(string Name = "Desk cross / reference ob
 
 public sealed record RobotProfile(string Id, string Name, string CanDeviceId = "", double Speed = 10, double Step = 1, double Tolerance = .5,
     string RobotId = "", CameraPreferences? Gripper = null, CameraPreferences? Depth = null, string DepthSerial = "",
-    Dictionary<string, SimulationCameraPreferences>? SimulationCameras = null, string PikaDevice = "", string WslDistribution = "Ubuntu", int CameraSlot = -1,
+    Dictionary<string, SimulationCameraPreferences>? SimulationCameras = null, string PikaDevice = "", string? WslDistribution = null, int CameraSlot = -1,
     AlignmentReference? Alignment = null, bool? RememberMeasuredLink = null, string SimulationTransport = SimulationTrajectoryTransport.PositionVelocity, string RobotJointPrefix = "", bool FollowSimulationSelected = false)
 {
-    /// <summary>The Pika agent distribution for this host. <c>null</c> means a native
-    /// Linux agent; Windows runs it inside the profile's WSL distribution. This is
-    /// the only place that convention is decided.</summary>
-    internal string? PikaDistribution => PikaDistributionFor(WslDistribution);
-    internal static string? PikaDistributionFor(string wslDistribution) => OperatingSystem.IsWindows() ? wslDistribution : null;
+    private readonly string? wslDistribution = Distribution.ForCurrentPlatform(WslDistribution);
+
+    /// <summary>The persisted WSL setting, normalized on every construction, <c>with</c>
+    /// and load by <see cref="Distribution.ForCurrentPlatform"/>: the named
+    /// (or default) WSL distribution on Windows, <c>null</c> (native Linux) elsewhere.
+    /// Record equality therefore compares normalized values.</summary>
+    public string? WslDistribution { get => wslDistribution; init => wslDistribution = Distribution.ForCurrentPlatform(value); }
+
+    /// <summary>The Pika agent distribution for this host, as the backend routes it.</summary>
+    internal string? PikaDistribution => WslDistribution;
 }
 
 /// <summary>Persistent identity and settings projection, independent of the editor and hardware.</summary>
@@ -30,7 +36,7 @@ public static class RobotProfileRouting
         RobotProfile[] profiles = value.Robots is { Length: > 0 } ? value.Robots :
             [new("piper-1", "Piper 1", Speed: value.Speed, Step: value.Step, Tolerance: value.Tolerance, RobotId: value.RobotId,
                 Gripper: value.Gripper, Depth: value.Depth, DepthSerial: value.DepthSerial,
-                SimulationCameras: RobotCameras(value.SimulationCameras), PikaDevice: value.Backend?.PikaDevice ?? "", WslDistribution: value.Backend?.WslDistribution ?? "Ubuntu",
+                SimulationCameras: RobotCameras(value.SimulationCameras), PikaDevice: value.Backend?.PikaDevice ?? "", WslDistribution: value.Backend?.WslDistribution,
                 SimulationTransport: SimulationTrajectoryTransport.Name(value.SimulationTransport))];
         if (profiles.Length > MaximumProfiles || profiles.Select(p => p.Id).Distinct(StringComparer.Ordinal).Count() != profiles.Length ||
             profiles.Any(p => p.Id.Length is 0 or > 64 || p.Id.Any(c => !char.IsAsciiLetterOrDigit(c) && c is not ('-' or '_'))))
@@ -338,9 +344,7 @@ public sealed partial class PipersPlugin
         finally { switchingProfile = false; }
     }
 
-    private bool PikaMatchesProfile() => PikaMatchesProfile(ActiveProfile, state?["pika"] as JsonObject);
-
-    private static bool PikaMatchesProfile(RobotProfile profile, JsonObject? pika) => ProfilePikaRouting.Matches(profile, pika);
+    private bool PikaMatchesProfile() => ProfilePikaRouting.Matches(ActiveProfile, state?["pika"] as JsonObject);
 
     private async Task ConfigureProfilePika(string expectedToken, CancellationToken cancellation)
     {

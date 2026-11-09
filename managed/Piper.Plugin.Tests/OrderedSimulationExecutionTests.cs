@@ -4,16 +4,16 @@ internal static class OrderedSimulationExecutionTests
 {
     public static void Run()
     {
-        var first = SimulationFollowSample.Read(SimulationFollowTests.Pose());
+        var first = SimulationFollowSample.Read(Fixtures.SimulationPose());
         var hardware = new SimulationFollowHardware("can-a", 7, true, true, true, first.CommandDegrees,
             Enumerable.Range(1, 6).Select(j => new EpisodeReplayJointLimit(j, -180, 180, 30, 20, true)).ToArray(), 20,
             new("can-a", 7, 77, 0, first.CommandDegrees));
         OrderedSimulationFrame Frame(ulong cursor, double time, double q, string phase, double opening = 20, double measured = 20, bool complete = false) =>
             new(cursor, (long)(time * 1e9), time, first.CommandDegrees.Select((v, i) => i == 0 ? q : v).ToArray(), first.MeasuredDegrees,
                 opening, measured, "episode-a", 0, phase, complete, complete);
-        var pausedJson = SimulationFollowTests.Pose(); pausedJson["mode"] = "pause";
+        var pausedJson = Fixtures.SimulationPose(); pausedJson["mode"] = "pause";
         var paused = SimulationFollowSample.Read(pausedJson);
-        var activationJson = SimulationFollowTests.Pose(sequence: 2, elapsedMs: 20); activationJson["timeScale"] = 1d;
+        var activationJson = Fixtures.SimulationPose(sequence: 2, elapsedMs: 20); activationJson["timeScale"] = 1d;
         var activation = SimulationFollowSample.Read(activationJson);
         SimulationFollowPolicy.ValidateStart(paused, paused.Identity, hardware, 1_000_000, 10);
         SimulationFollowPolicy.ValidateActivation(paused, hardware, activation, hardware, 1_000_020, 20);
@@ -86,10 +86,10 @@ internal static class OrderedSimulationExecutionTests
 
         // Runtime envelopes remain fresh and ordered while queued phases run;
         // only explicit source backpressure/episode sealing exempts physics stall.
-        var initial = SimulationFollowSample.Read(SimulationFollowTests.Pose());
+        var initial = SimulationFollowSample.Read(Fixtures.SimulationPose());
         var observe = new OrderedSimulationObservation(initial);
         SimulationFollowSample Sample(double physics, long seq, long wall, string mode = "play")
-        { var raw = SimulationFollowTests.Pose(physics, seq, wall); raw["mode"] = mode; raw["timeScale"] = 1d; return SimulationFollowSample.Read(raw); }
+        { var raw = Fixtures.SimulationPose(physics, seq, wall); raw["mode"] = mode; raw["timeScale"] = 1d; return SimulationFollowSample.Read(raw); }
         observe.Validate(Sample(1.02, 2, 20), 1_000_020, 20, false, false, "episode-a", false);
         observe.Validate(Sample(1.02, 3, 100), 1_000_100, 20, false, false, "episode-a", false);
         Reject(() => observe.Validate(Sample(1.02, 4, 300), 1_000_300, 20, false, false, "episode-a", false), "Unchanged queued-source physics rebased its 250ms stall anchor");

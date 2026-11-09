@@ -1,5 +1,4 @@
 using System.Diagnostics;
-using System.Reflection;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using LuckyEngine.PluginSdk;
@@ -34,8 +33,7 @@ internal static class CalibrationSheetUiTests
         int views = 0;
         JsonObject? lastPatch = null;
         var requests = new List<string>();
-        var context = (PluginContext)Activator.CreateInstance(typeof(PluginContext), BindingFlags.Instance | BindingFlags.NonPublic, null,
-            [new PluginStart("fixture", folder, folder),
+        var context = Fixtures.Context(new PluginStart("fixture", folder, folder),
                 (Func<object, CancellationToken, Task>)((message, _) =>
                 {
                     var json = JsonSerializer.SerializeToNode(message, PluginProtocol.Json)!;
@@ -53,7 +51,7 @@ internal static class CalibrationSheetUiTests
                         ["markerId"] = arguments["markerId"]?.DeepClone()
                     };
                     return Task.FromResult(JsonSerializer.SerializeToElement(result));
-                })], null)!;
+                }));
         plugin.preferences = prefs; plugin.engine = context; plugin.state = state; plugin.token = "fixture-session";
         plugin.calibrationProfile = "piper-1"; plugin.wizardProfile = "piper-1"; plugin.Navigation = WorkspaceNavigation.Calibration;
         plugin.link = new RobotLink("scene-a", "robot-a", joints, device);

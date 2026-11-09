@@ -4,7 +4,7 @@ internal static class OrderedContactLossTests
 {
     public static void Run()
     {
-        var first = SimulationFollowSample.Read(SimulationFollowTests.Pose());
+        var first = SimulationFollowSample.Read(Fixtures.SimulationPose());
         var limits = Enumerable.Range(1, 6).Select(j => new EpisodeReplayJointLimit(j, -180, 180, 30, 20, true)).ToArray();
         double[] Joints(double q) => [q, 0, 0, 0, 0, 0];
         SimulationFollowHardware Real(double opening, double q = 0) => new("can-a", 7, true, true, true, Joints(q), limits, opening,
@@ -84,8 +84,7 @@ internal static class OrderedContactLossTests
             {
                 // The source phase is immutable in production. Corrupt its
                 // retained command here to exercise the invariant directly.
-                var jawField = typeof(OrderedSimulationExecution).GetField("jaw", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
-                jawField.SetValue(value, (JawReference)jawField.GetValue(value)! with { Command = 31 });
+                value.jaw = value.jaw with { Command = 31 };
                 Reject(() => value.Step(time + .05, Real(30), false, 0, 5), "A changed close-command identity retained the old loss qualification");
             }
         }

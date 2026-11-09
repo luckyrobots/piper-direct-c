@@ -1,11 +1,11 @@
 using System.Collections.Concurrent;
 using System.Diagnostics;
-using System.Reflection;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using Grpc.Core;
 using LuckyEngine.PluginSdk;
 using LuckyRobots.Piper.Grpc;
+using LuckyRobots.Piper.Pika;
 using LuckyRobots.Piper.Plugin;
 
 internal static class MeasuredTrackingTests
@@ -204,7 +204,7 @@ internal static class MeasuredTrackingTests
                 }),
                 ["pika"] = new JsonObject
                 {
-                    ["configured"] = true, ["device"] = "/dev/pika-a", ["distribution"] = RobotProfile.PikaDistributionFor("Ubuntu"), ["owner"] = "",
+                    ["configured"] = true, ["device"] = "/dev/pika-a", ["distribution"] = PikaDistribution.ForCurrentPlatform(null), ["owner"] = "",
                     ["connected"] = false, ["fresh"] = true, ["power_requested"] = false, ["power_uncertain"] = false,
                     ["telemetry"] = new JsonObject { ["motor"] = new JsonObject { ["Position"] = 0.0 } }
                 }
@@ -213,8 +213,7 @@ internal static class MeasuredTrackingTests
             // feedback before this plugin opens its monitor session.
             Snapshot["pika"]!["connected"] = true;
             Fresh();
-            plugin.engine = (PluginContext)Activator.CreateInstance(typeof(PluginContext), BindingFlags.Instance | BindingFlags.NonPublic, null,
-                [new PluginStart("fixture", Folder, Folder),
+            plugin.engine = Fixtures.Context(new PluginStart("fixture", Folder, Folder),
                     (Func<object, CancellationToken, Task>)((_, _) => Task.CompletedTask),
                     (Func<string, JsonObject, CancellationToken, Task<JsonElement>>)(async (method, body, cancellation) =>
                     {
@@ -234,7 +233,7 @@ internal static class MeasuredTrackingTests
                         { ["name"] = pair.Key, ["position"] = pair.Value!.DeepClone() }).ToArray());
                         var reply = JsonSerializer.SerializeToElement(method == "robot.feedback" ? new JsonObject { ["applied"] = true, ["pose"] = pose } : pose);
                         AfterRequest?.Invoke(method); return reply;
-                    })], null)!;
+                    }));
         }
 
         private static JsonArray Model() => new(Enumerable.Range(1, 8).Select(i => (JsonNode)(i < 7

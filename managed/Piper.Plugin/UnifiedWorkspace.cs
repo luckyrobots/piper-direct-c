@@ -320,7 +320,7 @@ public sealed partial class PipersPlugin
     private JsonObject[] PikaChoices(RobotProfile profile)
     {
         if (profile.PikaDevice.Length == 0 || pikaDevices.Any(d => d["device"]?.GetValue<string>() == profile.PikaDevice || pikaDevices.Length == 1 && d["aliases"]?.AsArray().Any(a => a?.GetValue<string>() == profile.PikaDevice) == true)) return pikaDevices;
-        return [..pikaDevices, new JsonObject { ["device"] = profile.PikaDevice, ["distribution"] = profile.WslDistribution, ["name"] = "Saved Pika", ["available"] = false }];
+        return [..pikaDevices, new JsonObject { ["device"] = profile.PikaDevice, ["distribution"] = profile.PikaDistribution, ["name"] = "Saved Pika", ["available"] = false }];
     }
 
     internal async Task GlobalSettingsEvent(string action, JsonElement value, CancellationToken cancellation)
@@ -351,13 +351,13 @@ public sealed partial class PipersPlugin
                 var usb = pikaDevices.SingleOrDefault(d => d["device"]?.GetValue<string>() == before.PikaDevice)
                     ?? throw new InvalidOperationException("Choose a detected USB gripper first.");
                 string instance = usb["windows_instance_id"]?.GetValue<string>() ?? "";
-                if (!OperatingSystem.IsWindows() || !instance.StartsWith(PikaProtocol.WindowsInstanceIdPrefix, StringComparison.OrdinalIgnoreCase) ||
+                if (!OperatingSystem.IsWindows() || before.PikaDistribution is not { } distribution || !instance.StartsWith(PikaProtocol.WindowsInstanceIdPrefix, StringComparison.OrdinalIgnoreCase) ||
                     instance.Length == PikaProtocol.WindowsInstanceIdPrefix.Length || instance.AsSpan().IndexOfAny('\r', '\n') >= 0)
                     throw new InvalidOperationException("Only a detected Pika USB device can be shared with WSL.");
                 string installer = Path.Combine(engine.Start.PackageDirectory, "tools", "Setup-PikaUsb.ps1");
                 if (!File.Exists(installer)) throw new InvalidOperationException("Update the plugin package to include its USB setup helper.");
                 var start = new ProcessStartInfo("powershell.exe") { UseShellExecute = true, Verb = "runas", WindowStyle = ProcessWindowStyle.Hidden };
-                foreach (string argument in new[] { "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", installer, "-InstanceId", instance, "-Distribution", before.WslDistribution }) start.ArgumentList.Add(argument);
+                foreach (string argument in new[] { "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", installer, "-InstanceId", instance, "-Distribution", distribution }) start.ArgumentList.Add(argument);
                 using (var setup = Process.Start(start) ?? throw new InvalidOperationException("USB setup did not start."))
                 { await setup.WaitForExitAsync(cancellation); if (setup.ExitCode != 0) throw new InvalidOperationException("USB setup did not complete. Check Diagnostics and retry setup."); }
                 await RefreshPikaInventory(cancellation); await Render(cancellation); return;
@@ -372,10 +372,12 @@ public sealed partial class PipersPlugin
                 var choices = PikaChoices(before); int selected = value.GetInt32() - 1;
                 if (selected < -1 || selected >= choices.Length) throw new InvalidOperationException("Refresh the gripper list.");
                 string device = selected < 0 ? "" : choices[selected]["device"]!.GetValue<string>();
-                string distribution = selected < 0 ? before.WslDistribution : choices[selected]["distribution"]?.GetValue<string>() ?? before.WslDistribution;
-                if (device.Length > 0 && preferences.Robots!.Any(p => p.Id != before.Id && p.PikaDevice == device && p.WslDistribution == distribution))
+                // A choice without a distribution keeps the profile's; the profile normalizes it for this OS.
+                updated = before with { PikaDevice = device,
+                    WslDistribution = selected < 0 ? before.WslDistribution : choices[selected]["distribution"]?.GetValue<string>() ?? before.WslDistribution };
+                if (device.Length > 0 && preferences.Robots!.Any(p => p.Id != before.Id && p.PikaDevice == device && PikaDistribution.Same(p.PikaDistribution, updated.PikaDistribution)))
                     throw new InvalidOperationException("That Pika is already assigned to another robot.");
-                updated = before with { PikaDevice = device, WslDistribution = distribution }; break;
+                break;
             case "scene":
                 if (!settingsRobotChoices.TryGetValue(before.Id, out var robots)) throw new InvalidOperationException("Refresh scene robots.");
                 int sceneIndex = value.GetInt32() - 1;

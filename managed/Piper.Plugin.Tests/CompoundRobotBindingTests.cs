@@ -9,7 +9,7 @@ internal static class CompoundRobotBindingTests
         var world = World();
         var first = SimulationFollowSample.Read(world);
         var second = SimulationFollowSample.Read(world, "piper3_");
-        Check(first.CommandDegrees.SequenceEqual(SimulationFollowSample.Read(SimulationFollowTests.Pose()).CommandDegrees),
+        Check(first.CommandDegrees.SequenceEqual(SimulationFollowSample.Read(Fixtures.SimulationPose()).CommandDegrees),
             "Compound runtime selected another robot by array order instead of canonical names");
         Check(Math.Abs(second.CommandDegrees[0] - .5 * 180 / Math.PI) < 1e-9 && Math.Abs(second.MeasuredDegrees[0] - .6 * 180 / Math.PI) < 1e-9 &&
             second.CommandOpeningMm == 0 && second.MeasuredOpeningMm == 0 && first.CommandOpeningMm > 19.9,
@@ -72,7 +72,7 @@ internal static class CompoundRobotBindingTests
 
     internal static JsonObject World()
     {
-        var result = SimulationFollowTests.Pose(); var other = SimulationFollowTests.Pose();
+        var result = Fixtures.SimulationPose(); var other = Fixtures.SimulationPose();
         foreach (string key in new[] { "joints", "actuators" })
         {
             foreach (var item in other[key]!.AsArray().OfType<JsonObject>())

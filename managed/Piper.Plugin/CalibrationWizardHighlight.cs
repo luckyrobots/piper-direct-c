@@ -6,7 +6,7 @@ namespace LuckyRobots.Piper.Plugin;
 public sealed record WizardHighlightScope(string ProfileId, string DeviceId, long Generation, string BackendFingerprint,
     string SceneId, string RobotId, string ModelAssetId, string ModelRevision, string SiteName)
 {
-    public bool Matches(CalibrationIdentity live, string site, string asset, string revision, bool calibrationOpen, bool fresh) => calibrationOpen && fresh &&
+    public bool Matches(CalibrationIdentity live, string site, string asset, string revision, bool calibrationOpen) => calibrationOpen &&
         live.ProfileId == ProfileId && live.DeviceId == DeviceId && live.Generation == Generation && live.BackendSessionFingerprint == BackendFingerprint &&
         live.SceneId == SceneId && live.RobotId == RobotId && site == SiteName && asset == ModelAssetId && revision == ModelRevision;
     public JsonObject Request(bool visible) => new() { ["sceneId"] = SceneId, ["entityId"] = RobotId,
@@ -55,7 +55,7 @@ public sealed partial class PipersPlugin
         {
             _ = Device(scope.DeviceId, scope.Generation);
             return calibrationWizard is not null && scope.Matches(CurrentCalibrationIdentity(), Wizard.Answers.GetValueOrDefault("tool", "").Trim(),
-                Wizard.ModelAssetId, Wizard.ModelRevision, calibrationOpen, true);
+                Wizard.ModelAssetId, Wizard.ModelRevision, calibrationOpen);
         }
         catch (InvalidOperationException) { return false; }
     }
