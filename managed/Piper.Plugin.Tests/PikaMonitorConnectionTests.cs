@@ -34,5 +34,28 @@ internal static class PikaMonitorConnectionTests
             var malformed = abandoned.DeepClone().AsObject(); malformed[field] = "true";
             Check(PikaMonitorConnectionPolicy.Inspect(malformed) == PikaMonitorConnection.Skip, "Malformed backend reservation/capability granted adoption.");
         }
+        RunStatus();
+    }
+
+    /// <summary>Plugin-F: the status text has one source, the role plus the monitor's outcome.</summary>
+    private static void RunStatus()
+    {
+        var plugin = new PipersPlugin();
+        try
+        {
+            Check(plugin.PikaMonitorStatus.StartsWith("Pika telemetry starts read-only", StringComparison.Ordinal), "Unmonitored Pika lost its initial status");
+            var none = plugin.ObservePikaRole();
+            Check(plugin.TryAdvancePikaRole(none, PikaSessionRole.Owned) && plugin.PikaMonitorStatus == "Pika control session active.",
+                "An Enable's owned role did not show the control session without a second status write");
+            plugin.pikaMonitor.Report(new(plugin.ObservePikaRole(), "Pika is owned by another client; fresh shared telemetry is read without taking over."));
+            Check(plugin.PikaMonitorStatus.StartsWith("Pika is owned by another client", StringComparison.Ordinal), "The monitor's outcome under the current role was hidden");
+            plugin.ReleasePikaRole();
+            Check(plugin.PikaMonitorStatus.StartsWith("Pika telemetry starts read-only", StringComparison.Ordinal),
+                "A revoked role kept showing a monitor outcome reported under the earlier role");
+            var released = plugin.ObservePikaRole();
+            Check(plugin.TryAdvancePikaRole(released, PikaSessionRole.Monitoring) && plugin.PikaMonitorStatus == "Pika monitoring only · motor power unchanged.",
+                "A monitoring role did not report read-only monitoring");
+        }
+        finally { plugin.channel.Dispose(); plugin.commands.Dispose(); }
     }
 }

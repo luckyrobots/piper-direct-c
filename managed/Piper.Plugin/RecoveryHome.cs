@@ -9,6 +9,17 @@ public sealed record RecoveryHomeAcknowledgement(long RequestId, long Sequence, 
 /// <summary>Feedback deadlines per recovery stage; fixtures shorten them.</summary>
 public sealed record RecoveryHomeDeadlines(int ResetMilliseconds = 6000, int EnableMilliseconds = 10000, int HomeMilliseconds = 60000);
 
+/// <summary>How a recovery-to-zero run ended without a failure.</summary>
+public enum RecoveryHomeOutcome
+{
+    /// <summary>All six joints reached zero.</summary>
+    Completed,
+    /// <summary>A reset is pending on a healthy all-off arm. Only the operator can
+    /// attest that the reset or power cycle completed (B1), so the run stopped
+    /// before sending anything and the caller must ask.</summary>
+    ResetConfirmationRequired
+}
+
 /// <summary>One explicit resting-arm recovery goal. Never retries a stage or restores an interrupted target.</summary>
 public static class RecoveryHome
 {
@@ -107,7 +118,7 @@ public static class RecoveryHome
 
     /// <summary>Runs after the operator's labelled "arm resting, path clear"
     /// action; that click is the physical-support acknowledgement.</summary>
-    public static async Task Run(string deviceId, long generation, string owner,
+    public static async Task<RecoveryHomeOutcome> Run(string deviceId, long generation, string owner,
         Func<RecoveryHomeSnapshot> snapshot,
         Func<string, CancellationToken, Task<RecoveryHomeAcknowledgement>> action,
         Func<long, CancellationToken, Task> stopOwnedRequest, Func<string, Task> progress,
@@ -154,11 +165,12 @@ public static class RecoveryHome
             bool healthyOff = HealthyOffOrOn(initial, false, requireClearedRecovery: false);
             if (initial.Device["reset_pending"]?.GetValue<bool>() == true && healthyOff)
             {
-                await progress("Verifying the completed reset · arm stays on its support");
-                var verified = await Send("verify-reset");
-                await Wait(verified, s => HealthyOffOrOn(s, false), resetTimeoutMilliseconds);
+                // The arm looks reset, but only the operator may attest that the
+                // reset or power cycle completed. Stop here; nothing was sent.
+                await progress("Controller reset pending · confirm that the reset or power cycle completed, then recover to zero again");
+                return RecoveryHomeOutcome.ResetConfirmationRequired;
             }
-            else if (initial.Device["reset_pending"]?.GetValue<bool>() != true && (healthyOn || healthyOff))
+            if (initial.Device["reset_pending"]?.GetValue<bool>() != true && (healthyOn || healthyOff))
             {
                 if (initial.Device["recovery_required"]?.GetValue<bool>() == true)
                 {
@@ -188,6 +200,7 @@ public static class RecoveryHome
             await Wait(home, s => HealthyOffOrOn(s, true) && s.Device["joints"]!.AsArray().All(j =>
                 j?["actual_deg"]?.GetValue<double>() is double value && double.IsFinite(value) && Math.Abs(value) <= 1), homeTimeoutMilliseconds);
             await progress("Recovery complete · zero target reached within 1° · previous movement discarded");
+            return RecoveryHomeOutcome.Completed;
         }
         catch
         {

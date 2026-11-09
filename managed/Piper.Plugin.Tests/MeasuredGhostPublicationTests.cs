@@ -11,6 +11,16 @@ internal static class MeasuredGhostPublicationTests
     {
         using (var fixture = new Fixture())
         {
+            // Plugin-H: a capability probed under an earlier backend is Unknown after a restart.
+            fixture.Plugin.ghostCapabilities = new("previous-backend", Ghosts: false, Visibility: false);
+            await fixture.Publish();
+            Check(fixture.HostProbes == 1 && fixture.Plugin.ghostCapabilities is { Backend: "backend", Ghosts: true } && fixture.Ghosts.Count == 2,
+                "A backend restart kept the previous backend's ghost capability instead of re-probing it");
+            await fixture.Publish();
+            Check(fixture.HostProbes == 1 && fixture.Ghosts.Count == 4, "Ghost capability was re-probed for an unchanged backend");
+        }
+        using (var fixture = new Fixture())
+        {
             var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             var released = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             fixture.AfterRead = async count =>
@@ -77,6 +87,7 @@ internal static class MeasuredGhostPublicationTests
         public Preferences Preferences { get; private set; }
         public List<JsonObject> Ghosts { get; } = [];
         public Func<int, Task>? AfterRead;
+        public int HostProbes;
 
         public Fixture()
         {
@@ -85,7 +96,7 @@ internal static class MeasuredGhostPublicationTests
                 new("b", "Second", "can-b", RobotId: "compound", PikaDevice: "/dev/b", RobotJointPrefix: "piper3_")], ActiveRobotId: "a"));
             SetPreferences(Preferences);
             plugin.passiveMeasuredTrackingStarted = true;
-            plugin.ghostCapabilities = new(Ghosts: true, Visibility: true);
+            plugin.ghostCapabilities = new("backend", Ghosts: true, Visibility: true);
             plugin.publishedGhostVisibility = true;
             plugin.token = "backend";
             var joints = new JsonArray();
@@ -104,6 +115,11 @@ internal static class MeasuredGhostPublicationTests
                         {
                             if (AfterRead is not null) await AfterRead(++reads);
                             return JsonSerializer.SerializeToElement(new { mode = "play", runId = "run" });
+                        }
+                        if (method == "host.info")
+                        {
+                            ++HostProbes;
+                            return JsonSerializer.SerializeToElement(new { robotFeedbackGhostSupported = true, robotGhostVisibilitySupported = true });
                         }
                         if (method != "robot.feedback") throw new InvalidOperationException("Unexpected ghost request: " + method);
                         Ghosts.Add(arguments.DeepClone().AsObject());

@@ -34,11 +34,11 @@ public sealed partial class PipersPlugin
         private LanePika pika = LanePika.Untouched;
         public LaneArm Arm => Volatile.Read(ref arm);
         public LanePika Pika => Volatile.Read(ref pika);
-        public void TouchArm() { if (Arm.Phase == LanePhase.Untouched) Volatile.Write(ref arm, LaneArm.Touched); }
-        public void MatchRequested(long request) => Volatile.Write(ref arm, new(LanePhase.Matching, MatchRequest: request));
-        public void Matched() { if (Arm.Phase == LanePhase.Matching) Volatile.Write(ref arm, LaneArm.MatchedPose); }
+        public void TouchArm() { if (Arm is LaneArm.UntouchedArm) Volatile.Write(ref arm, LaneArm.Touched); }
+        public void MatchRequested(long request) => Volatile.Write(ref arm, new LaneArm.Matching(request));
+        public void Matched() { if (Arm is LaneArm.Matching) Volatile.Write(ref arm, LaneArm.MatchedPose); }
         public void FollowAdmitted(long request, long ticks, long sequence) =>
-            Volatile.Write(ref arm, new(LanePhase.Following, FollowRequest: request, AdmissionTicks: ticks, AdmissionSequence: sequence));
+            Volatile.Write(ref arm, new LaneArm.Following(request, ticks, sequence));
         public void TouchPika() { if (!Pika.Touched) Volatile.Write(ref pika, LanePika.TouchedOnly); }
         public void PikaFollowing(string session) => Volatile.Write(ref pika, new(true, session));
     }
@@ -49,14 +49,20 @@ public sealed partial class PipersPlugin
     ///   Touched --pose acknowledged--> Matching(MatchRequest) --every lane settled--> Matched
     ///   Untouched|Touched|Matched --follow-start acknowledged--> Following(FollowRequest, admission ticks/sequence)
     /// </code>
-    /// A pose request and a follow request are separate fields; only the current
-    /// one is heartbeated and held at retirement.</summary>
-    internal enum LanePhase { Untouched, Touched, Matching, Matched, Following }
-
-    internal sealed record LaneArm(LanePhase Phase, long MatchRequest = 0, long FollowRequest = 0, long AdmissionTicks = 0, long AdmissionSequence = 0)
+    /// Each phase is its own type, so a pose request and a follow request can never
+    /// be held at once; only the current one is heartbeated and held at retirement.</summary>
+    internal abstract record LaneArm
     {
-        public static readonly LaneArm Untouched = new(LanePhase.Untouched), Touched = new(LanePhase.Touched), MatchedPose = new(LanePhase.Matched);
-        public long CurrentRequest => Phase switch { LanePhase.Matching => MatchRequest, LanePhase.Following => FollowRequest, _ => 0 };
+        private LaneArm() { }
+        internal sealed record UntouchedArm : LaneArm;
+        internal sealed record TouchedArm : LaneArm;
+        internal sealed record Matching(long MatchRequest) : LaneArm;
+        internal sealed record MatchedArm : LaneArm;
+        internal sealed record Following(long FollowRequest, long AdmissionTicks, long AdmissionSequence) : LaneArm;
+
+        public static readonly LaneArm Untouched = new UntouchedArm(), Touched = new TouchedArm(), MatchedPose = new MatchedArm();
+        /// <summary>The native request this lane currently owns, or 0 before any acknowledgement.</summary>
+        public long CurrentRequest => this switch { Matching matching => matching.MatchRequest, Following following => following.FollowRequest, _ => 0 };
     }
 
     /// <summary>A Pika session exists only on a touched channel.</summary>
@@ -174,7 +180,7 @@ public sealed partial class PipersPlugin
     private bool GroupWaitingForUserPlay(GroupSession group) =>
         group.Phase is GroupFollowPhase.Arming or GroupFollowPhase.Armed && group.RunId.Length == 0 && GroupScopeCurrent(group);
 
-    private static bool GroupBlocksControlEvent(string id) => id is "speed" or "recovery.run" or "recovery.card.run" or "robots.select" or "link" or "backend.restart.confirm" ||
+    private static bool GroupBlocksControlEvent(string id) => id is "speed" or "recovery.run" or "recovery.card.run" or "recovery.reset.confirm" or "robots.select" or "link" or "backend.restart.confirm" ||
         WorkspaceCommandPolicy.RequiresControls(id) && id is not ("simulation.toggle" or "simulation.match") ||
         id.StartsWith("global.robot.", StringComparison.Ordinal) ||
         id.StartsWith("teaching.", StringComparison.Ordinal) || id.StartsWith("pika.reference.", StringComparison.Ordinal) ||
@@ -187,7 +193,7 @@ public sealed partial class PipersPlugin
             string robot = preferences.Robots?.FirstOrDefault(profile => profile.Id == lease.Scope.ProfileId)?.Name ?? "the robot";
             return $"Finish the current arm action for {robot} before arming Follow simulation.";
         }
-        return teleoperating || followRequest != 0 || calibrationOpen || CurrentGuide?.Gate is not null ||
+        return teleoperating || followRequest != 0 || calibrationOpen || CurrentGuide?.HandGuideGate is not null ||
             CurrentRecovery is not null || PikaTeachingRecording
             ? "Finish the current control, recovery, or calibration action before arming Follow simulation." : null;
     }

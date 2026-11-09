@@ -19,9 +19,11 @@ internal static class PikaTeachingWorkspaceTests
             plugin.pikaTeaching = plugin.pikaTeaching with { DisableRequest = "free-A" };
             plugin.pikaTeaching = plugin.pikaTeaching with { Status = "A remains deliberately free" };
             Check(Visible(), "A completed arm-teach session hid its free-jaw recovery controls.");
-            plugin.pikaTeaching = plugin.pikaTeaching with { Unsaved = report };
-            plugin.pikaTeaching = plugin.pikaTeaching with { Path = "A/prior-report.json" };
-            plugin.pikaTeaching = plugin.pikaTeaching with { ConfirmationIdentity = "pending-A-confirmation" };
+            plugin.pikaTeaching = plugin.pikaTeaching.Saved("A/prior-report.json", plugin.pikaTeaching.Status);
+            Check(plugin.pikaTeaching is { Path: "A/prior-report.json", Unsaved: null }, "A saved path kept an unsaved report");
+            plugin.pikaTeaching = plugin.pikaTeaching with { Outcome = new PipersPlugin.PikaTeachingOutcome.Unsaved(report) };
+            Check(plugin.pikaTeaching is { Path: "", Unsaved: not null }, "An unsaved report kept an earlier saved path");
+            plugin.pikaTeaching = plugin.pikaTeaching.Confirming("pending-A-confirmation");
             plugin.StorePikaTeachingWorkspace(a);
             plugin.RestorePikaTeachingWorkspace(b);
             Check(plugin.pikaTeaching.DisableRequest == "" && plugin.pikaTeaching.Path == "" &&
@@ -34,7 +36,7 @@ internal static class PikaTeachingWorkspaceTests
             plugin.pikaTeaching = plugin.pikaTeaching with { Status = "B remains deliberately free" };
             plugin.StorePikaTeachingWorkspace(b);
             plugin.RestorePikaTeachingWorkspace(a with { Name = "First renamed" });
-            Check(plugin.pikaTeaching.DisableRequest == "free-A" && plugin.pikaTeaching.Path == "A/prior-report.json" &&
+            Check(plugin.pikaTeaching.DisableRequest == "free-A" && plugin.pikaTeaching.Path == "" &&
                 plugin.pikaTeaching.Status == "A remains deliberately free" && Visible(),
                 "Returning to the exact first assignment lost its resume provenance or saved status.");
             Check(plugin.pikaTeaching.Unsaved!.Identity == identity &&
@@ -71,9 +73,11 @@ internal static class PikaTeachingWorkspaceTests
             Check(plugin.pikaTeaching.SaveWorker is null && plugin.pikaTeaching.DisableRequest == "free-A",
                 "An old completed save worker was attached to the restored profile.");
 
-            plugin.pikaTeaching = plugin.pikaTeaching with { Transition = true };
+            plugin.pikaTeaching = plugin.pikaTeaching.Confirming("pending").InTransition(true);
+            Check(plugin.pikaTeaching is { Transition: true, ConfirmationIdentity: null } &&
+                plugin.pikaTeaching.Confirming("late").ConfirmationIdentity is null, "A release confirmation coexisted with a motor transition");
             RejectSwap(plugin.StorePikaTeachingWorkspace, a); RejectSwap(plugin.RestorePikaTeachingWorkspace, b);
-            plugin.pikaTeaching = plugin.pikaTeaching with { Transition = false };
+            plugin.pikaTeaching = plugin.pikaTeaching.InTransition(false);
             plugin.pikaTeaching = plugin.pikaTeaching with { Recorder = new PikaTeachingRecorder(identity, "free-A", null, 1000, DateTimeOffset.UnixEpoch) };
             RejectSwap(plugin.StorePikaTeachingWorkspace, a); RejectSwap(plugin.RestorePikaTeachingWorkspace, b);
             plugin.pikaTeaching = plugin.pikaTeaching with { Recorder = null };

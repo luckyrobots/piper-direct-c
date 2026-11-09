@@ -6,11 +6,14 @@ namespace LuckyRobots.Piper.Plugin;
 /// <summary>Visual feedback never owns the leader's physics or sends a hardware target.</summary>
 public sealed partial class PipersPlugin
 {
-    /// <summary>Plugin-H: null is Unknown. A probe (at most every 5 s, shared by
-    /// publication and the visibility toggle) records what the engine host supports;
-    /// visibility can therefore never be known while ghost support is unknown.</summary>
-    internal sealed record GhostCapabilities(bool Ghosts, bool Visibility);
+    /// <summary>Plugin-H: Unknown unless probed for the current backend identity. A probe
+    /// (at most every 5 s, shared by publication and the visibility toggle) records
+    /// what the engine host supports; visibility can therefore never be known while
+    /// ghost support is unknown. A backend restart (a new token) makes the recorded
+    /// capability Unknown again, so it is re-probed.</summary>
+    internal sealed record GhostCapabilities(string Backend, bool Ghosts, bool Visibility);
     internal GhostCapabilities? ghostCapabilities;
+    private GhostCapabilities? KnownGhostCapabilities => ghostCapabilities is { } known && known.Backend == token ? known : null;
     private long ghostCapabilityAttempt;
     private const double GhostProbeBackoffSeconds = 5;
     private const int GhostVisibilityTimeoutMilliseconds = 500;
@@ -33,13 +36,15 @@ public sealed partial class PipersPlugin
 
     private async Task<GhostCapabilities?> ProbeGhostCapabilities(CancellationToken cancellation)
     {
-        if (ghostCapabilities is { } known) return known;
+        if (KnownGhostCapabilities is { } known) return known;
         if (ghostCapabilityAttempt != 0 && Stopwatch.GetElapsedTime(ghostCapabilityAttempt).TotalSeconds < GhostProbeBackoffSeconds) return null;
         ghostCapabilityAttempt = Stopwatch.GetTimestamp();
+        string backend = token;
         using var discovery = CancellationTokenSource.CreateLinkedTokenSource(cancellation);
         discovery.CancelAfter(400);
         var info = await engine.RequestAsync("host.info", cancellation: discovery.Token);
-        return ghostCapabilities = new(info.TryGetProperty("robotFeedbackGhostSupported", out var supported) && supported.GetBoolean(),
+        if (token != backend) return null; // The backend changed during the probe; probe again for the new one.
+        return ghostCapabilities = new(backend, info.TryGetProperty("robotFeedbackGhostSupported", out var supported) && supported.GetBoolean(),
             info.TryGetProperty("robotGhostVisibilitySupported", out var visibility) && visibility.GetBoolean());
     }
 

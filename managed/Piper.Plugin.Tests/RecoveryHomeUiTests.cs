@@ -13,15 +13,16 @@ internal static class RecoveryHomeUiTests
     {
         await RunRenderedRecovery(cancelMove: false);
         await RunRenderedRecovery(cancelMove: true);
+        await RunRenderedRecovery(cancelMove: false, resetPending: true);
     }
 
-    private static async Task RunRenderedRecovery(bool cancelMove)
+    private static async Task RunRenderedRecovery(bool cancelMove, bool resetPending = false)
     {
         string root = Path.Combine(Path.GetTempPath(), "piper-recovery-home-ui-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(root);
         var plugin = new PipersPlugin();
         var errors = new ConcurrentQueue<Exception>();
-        var calls = new HomeCalls(plugin.owner, cancelMove);
+        var calls = new HomeCalls(plugin.owner, cancelMove) { ResetPending = resetPending };
         JsonObject? rendered = null, patches = null;
         var engine = Fixtures.Context(new PluginStart("fixture", root, Path.GetTempPath()),
                 (Func<object, CancellationToken, Task>)((message, _) =>
@@ -71,6 +72,8 @@ internal static class RecoveryHomeUiTests
             Task? recoveryWorker;
             while ((recoveryWorker = plugin.recoveryOperation?.Worker) is null)
             {
+                // A run that stops at the reset question may retire before this poll.
+                if (resetPending && plugin.resetCompletionPrompt is not null) { recoveryWorker = Task.CompletedTask; break; }
                 if (Stopwatch.GetElapsedTime(started).TotalSeconds > 3) throw new TimeoutException("Recovery UI event did not start its worker: " + string.Join("; ", errors));
                 await Task.Delay(5);
             }
@@ -84,6 +87,23 @@ internal static class RecoveryHomeUiTests
                 await plugin.HandleEventAsync(new("fixture", cancel, "click", JsonSerializer.SerializeToElement(true)), CancellationToken.None);
             }
             await recoveryWorker.WaitAsync(TimeSpan.FromSeconds(4));
+            if (resetPending)
+            {
+                // B1: recovery to zero stops at the operator's reset question.
+                string question = Walk(rendered!).Single(node => node["id"]!.GetValue<string>().EndsWith(".recovery.reset", StringComparison.Ordinal))["id"]!.GetValue<string>();
+                string confirm = Walk(rendered!).Single(node => node["id"]!.GetValue<string>().EndsWith(".recovery.reset.confirm", StringComparison.Ordinal))["id"]!.GetValue<string>();
+                Check(calls.Actions.Count == 0 && plugin.resetCompletionPrompt is not null && plugin.recoveryOperation is null &&
+                    patches?[question]?["visible"]?.GetValue<bool>() == true,
+                    "Recovery to zero verified a pending reset instead of stopping at the operator's confirmation: " + plugin.message);
+                await plugin.HandleEventAsync(new("fixture", confirm, "click", JsonSerializer.SerializeToElement(true)), CancellationToken.None);
+                started = Stopwatch.GetTimestamp();
+                while (calls.Actions.Count == 0 && Stopwatch.GetElapsedTime(started).TotalSeconds < 3) await Task.Delay(5);
+                await plugin.Update(CancellationToken.None);
+                Check(calls.Actions.SequenceEqual(["verify-reset"]) && calls.ResetCompletedAttestations == 1 && plugin.resetCompletionPrompt is null &&
+                    patches?[question]?["visible"]?.GetValue<bool>() == false,
+                    "Confirming the reset question did not send exactly one attested verify-reset: " + string.Join("; ", errors));
+                return;
+            }
             Check(calls.Actions.SequenceEqual(["enable", "move-to-zero"]),
                 "The single real UI-actor healthy/all-off recovery event cancelled itself, reset unnecessarily or failed to finish: " + plugin.message);
             Check(errors.IsEmpty && plugin.recoveryOperation is null && plugin.approved == !cancelMove,
@@ -120,6 +140,8 @@ internal static class RecoveryHomeUiTests
         public List<string> Actions { get; } = [];
         public List<double> SpeedPercents { get; } = [];
         public bool AllCommandsScoped { get; private set; } = true;
+        public bool ResetPending;
+        public int ResetCompletedAttestations { get; private set; }
         public long ScopedStopRequest { get; private set; }
         public JsonObject Snapshot()
         {
@@ -130,7 +152,7 @@ internal static class RecoveryHomeUiTests
                 ["devices"] = new JsonArray(new JsonObject
                 {
                     ["id"] = "resting-arm", ["generation"] = 7L, ["present"] = true, ["up"] = true, ["fresh"] = true,
-                    ["firmware_supported"] = true, ["recovery_required"] = false, ["reset_pending"] = false,
+                    ["firmware_supported"] = true, ["recovery_required"] = ResetPending, ["reset_pending"] = ResetPending,
                     ["range_recovery"] = new JsonObject { ["required"] = angles[1] < 0 || angles[2] > 0 },
                     ["status"] = new JsonObject { ["arm_status"] = 0, ["control"] = 0, ["motion_mode"] = 1,
                         ["teach_state"] = 0, ["error"] = 0, ["stationary_s"] = 1d, ["age_s"] = 0d },
@@ -164,6 +186,17 @@ internal static class RecoveryHomeUiTests
                     Task.FromResult(new Metadata()), () => Status.DefaultSuccess, () => new Metadata(), () => { });
             }
             string step = body["action"]!.GetValue<string>();
+            if (command.Route == "/api/command" && step == "verify-reset")
+            {
+                lock (gate)
+                {
+                    Actions.Add(step);
+                    if (body["reset_completed"]?.GetValue<bool>() == true) ++ResetCompletedAttestations;
+                    ResetPending = false;
+                }
+                return new(Task.FromResult((TResponse)(object)new ControlReply { Status = 200, Json = "{\"message\":\"verified\"}" }),
+                    Task.FromResult(new Metadata()), () => Status.DefaultSuccess, () => new Metadata(), () => { });
+            }
             if (command.Route != "/api/command" || step is not ("reset" or "enable" or "move-to-zero"))
                 throw new InvalidOperationException("Recovery sent an unexpected route/action");
             long accepted;

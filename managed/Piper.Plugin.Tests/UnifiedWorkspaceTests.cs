@@ -110,12 +110,14 @@ internal static class UnifiedWorkspaceTests
         var guiding = new TeachingState(TeachingPhase.HandGuiding, true, true, false, "", "") { RequiresZero = false };
         var ended = new TeachingState(TeachingPhase.Ended, false, true, false, "", "") { RequiresZero = false };
         var gate = new HandGuideRecoveryGate("identity-a");
-        Check(!gate.Observe("identity-a", ended, true), "Loading a completed state granted recovery without an observed guide cycle");
-        Check(!gate.Observe("identity-b", guiding, true) && !gate.SawGuiding, "A different arm supplied the physical guide proof");
-        Check(!gate.Observe("identity-a", guiding, true) && gate.SawGuiding, "Hand guiding dispatched recovery before the light turned off");
-        Check(!gate.Observe("identity-a", ended, false), "UI recovery bypassed native qualification");
-        Check(gate.Observe("identity-a", ended, true) && !gate.Observe("identity-a", ended, true), "A physical guide cycle did not authorize exactly one qualified return");
-        var nativeObserved = new HandGuideRecoveryGate("identity-a", observedGuiding: true);
-        Check(nativeObserved.Observe("identity-a", ended, true), "Explicit recovery discarded a fresh native-observed physical guide cycle");
+        Check(!gate.Observe("identity-a", ended).Qualifies("identity-a", ended, true), "Loading a completed state granted recovery without an observed guide cycle");
+        Check(!gate.Observe("identity-b", guiding).SawGuiding, "A different arm supplied the physical guide proof");
+        var seen = gate.Observe("identity-a", guiding);
+        Check(seen.SawGuiding && !gate.SawGuiding && !seen.Qualifies("identity-a", guiding, true),
+            "Hand guiding dispatched recovery before the light turned off, or mutated the earlier gate");
+        Check(!seen.Qualifies("identity-a", ended, false), "UI recovery bypassed native qualification");
+        Check(seen.Qualifies("identity-a", ended, true) && !seen.Qualifies("identity-b", ended, true), "A physical guide cycle did not authorize a qualified return on its own arm only");
+        var nativeObserved = new HandGuideRecoveryGate("identity-a", SawGuiding: true);
+        Check(nativeObserved.Qualifies("identity-a", ended, true), "Explicit recovery discarded a fresh native-observed physical guide cycle");
     }
 }

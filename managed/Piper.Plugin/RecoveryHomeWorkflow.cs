@@ -71,19 +71,19 @@ public sealed partial class PipersPlugin
         {
             bool entered = false;
             bool completed = false;
+            RecoveryHomeOutcome? outcome = null;
             try
             {
                 await commands.WaitAsync(operation.Token); entered = true;
                 await SaveProgress(recoveryHomeProgress);
-                await RecoveryHome.Run(deviceId, generation, owner, () => HomeSnapshot(operation),
+                outcome = await RecoveryHome.Run(deviceId, generation, owner, () => HomeSnapshot(operation),
                     async (step, stepCancellation) =>
                     {
                         var before = HomeSnapshot(operation);
-                        if (step == "reset") Volatile.Write(ref operation.ResetAt, Stopwatch.GetTimestamp());
-                        else if (step != "verify-reset") Volatile.Write(ref operation.ResetAt, 0);
+                        Volatile.Write(ref operation.ResetAt, step == "reset" ? Stopwatch.GetTimestamp() : 0);
                         if (step is "enable" or "move-to-zero") GrantRecoveryHolding(operation, stepCancellation);
                         var reply = await Command(step, null, stepCancellation,
-                            step is "reset" or "verify-reset" or "verify-current" ? CommandPurpose.Recovery : CommandPurpose.Control,
+                            step is "reset" or "verify-current" ? CommandPurpose.Recovery : CommandPurpose.Control,
                             operation.Scope, operation.Epoch, RecoveryHome.SpeedPercent);
                         var receipt = telemetry.Latest;
                         long request = reply["request_id"]?.GetValue<long>() ?? before.Motion["request_id"]?.GetValue<long>() ?? 0;
@@ -98,8 +98,11 @@ public sealed partial class PipersPlugin
                         await Call("/api/stop", new JsonObject { ["device_id"] = deviceId, ["generation"] = generation,
                             ["request_id"] = request, ["owner"] = owner }, stopping, backend);
                     }, stage => SaveProgress(stage), operation.Token);
-                CompleteRecoveryHolding(operation);
-                completed = true;
+                if (outcome == RecoveryHomeOutcome.Completed)
+                {
+                    CompleteRecoveryHolding(operation);
+                    completed = true;
+                }
             }
             catch (Exception error)
             {
@@ -114,6 +117,9 @@ public sealed partial class PipersPlugin
                     CommandAuthority.TryInEpoch(operation.Epoch, () => approved = linkCommandsEnabled = false);
                 RetireRecovery(operation);
                 if (entered) commands.Release();
+                // Asked only after retirement, so the operator's answer is not
+                // rejected as arriving during a running recovery.
+                if (outcome == RecoveryHomeOutcome.ResetConfirmationRequired) RequestResetCompletion(operation.Scope, operation.Epoch);
                 try { await Update(shutdown.Token); } catch (Exception error) { Trace.TraceWarning("Recovery view: {0}", error.Message); }
             }
         }, CancellationToken.None);

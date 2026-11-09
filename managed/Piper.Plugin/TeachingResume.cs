@@ -60,7 +60,7 @@ public sealed partial class PipersPlugin
         Debug.Assert(primaryAction.Phase == PrimaryActionPhase.Running, "Resume runs only as the primary robot action.");
         primaryAction = primaryAction with { Phase = PrimaryActionPhase.ResumingControls };
         approved = linkCommandsEnabled = false;
-        teachingReturnGate.Invalidate();
+        teachingSession.InvalidateReturn();
         try
         {
             await PrimaryActionProgress("waiting-for-stillness", "Hold the arm still · reconnecting controls at this pose…", cancellation);
@@ -132,7 +132,7 @@ public sealed partial class PipersPlugin
             }
             TeachingResumeCheck.CommitApproval(() => { _ = Current(); }, () =>
             {
-                teachingOwnership = TeachingOwnership.None;
+                teachingSession.Release();
                 RememberControlApproval(expectedPermission, activate: true);
             }, () =>
             {

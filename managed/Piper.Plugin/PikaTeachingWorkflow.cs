@@ -18,19 +18,46 @@ public sealed partial class PipersPlugin
     ///   Recording --free/hold--> Transition --> Recording;  Recording --finish, end, fault, telemetry loss--> Saving(Unsaved, SaveWorker)
     ///   Saving --written--> Saved(Path) | --failed--> Unsaved --retry--> Saving
     /// </code>
-    /// A transition clears any pending confirmation, and a saved path clears the
-    /// unsaved report, so neither combination can be represented.</summary>
-    internal sealed record PikaTeachingState(PikaTeachingRecorder? Recorder = null, PikaTeachingReport? Unsaved = null, Task? SaveWorker = null,
-        string? ConfirmationIdentity = null, string Path = "", string DisableRequest = "", bool Transition = false,
-        string Status = DefaultPikaTeachingStatus)
+    /// A pending confirmation and a motor transition share one <see cref="PikaTeachingGesture"/>,
+    /// and a saved path and an unsaved report share one <see cref="PikaTeachingOutcome"/>,
+    /// so neither combination can be represented, by a constructor or by <c>with</c>.</summary>
+    internal sealed record PikaTeachingState(PikaTeachingRecorder? Recorder = null, PikaTeachingOutcome? Outcome = null, Task? SaveWorker = null,
+        PikaTeachingGesture? Gesture = null, string DisableRequest = "", string Status = DefaultPikaTeachingStatus)
     {
+        public PikaTeachingReport? Unsaved => (Outcome as PikaTeachingOutcome.Unsaved)?.Report;
+        public string Path => (Outcome as PikaTeachingOutcome.Saved)?.Path ?? "";
+        public string? ConfirmationIdentity => (Gesture as PikaTeachingGesture.Confirming)?.Identity;
+        public bool Transition => Gesture is PikaTeachingGesture.Transitioning;
         public bool Saving => SaveWorker is { IsCompleted: false };
         /// <summary>Recording, saving or a motor transition is in progress.</summary>
         public bool Busy => Recorder is not null || Saving || Transition;
-        public PikaTeachingState InTransition(bool active) => this with { Transition = active, ConfirmationIdentity = active ? null : ConfirmationIdentity };
-        public PikaTeachingState Saved(string path, string status) => this with { Unsaved = null, Path = path, Status = status };
+        /// <summary>Entering a transition replaces a pending confirmation; leaving it ends only the transition.</summary>
+        public PikaTeachingState InTransition(bool active) =>
+            active ? this with { Gesture = PikaTeachingGesture.Transitioning.Instance } : Transition ? this with { Gesture = null } : this;
+        /// <summary>A confirmation cannot be opened during a motor transition.</summary>
+        public PikaTeachingState Confirming(string identity) => Transition ? this : this with { Gesture = new PikaTeachingGesture.Confirming(identity) };
+        public PikaTeachingState WithoutConfirmation() => Gesture is PikaTeachingGesture.Confirming ? this with { Gesture = null } : this;
+        public PikaTeachingState SavingReport(PikaTeachingReport report, Task worker, string status) =>
+            this with { Outcome = new PikaTeachingOutcome.Unsaved(report), SaveWorker = worker, Status = status };
+        public PikaTeachingState Saved(string path, string status) => this with { Outcome = new PikaTeachingOutcome.Saved(path), Status = status };
         /// <summary>What survives a profile switch: never a pending gesture or worker.</summary>
-        public PikaTeachingState Portable() => this with { Recorder = null, SaveWorker = null, ConfirmationIdentity = null, Transition = false };
+        public PikaTeachingState Portable() => this with { Recorder = null, SaveWorker = null, Gesture = null };
+    }
+
+    /// <summary>The operator gesture in progress: a release awaiting confirmation, or a motor transition.</summary>
+    internal abstract record PikaTeachingGesture
+    {
+        private PikaTeachingGesture() { }
+        internal sealed record Confirming(string Identity) : PikaTeachingGesture;
+        internal sealed record Transitioning : PikaTeachingGesture { public static readonly Transitioning Instance = new(); }
+    }
+
+    /// <summary>A finished recording's report: written to a path, or not yet saved.</summary>
+    internal abstract record PikaTeachingOutcome
+    {
+        private PikaTeachingOutcome() { }
+        internal sealed record Saved(string Path) : PikaTeachingOutcome;
+        internal sealed record Unsaved(PikaTeachingReport Report) : PikaTeachingOutcome;
     }
 
     private readonly Dictionary<PikaTeachingWorkspaceKey, PikaTeachingState> pikaTeachingWorkspaces = new();
@@ -64,7 +91,7 @@ public sealed partial class PipersPlugin
                 throw new InvalidOperationException("Finish the current Pika teaching transition or save before changing robot profiles.");
             pikaTeachingWorkspaces[PikaTeachingKey(profile)] = pikaTeaching.Portable();
             // A release confirmation is a pending gesture, never portable state.
-            pikaTeaching = pikaTeaching with { ConfirmationIdentity = null };
+            pikaTeaching = pikaTeaching.WithoutConfirmation();
         }
     }
 
@@ -103,7 +130,7 @@ public sealed partial class PipersPlugin
 
     private async Task PikaTeachingEvent(string action, CancellationToken cancellation)
     {
-        if (action == "cancel") { UpdatePikaTeaching(s => s with { ConfirmationIdentity = null }); await Update(cancellation); return; }
+        if (action == "cancel") { UpdatePikaTeaching(s => s.WithoutConfirmation()); await Update(cancellation); return; }
         if (action == "finish") { await FinishPikaTeaching("Operator finished", cancellation); await Update(cancellation); return; }
         if (action == "hold") { await ResumePikaMeasuredHold(cancellation); await Update(cancellation); return; }
         if (action == "retry")
@@ -125,11 +152,11 @@ public sealed partial class PipersPlugin
         string confirmationIdentity = ActiveProfile.Id + "\n" + device["id"]!.GetValue<string>() + "\n" + device["generation"]!.GetValue<long>() + "\n" + token;
         if (action == "free")
         {
-            UpdatePikaTeaching(s => s with { ConfirmationIdentity = confirmationIdentity });
+            UpdatePikaTeaching(s => s.Confirming(confirmationIdentity));
             await Update(cancellation); return;
         }
         string? confirmed;
-        lock (pikaTeachingSync) { confirmed = pikaTeaching.ConfirmationIdentity; pikaTeaching = pikaTeaching with { ConfirmationIdentity = null }; }
+        lock (pikaTeachingSync) { confirmed = pikaTeaching.ConfirmationIdentity; pikaTeaching = pikaTeaching.WithoutConfirmation(); }
         if (action != "confirm" || confirmed is null) throw new InvalidOperationException("Confirm that the jaws are empty or their grasp is supported first.");
         if (confirmed != confirmationIdentity)
             throw new InvalidOperationException("The robot/control session changed. Choose Free Pika jaws and review its release confirmation again.");
@@ -177,7 +204,7 @@ public sealed partial class PipersPlugin
                 var recorder = new PikaTeachingRecorder(identity, request, reference, receipt.ReceivedTicks, DateTimeOffset.UtcNow);
                 long utc = (DateTimeOffset.UtcNow.Ticks - DateTimeOffset.UnixEpoch.Ticks) / 10;
                 recorder.Observe(PikaTeachingRecorder.Read(receipt, device, pika!, identity, utc, reference));
-                UpdatePikaTeaching(s => s with { Recorder = recorder, Path = "",
+                UpdatePikaTeaching(s => s with { Recorder = recorder, Outcome = null,
                     Status = "Pika jaws are free. Move the arm and jaws by hand; the plugin is capturing their measured motion. End arm teaching or choose Finish & save." });
             }
             await Update(cancellation); return;
@@ -355,8 +382,8 @@ public sealed partial class PipersPlugin
                 { Trace.TraceWarning("Pika teaching temporary-file cleanup: {0}", error.Message); }
             }
         });
-        pikaTeaching = pikaTeaching with { Unsaved = report, SaveWorker = worker,
-            Status = $"Saving {report.Frames.Length} arm/Pika observations. Motor power is unchanged; no automatic replay." };
+        pikaTeaching = pikaTeaching.SavingReport(report, worker,
+            $"Saving {report.Frames.Length} arm/Pika observations. Motor power is unchanged; no automatic replay.");
     }
 
     private async Task FinishPikaTeaching(string reason, CancellationToken cancellation)
