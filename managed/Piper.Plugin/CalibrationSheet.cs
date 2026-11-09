@@ -147,7 +147,7 @@ public sealed partial class PipersPlugin
             var root = await ReadWizardMetricRoot(cancellation);
             if (calibrationIdentity is not null && (calibrationOriginal is null || !calibrationOriginal.Same(root) || Math.Abs(root.Position.Y - calibrationDesk.SurfaceY) > 1e-6))
                 throw new InvalidOperationException("Reconfirming a corrected model cannot change the saved original placement or tabletop height.");
-            Wizard.Answers["observedrooty"] = Wizard.Answers["sceney"] = CalibrationNumber(root.Position.Y * 1000);
+            Wizard.Answers["sceney"] = CalibrationNumber(root.Position.Y * 1000);
             Wizard.Answers["sceneconfirmed"] = "operator confirmed simulated base rests on tabletop";
             calibrationDesk = calibrationDesk with { SurfaceY = root.Position.Y };
             if (Wizard.Answers.TryGetValue("edgeroot", out string? pinned) && !CalibrationPlacement.Read(JsonNode.Parse(pinned)).Same(root))

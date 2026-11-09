@@ -1,6 +1,7 @@
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json.Nodes;
+using System.Text.Json.Serialization;
 
 namespace LuckyRobots.Piper.Plugin;
 
@@ -65,21 +66,21 @@ public sealed record CalibrationReport(int Schema, CalibrationIdentity Identity,
     CalibrationSample[] Samples, CalibrationFit? Fit, CalibrationPlacement? AppliedPlacement, bool PlacementUnverified, DateTimeOffset UpdatedAt,
     string Evidence = "Operator edge/grid measurements, measured joint feedback and model forward kinematics. Fits base world-Y yaw/XZ translation only; no encoder/joint/TCP/scale changes. Camera calibration and exposure synchronization are unverified.",
     string CoordinateFrame = "Engine world Y-up, metres. Desk centre X=0/Z=0; left=-X, back=-Z. Heights above measured desk surface.", string ClockDomain = "host-utc-receipt (not exposure time)",
-    CalibrationModelReevaluation? ModelReevaluation = null);
-
-/// <summary>Restores rollback evidence, never permission to repeat an interrupted write.</summary>
-public sealed record CalibrationSavedState(CalibrationReport Report, bool RequiresInspection)
+    CalibrationModelReevaluation? ModelReevaluation = null)
 {
-    public static CalibrationSavedState? Recover(CalibrationReport report, string profileId)
+    /// <summary>A scene write was sent or applied, so the placement must be inspected before more edits.</summary>
+    [JsonIgnore] public bool RequiresInspection => PlacementUnverified || AppliedPlacement is not null;
+
+    /// <summary>Validates a report read from disk. It restores rollback evidence, never permission to repeat an interrupted write.</summary>
+    public void Validate(string profileId)
     {
-        if (report.Schema != 1 || report.Identity is null || report.Desk is null || report.OriginalPlacement?.Rotation is not { Length: 4 } ||
-            report.Identity.ProfileId != profileId || string.IsNullOrWhiteSpace(report.Identity.ModelAssetId) || string.IsNullOrWhiteSpace(report.Identity.ModelRevision) ||
-            report.Samples is null || report.Samples.Length > 24 || report.Samples.Any(s => s is null || !s.MeasuredWorld.Finite || !s.SceneWorld.Finite || s.JointDegrees is not { Length: 6 } || s.Measurement is null) ||
-            report.AppliedPlacement is { Rotation: not { Length: 4 } } || report.Fit is not null && report.Fit.ProposedPlacement?.Rotation is not { Length: 4 })
+        if (Schema != 1 || Identity is null || Desk is null || OriginalPlacement?.Rotation is not { Length: 4 } ||
+            Identity.ProfileId != profileId || string.IsNullOrWhiteSpace(Identity.ModelAssetId) || string.IsNullOrWhiteSpace(Identity.ModelRevision) ||
+            Samples is null || Samples.Length > 24 || Samples.Any(s => s is null || !s.MeasuredWorld.Finite || !s.SceneWorld.Finite || s.JointDegrees is not { Length: 6 } || s.Measurement is null) ||
+            AppliedPlacement is { Rotation: not { Length: 4 } } || Fit is not null && Fit.ProposedPlacement?.Rotation is not { Length: 4 })
             throw new InvalidOperationException("Saved calibration identity/geometry is invalid; inspect the report before starting a new check.");
-        report.Desk.Validate(); _ = CalibrationPlacement.Read(report.OriginalPlacement.Json());
-        if (report.AppliedPlacement is not null) _ = CalibrationPlacement.Read(report.AppliedPlacement.Json());
-        if (report.Fit is not null) _ = CalibrationPlacement.Read(report.Fit.ProposedPlacement.Json());
-        return report.PlacementUnverified || report.AppliedPlacement is not null ? new(report, true) : null;
+        Desk.Validate(); _ = CalibrationPlacement.Read(OriginalPlacement.Json());
+        if (AppliedPlacement is not null) _ = CalibrationPlacement.Read(AppliedPlacement.Json());
+        if (Fit is not null) _ = CalibrationPlacement.Read(Fit.ProposedPlacement.Json());
     }
 }

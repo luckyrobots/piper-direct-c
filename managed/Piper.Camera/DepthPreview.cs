@@ -33,8 +33,6 @@ public static class DepthPreview
     private static bool IsPinhole(Intrinsics intr) => intr.model is Distortion.None or Distortion.BrownConrady or Distortion.ModifiedBrownConrady or Distortion.InverseBrownConrady &&
         intr.coeffs.Length == 5 && intr.coeffs.All(c => float.IsFinite(c) && Math.Abs(c) < 1e-8);
 
-    public static Task Run(string selectedSerial, CancellationToken cancellation) => Run(selectedSerial, "depth", cancellation);
-
     public static async Task Run(string selectedSerial, string view, CancellationToken cancellation)
     {
         ValidateView(view);

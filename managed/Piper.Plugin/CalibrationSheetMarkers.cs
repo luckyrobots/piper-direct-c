@@ -33,7 +33,7 @@ public sealed partial class PipersPlugin
             Wizard.Answers.Remove("leftedgeconfirmed"); Wizard.Answers.Remove("frame"); Wizard.Answers.Remove("edgeroot");
         }
         if (!Wizard.Answers.ContainsKey("sceneconfirmed"))
-            Wizard.Answers["observedrooty"] = Wizard.Answers["sceney"] = CalibrationNumber(root.Position.Y * 1000);
+            Wizard.Answers["sceney"] = CalibrationNumber(root.Position.Y * 1000);
         Wizard.Answers["sheetreferencepreview"] = "read-only visual reference; not operator confirmation";
         return root;
     }

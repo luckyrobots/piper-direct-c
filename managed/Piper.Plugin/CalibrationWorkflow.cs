@@ -49,18 +49,24 @@ public sealed partial class PipersPlugin
         calibrationPath = Directory.Exists(RobotCalibrationDirectory) ? Directory.EnumerateFiles(RobotCalibrationDirectory, "*-calibration.json").OrderByDescending(File.GetLastWriteTimeUtc).FirstOrDefault() ?? "" : "";
         try
         {
+            // Only a report with a sent or applied scene write resumes here; an
+            // unapplied report resumes only through its wizard draft.
             if (calibrationPath.Length > 0 && new FileInfo(calibrationPath).Length <= 1024 * 1024 &&
-                JsonSerializer.Deserialize<CalibrationReport>(File.ReadAllText(calibrationPath), PluginProtocol.Json) is { } report &&
-                CalibrationSavedState.Recover(report, ActiveProfile.Id) is { } saved)
-            {
-                calibrationIdentity = report.Identity; calibrationOriginal = report.OriginalPlacement; calibrationApplied = report.AppliedPlacement; calibrationFit = report.Fit;
-                calibrationReevaluation = report.ModelReevaluation;
-                calibrationSamples.AddRange(report.Samples); calibrationDesk = report.Desk; calibrationMeasurement = report.Samples.LastOrDefault()?.Measurement ?? calibrationMeasurement;
-                calibrationPlacementUnverified = saved.RequiresInspection;
-            }
+                JsonSerializer.Deserialize<CalibrationReport>(File.ReadAllText(calibrationPath), PluginProtocol.Json) is { RequiresInspection: true } report)
+                RestoreCalibrationReport(report, calibrationPath);
         }
         catch (Exception error) when (error is IOException or JsonException or InvalidOperationException or ArgumentException)
         { Trace.TraceWarning("Saved calibration could not be restored: {0}", error.Message); }
+    }
+
+    private void RestoreCalibrationReport(CalibrationReport report, string path)
+    {
+        report.Validate(ActiveProfile.Id);
+        calibrationIdentity = report.Identity; calibrationOriginal = report.OriginalPlacement; calibrationApplied = report.AppliedPlacement; calibrationFit = report.Fit;
+        calibrationReevaluation = report.ModelReevaluation;
+        calibrationSamples.Clear(); calibrationSamples.AddRange(report.Samples); calibrationDesk = report.Desk; calibrationPath = path;
+        calibrationMeasurement = report.Samples.LastOrDefault()?.Measurement ?? calibrationMeasurement;
+        calibrationPlacementUnverified = report.RequiresInspection;
     }
 
     private CalibrationIdentity CurrentCalibrationIdentity()

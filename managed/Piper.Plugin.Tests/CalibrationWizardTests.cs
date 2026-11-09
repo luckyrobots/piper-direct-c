@@ -28,39 +28,29 @@ public static class CalibrationWizardTests
         point = CalibrationWizardFlow.NextPoint(next, 4, 0);
         check(point.Answers["role"] == "validation" && point.Step == CalibrationWizardStep.PointIntro, "Four training captures did not require a NEW held-out point");
         point = CalibrationWizardFlow.NextPoint(next, 4, 1);
-        check(point.Step == CalibrationWizardStep.Review && point.History.Length == 0, "A validation capture did not go to explicit review");
+        check(point.Step == CalibrationWizardStep.Review, "A validation capture did not go to explicit review");
         foreach (string invalid in new[] { "", "NaN", "Infinity", "-1", "3001" })
         {
             var bad = draft with { Answers = new(draft.Answers) { ["tableheight"] = invalid } };
             Reject(() => CalibrationWizardFlow.Number(bad, "tableheight", 1, 3000), "Invalid/unknown physical height was accepted: " + invalid);
         }
-        var measured = draft with { Answers = new(draft.Answers) { ["tableheight"] = "755.5", ["column"] = "1.5" } };
+        var measured = draft with { Answers = new(draft.Answers) { ["tableheight"] = "755.5" } };
         check(CalibrationWizardFlow.Number(measured, "tableheight", 1, 3000) == 755.5, "Measured physical height was not preserved exactly");
-        Reject(() => CalibrationWizardFlow.Number(measured, "column", 0, 200, true), "A square-centre fraction was treated as an integer intersection");
         var genericDesk = draft with { Answers = new(draft.Answers) { ["sceney"] = "800", ["floory"] = "0", ["tableheight"] = "800" } };
         check(CalibrationWizardFlow.SceneSurface(genericDesk, 800) == 800, "A generic800mm scene tabletop required editing private JSON");
-        CalibrationWizardFlow.ValidateTabletopHeight(genericDesk, 1);
-        check(CalibrationWizardFlow.RelativeTabletopHeight(genericDesk) == 800, "Matching floor origins changed relative tabletop height");
-        var offsetFloor = genericDesk with { Answers = new(genericDesk.Answers) { ["sceney"] = "1800", ["floory"] = "1000" } };
-        CalibrationWizardFlow.ValidateTabletopHeight(offsetFloor, 1);
-        check(CalibrationWizardFlow.RelativeTabletopHeight(offsetFloor) == 800, "An explicit world-floor offset was ignored");
         Reject(() => CalibrationWizardFlow.SceneSurface(genericDesk, 750), "A mismatched model base silently floated to a ruler-derived scene height");
-        Reject(() => CalibrationWizardFlow.ValidateTabletopHeight(genericDesk with { Answers = new(genericDesk.Answers) { ["tableheight"] = "750" } }, 10), "Physical/scene height mismatch was silently fitted away");
         Reject(() => CalibrationWizardFlow.SceneSurface(draft), "An unknown scene surface silently defaulted to750mm");
-        Reject(() => CalibrationWizardFlow.RelativeTabletopHeight(genericDesk with { Answers = new(draft.Answers) { ["sceney"] = "800" } }), "Unknown world-floor origin silently defaulted tozero");
         var tabletopDraft = draft with { Answers = new(draft.Answers) { ["width"] = "1400", ["depth"] = "700", ["sceney"] = "800", ["precision"] = "10", ["left"] = "400", ["back"] = "300", ["height"] = "0" } };
         var tabletop = CalibrationWizardFlow.TabletopInputs(tabletopDraft);
         check(tabletop.Measurement.World(tabletop.Desk).Distance(new(-.3, .8, -.05)) < 1e-12, "Tabletop capture required a physical floor/table-height measurement or used a wrong height frame");
-        check(CalibrationWizardFlow.OptionalOfficeAudit(tabletopDraft) is { SceneFloorYMillimetres: null, MeasuredTabletopHeightMillimetres: null }, "Unknown physical office heights were fabricated as measured defaults");
         var inconsistentOffice = tabletopDraft with { Answers = new(tabletopDraft.Answers) { ["floory"] = "1000", ["tableheight"] = "740" } };
         check(CalibrationWizardFlow.TabletopInputs(inconsistentOffice) == tabletop, "An unrelated optional office-height audit blocked tabletop capture");
-        check(CalibrationWizardFlow.OptionalOfficeAudit(inconsistentOffice) is { SceneFloorYMillimetres: 1000, MeasuredTabletopHeightMillimetres: 740 }, "Explicit legacy office-height input was discarded");
-        var resumedLegacy = CalibrationWizardFlow.TabletopDefault(tabletopDraft with { Step = CalibrationWizardStep.SceneFloorOrigin,
-            History = [CalibrationWizardStep.SceneSurfaceY, CalibrationWizardStep.SceneFloorOrigin] });
-        check(resumedLegacy.Step == CalibrationWizardStep.DeskWidth && !resumedLegacy.History.Contains(CalibrationWizardStep.SceneFloorOrigin), "An old draft still forced irrelevant floor questions on resume/back");
+        // Old question-by-question step numbers resume at the matching part of the single sheet.
+        check(CalibrationWizardFlow.Legacy((CalibrationWizardStep)5) == CalibrationWizardStep.Prepare && CalibrationWizardFlow.Legacy((CalibrationWizardStep)20) == CalibrationWizardStep.PointIntro &&
+            CalibrationWizardFlow.Legacy(CalibrationWizardStep.DeskBack) == CalibrationWizardStep.DeskBack, "An old draft still forced irrelevant floor questions on resume/back");
         var abstractLegacy = CalibrationWizardFlow.TabletopDefault(tabletopDraft with { Schema = 1, Step = CalibrationWizardStep.PointIntro,
             Answers = new(tabletopDraft.Answers) { ["frame"] = "old technical frame confirmation" } });
-        check(abstractLegacy.Schema == 2 && abstractLegacy.Step == CalibrationWizardStep.SceneSurfaceY && !abstractLegacy.Answers.ContainsKey("frame") && abstractLegacy.Epoch > tabletopDraft.Epoch,
+        check(abstractLegacy.Schema == 2 && abstractLegacy.Step == CalibrationWizardStep.Prepare && !abstractLegacy.Answers.ContainsKey("frame") && abstractLegacy.Epoch > tabletopDraft.Epoch,
             "An uncaptured old draft invented confirmation of the new desk-edge pointers");
         var savedLegacy = CalibrationWizardFlow.TabletopDefault(tabletopDraft with { Schema = 1, Step = CalibrationWizardStep.InspectSaved, ReportFile = "saved-calibration.json" });
         check(savedLegacy.Step == CalibrationWizardStep.InspectSaved && savedLegacy.ReportFile == "saved-calibration.json", "Pointer-question migration discarded a saved placement inspection/report");

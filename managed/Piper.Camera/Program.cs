@@ -33,7 +33,6 @@ try
         File.WriteAllText(Path.Combine(session, "lens-profile.json"), result.ToJsonString(new() { WriteIndented = true }));
         Console.WriteLine(result.ToJsonString());
     }
-    else if (mode == "depth") await DepthPreview.Run(Option("serial"), cancellation.Token);
     else if (mode == "d405") await DepthPreview.Run(Option("serial"), Option("view", "color"), cancellation.Token);
     else if (mode == "color") await ColorPreview.Run(Option("device"), Option("size"), int.Parse(Option("fps", "0")), Option("codec"), cancellation.Token);
     else if (mode == "devices") Console.WriteLine(JsonSerializer.Serialize(VideoDevices.List()));
