@@ -87,7 +87,6 @@ public sealed partial class PipersPlugin
     private string telemetryConnectionUiIssue = "";
     private string linkBackendToken = "";
     private long scenePermissionEpoch;
-    private long recoveryRequestId, recoveryAcknowledgedTicks, recoveryAcknowledgedSequence;
 
     private bool TelemetryIsFresh() => telemetry.Latest is { } receipt && receipt.BackendToken == token && receipt.IsFresh(Stopwatch.GetTimestamp());
     private void DisarmTelemetryTargets(string reason, bool clearLink, string? forgetApproval = null, bool forgetAllApprovals = false)
@@ -103,7 +102,7 @@ public sealed partial class PipersPlugin
         teleoperating = false;
         followRequest = 0; followInput.End();
         acknowledgedScenePose = null; linkErrorDegrees = null;
-        if (clearLink) { link = null; recoveryInProgress = false; }
+        if (clearLink) link = null;
     }
 
     private void PauseSceneFollowing()
@@ -388,7 +387,6 @@ public sealed partial class PipersPlugin
                 await PublishMeasuredGhosts(cancellation);
                 await PublishMeasuredScene(cancellation);
                 QueueWizardHighlight();
-                await ObserveRecovery(cancellation);
                 await Update(cancellation);
             }
             catch (Exception error) when (!cancellation.IsCancellationRequested)
@@ -401,37 +399,6 @@ public sealed partial class PipersPlugin
             }
             QueueHeightMaintenance();
             await Task.Delay(100, cancellation);
-        }
-    }
-
-    private async Task ObserveRecovery(CancellationToken cancellation)
-    {
-        if (RecoveryHomeBusy) return;
-        if (!recoveryInProgress || !HasFreshControlTelemetry(out var receipt)) return;
-        var device = Device(expectedToken: receipt!.BackendToken, sourceReceipt: receipt);
-        if (device["recovery_required"]?.GetValue<bool>() != true && device["reset_pending"]?.GetValue<bool>() != true)
-        {
-            recoveryInProgress = false;
-            message = "Recovery verified. The interrupted move was discarded. Enable robot when ready; measured scene tracking continues.";
-            return;
-        }
-        var plan = RecoveryPlan.Inspect(device, receipt.State["motion"]?["active"]?.GetValue<bool>() == true);
-        if (plan.RetryFailedReset)
-        {
-            long acknowledged = Interlocked.Read(ref recoveryAcknowledgedTicks);
-            if (acknowledged > 0 && (receipt.Sequence <= Interlocked.Read(ref recoveryAcknowledgedSequence) ||
-                receipt.ReceivedTicks - receipt.SourceAgeMilliseconds * Stopwatch.Frequency / 1000 <= acknowledged ||
-                receipt.State["motion"]?["request_id"]?.GetValue<long>() != Interlocked.Read(ref recoveryRequestId))) return;
-            // A failed native reset has retired. Release only the UI's waiting
-            // latch; a supported retry remains an explicit operator action.
-            recoveryInProgress = false;
-            message = "The previous reset did not clear STOP. Keep supporting the arm and use Retry failed reset when ready.";
-        }
-        else if (plan.Action == "verify-reset" && await commands.WaitAsync(0, cancellation))
-        {
-            try { await Command("verify-reset", null, cancellation, recoveryAcknowledged: true); recoveryInProgress = false; }
-            catch (InvalidOperationException error) { message = error.Message; recoveryInProgress = false; }
-            finally { commands.Release(); }
         }
     }
 

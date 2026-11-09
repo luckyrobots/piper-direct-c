@@ -26,7 +26,6 @@ public sealed partial class PipersPlugin
         DisarmTelemetryTargets("Operator STOP; previous actions discarded", clearLink: false, forgetApproval: profile.Id, forgetAllApprovals: groupActive);
         CancelHandGuideRecovery();
         uiEvents?.InvalidateControlEvents();
-        recoveryInProgress = false;
         message = "STOP requested · previous targets discarded · verifying hardware";
         using (var timeout = new CancellationTokenSource(StopAcknowledgementBudget))
         try

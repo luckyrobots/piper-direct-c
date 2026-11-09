@@ -204,7 +204,7 @@ public sealed partial class PipersPlugin
         }
         if (!switchingProfile && !string.IsNullOrEmpty(ActiveProfile.CanDeviceId) && snapshot["selected"]?.GetValue<string>() != ActiveProfile.CanDeviceId)
         {
-            approved = false; linkCommandsEnabled = false; recoveryInProgress = false;
+            approved = false; linkCommandsEnabled = false;
             if (teleoperating && await commands.WaitAsync(0, cancellation))
             {
                 try { await PauseTeleoperation(cancellation); }
@@ -292,7 +292,7 @@ public sealed partial class PipersPlugin
         if (link is not null) await engine.RequestAsync("robot.unsubscribe", cancellation: cancellation);
         CommandAuthority.Revoke();
         teleoperating = false; followInput.End(); followRequest = 0;
-        approved = pikaOwned = pikaMonitoring = linkCommandsEnabled = recoveryInProgress = false; link = null; linkErrorDegrees = null;
+        approved = pikaOwned = pikaMonitoring = linkCommandsEnabled = false; link = null; linkErrorDegrees = null;
         CancelHandGuideRecovery();
     }
 

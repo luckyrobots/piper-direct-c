@@ -33,7 +33,7 @@ public sealed partial class PipersPlugin : ILuckyPlugin
     internal RobotCommandAuthority CommandAuthority { get; } = new();
     private volatile bool approved, pikaOwned;
     private volatile RobotLink? link;
-    private volatile bool linkCommandsEnabled, recoveryInProgress;
+    private volatile bool linkCommandsEnabled;
     private double? linkErrorDegrees;
     private JsonObject? scene;
     private Task? worker;
@@ -346,20 +346,7 @@ public sealed partial class PipersPlugin : ILuckyPlugin
                 if (pikaOwned) await Call("/api/pika/disable", new JsonObject { ["owner"] = owner }, cancellation);
             }
             else if (id == "recovery.home") await StartRecoveryHome(cancellation);
-            else if (id == "recovery.card.run") await RunRecoveryCard(cancellation);
-            else if (id == "recovery.run")
-            {
-                var plan = RecoveryPlan.Inspect(Device(), state?["motion"]?["active"]?.GetValue<bool>() == true);
-                if (plan.Action is null) throw new InvalidOperationException(plan.NextStep);
-                linkCommandsEnabled = false;
-                // The explicitly labelled recovery action acknowledges support;
-                // it does not enable general motion controls for a new session.
-                var recoveryReply = await Command(plan.Action, null, cancellation, recoveryAcknowledged: true);
-                Interlocked.Exchange(ref recoveryRequestId, recoveryReply["request_id"]?.GetValue<long>() ?? 0);
-                Interlocked.Exchange(ref recoveryAcknowledgedSequence, telemetry.Latest?.Sequence ?? 0);
-                Interlocked.Exchange(ref recoveryAcknowledgedTicks, Stopwatch.GetTimestamp());
-                recoveryInProgress = plan.Action == "reset";
-            }
+            else if (id is "recovery.card.run" or "recovery.run") await RunRecoveryCard(cancellation, verifyOnly: id == "recovery.run");
             else if (id.StartsWith("camera.", StringComparison.Ordinal))
             {
                 string[] parts = id.Split('.'); string camera = parts[1];
@@ -664,10 +651,10 @@ public sealed partial class PipersPlugin : ILuckyPlugin
         bool manualPika = scope.Context.Page == WorkspacePage.Controls && ManualPikaBlocker(device, pika as JsonObject) is null;
         patches["pika.target"] = new() { ["value"] = opening ?? 0, ["enabled"] = manualPika };
         patches["pika.monitor"] = new() { ["text"] = pikaMonitorStatus };
-        bool needsRecovery = device?["recovery_required"]?.GetValue<bool>() == true || device?["reset_pending"]?.GetValue<bool>() == true;
-        var recovery = needsRecovery ? RecoveryPlan.Inspect(device!, snapshot?["motion"]?["active"]?.GetValue<bool>() == true) : null;
-        patches["recovery.run"] = new() { ["enabled"] = recovery?.Action is not null && !recoveryInProgress,
-            ["text"] = recoveryInProgress ? "Verifying recovery…" : recovery?.ButtonText ?? "Verify current state (no movement)" };
+        var recoveryCard = RecoveryCardState(device);
+        bool verifiable = VerifiesOnly(recoveryCard) && RecoveryCardCanRun(recoveryCard);
+        patches["recovery.run"] = new() { ["enabled"] = verifiable, ["text"] = verifiable ? recoveryCard.ActionText : "Verify controller state",
+            ["hint"] = recoveryCard.NextStep };
         foreach (string id in new[] { "bench", "gripper", "depth" })
         {
             patches["camera." + id + ".image"] = new() { ["visible"] = CameraFrameReady(id) };

@@ -95,6 +95,8 @@ internal static class RecoveryWorkspaceTests
         {
             Fresh(); await Click("enable");
             check(calls.Actions.Count == 0 && Get<bool>("recoveryGuideOpen"), "Generic Recover click removed torque instead of opening its supported guide");
+            Fresh(); await Click("recovery.run");
+            check(calls.Actions.Count == 0, "Diagnostics' Verify controller state ran a power-changing supported STOP recovery");
             using (SimulatedRecovery(PipersPlugin.RecoveryKind.ReturnToZero))
             {
                 Fresh(); await Click("disable");
@@ -116,7 +118,6 @@ internal static class RecoveryWorkspaceTests
             check(calls.Actions.SequenceEqual(["recover-at-pose"]) && Get<bool>("handGuideRecoveryCommandSent"),
                 "A qualified green/off cycle did not admit the explicit same-pose return");
             calls.Actions.Clear(); Set("handGuideRecoveryCommandSent", false);
-            Set("recoveryInProgress", false);
             device["status"]!["arm_status"] = 0; device["teaching"]!["phase"] = "off";
             device["status"]!["control"] = 1; device["status"]!["teach_state"] = 0;
             foreach (var joint in device["joints"]!.AsArray()) joint!["enabled"] = false;
@@ -146,6 +147,10 @@ internal static class RecoveryWorkspaceTests
             check(retiredGrant && !Get<bool>("approved") && calls.Actions.Count == 0, "A recovery continuation granted holding permission after STOP");
             Set("recoveryOperation", null);
             device["fresh"] = true; device["joints"]![0]!["fresh"] = true;
+            device["reset_pending"] = true; device["recovery_required"] = true;
+            Fresh(); await Click("recovery.run");
+            check(calls.Actions.SequenceEqual(["verify-reset"]), "Diagnostics' Verify controller state did not run the recovery card's verification");
+            calls.Actions.Clear(); device["reset_pending"] = false; device["recovery_required"] = false;
             device["blocker"] = "Another controller is sending commands on this CAN bus.";
             Set("approved", true);
             Fresh(); await Click("enable");

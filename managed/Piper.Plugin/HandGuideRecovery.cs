@@ -133,18 +133,24 @@ public sealed partial class PipersPlugin
     private bool RecoveryGuideFor(JsonObject? device) => device is not null && recoveryGuideOpen && recoveryGuideScope == RecoveryConnectionIdentity(device);
 
     private RecoveryWorkspaceState RecoveryCardState(JsonObject? device) => RecoveryWorkspaceState.Inspect(device,
-        state?["motion"]?["active"]?.GetValue<bool>() == true, recoveryInProgress || SupportedRecoveryBusy && RecoveryGuideFor(device));
+        state?["motion"]?["active"]?.GetValue<bool>() == true, SupportedRecoveryBusy && RecoveryGuideFor(device));
 
     private bool RecoveryCardCanRun(RecoveryWorkspaceState view) => view.CanAct && !switchingProfile && CurrentRecovery is null && !GroupFollowActive;
 
-    private async Task RunRecoveryCard(CancellationToken cancellation)
+    private static bool VerifiesOnly(RecoveryWorkspaceState view) => view.NextAction is RecoveryWorkspaceAction.VerifyReset or RecoveryWorkspaceAction.VerifyCurrent;
+
+    /// <summary>The single recovery entry point. The Controls card runs its next
+    /// step; Diagnostics' "Verify controller state" (verifyOnly) may run only the
+    /// card's verification steps, which change neither motor power nor position.</summary>
+    private async Task RunRecoveryCard(CancellationToken cancellation, bool verifyOnly = false)
     {
-        if (Navigation.Page != WorkspacePage.Controls) throw new InvalidOperationException("Return to Controls to use the recovery guide.");
+        if (!verifyOnly && Navigation.Page != WorkspacePage.Controls) throw new InvalidOperationException("Return to Controls to use the recovery guide.");
         long permissionEpoch = CommandAuthority.Epoch;
         var device = Device();
         var view = RecoveryCardState(device);
         if (!RecoveryCardCanRun(view)) throw new InvalidOperationException(view.CanAct ? "Wait for the current robot action to finish before continuing recovery." : view.NextStep);
-        recoveryGuideOpen = true; recoveryGuideScope = RecoveryConnectionIdentity(device);
+        if (verifyOnly && !VerifiesOnly(view)) throw new InvalidOperationException("Use the recovery card on Controls for this step. " + view.NextStep);
+        if (!verifyOnly) { recoveryGuideOpen = true; recoveryGuideScope = RecoveryConnectionIdentity(device); }
         try
         {
             switch (view.NextAction)

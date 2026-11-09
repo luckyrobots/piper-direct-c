@@ -28,7 +28,7 @@ public sealed partial class PipersPlugin
     {
         if (Navigation.Page != WorkspacePage.Controls) return "Return to Controls before recovering to zero.";
         if (GroupFollowActive) return "Stop following before recovering to zero.";
-        if (CurrentRecovery is not null || recoveryInProgress || switchingProfile) return "Wait for the current recovery or connection change.";
+        if (CurrentRecovery is not null || switchingProfile) return "Wait for the current recovery or connection change.";
         try
         {
             var current = snapshot ?? HomeSnapshot();

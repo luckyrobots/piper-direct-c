@@ -286,7 +286,6 @@ Check(RecoveryPlan.Inspect(stopped, false).Action == "verify-current", "Healthy 
 stopped["status"]!["teach_state"] = 3;
 Check(RecoveryPlan.Inspect(stopped, false).Action is null, "Active teaching must not reset");
 RecoveryPlanTests.Run(Check);
-await RecoveryPlanTests.RunObservation(Check);
 RecoveryWorkspaceTests.Run(Check);
 await RecoveryWorkspaceTests.RunEvents(Check);
 await RecoveryWorkspaceTests.RunSupportedSequence(Check);

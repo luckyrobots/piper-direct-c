@@ -5,8 +5,6 @@ namespace LuckyRobots.Piper.Plugin;
 public sealed record RecoveryPlan(string Diagnosis, string NextStep, string? Action)
 {
     public bool RetryFailedReset { get; init; }
-    public string ButtonText => RetryFailedReset ? "Rest arm securely — retry failed reset"
-        : Action == "reset" ? "Clear & rest arm securely — recover" : "Verify current state (no movement)";
     public static RecoveryPlan Inspect(JsonObject device, bool moving)
     {
         var incident = device["stop_event"];
