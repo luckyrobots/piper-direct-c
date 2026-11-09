@@ -91,13 +91,10 @@ public sealed partial class PipersPlugin
                     }, async (request, stopping) =>
                     {
                         // A timeout within this operation can still stop its own
-                        // exact move. Priority STOP revocation already owns the
-                        // transport if the epoch changed.
+                        // exact move; RecoveryHome.Run already matched the device,
+                        // generation, owner and active request. Priority STOP
+                        // revocation already owns the transport if the epoch changed.
                         if (!RecoveryScopeMatches(operation)) return;
-                        var current = HomeSnapshot(operation);
-                        if (current.Device["id"]?.GetValue<string>() != deviceId || current.Device["generation"]?.GetValue<long>() != generation ||
-                            current.Motion["request_id"]?.GetValue<long>() != request || current.Motion["owner"]?.GetValue<string>() != owner ||
-                            current.Motion["active"]?.GetValue<bool>() != true) return;
                         await Call("/api/stop", new JsonObject { ["device_id"] = deviceId, ["generation"] = generation,
                             ["request_id"] = request, ["owner"] = owner }, stopping, backend);
                     }, stage => SaveProgress(stage), operation.Token);
