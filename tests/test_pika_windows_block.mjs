@@ -5,11 +5,12 @@ const element = id => {
   return elements.get(id);
 };
 globalThis.document = { hidden: false, hasFocus: () => true, getElementById: element, addEventListener() {} };
-globalThis.window = { addEventListener() {} };
+let stateListener;
+globalThis.window = { addEventListener(name, fn) { if (name === 'piper-state') stateListener = fn; } };
 globalThis.setInterval = () => {}; globalThis.setTimeout = () => {};
 Object.defineProperty(globalThis, 'navigator', { value: { platform: 'Win32', serial: { async requestPort() { attempted++; throw Error('must not run'); } } }, configurable: true });
-globalThis.fetch = async () => ({ ok: true, json: async () => ({ simulated: false, token: 'fixture', pika: { configured: false, transport: 'disabled' } }) });
 await import('../web/pika.mjs');
+stateListener({ detail: { simulated: false, token: 'fixture', pika: { configured: false, transport: 'disabled' } } });
 for (let i = 0; i < 20; i++) await Promise.resolve();
 assert.equal(element('pika-connect').disabled, true);
 await element('pika-connect').onclick();
