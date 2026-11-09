@@ -295,8 +295,13 @@ static void update_stationary(struct can_device *d,double now)
     }
     if (d->stationary_phase==STATIONARY_STRICT_STILL&&velocity_moving) stationary_enter(d,STATIONARY_POSE_QUIET,now);
     else if (d->stationary_phase==STATIONARY_POSE_QUIET&&!velocity_moving&&velocity_quiet) stationary_enter(d,STATIONARY_STRICT_STILL,now);
-    assert((d->pose_stationary_since!=0)==(d->stationary_phase>=STATIONARY_POSE_QUIET)&&
-        (d->stationary_since!=0)==(d->stationary_phase==STATIONARY_STRICT_STILL));
+    /* This runs on live feedback. An inconsistent detector fails safe: it
+       forgets stillness, so every stationary gate waits for a new dwell. */
+    if ((d->pose_stationary_since!=0)!=(d->stationary_phase>=STATIONARY_POSE_QUIET)||
+        (d->stationary_since!=0)!=(d->stationary_phase==STATIONARY_STRICT_STILL)) {
+        fprintf(stderr,"%s: stationary detector state inconsistent (phase %d); stillness forgotten.\n",d->id,(int)d->stationary_phase);
+        can_bus_forget_stationary(d);
+    }
 }
 void can_bus_ingest(struct can_device *d,const struct can_frame *f,bool local,double now)
 {

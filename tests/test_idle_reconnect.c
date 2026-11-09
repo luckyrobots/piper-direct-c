@@ -32,14 +32,14 @@ int main(void)
 {
     struct controller controller={0};can_bus_init(&controller.bus,false);controller.bus.sequence=2;
     struct can_device *healthy=&controller.bus.devices[0],*failed=&controller.bus.devices[1];
-    strcpy(healthy->id,"usb:healthy");healthy->fd=0;healthy->generation=1;
+    strcpy(healthy->id,"usb:healthy");healthy->fd=FIXTURE_FD;healthy->generation=1;
     healthy->present=healthy->up=healthy->stable=healthy->link_verified=true;healthy->last_rx=clock_now;
     strcpy(healthy->feedback.hardware,"H-V1.2-1");strcpy(healthy->feedback.version,"S-V1.9-0");
     healthy->feedback.arm[0].deg[2]=-32.125;healthy->feedback.motor[2].enabled=true;
     for (unsigned i=0;i<6;++i) { healthy->feedback.limit[i].seen=true;healthy->feedback.acceleration[i].seen=true; }
     healthy->rx=12345;healthy->tx=12;
     struct can_device saved_healthy=*healthy;
-    strcpy(failed->id,"usb:failed");failed->fd=1;failed->generation=2;failed->present=failed->up=true;
+    strcpy(failed->id,"usb:failed");failed->fd=FIXTURE_FD;failed->generation=2;failed->present=failed->up=true;
     strcpy(failed->problem,"Windows USB-CAN send failed (transport 14, WinUSB 121)");
     strcpy(controller.selected,failed->id);
 

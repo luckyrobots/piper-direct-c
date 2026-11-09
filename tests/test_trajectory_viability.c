@@ -99,7 +99,7 @@ static void fixture(struct controller *c,char directory[96])
     cJSON_AddStringToObject(body,"owner","trajectory-viability-fixture");cJSON_AddStringToObject(body,"action","follow-start");
     cJSON_AddNumberToObject(body,"speed_percent",90);cJSON_AddBoolToObject(body,"trajectory",true);
     cJSON_AddBoolToObject(body,"standalone",true);cJSON_AddBoolToObject(body,"clear",true);
-    int status;cJSON *reply=controller_action(c,"/api/command",body,&status);CHECK(status==202&&LANE(c)->trajectory_follow);
+    int status;cJSON *reply=controller_action(c,"/api/command",body,&status);CHECK(status==202&&(LANE(c)->stage==STAGE_MOVE_TRAJECTORY));
     cJSON_Delete(reply);cJSON_Delete(body);
 }
 static void close_fixture(struct controller *c,const char *directory)
@@ -139,7 +139,7 @@ int main(void)
         if (failure==5) device->feedback.arm[0].error=1;
         if (failure==6) LANE(&c)->trajectory_velocity[1]=NAN;
         clock_now+=.025;LANE(&c)->heartbeat=LANE(&c)->follow_updated=clock_now;controller_tick(&c,clock_now);
-        CHECK(LANE(&c)->op==OP_IDLE&&!LANE(&c)->trajectory_follow);
+        CHECK(LANE(&c)->op==OP_IDLE&&!(LANE(&c)->stage==STAGE_MOVE_TRAJECTORY));
         if (!failure) {
             CHECK(LANE(&c)->follow!=FOLLOW_LIVE&&!stop_packets&&pose_packets==1&&device->feedback.motor[1].enabled);
             CHECK(strstr(LANE(&c)->message,"boundary")&&strstr(LANE(&c)->message,"Holding"));

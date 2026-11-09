@@ -1,6 +1,5 @@
 #define _GNU_SOURCE
 #include "controller_internal.h"
-#include <assert.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <math.h>
@@ -88,7 +87,13 @@ static bool persist(struct controller *c)
                                                      verified recovery
      "kind":  why it is latched (intent, stop, obstruction, power, reset); empty
               when clear. Recovery eligibility uses kind, never message text.
-     "stop_event_active": unacknowledged STOP evidence; it implies a latch.
+     "reason": the operator-facing text of the latch; empty when clear.
+     "kind_reason": the reason that "kind" was set for. This build writes
+              reason and kind_reason together, so a mismatch means an older
+              build rewrote reason and kind must be derived again.
+     "stop_event": the first STOP's evidence (reason, kind, joints, transport).
+     "stop_event_active": unacknowledged STOP evidence; it implies a latch,
+              so normalizing a clear record with active evidence latches it.
    A separate legacy motion-stops.json entry also blocks until acknowledged.
    The "blocked"/"reset_pending" booleans are still written so an older build
    reading this file stays blocked. Records written before "state"/"kind"
@@ -123,6 +128,8 @@ static const char *legacy_kind(const cJSON *r)
    fields, so after a rollback and upgrade "state"/"kind" can be stale.
    - state: any disagreement with the booleans resolves to the stricter
      reading (latched if either side says so, reset-pending likewise).
+     Active STOP evidence also says latched, so "stop_event_active" without
+     a latch cannot survive normalization.
    - kind: "kind_reason" records the reason kind was set for. A reason that
      no longer matches it was written by an older build, so kind is derived
      again from that text. Rewording messages in code never trips this,
@@ -131,7 +138,7 @@ static void record_normalize(cJSON *r)
 {
     const char *state=text_field(r,"state");
     bool known=record_state_valid(state);
-    bool latched=yes(r,"blocked")||yes(r,"reset_pending")||(known&&strcmp(state,RECORD_CLEAR));
+    bool latched=yes(r,"blocked")||yes(r,"reset_pending")||yes(r,"stop_event_active")||(known&&strcmp(state,RECORD_CLEAR));
     bool pending=yes(r,"reset_pending")||(known&&!strcmp(state,RECORD_RESET_PENDING));
     const char *derived=!latched?RECORD_CLEAR:pending?RECORD_RESET_PENDING:RECORD_LATCHED;
     bool state_stale=!known||strcmp(state,derived)||yes(r,"blocked")!=latched||yes(r,"reset_pending")!=pending;
@@ -209,26 +216,52 @@ static void message(struct controller_lane *l,const char *phase,const char *form
 static void lane_go_idle(struct controller_lane *l)
 {
     l->op=OP_IDLE; l->owner[0]=0;
-    l->stage=STAGE_NONE;
-    l->follow=FOLLOW_NONE; l->trajectory_follow=false;
-    l->range_followup=l->arrival_hold=false; l->synchronized_pose=false;
-    l->position_seed_pending=false; l->recovering_at_pose=false;
+    l->stage=STAGE_NONE; l->pose_phase=POSE_NONE;
+    l->follow=FOLLOW_NONE; l->recovering_at_pose=false;
     l->settled_at=l->final_sent_at=0;
 }
 static bool cycle_stage(enum lane_stage stage) { return stage>=STAGE_CYCLE_RAISING&&stage<=STAGE_CYCLE_RETURNING; }
 static bool teach_stage(enum lane_stage stage) { return stage>=STAGE_TEACH_STANDBY&&stage<=STAGE_TEACH_MODE; }
 static bool teach_seamless(const struct controller_lane *l) { return l->stage==STAGE_TEACH_SEEDED||l->stage==STAGE_TEACH_MODE; }
-/* The C-A invariants. Illegal combinations abort offline tests and debug builds. */
-static void lane_check(const struct controller_lane *l)
+/* The op each stage refines; STAGE_NONE refines none. */
+static enum operation stage_op(enum lane_stage stage)
 {
-    assert(cycle_stage(l->stage)==(l->op==OP_CYCLE));
-    assert(teach_stage(l->stage)==(l->op==OP_TEACH_RETURN));
-    assert(l->follow==FOLLOW_NONE||l->op==OP_MOVE);
-    assert(!l->trajectory_follow||l->op==OP_MOVE);
-    assert(!l->range_followup||l->op==OP_ALIGN);
-    assert(!l->recovering_at_pose||l->op==OP_TEACH_RETURN);
-    assert(l->op!=OP_IDLE||(!l->arrival_hold&&!l->synchronized_pose&&!l->position_seed_pending));
-    (void)l;
+    switch (stage) {
+    case STAGE_NONE: return OP_IDLE;
+    case STAGE_CYCLE_RAISING: case STAGE_CYCLE_UPRIGHT: case STAGE_CYCLE_RETURNING: return OP_CYCLE;
+    case STAGE_TEACH_STANDBY: case STAGE_TEACH_CAN: case STAGE_TEACH_SEEDED: case STAGE_TEACH_MODE: return OP_TEACH_RETURN;
+    case STAGE_ALIGN_FOLLOWUP: return OP_ALIGN;
+    case STAGE_MOVE_SYNCHRONIZED: case STAGE_MOVE_TRAJECTORY: return OP_MOVE;
+    }
+    return OP_IDLE;
+}
+static bool position_op(enum operation op) { return op==OP_MOVE||op==OP_ALIGN||op==OP_CYCLE; }
+static bool arrival_holding(const struct controller_lane *l) { return l->pose_phase==POSE_ARRIVAL_HOLD; }
+static bool trajectory_following(const struct controller_lane *l) { return l->stage==STAGE_MOVE_TRAJECTORY; }
+/* Cycle legs and synchronized moves interpolate every joint along one leg. */
+static bool leg_interpolated(const struct controller_lane *l) { return l->op==OP_CYCLE||l->stage==STAGE_MOVE_SYNCHRONIZED; }
+/* A new leg or an operator hold retires a pending arrival hold. Seeding is
+   kept: the frozen pose must still go out before any new destination. */
+static void leave_arrival_hold(struct controller_lane *l)
+{
+    if (l->pose_phase==POSE_ARRIVAL_HOLD) l->pose_phase=POSE_TRACKING;
+    l->arrival_hold_at=0;
+}
+/* The C-A invariants the enums cannot express. Returns the first broken one. */
+static const char *lane_violation(const struct controller_lane *l)
+{
+    if (l->stage!=STAGE_NONE&&stage_op(l->stage)!=l->op) return "stage does not refine the active operation";
+    if (l->op==OP_CYCLE&&!cycle_stage(l->stage)) return "cycle without a cycle stage";
+    if (l->op==OP_TEACH_RETURN&&!teach_stage(l->stage)) return "teaching return without a teaching stage";
+    if (l->follow!=FOLLOW_NONE&&l->op!=OP_MOVE) return "following outside a move";
+    if (l->follow!=FOLLOW_NONE&&l->stage!=STAGE_NONE&&l->stage!=STAGE_MOVE_TRAJECTORY) return "following with a non-following move stage";
+    if (trajectory_following(l)&&l->follow!=FOLLOW_LIVE) return "trajectory reference without live following";
+    if ((l->pose_phase!=POSE_NONE)!=position_op(l->op)) return "pose phase does not match the operation";
+    if (arrival_holding(l)&&l->op!=OP_MOVE&&l->op!=OP_ALIGN) return "arrival hold outside a move or range entry";
+    if (l->pose_phase==POSE_SEEDING&&l->follow!=FOLLOW_NONE) return "seed pending during following";
+    if (l->recovering_at_pose&&!(l->op==OP_TEACH_RETURN&&teach_seamless(l))) return "recover-at-pose outside a seamless teaching return";
+    if (l->op==OP_IDLE&&(l->settled_at||l->final_sent_at||*l->owner)) return "idle lane keeps operation timers or owner";
+    return NULL;
 }
 /* Lanes (C-F): every lane operation receives its struct controller_lane *
    explicitly; there is no selected-lane copy to commit or restore. lane_for
@@ -610,7 +643,7 @@ static void abandon_teaching_return(struct controller_lane *l,const char *reason
 }
 static bool send_pose(struct controller *c,struct controller_lane *l,struct can_device *d,const double target[6])
 {
-    unsigned speed=l->op==OP_ALIGN||l->arrival_hold?1:(unsigned)fmax(1,ceil(l->speed_percent));
+    unsigned speed=l->op==OP_ALIGN||arrival_holding(l)?1:(unsigned)fmax(1,ceil(l->speed_percent));
     struct can_frame f[4]; f[0]=piper_mode(speed);
     if (!piper_targets(target,f+1)) { l->pose_tx_valid=false; return false; }
     int32_t encoded[6]; bool same=true;
@@ -647,7 +680,7 @@ static void lane_stop(struct controller *c,struct controller_lane *l,const char 
             num(event,"joint",l->obstruction_joint); num(event,"threshold_s",.5); num(event,"tolerance_deg",l->tolerance);
             num(event,"request_id",l->request_id); num(event,"speed_deg_s",l->speed);
             flag(event,"following",l->follow==FOLLOW_LIVE); flag(event,"finishing_target",l->follow==FOLLOW_COMMITTED);
-            flag(event,"trajectory_follow",l->trajectory_follow);
+            flag(event,"trajectory_follow",trajectory_following(l));
             num(event,"follow_sequence",l->follow_sequence);
             str(event,"phase_before_stop",l->phase);
             if (l->follow!=FOLLOW_NONE) {
@@ -717,6 +750,22 @@ void controller_stop_obstruction(struct controller *c,const char *reason)
 {
     struct controller_lane *l=lane_for(c,c->selected); if (l) lane_stop(c,l,KIND_OBSTRUCTION,reason);
 }
+/* Runs after every action and tick on a live arm. A broken C-A invariant
+   fails safe: it is logged, the lane is stopped and the recovery record is
+   latched. It never aborts the daemon. Returns false when it stopped the lane. */
+static bool lane_check(struct controller *c,struct controller_lane *l)
+{
+    const char *broken=lane_violation(l);
+    if (!broken) return true;
+    char reason[200]; snprintf(reason,sizeof reason,"Internal lane state is inconsistent (%s); action stopped.",broken);
+    fprintf(stderr,"lane %s: invariant broken: %s\n",l->lane_device,broken);
+    bool known=can_bus_find(&c->bus,l->lane_device)!=NULL;
+    stop_lane(c,l,reason);
+    /* lane_stop latches through the device record; a lane without a device
+       still latches its own id so nothing resumes from this state. */
+    if (!known&&*l->lane_device) latch(c,l->lane_device,reason,KIND_STOP,reset_pending(c,l->lane_device));
+    return false;
+}
 static void finish(struct controller *c,struct controller_lane *l,struct can_device *d,const char *result,bool clear)
 {
     lane_go_idle(l);
@@ -774,8 +823,8 @@ static bool controller_init_devices(struct controller *c,bool simulation,unsigne
     cJSON *saved_record;
     cJSON_ArrayForEach(saved_record,field(c->saved,"devices")) {
         if (!cJSON_IsObject(saved_record)) return false;
-        const char *keys[]={"blocked","reset_pending"};
-        for (unsigned i=0;i<2;++i) if (field(saved_record,keys[i])&&!cJSON_IsBool(field(saved_record,keys[i]))) return false;
+        const char *keys[]={"blocked","reset_pending","stop_event_active"};
+        for (unsigned i=0;i<3;++i) if (field(saved_record,keys[i])&&!cJSON_IsBool(field(saved_record,keys[i]))) return false;
         if (field(saved_record,"state")&&(!cJSON_IsString(field(saved_record,"state"))||!record_state_valid(text_field(saved_record,"state")))) return false;
         if (field(saved_record,"kind")&&!cJSON_IsString(field(saved_record,"kind"))) return false;
         record_normalize(saved_record);
@@ -851,19 +900,17 @@ static void begin(struct controller *c,struct controller_lane *l,struct can_devi
     l->sent_at=l->settled_at=l->final_sent_at=0; l->best_error=1e9; l->enable_count=0; l->request_id=++c->next_request_id;
     l->power_cursor=0;
     l->pose_tx_valid=false;
-    l->position_seed_pending=false;
     memset(l->power_requested,0,sizeof l->power_requested);
     memset(l->power_acknowledged,0,sizeof l->power_acknowledged);
     memset(l->power_first_sent_at,0,sizeof l->power_first_sent_at);
     memset(l->power_last_sent_at,0,sizeof l->power_last_sent_at);
     memset(l->enable_baseline,0,sizeof l->enable_baseline);
     l->stage=STAGE_NONE;
+    /* Admission moves a position op to POSE_SEEDING unless it follows. */
+    l->pose_phase=position_op(op)?POSE_TRACKING:POSE_NONE; l->arrival_hold_at=0;
     l->recovering_at_pose=false;
-    l->synchronized_pose=false;
-    l->range_followup=false;
-    l->arrival_hold=false; l->arrival_hold_at=0;
     l->follow=FOLLOW_NONE; l->follow_updated=0; l->follow_sequence=0;
-    l->trajectory_follow=false; l->trajectory_previous_dt=0;
+    l->trajectory_previous_dt=0;
     memset(l->trajectory_velocity,0,sizeof l->trajectory_velocity);
     snprintf(l->owner,sizeof l->owner,"%s",owner);
     memcpy(l->initial,d->feedback.arm[0].deg,sizeof l->initial);
@@ -871,7 +918,7 @@ static void begin(struct controller *c,struct controller_lane *l,struct can_devi
 }
 static void cycle_leg(struct controller_lane *l,struct can_device *d,double now)
 {
-    l->arrival_hold=false; l->arrival_hold_at=0;
+    leave_arrival_hold(l);
     for (unsigned i=0;i<6;++i) obstruction_reset(&l->obstruction[i],now);
     memcpy(l->leg_start,d->feedback.arm[0].deg,sizeof l->leg_start);
     memcpy(l->command,l->leg_start,sizeof l->command);
@@ -994,8 +1041,36 @@ enum trajectory_step_result trajectory_reference_step(struct controller_lane *l,
     l->trajectory_previous_dt=dt;
     return TRAJECTORY_STEP_OK;
 }
+/* The HTTP routes and /api/command actions, parsed once at the boundary. */
+enum api_route { ROUTE_UNKNOWN, ROUTE_SELECT, ROUTE_STOP, ROUTE_RECONNECT, ROUTE_HEARTBEAT, ROUTE_QUERY, ROUTE_COMMAND };
+enum control_action {
+    ACTION_UNKNOWN, ACTION_HOLD, ACTION_FOLLOW_START, ACTION_FOLLOW_UPDATE, ACTION_FOLLOW_COMMIT, ACTION_FOLLOW_END,
+    ACTION_TEACH_RETURN, ACTION_RECOVER_AT_POSE, ACTION_VERIFY_CURRENT,
+    ACTION_DISABLE, ACTION_RESET, ACTION_VERIFY_RESET, ACTION_VERIFY_DISABLED,
+    ACTION_ENABLE, ACTION_ALIGN, ACTION_CYCLE, ACTION_MOVE_TO_ZERO, ACTION_POSE, ACTION_JOINT, ACTION_JOG, ACTION_ZERO, ACTION_GRIPPER
+};
+static enum api_route parse_route(const char *route)
+{
+    static const struct { const char *path; enum api_route route; } routes[]={
+        {"/api/select",ROUTE_SELECT},{"/api/stop",ROUTE_STOP},{"/api/reconnect",ROUTE_RECONNECT},
+        {"/api/heartbeat",ROUTE_HEARTBEAT},{"/api/query",ROUTE_QUERY},{"/api/command",ROUTE_COMMAND}};
+    for (size_t i=0;i<sizeof routes/sizeof *routes;++i) if (!strcmp(route,routes[i].path)) return routes[i].route;
+    return ROUTE_UNKNOWN;
+}
+static enum control_action parse_action(const char *action)
+{
+    static const struct { const char *name; enum control_action action; } actions[]={
+        {"hold",ACTION_HOLD},{"follow-start",ACTION_FOLLOW_START},{"follow-update",ACTION_FOLLOW_UPDATE},
+        {"follow-commit",ACTION_FOLLOW_COMMIT},{"follow-end",ACTION_FOLLOW_END},{"teach-return",ACTION_TEACH_RETURN},
+        {"recover-at-pose",ACTION_RECOVER_AT_POSE},{"verify-current",ACTION_VERIFY_CURRENT},{"disable",ACTION_DISABLE},
+        {"reset",ACTION_RESET},{"verify-reset",ACTION_VERIFY_RESET},{"verify-disabled",ACTION_VERIFY_DISABLED},
+        {"enable",ACTION_ENABLE},{"align",ACTION_ALIGN},{"cycle",ACTION_CYCLE},{"move-to-zero",ACTION_MOVE_TO_ZERO},
+        {"pose",ACTION_POSE},{"joint",ACTION_JOINT},{"jog",ACTION_JOG},{"zero",ACTION_ZERO},{"gripper",ACTION_GRIPPER}};
+    for (size_t i=0;i<sizeof actions/sizeof *actions;++i) if (!strcmp(action,actions[i].name)) return actions[i].action;
+    return ACTION_UNKNOWN;
+}
 /* follow-update, follow-commit or follow-end for the lane's live session. */
-static cJSON *follow_command(struct controller *c,struct controller_lane *l,struct can_device *d,const cJSON *body,const char *action,double now,int *status)
+static cJSON *follow_command(struct controller *c,struct controller_lane *l,struct can_device *d,const cJSON *body,enum control_action action,double now,int *status)
 {
     double request,generation,sequence;
     if (!d||strcmp(l->owner,text_field(body,"owner"))||strcmp(d->id,text_field(body,"device_id"))||
@@ -1006,12 +1081,12 @@ static cJSON *follow_command(struct controller *c,struct controller_lane *l,stru
         follow_hold(c,l,d,now,"Following input expired after 250 ms. Holding measured pose; no target replay.");
         return reply(status,409,l->message);
     }
-    if (!strcmp(action,"follow-end")) {
+    if (action==ACTION_FOLLOW_END) {
         bool held=follow_hold(c,l,d,now,"Movement stopped. Holding measured pose; motors remain enabled.");
         return reply(status,held?200:409,l->message);
     }
     if (l->follow!=FOLLOW_LIVE) return reply(status,409,"This drag was already released. Start a new gesture to change its target.");
-    if (l->trajectory_follow&&!strcmp(action,"follow-commit"))
+    if (trajectory_following(l)&&action==ACTION_FOLLOW_COMMIT)
         return reply(status,409,"Trajectory following requires live samples; finish with follow-end to hold the measured pose.");
     if (!numeric(body,"sequence",1,UINT32_MAX,&sequence)||sequence!=floor(sequence)||sequence<=l->follow_sequence)
         return reply(status,409,"Discarded an old following target.");
@@ -1027,7 +1102,7 @@ static cJSON *follow_command(struct controller *c,struct controller_lane *l,stru
     if (!valid_target(l,d,target)) return reply(status,400,l->error);
     memcpy(l->target,target,sizeof target); l->follow_sequence=(unsigned)sequence;
     l->follow_updated=l->heartbeat=now;
-    if (!strcmp(action,"follow-commit")) {
+    if (action==ACTION_FOLLOW_COMMIT) {
         l->follow=FOLLOW_COMMITTED;
         l->started=l->progress_at=now; l->best_error=1e9;
         l->settled_at=l->final_sent_at=0;
@@ -1036,16 +1111,361 @@ static cJSON *follow_command(struct controller *c,struct controller_lane *l,stru
     }
     return reply(status,202,"Latest following target accepted.");
 }
-static cJSON *lane_action(struct controller *c,struct controller_lane *l,const char *route,const cJSON *body,int *status)
+/* /api/stop for one lane, after its device and generation checks. */
+static cJSON *lane_stop_request(struct controller *c,struct controller_lane *l,const cJSON *body,int *status)
+{
+    if (field(body,"request_id")) {
+        double request;
+        if (l->op==OP_IDLE||strcmp(l->owner,text_field(body,"owner"))||!numeric(body,"request_id",1,UINT32_MAX,&request)||request!=l->request_id)
+            return reply(status,409,"No matching active action for this automatic stop.");
+    }
+    stop_lane(c,l,"Operator stop."); return reply(status,200,l->message);
+}
+static cJSON *lane_heartbeat(struct controller *c,struct controller_lane *l,struct can_device *d,const cJSON *body,double now,int *status)
+{
+    double request;
+    if (!d||d->generation!=l->generation) return reply(status,409,"The control lease belongs to another CAN connection generation.");
+    if (l->op!=OP_IDLE&&now-l->heartbeat>=lease_timeout_s) {
+        if (l->op==OP_TEACH_RETURN) abandon_teaching_return(l,"Control lease expired.");
+        else stop_lane(c,l,"Control heartbeat expired.");
+        return reply(status,409,l->message);
+    }
+    if (l->op==OP_IDLE||strcmp(l->owner,text_field(body,"owner"))||!numeric(body,"request_id",1,UINT32_MAX,&request)||request!=l->request_id)
+        return reply(status,409,"No matching active control lease.");
+    l->heartbeat=now; return reply(status,200,"Control lease renewed.");
+}
+/* The owner's hold on an active lane: ALIGN cancels with STOP, GRIPPER stops
+   at its last target, MOVE and CYCLE hold the measured pose. */
+static cJSON *lane_hold(struct controller *c,struct controller_lane *l,struct can_device *d,const cJSON *body,double now,int *status)
+{
+    switch (l->op) {
+    case OP_ALIGN: {
+        double request,generation;
+        if (!d||strcmp(d->id,text_field(body,"device_id"))||
+            !numeric(body,"generation",1,UINT32_MAX,&generation)||generation!=l->generation||d->generation!=l->generation||
+            !numeric(body,"request_id",1,UINT32_MAX,&request)||request!=l->request_id)
+            return reply(status,409,"Range-entry cancellation belongs to another controller action or CAN connection.");
+        /* A full measured pose outside its limits cannot be encoded as a
+           legal hold target. Cancel the pending destination with STOP. */
+        stop_lane(c,l,"Operator cancelled range entry; the pending destination was discarded.");
+        return reply(status,200,l->message);
+    }
+    case OP_GRIPPER: {
+        const char *why=health(d,now,CHECK_CONTROL); if (why) return reply(status,409,why);
+        if (d->generation!=l->generation||!enabled(d,true,0)||!d->feedback.gripper_enabled) return reply(status,409,"Connection or motor enable changed during gripper motion.");
+        if (now-l->heartbeat>=lease_timeout_s||!d->feedback.gripper_seen||!piper_recent(d->feedback.gripper_at,now)||d->feedback.gripper_fault) return reply(status,409,"Fresh gripper feedback and an active lease are required to hold.");
+        if (!l->sent_at) return reply(status,409,"No gripper target has been transmitted yet.");
+        finish(c,l,d,"Gripper ramp stopped at its last transmitted target and effort limit. Contact or a secure grasp is not verified.",true);
+        return reply(status,200,l->message);
+    }
+    case OP_MOVE: case OP_CYCLE: {
+        double request;
+        if (field(body,"request_id")&&(!numeric(body,"request_id",1,UINT32_MAX,&request)||request!=l->request_id))
+            return reply(status,409,"Hold belongs to an older movement.");
+        if (l->follow!=FOLLOW_NONE) {
+            bool held=follow_hold(c,l,d,now,"Following paused. Holding measured pose; motors remain enabled.");
+            return reply(status,held?200:409,l->message);
+        }
+        const char *why=health(d,now,CHECK_CONTROL); if (why) return reply(status,409,why);
+        leave_arrival_hold(l);
+        memcpy(l->target,d->feedback.arm[0].deg,sizeof l->target); memcpy(l->command,l->target,sizeof l->command);
+        bool was_cycle=l->op==OP_CYCLE; l->op=OP_MOVE; l->stage=STAGE_NONE;
+        if (was_cycle) { l->started=l->progress_at=now; l->best_error=1e9; }
+        l->settled_at=l->final_sent_at=0; l->heartbeat=now;
+        message(l,"holding","%s",was_cycle?"Upright/return sequence cancelled. Holding here; no automatic return will run.":"Holding the current measured pose.");
+        return reply(status,202,l->message);
+    }
+    default:
+        return reply(status,409,"Another control action is active. Hold or stop it first.");
+    }
+}
+/* Only the owner's hold and the live session's follow commands reach an
+   active lane. Every other request is refused without a state change. */
+static cJSON *active_lane_request(struct controller *c,struct controller_lane *l,struct can_device *d,enum control_action action,const cJSON *body,double now,int *status)
+{
+    switch (action) {
+    case ACTION_FOLLOW_UPDATE: case ACTION_FOLLOW_COMMIT: case ACTION_FOLLOW_END:
+        if (l->follow!=FOLLOW_NONE) return follow_command(c,l,d,body,action,now,status);
+        break;
+    case ACTION_HOLD:
+        if (!strcmp(l->owner,text_field(body,"owner"))) return lane_hold(c,l,d,body,now,status);
+        break;
+    default:
+        break;
+    }
+    return reply(status,409,"Another control action is active. Hold or stop it first.");
+}
+/* The 202 reply for an admitted power or motion operation. */
+static cJSON *admitted(const struct controller_lane *l,int *status)
+{
+    cJSON *result=reply(status,202,l->message); num(result,"request_id",l->request_id);
+    str(result,"trajectory_transport","position-velocity");
+    flag(result,"trajectory_transport_validated",false);
+    flag(result,"trajectory_follow",trajectory_following(l)); return result;
+}
+/* teach-return, or recover-at-pose when recovery is true. */
+static cJSON *admit_teach_return(struct controller *c,struct controller_lane *l,struct can_device *d,const cJSON *body,const char *owner,bool recovery,double now,int *status)
+{
+    bool modern=piper_seamless_teach_supported(&d->feedback);
+    if (recovery&&!modern) return reply(status,409,"This firmware cannot restore a measured-pose hold without a reset; use its separate recovery flow.");
+    if (!yes(body,"button_off")||!yes(body,modern?"same_pose_confirmed":"zero_pose_confirmed")||!yes(body,"clear")||!yes(body,"supported"))
+        return reply(status,400,modern?"Confirm teach light off, a clear workspace and the stationary measured hold pose; no homing or motor-power change will run.":
+            "Confirm physical zero pose, teach-button light off, a clear workspace and support for the arm during the standby/CAN transition.");
+    const struct piper_sample *s=&d->feedback.arm[0];
+    if (!recovery&&s->control<=1&&!teaching_active(s)) {
+        const char *why=health(d,now,CHECK_CONTROL); if (why) return reply(status,409,why);
+        return reply(status,200,"The arm already reports standby/CAN control. No handoff command was sent.");
+    }
+    if (s->control!=2) return reply(status,409,"This action only returns a completed onboard teaching state to CAN control.");
+    const char *why=teaching_return_guard(c,l,d,now,recovery); if (why) return reply(status,409,why);
+    begin(c,l,d,owner,OP_TEACH_RETURN,now); l->stage=modern?STAGE_TEACH_SEEDED:STAGE_TEACH_STANDBY; l->sent_at=now;
+    l->recovering_at_pose=recovery;
+    if (recovery) forget_teaching_cycle(l); /* One attempt per observed cycle. */
+    memcpy(l->target,l->initial,sizeof l->target); /* Retire every previous destination. */
+    if (modern) {
+        /* Seed the frozen full pose while still in completed teaching.
+           Return to the receive loop before the bounded mode+pose batch;
+           seven synchronous USB writes must not starve receive draining. */
+        struct can_frame frames[3];
+        if (!piper_targets(l->initial,frames)) {
+            abandon_teaching_return(l,"Measured hold could not be encoded."); return reply(status,409,l->message);
+        }
+        if (!can_bus_send(&c->bus,d,l->generation,frames,3)) {
+            stop_lane(c,l,"Same-pose teaching handoff seed could not finish transmitting; previous targets discarded."); return reply(status,409,l->message);
+        }
+        l->sent_at=piper_now();
+        message(l,"teaching-return","Measured hold pose seeded. Checking fresh feedback before requesting CAN MoveJ; no motor-power change or homing.");
+        cJSON *result=reply(status,202,l->message); num(result,"request_id",l->request_id); return result;
+    }
+    struct can_frame frame=piper_mode(1); frame.data[0]=0; /* Documented standby, then CAN; never ctrl_mode=2. */
+    if (!can_bus_send(&c->bus,d,l->generation,&frame,1)) {
+        abandon_teaching_return(l,"Standby request could not be transmitted."); return reply(status,409,l->message);
+    }
+    message(l,"teaching-return","Standby requested at verified zero. Waiting for fresh acknowledgement before requesting CAN; keep the arm supported.");
+    cJSON *result=reply(status,202,l->message); num(result,"request_id",l->request_id); return result;
+}
+static cJSON *verify_current(struct controller *c,struct controller_lane *l,struct can_device *d,const cJSON *body,double now,int *status)
+{
+    if (!yes(body,"clear") || !yes(body,"supported")) return reply(status,400,"Confirm that it is safe to use the current robot state.");
+    const char *why=health(d,now,CHECK_CONTROL); if (why) return reply(status,409,why);
+    if (reset_pending(c,d->id)) return reply(status,409,"A reset is pending; verify completed reset recovery first.");
+    if ((!enabled(d,true,0)&&!enabled(d,false,0)) || can_bus_strict_still_for(d,now)<stationary_dwell_s)
+        return reply(status,409,"Wait for healthy, stationary feedback and a consistent motor power state.");
+    if (!clear_latch(c,d->id)) return reply(status,500,"Recovery state could not be saved.");
+    message(l,"monitor","Current robot state verified. No motor power or position command was sent.");
+    return reply(status,200,l->message);
+}
+/* disable, reset, verify-reset or verify-disabled. */
+static cJSON *admit_power(struct controller *c,struct controller_lane *l,struct can_device *d,const cJSON *body,const char *owner,enum control_action action,double now,int *status)
+{
+    if (!yes(body,"supported")) return reply(status,400,"Physically support the arm before removing motor power or recovering it.");
+    const char *why=health(d,now,CHECK_POWER); if (why) return reply(status,409,why);
+    switch (action) {
+    case ACTION_VERIFY_RESET: case ACTION_VERIFY_DISABLED: {
+        bool reset_verification=action==ACTION_VERIFY_RESET;
+        if (reset_verification&&!yes(body,"reset_completed")) return reply(status,409,"Confirm that the reset or power cycle has completed.");
+        if (!reset_verification&&reset_pending(c,d->id)) return reply(status,409,"A controller reset is pending. Use Verify completed recovery after it finishes.");
+        if (!enabled(d,false,0)||health(d,now,CHECK_CONTROL)||can_bus_strict_still_for(d,now)<stationary_dwell_s)
+            return reply(status,409,"All six motors must report disabled, healthy and stationary before recovery can be cleared.");
+        if (!clear_latch(c,d->id)) return reply(status,500,"Recovery state could not be saved.");
+        message(l,"monitor","Recovery cleared: all six motors verified off, healthy and stationary. Enable motors when ready; no motor command was sent.");
+        return reply(status,200,l->message);
+    }
+    case ACTION_RESET: {
+        struct piper_sample *s=&d->feedback.arm[0];
+        if (!yes(body,"clear")) return reply(status,400,"Confirm the workspace is clear before requesting reset recovery.");
+        bool stopped_off=s->arm_status==PIPER_ARM_STATUS_STOPPED&&!s->error&&enabled(d,false,0);
+        /* An in-flight reset was rejected above with every other active
+           action. A retired/timed-out reset can be requested explicitly
+           again only at a fresh, stationary, error-free STOP with every
+           motor off. Never retry on refresh, while running, or merely
+           because an acknowledgement has not arrived yet. */
+        if (reset_pending(c,d->id)&&!stopped_off)
+            return reply(status,409,"A reset is pending. Verify completed recovery, or request reset again only after a fresh stationary stop with all six motors off.");
+        bool residual_teach=stopped_off&&s->teach==PIPER_TEACH_RECORDING;
+        if (s->control>2||s->motion_mode>1||(!residual_teach&&!piper_teach_idle(s->teach))) return reply(status,409,"Reset is supported only for stopped/idle MoveJ or completed teaching states.");
+        if (can_bus_strict_still_for(d,now)<stationary_dwell_s) return reply(status,409,"Wait for a stationary arm before reset recovery.");
+        break;
+    }
+    default:
+        break;
+    }
+    bool reset=action==ACTION_RESET;
+    l->disable_keeps_recovery=blocked(c,d->id)||health(d,now,CHECK_CONTROL)!=NULL;
+    const char *kind=reset?KIND_RESET:KIND_POWER;
+    const char *intent=reset?"Reset pending verification":active_incident(c,d->id,"Motors disabled; recovery verification required",&kind);
+    if (!latch(c,d->id,intent,kind,reset||reset_pending(c,d->id))) return reply(status,500,"Could not persist the recovery record; no command sent.");
+    begin(c,l,d,owner,reset?OP_RESET:OP_DISABLE,now); l->sent_at=now;
+    struct can_frame f=piper_reset_frame();
+    bool sent=!reset||can_bus_send(&c->bus,d,l->generation,&f,1);
+    if (!sent) { lane_go_idle(l); message(l,"blocked","Power/recovery request was not fully transmitted. Recovery remains required."); return reply(status,409,l->message); }
+    message(l,reset?"resetting":"disabling","Request queued; checking fresh disabled-motor feedback.");
+    return admitted(l,status);
+}
+/* enable, gripper and every position action (align, cycle, follow-start,
+   move-to-zero, pose, joint, jog, zero). An unknown action is rejected after
+   the shared motion guards, so its reply does not change. */
+static cJSON *admit_motion(struct controller *c,struct controller_lane *l,struct can_device *d,const cJSON *body,const char *owner,enum control_action action,double now,int *status)
+{
+    const char *why=controller_blocker(c,d,now); if (why) return reply(status,409,why);
+    if (field(body,"trajectory")&&(!cJSON_IsBool(field(body,"trajectory"))||action!=ACTION_FOLLOW_START))
+        return reply(status,400,"trajectory is a boolean available only on follow-start.");
+    bool trajectory=yes(body,"trajectory");
+    /* The experimental streamed-position transport was removed; the name is
+       still recognized so old clients get the same explicit rejection. */
+    if (trajectory&&!strcmp(text_field(body,"trajectory_transport"),"streamed-position"))
+        return reply(status,409,"Experimental streamed-position transport is disabled in this build. Use position-velocity; no action or motor command was admitted.");
+    if (!yes(body,"clear")) return reply(status,400,"Confirm that the full motion path is clear and the arm is attended.");
+    /* The MCU's target-arrival bit can remain unset after a disabled arm
+       settles away from its last target. Require measured stillness. */
+    if (action==ACTION_ENABLE) {
+        if (can_bus_strict_still_for(d,now)<pose_dwell_s) return reply(status,409,"Wait for a stationary arm before changing motor power.");
+    } else if (!position_control_stationary(d,now)) return reply(status,409,"Wait for a stable measured pose before beginning another action.");
+    measured_hold_target(d,l->target);
+    enum operation op=OP_MOVE;
+    bool staged_range=false, zero_destination=action==ACTION_MOVE_TO_ZERO;
+    int selected_joint=-1;
+    double requested_target[6], requested_speed=0, requested_percent=0;
+    l->speed=3; l->tolerance=.2;
+    double ceiling=1e9;
+    for (unsigned i=0;i<6;++i) ceiling=fmin(ceiling,RAD2DEG(d->feedback.limit[i].speed));
+    bool percentage=field(body,"speed_percent")!=NULL;
+    if (percentage) {
+        if (field(body,"speed_deg_s")) return reply(status,400,"Specify speed_percent or speed_deg_s, not both.");
+        if (!numeric(body,"speed_percent",0,100,&l->speed_percent)) return reply(status,400,"speed_percent must be 0–100.");
+        l->speed=ceiling*l->speed_percent/100;
+    } else if (field(body,"speed_deg_s")&&!numeric(body,"speed_deg_s",.1,15,&l->speed)) return reply(status,400,"Legacy speed_deg_s must be 0.1–15; use speed_percent for reported limits.");
+    if (field(body,"tolerance_deg")&&!numeric(body,"tolerance_deg",.05,1,&l->tolerance)) return reply(status,400,"tolerance_deg must be 0.05–1.0.");
+    switch (action) {
+    case ACTION_ENABLE:
+        if (!yes(body,"supported")) return reply(status,400,"Support the arm before changing motor power.");
+        if (!enabled(d,false,0)) return reply(status,409,"All six motors must be disabled before this enable operation.");
+        op=OP_ENABLE;
+        break;
+    case ACTION_ALIGN: {
+        double distance=range_distance(d);
+        if (!isfinite(distance)||distance<=0) return reply(status,409,"All joints are already within the reported command ranges.");
+        if (distance>3) return reply(status,409,"A joint is more than 3 degrees outside its command range. Inspect the pose and calibration before motion.");
+        for (unsigned i=0;i<6;++i) l->target[i]=range_target(d,i);
+        op=OP_ALIGN; l->speed=1;
+        break;
+    }
+    case ACTION_CYCLE:
+        /* Existing H-V1.2-1 near-upright preset from the vendor DH model.
+           Preserve base heading and tool roll; capture the return pose now. */
+        l->target[1]=82; l->target[2]=-160; l->target[3]=0; l->target[4]=-7;
+        op=OP_CYCLE; l->speed=3; l->tolerance=.2;
+        break;
+    case ACTION_FOLLOW_START:
+        /* Begin at fresh measurements. No queued target is replayed on entry. */
+        break;
+    case ACTION_MOVE_TO_ZERO:
+        memset(l->target,0,sizeof l->target);
+        break;
+    case ACTION_POSE: {
+        const cJSON *angles=field(body,"degrees");
+        if (!cJSON_IsArray(angles)||cJSON_GetArraySize(angles)!=6) return reply(status,400,"degrees must contain six finite angles.");
+        zero_destination=true;
+        for (unsigned i=0;i<6;++i) { cJSON *n=cJSON_GetArrayItem(angles,(int)i); if (!cJSON_IsNumber(n)||!isfinite(n->valuedouble)) return reply(status,400,"Every angle must be finite."); l->target[i]=n->valuedouble; if (l->target[i]!=0) zero_destination=false; }
+        break;
+    }
+    case ACTION_JOINT: case ACTION_JOG: case ACTION_ZERO: {
+        double joint;
+        if (!numeric(body,"joint",1,6,&joint)||floor(joint)!=joint) return reply(status,400,"joint must be 1–6.");
+        unsigned index=(unsigned)joint-1;
+        selected_joint=(int)index;
+        double degrees=0;
+        bool jog=action==ACTION_JOG;
+        if (action!=ACTION_ZERO&&!numeric(body,"degrees",jog?-5:-360,jog?5:360,&degrees)) return reply(status,400,"Enter a finite angle (jog increments are limited to ±5°).");
+        /* An inward jog starts from the nearest legal boundary, as it
+           already does for sub-tolerance encoder drift. It cannot request
+           another invalid negative/outward pose. */
+        if (jog) l->target[index]=clamp_limit(&d->feedback.limit[index],l->target[index]);
+        l->target[index]=jog?l->target[index]+degrees:degrees;
+        break;
+    }
+    case ACTION_GRIPPER: {
+        if (!d->feedback.gripper_seen||!piper_recent(d->feedback.gripper_at,now)||d->feedback.gripper_fault) return reply(status,409,"Fresh, fault-free gripper feedback is required.");
+        struct piper_feedback *f=&d->feedback;
+        if (!configuration_current(d,f->gripper_config_seen,f->gripper_config_at,now)||(f->gripper_max_mm!=70&&f->gripper_max_mm!=100)) return reply(status,409,"Read gripper configuration: a verified 70 or 100 mm range is required for this connection.");
+        if (!numeric(body,"width_mm",0,f->gripper_max_mm,&l->gripper_target)) return reply(status,400,"width_mm must be between zero and the controller-reported maximum opening.");
+        l->gripper_effort=.1;
+        if (field(body,"effort_nm")&&!numeric(body,"effort_nm",.02,.5,&l->gripper_effort)) return reply(status,400,"effort_nm must be 0.02–0.5 N·m.");
+        l->gripper_entry=f->gripper_mm<0;
+        if (!isfinite(f->gripper_mm)||f->gripper_mm < -2||f->gripper_mm>f->gripper_max_mm) return reply(status,409,"Gripper feedback is outside the supported range; inspect calibration.");
+        if (l->gripper_entry&&(!yes(body,"allow_closed_offset")||l->gripper_target<5)) return reply(status,409,"A small negative closed reading requires allow_closed_offset=true and an opening target of at least 5 mm. This does not change encoder zero.");
+        l->gripper_max_mm=f->gripper_max_mm;
+        l->gripper_command=d->feedback.gripper_mm; op=OP_GRIPPER;
+        break;
+    }
+    default:
+        return reply(status,400,"Unknown control action.");
+    }
+    if (op!=OP_ENABLE&&!enabled(d,true,0)) return reply(status,409,"Enable all six arm motors first so the unselected joints remain supported.");
+    double correction=range_distance(d);
+    if ((op==OP_MOVE||op==OP_CYCLE)&&correction>0) {
+        bool inward_joint=selected_joint>=0&&outside_range_count(d)==1&&joint_outside_range(d,(unsigned)selected_joint);
+        if (op!=OP_MOVE||(!zero_destination&&!inward_joint)) { char reason[256]; return reply(status,409,range_reason(d,reason,sizeof reason)); }
+        if (correction>3) return reply(status,409,"Range entry requires more than 3 degrees of correction. Inspect the physical pose and calibration before moving.");
+        staged_range=true;
+    }
+    if (position_op(op)&&!valid_target(l,d,l->target)) return reply(status,400,l->error);
+    if (percentage&&l->speed_percent==0&&(op==OP_MOVE||op==OP_CYCLE)) return reply(status,409,"Speed is 0%; choose a nonzero speed before moving. This setting applies to the next move, not an active stop.");
+    /* Alignment and the optional scripted cycle retain their explicit rates. */
+    if (!percentage||op==OP_ALIGN||op==OP_CYCLE) l->speed_percent=fmin(100,100*l->speed/ceiling);
+    if (trajectory) {
+        for (unsigned i=0;i<6;++i) {
+            if (d->feedback.arm[0].deg[i]<d->feedback.limit[i].min||d->feedback.arm[0].deg[i]>d->feedback.limit[i].max)
+                return reply(status,409,"Trajectory following starts only from an in-range measured pose; range recovery is a separate action.");
+            double speed=trajectory_speed_limit(&d->feedback.limit[i],l->speed_percent);
+            double acceleration=RAD2DEG(d->feedback.acceleration[i].max);
+            if (speed*.02<.001-1e-10||acceleration*.02*.02<=.001+1e-10)
+                return reply(status,409,"Reported limits or selected speed are below the 1-millidegree/20-ms trajectory reference resolution; no motion started.");
+        }
+    }
+    if (op==OP_CYCLE&&!valid_target(l,d,d->feedback.arm[0].deg)) return reply(status,400,l->error);
+    for (unsigned i=0;i<6;++i) if (l->speed>RAD2DEG(d->feedback.limit[i].speed)) return reply(status,400,"Requested speed exceeds a controller-reported joint speed limit.");
+    if (staged_range) {
+        memcpy(requested_target,l->target,sizeof requested_target);
+        requested_speed=l->speed; requested_percent=l->speed_percent;
+        for (unsigned i=0;i<6;++i) l->target[i]=joint_outside_range(d,i)?range_target(d,i):
+            clamp_limit(&d->feedback.limit[i],d->feedback.arm[0].deg[i]);
+        if (!valid_target(l,d,l->target)) return reply(status,400,l->error);
+        op=OP_ALIGN; l->speed=ceiling/100; l->speed_percent=1;
+    }
+    if (!latch(c,d->id,intent_reason,KIND_INTENT,false)) return reply(status,500,"Could not persist action intent; no command sent.");
+    begin(c,l,d,owner,op,now);
+    bool following=action==ACTION_FOLLOW_START;
+    if (position_op(op)&&!following) l->pose_phase=POSE_SEEDING;
+    if (staged_range) {
+        l->stage=STAGE_ALIGN_FOLLOWUP; memcpy(l->range_followup_target,requested_target,sizeof requested_target);
+        l->range_followup_speed=requested_speed; l->range_followup_percent=requested_percent;
+    }
+    if (following) { l->follow=FOLLOW_LIVE; l->follow_updated=now; }
+    if (trajectory) {
+        l->stage=STAGE_MOVE_TRAJECTORY;
+        for (unsigned i=0;i<6;++i) {
+            l->trajectory_minimum[i]=d->feedback.limit[i].min; l->trajectory_maximum[i]=d->feedback.limit[i].max;
+            l->trajectory_speed[i]=trajectory_speed_limit(&d->feedback.limit[i],l->speed_percent);
+            l->trajectory_acceleration[i]=RAD2DEG(d->feedback.acceleration[i].max);
+        }
+    }
+    if (op==OP_CYCLE) { l->stage=STAGE_CYCLE_RAISING; cycle_leg(l,d,now); }
+    if (op==OP_MOVE&&(zero_destination||(action==ACTION_POSE&&yes(body,"synchronized")))) { l->stage=STAGE_MOVE_SYNCHRONIZED; cycle_leg(l,d,now); }
+    message(l,op==OP_ENABLE?"enabling":op==OP_GRIPPER?"gripper":op==OP_ALIGN?"aligning":op==OP_CYCLE?"raising":"moving","%s",op==OP_ENABLE?"Enabling motor drivers only; no position target is sent.":op==OP_ALIGN?"Moving 0.5 degrees inside the command range at 1% controller speed (maximum correction 3 degrees).":op==OP_CYCLE?"Raising to upright at up to 3 degrees/second. The measured starting pose is saved for return.":"Executing target with a live control lease and feedback checks.");
+    if (staged_range) message(l,"aligning","Explicit destination accepted. First correcting bounded range overrun at 1%% controller speed; then moving to the requested target under the same live lease.");
+    return admitted(l,status);
+}
+/* One request for one lane. action is ACTION_UNKNOWN except on ROUTE_COMMAND. */
+static cJSON *lane_action(struct controller *c,struct controller_lane *l,enum api_route route,enum control_action action,const cJSON *body,int *status)
 {
     double now=piper_now(); struct can_device *d=can_bus_find(&c->bus,l->lane_device);
-    bool command=!strcmp(route,"/api/command");
-    const char *action=text_field(body,"action"),*owner=text_field(body,"owner");
-    if (command&&field(body,"trajectory_transport")&&
-        (!cJSON_IsString(field(body,"trajectory_transport"))||strcmp(action,"follow-start")||!yes(body,"trajectory")||
+    const char *owner=text_field(body,"owner");
+    if (route==ROUTE_COMMAND&&field(body,"trajectory_transport")&&
+        (!cJSON_IsString(field(body,"trajectory_transport"))||action!=ACTION_FOLLOW_START||!yes(body,"trajectory")||
          (strcmp(text_field(body,"trajectory_transport"),"position-velocity")&&strcmp(text_field(body,"trajectory_transport"),"streamed-position"))))
         return reply(status,400,"trajectory_transport must be position-velocity or streamed-position, only on trajectory follow-start.");
-    if (!strcmp(route,"/api/stop")) {
+    if (route==ROUTE_STOP) {
         if (*text_field(body,"device_id")&&(!d||strcmp(text_field(body,"device_id"),d->id))) return reply(status,409,"Stop belongs to a different selected adapter.");
         if (field(body,"generation")) {
             double generation;
@@ -1055,71 +1475,13 @@ static cJSON *lane_action(struct controller *c,struct controller_lane *l,const c
     }
     observe_teaching_cycle(l,d,now);
     relinquish_to_teaching(c,l,d,now);
-    if (!strcmp(route,"/api/stop")) {
-        if (field(body,"request_id")) {
-            double request;
-            if (l->op==OP_IDLE||strcmp(l->owner,text_field(body,"owner"))||!numeric(body,"request_id",1,UINT32_MAX,&request)||request!=l->request_id)
-                return reply(status,409,"No matching active action for this automatic stop.");
-        }
-        stop_lane(c,l,"Operator stop."); return reply(status,200,l->message);
+    switch (route) {
+    case ROUTE_STOP: return lane_stop_request(c,l,body,status);
+    case ROUTE_HEARTBEAT: return lane_heartbeat(c,l,d,body,now,status);
+    default: break;
     }
-    if (!strcmp(route,"/api/heartbeat")) {
-        double request;
-        if (!d||d->generation!=l->generation) return reply(status,409,"The control lease belongs to another CAN connection generation.");
-        if (l->op!=OP_IDLE&&now-l->heartbeat>=lease_timeout_s) {
-            if (l->op==OP_TEACH_RETURN) abandon_teaching_return(l,"Control lease expired.");
-            else stop_lane(c,l,"Control heartbeat expired.");
-            return reply(status,409,l->message);
-        }
-        if (l->op==OP_IDLE||strcmp(l->owner,text_field(body,"owner"))||!numeric(body,"request_id",1,UINT32_MAX,&request)||request!=l->request_id)
-            return reply(status,409,"No matching active control lease.");
-        l->heartbeat=now; return reply(status,200,"Control lease renewed.");
-    }
-    if (l->op!=OP_IDLE) {
-        /* Only the owner's hold/follow commands reach an active lane. */
-        bool hold=command&&!strcmp(action,"hold")&&!strcmp(l->owner,owner);
-        if (command&&l->follow!=FOLLOW_NONE&&(!strcmp(action,"follow-update")||!strcmp(action,"follow-commit")||!strcmp(action,"follow-end")))
-            return follow_command(c,l,d,body,action,now,status);
-        if (hold&&l->op==OP_ALIGN) {
-            double request,generation;
-            if (!d||strcmp(d->id,text_field(body,"device_id"))||
-                !numeric(body,"generation",1,UINT32_MAX,&generation)||generation!=l->generation||d->generation!=l->generation||
-                !numeric(body,"request_id",1,UINT32_MAX,&request)||request!=l->request_id)
-                return reply(status,409,"Range-entry cancellation belongs to another controller action or CAN connection.");
-            /* A full measured pose outside its limits cannot be encoded as a
-               legal hold target. Cancel the pending destination with STOP. */
-            stop_lane(c,l,"Operator cancelled range entry; the pending destination was discarded.");
-            return reply(status,200,l->message);
-        }
-        if (hold&&l->op==OP_GRIPPER) {
-            const char *why=health(d,now,CHECK_CONTROL); if (why) return reply(status,409,why);
-            if (d->generation!=l->generation||!enabled(d,true,0)||!d->feedback.gripper_enabled) return reply(status,409,"Connection or motor enable changed during gripper motion.");
-            if (now-l->heartbeat>=lease_timeout_s||!d->feedback.gripper_seen||!piper_recent(d->feedback.gripper_at,now)||d->feedback.gripper_fault) return reply(status,409,"Fresh gripper feedback and an active lease are required to hold.");
-            if (!l->sent_at) return reply(status,409,"No gripper target has been transmitted yet.");
-            finish(c,l,d,"Gripper ramp stopped at its last transmitted target and effort limit. Contact or a secure grasp is not verified.",true);
-            return reply(status,200,l->message);
-        }
-        if (hold&&(l->op==OP_MOVE||l->op==OP_CYCLE)) {
-            double request;
-            if (field(body,"request_id")&&(!numeric(body,"request_id",1,UINT32_MAX,&request)||request!=l->request_id))
-                return reply(status,409,"Hold belongs to an older movement.");
-            if (l->follow!=FOLLOW_NONE) {
-                bool held=follow_hold(c,l,d,now,"Following paused. Holding measured pose; motors remain enabled.");
-                return reply(status,held?200:409,l->message);
-            }
-            const char *why=health(d,now,CHECK_CONTROL); if (why) return reply(status,409,why);
-            l->arrival_hold=false;
-            memcpy(l->target,d->feedback.arm[0].deg,sizeof l->target); memcpy(l->command,l->target,sizeof l->command);
-            bool was_cycle=l->op==OP_CYCLE; l->op=OP_MOVE; l->stage=STAGE_NONE;
-            l->synchronized_pose=false;
-            if (was_cycle) { l->started=l->progress_at=now; l->best_error=1e9; }
-            l->settled_at=l->final_sent_at=0; l->heartbeat=now;
-            message(l,"holding","%s",was_cycle?"Upright/return sequence cancelled. Holding here; no automatic return will run.":"Holding the current measured pose.");
-            return reply(status,202,l->message);
-        }
-        return reply(status,409,"Another control action is active. Hold or stop it first.");
-    }
-    if (!strcmp(route,"/api/reconnect")) {
+    if (l->op!=OP_IDLE) return active_lane_request(c,l,d,action,body,now,status);
+    if (route==ROUTE_RECONNECT) {
         const char *why=reconnect_and_query(c,l,d,now);
         if (why) message(l,"monitor","CAN sockets reopened. %s Read firmware & limits once connected.",why);
         return reply(status,200,l->message);
@@ -1127,311 +1489,115 @@ static cJSON *lane_action(struct controller *c,struct controller_lane *l,const c
     if (!d||strcmp(text_field(body,"device_id"),d->id)) return reply(status,409,"Selected adapter changed; refresh before commanding.");
     double generation;
     if (!numeric(body,"generation",1,UINT32_MAX,&generation)||generation!=d->generation) return reply(status,409,"CAN connection changed; refresh before commanding.");
-    if (!strcmp(route,"/api/query")) {
+    switch (route) {
+    case ROUTE_QUERY: {
         if (l->query) return reply(status,409,"An information query is already active.");
         const char *why=start_query(c,l,d,now);
         return reply(status,why?409:202,why?why:l->message);
     }
-    if (!command) return reply(status,404,"Unknown API route.");
+    case ROUTE_COMMAND: break;
+    default: return reply(status,404,"Unknown API route.");
+    }
     if (l->query) return reply(status,409,"Wait for the information query to complete.");
     if (strlen(owner)<16||strlen(owner)>80) return reply(status,400,"owner must be a 16–80 character client identifier.");
     if (!yes(body,"standalone")) return reply(status,400,"Confirm that this arm has no linked leader or competing controller.");
     if (c->storage_failed) return reply(status,409,"Persistent control-state storage failed; repair storage and restart.");
-    if (!strcmp(action,"teach-return")||!strcmp(action,"recover-at-pose")) {
-        bool recovery=!strcmp(action,"recover-at-pose");
-        bool modern=piper_seamless_teach_supported(&d->feedback);
-        if (recovery&&!modern) return reply(status,409,"This firmware cannot restore a measured-pose hold without a reset; use its separate recovery flow.");
-        if (!yes(body,"button_off")||!yes(body,modern?"same_pose_confirmed":"zero_pose_confirmed")||!yes(body,"clear")||!yes(body,"supported"))
-            return reply(status,400,modern?"Confirm teach light off, a clear workspace and the stationary measured hold pose; no homing or motor-power change will run.":
-                "Confirm physical zero pose, teach-button light off, a clear workspace and support for the arm during the standby/CAN transition.");
-        const struct piper_sample *s=&d->feedback.arm[0];
-        if (!recovery&&s->control<=1&&!teaching_active(s)) {
-            const char *why=health(d,now,CHECK_CONTROL); if (why) return reply(status,409,why);
-            return reply(status,200,"The arm already reports standby/CAN control. No handoff command was sent.");
-        }
-        if (s->control!=2) return reply(status,409,"This action only returns a completed onboard teaching state to CAN control.");
-        const char *why=teaching_return_guard(c,l,d,now,recovery); if (why) return reply(status,409,why);
-        begin(c,l,d,owner,OP_TEACH_RETURN,now); l->stage=modern?STAGE_TEACH_SEEDED:STAGE_TEACH_STANDBY; l->sent_at=now;
-        l->recovering_at_pose=recovery;
-        if (recovery) forget_teaching_cycle(l); /* One attempt per observed cycle. */
-        memcpy(l->target,l->initial,sizeof l->target); /* Retire every previous destination. */
-        if (modern) {
-            /* Seed the frozen full pose while still in completed teaching.
-               Return to the receive loop before the bounded mode+pose batch;
-               seven synchronous USB writes must not starve receive draining. */
-            struct can_frame frames[3];
-            if (!piper_targets(l->initial,frames)) {
-                abandon_teaching_return(l,"Measured hold could not be encoded."); return reply(status,409,l->message);
-            }
-            if (!can_bus_send(&c->bus,d,l->generation,frames,3)) {
-                stop_lane(c,l,"Same-pose teaching handoff seed could not finish transmitting; previous targets discarded."); return reply(status,409,l->message);
-            }
-            l->sent_at=piper_now();
-            message(l,"teaching-return","Measured hold pose seeded. Checking fresh feedback before requesting CAN MoveJ; no motor-power change or homing.");
-            cJSON *result=reply(status,202,l->message); num(result,"request_id",l->request_id); return result;
-        }
-        struct can_frame frame=piper_mode(1); frame.data[0]=0; /* Documented standby, then CAN; never ctrl_mode=2. */
-        if (!can_bus_send(&c->bus,d,l->generation,&frame,1)) {
-            abandon_teaching_return(l,"Standby request could not be transmitted."); return reply(status,409,l->message);
-        }
-        message(l,"teaching-return","Standby requested at verified zero. Waiting for fresh acknowledgement before requesting CAN; keep the arm supported.");
-        cJSON *result=reply(status,202,l->message); num(result,"request_id",l->request_id); return result;
+    switch (action) {
+    case ACTION_TEACH_RETURN: case ACTION_RECOVER_AT_POSE:
+        return admit_teach_return(c,l,d,body,owner,action==ACTION_RECOVER_AT_POSE,now,status);
+    case ACTION_VERIFY_CURRENT:
+        return verify_current(c,l,d,body,now,status);
+    case ACTION_DISABLE: case ACTION_RESET: case ACTION_VERIFY_RESET: case ACTION_VERIFY_DISABLED:
+        return admit_power(c,l,d,body,owner,action,now,status);
+    default:
+        return admit_motion(c,l,d,body,owner,action,now,status);
     }
-    if (!strcmp(action,"verify-current")) {
-        if (!yes(body,"clear") || !yes(body,"supported")) return reply(status,400,"Confirm that it is safe to use the current robot state.");
-        const char *why=health(d,now,CHECK_CONTROL); if (why) return reply(status,409,why);
-        if (reset_pending(c,d->id)) return reply(status,409,"A reset is pending; verify completed reset recovery first.");
-        if ((!enabled(d,true,0)&&!enabled(d,false,0)) || can_bus_strict_still_for(d,now)<stationary_dwell_s)
-            return reply(status,409,"Wait for healthy, stationary feedback and a consistent motor power state.");
-        if (!clear_latch(c,d->id)) return reply(status,500,"Recovery state could not be saved.");
-        message(l,"monitor","Current robot state verified. No motor power or position command was sent.");
-        return reply(status,200,l->message);
-    }
-    if (!strcmp(action,"disable")||!strcmp(action,"reset")||!strcmp(action,"verify-reset")||!strcmp(action,"verify-disabled")) {
-        if (!yes(body,"supported")) return reply(status,400,"Physically support the arm before removing motor power or recovering it.");
-        const char *why=health(d,now,CHECK_POWER); if (why) return reply(status,409,why);
-        if (!strcmp(action,"verify-reset")||!strcmp(action,"verify-disabled")) {
-            bool reset_verification=!strcmp(action,"verify-reset");
-            if (reset_verification&&!yes(body,"reset_completed")) return reply(status,409,"Confirm that the reset or power cycle has completed.");
-            if (!reset_verification&&reset_pending(c,d->id)) return reply(status,409,"A controller reset is pending. Use Verify completed recovery after it finishes.");
-            if (!enabled(d,false,0)||health(d,now,CHECK_CONTROL)||can_bus_strict_still_for(d,now)<stationary_dwell_s)
-                return reply(status,409,"All six motors must report disabled, healthy and stationary before recovery can be cleared.");
-            if (!clear_latch(c,d->id)) return reply(status,500,"Recovery state could not be saved.");
-            message(l,"monitor","Recovery cleared: all six motors verified off, healthy and stationary. Enable motors when ready; no motor command was sent.");
-            return reply(status,200,l->message);
-        }
-        if (!strcmp(action,"reset")) {
-            struct piper_sample *s=&d->feedback.arm[0];
-            if (!yes(body,"clear")) return reply(status,400,"Confirm the workspace is clear before requesting reset recovery.");
-            bool stopped_off=s->arm_status==PIPER_ARM_STATUS_STOPPED&&!s->error&&enabled(d,false,0);
-            /* An in-flight reset was rejected above with every other active
-               action. A retired/timed-out reset can be requested explicitly
-               again only at a fresh, stationary, error-free STOP with every
-               motor off. Never retry on refresh, while running, or merely
-               because an acknowledgement has not arrived yet. */
-            if (reset_pending(c,d->id)&&!stopped_off)
-                return reply(status,409,"A reset is pending. Verify completed recovery, or request reset again only after a fresh stationary stop with all six motors off.");
-            bool residual_teach=stopped_off&&s->teach==PIPER_TEACH_RECORDING;
-            if (s->control>2||s->motion_mode>1||(!residual_teach&&!piper_teach_idle(s->teach))) return reply(status,409,"Reset is supported only for stopped/idle MoveJ or completed teaching states.");
-            if (can_bus_strict_still_for(d,now)<stationary_dwell_s) return reply(status,409,"Wait for a stationary arm before reset recovery.");
-        }
-        bool reset=!strcmp(action,"reset");
-        l->disable_keeps_recovery=blocked(c,d->id)||health(d,now,CHECK_CONTROL)!=NULL;
-        const char *kind=reset?KIND_RESET:KIND_POWER;
-        const char *intent=reset?"Reset pending verification":active_incident(c,d->id,"Motors disabled; recovery verification required",&kind);
-        if (!latch(c,d->id,intent,kind,reset||reset_pending(c,d->id))) return reply(status,500,"Could not persist the recovery record; no command sent.");
-        begin(c,l,d,owner,reset?OP_RESET:OP_DISABLE,now); l->sent_at=now;
-        struct can_frame f=piper_reset_frame();
-        bool sent=!reset||can_bus_send(&c->bus,d,l->generation,&f,1);
-        if (!sent) { lane_go_idle(l); message(l,"blocked","Power/recovery request was not fully transmitted. Recovery remains required."); return reply(status,409,l->message); }
-        message(l,reset?"resetting":"disabling","Request queued; checking fresh disabled-motor feedback.");
-    } else {
-        const char *why=controller_blocker(c,d,now); if (why) return reply(status,409,why);
-        if (field(body,"trajectory")&&(!cJSON_IsBool(field(body,"trajectory"))||strcmp(action,"follow-start")))
-            return reply(status,400,"trajectory is a boolean available only on follow-start.");
-        bool trajectory=yes(body,"trajectory");
-        /* The experimental streamed-position transport was removed; the name is
-           still recognized so old clients get the same explicit rejection. */
-        if (trajectory&&!strcmp(text_field(body,"trajectory_transport"),"streamed-position"))
-            return reply(status,409,"Experimental streamed-position transport is disabled in this build. Use position-velocity; no action or motor command was admitted.");
-        if (!yes(body,"clear")) return reply(status,400,"Confirm that the full motion path is clear and the arm is attended.");
-        /* The MCU's target-arrival bit can remain unset after a disabled arm
-           settles away from its last target. Require measured stillness. */
-        if (!strcmp(action,"enable")) {
-            if (can_bus_strict_still_for(d,now)<pose_dwell_s) return reply(status,409,"Wait for a stationary arm before changing motor power.");
-        } else if (!position_control_stationary(d,now)) return reply(status,409,"Wait for a stable measured pose before beginning another action.");
-        measured_hold_target(d,l->target);
-        enum operation op=OP_MOVE;
-        bool staged_range=false, zero_destination=!strcmp(action,"move-to-zero");
-        int selected_joint=-1;
-        double requested_target[6], requested_speed=0, requested_percent=0;
-        l->speed=3; l->tolerance=.2;
-        double ceiling=1e9;
-        for (unsigned i=0;i<6;++i) ceiling=fmin(ceiling,RAD2DEG(d->feedback.limit[i].speed));
-        bool percentage=field(body,"speed_percent")!=NULL;
-        if (percentage) {
-            if (field(body,"speed_deg_s")) return reply(status,400,"Specify speed_percent or speed_deg_s, not both.");
-            if (!numeric(body,"speed_percent",0,100,&l->speed_percent)) return reply(status,400,"speed_percent must be 0–100.");
-            l->speed=ceiling*l->speed_percent/100;
-        } else if (field(body,"speed_deg_s")&&!numeric(body,"speed_deg_s",.1,15,&l->speed)) return reply(status,400,"Legacy speed_deg_s must be 0.1–15; use speed_percent for reported limits.");
-        if (field(body,"tolerance_deg")&&!numeric(body,"tolerance_deg",.05,1,&l->tolerance)) return reply(status,400,"tolerance_deg must be 0.05–1.0.");
-        if (!strcmp(action,"enable")) {
-            if (!yes(body,"supported")) return reply(status,400,"Support the arm before changing motor power.");
-            if (!enabled(d,false,0)) return reply(status,409,"All six motors must be disabled before this enable operation.");
-            op=OP_ENABLE;
-        } else if (!strcmp(action,"align")) {
-            double distance=range_distance(d);
-            if (!isfinite(distance)||distance<=0) return reply(status,409,"All joints are already within the reported command ranges.");
-            if (distance>3) return reply(status,409,"A joint is more than 3 degrees outside its command range. Inspect the pose and calibration before motion.");
-            for (unsigned i=0;i<6;++i) l->target[i]=range_target(d,i);
-            op=OP_ALIGN; l->speed=1;
-        } else if (!strcmp(action,"cycle")) {
-            /* Existing H-V1.2-1 near-upright preset from the vendor DH model.
-               Preserve base heading and tool roll; capture the return pose now. */
-            l->target[1]=82; l->target[2]=-160; l->target[3]=0; l->target[4]=-7;
-            op=OP_CYCLE; l->speed=3; l->tolerance=.2;
-        } else if (!strcmp(action,"follow-start")) {
-            /* Begin at fresh measurements. No queued target is replayed on entry. */
-        } else if (!strcmp(action,"move-to-zero")) {
-            memset(l->target,0,sizeof l->target);
-        } else if (!strcmp(action,"pose")) {
-            const cJSON *angles=field(body,"degrees");
-            if (!cJSON_IsArray(angles)||cJSON_GetArraySize(angles)!=6) return reply(status,400,"degrees must contain six finite angles.");
-            zero_destination=true;
-            for (unsigned i=0;i<6;++i) { cJSON *n=cJSON_GetArrayItem(angles,(int)i); if (!cJSON_IsNumber(n)||!isfinite(n->valuedouble)) return reply(status,400,"Every angle must be finite."); l->target[i]=n->valuedouble; if (l->target[i]!=0) zero_destination=false; }
-        } else if (!strcmp(action,"joint")||!strcmp(action,"jog")||!strcmp(action,"zero")) {
-            double joint;
-            if (!numeric(body,"joint",1,6,&joint)||floor(joint)!=joint) return reply(status,400,"joint must be 1–6.");
-            unsigned index=(unsigned)joint-1;
-            selected_joint=(int)index;
-            double degrees=0;
-            if (strcmp(action,"zero")&&!numeric(body,"degrees",!strcmp(action,"jog")?-5:-360,!strcmp(action,"jog")?5:360,&degrees)) return reply(status,400,"Enter a finite angle (jog increments are limited to ±5°).");
-            /* An inward jog starts from the nearest legal boundary, as it
-               already does for sub-tolerance encoder drift. It cannot request
-               another invalid negative/outward pose. */
-            if (!strcmp(action,"jog")) l->target[index]=clamp_limit(&d->feedback.limit[index],l->target[index]);
-            l->target[index]=!strcmp(action,"jog")?l->target[index]+degrees:degrees;
-        } else if (!strcmp(action,"gripper")) {
-            if (!d->feedback.gripper_seen||!piper_recent(d->feedback.gripper_at,now)||d->feedback.gripper_fault) return reply(status,409,"Fresh, fault-free gripper feedback is required.");
-            struct piper_feedback *f=&d->feedback;
-            if (!configuration_current(d,f->gripper_config_seen,f->gripper_config_at,now)||(f->gripper_max_mm!=70&&f->gripper_max_mm!=100)) return reply(status,409,"Read gripper configuration: a verified 70 or 100 mm range is required for this connection.");
-            if (!numeric(body,"width_mm",0,f->gripper_max_mm,&l->gripper_target)) return reply(status,400,"width_mm must be between zero and the controller-reported maximum opening.");
-            l->gripper_effort=.1;
-            if (field(body,"effort_nm")&&!numeric(body,"effort_nm",.02,.5,&l->gripper_effort)) return reply(status,400,"effort_nm must be 0.02–0.5 N·m.");
-            l->gripper_entry=f->gripper_mm<0;
-            if (!isfinite(f->gripper_mm)||f->gripper_mm < -2||f->gripper_mm>f->gripper_max_mm) return reply(status,409,"Gripper feedback is outside the supported range; inspect calibration.");
-            if (l->gripper_entry&&(!yes(body,"allow_closed_offset")||l->gripper_target<5)) return reply(status,409,"A small negative closed reading requires allow_closed_offset=true and an opening target of at least 5 mm. This does not change encoder zero.");
-            l->gripper_max_mm=f->gripper_max_mm;
-            l->gripper_command=d->feedback.gripper_mm; op=OP_GRIPPER;
-        } else return reply(status,400,"Unknown control action.");
-        if (op!=OP_ENABLE&&!enabled(d,true,0)) return reply(status,409,"Enable all six arm motors first so the unselected joints remain supported.");
-        double correction=range_distance(d);
-        if ((op==OP_MOVE||op==OP_CYCLE)&&correction>0) {
-            bool inward_joint=selected_joint>=0&&outside_range_count(d)==1&&joint_outside_range(d,(unsigned)selected_joint);
-            if (op!=OP_MOVE||(!zero_destination&&!inward_joint)) { char why[256]; return reply(status,409,range_reason(d,why,sizeof why)); }
-            if (correction>3) return reply(status,409,"Range entry requires more than 3 degrees of correction. Inspect the physical pose and calibration before moving.");
-            staged_range=true;
-        }
-        if ((op==OP_MOVE||op==OP_ALIGN||op==OP_CYCLE)&&!valid_target(l,d,l->target)) return reply(status,400,l->error);
-        if (percentage&&l->speed_percent==0&&(op==OP_MOVE||op==OP_CYCLE)) return reply(status,409,"Speed is 0%; choose a nonzero speed before moving. This setting applies to the next move, not an active stop.");
-        /* Alignment and the optional scripted cycle retain their explicit rates. */
-        if (!percentage||op==OP_ALIGN||op==OP_CYCLE) l->speed_percent=fmin(100,100*l->speed/ceiling);
-        if (trajectory) {
-            for (unsigned i=0;i<6;++i) {
-                if (d->feedback.arm[0].deg[i]<d->feedback.limit[i].min||d->feedback.arm[0].deg[i]>d->feedback.limit[i].max)
-                    return reply(status,409,"Trajectory following starts only from an in-range measured pose; range recovery is a separate action.");
-                double speed=trajectory_speed_limit(&d->feedback.limit[i],l->speed_percent);
-                double acceleration=RAD2DEG(d->feedback.acceleration[i].max);
-                if (speed*.02<.001-1e-10||acceleration*.02*.02<=.001+1e-10)
-                    return reply(status,409,"Reported limits or selected speed are below the 1-millidegree/20-ms trajectory reference resolution; no motion started.");
-            }
-        }
-        if (op==OP_CYCLE&&!valid_target(l,d,d->feedback.arm[0].deg)) return reply(status,400,l->error);
-        for (unsigned i=0;i<6;++i) if (l->speed>RAD2DEG(d->feedback.limit[i].speed)) return reply(status,400,"Requested speed exceeds a controller-reported joint speed limit.");
-        if (staged_range) {
-            memcpy(requested_target,l->target,sizeof requested_target);
-            requested_speed=l->speed; requested_percent=l->speed_percent;
-            for (unsigned i=0;i<6;++i) l->target[i]=joint_outside_range(d,i)?range_target(d,i):
-                clamp_limit(&d->feedback.limit[i],d->feedback.arm[0].deg[i]);
-            if (!valid_target(l,d,l->target)) return reply(status,400,l->error);
-            op=OP_ALIGN; l->speed=ceiling/100; l->speed_percent=1;
-        }
-        if (!latch(c,d->id,intent_reason,KIND_INTENT,false)) return reply(status,500,"Could not persist action intent; no command sent.");
-        begin(c,l,d,owner,op,now);
-        l->position_seed_pending=(op==OP_MOVE||op==OP_ALIGN||op==OP_CYCLE)&&strcmp(action,"follow-start")!=0;
-        if (staged_range) {
-            l->range_followup=true; memcpy(l->range_followup_target,requested_target,sizeof requested_target);
-            l->range_followup_speed=requested_speed; l->range_followup_percent=requested_percent;
-        }
-        if (!strcmp(action,"follow-start")) { l->follow=FOLLOW_LIVE; l->follow_updated=now; }
-        if (trajectory) {
-            l->trajectory_follow=true;
-            for (unsigned i=0;i<6;++i) {
-                l->trajectory_minimum[i]=d->feedback.limit[i].min; l->trajectory_maximum[i]=d->feedback.limit[i].max;
-                l->trajectory_speed[i]=trajectory_speed_limit(&d->feedback.limit[i],l->speed_percent);
-                l->trajectory_acceleration[i]=RAD2DEG(d->feedback.acceleration[i].max);
-            }
-        }
-        if (op==OP_CYCLE) { l->stage=STAGE_CYCLE_RAISING; cycle_leg(l,d,now); }
-        if (op==OP_MOVE&&(zero_destination||(!strcmp(action,"pose")&&yes(body,"synchronized")))) { l->synchronized_pose=true; cycle_leg(l,d,now); }
-        message(l,op==OP_ENABLE?"enabling":op==OP_GRIPPER?"gripper":op==OP_ALIGN?"aligning":op==OP_CYCLE?"raising":"moving","%s",op==OP_ENABLE?"Enabling motor drivers only; no position target is sent.":op==OP_ALIGN?"Moving 0.5 degrees inside the command range at 1% controller speed (maximum correction 3 degrees).":op==OP_CYCLE?"Raising to upright at up to 3 degrees/second. The measured starting pose is saved for return.":"Executing target with a live control lease and feedback checks.");
-        if (staged_range) message(l,"aligning","Explicit destination accepted. First correcting bounded range overrun at 1%% controller speed; then moving to the requested target under the same live lease.");
-    }
-    cJSON *result=reply(status,202,l->message); num(result,"request_id",l->request_id);
-    str(result,"trajectory_transport","position-velocity");
-    flag(result,"trajectory_transport_validated",false);
-    flag(result,"trajectory_follow",l->op==OP_MOVE&&l->trajectory_follow); return result;
 }
-
-cJSON *controller_action(struct controller *c,const char *route,const cJSON *body,int *status)
+static cJSON *select_adapter(struct controller *c,const char *requested,int *status)
+{
+    struct can_device *device=can_bus_find(&c->bus,requested);
+    if (!device) return reply(status,404,"Adapter not found.");
+    str(c->saved,"selected",device->id);
+    str(record(c,device->id),"name",*device->label?device->label:device->name);
+    if (!persist(c)) return reply(status,500,"Adapter selection could not be saved; control is blocked.");
+    snprintf(c->selected,sizeof c->selected,"%s",device->id);
+    discover_lanes(c);
+    return reply(status,200,"Display selection changed. All device-qualified control lanes are unchanged.");
+}
+static cJSON *global_stop(struct controller *c,const cJSON *body,int *status)
+{
+    if (field(body,"generation")||field(body,"request_id"))
+        return reply(status,409,"A scoped cleanup STOP requires its explicit device_id. It cannot become a global STOP.");
+    cJSON *result=reply(status,200,"STOP requested independently on every known arm. Previous targets were discarded."),*stops=cJSON_CreateArray();
+    bool failed=false;
+    for (unsigned i=0;i<CANBUS_MAX;++i) if (*c->bus.devices[i].id) {
+        struct can_device *device=&c->bus.devices[i];
+        /* discover_lanes makes one lane per device; if that ever fails,
+           report this arm as unverified and keep stopping the others. */
+        struct controller_lane *l=lane_for(c,device->id);
+        if (l) stop_lane(c,l,"Operator global stop.");
+        cJSON *entry=cJSON_CreateObject();str(entry,"device_id",device->id);num(entry,"generation",device->generation);
+        bool delivered=l&&l->stop_delivered;flag(entry,"ok",delivered);str(entry,"message",l?l->message:"No control lane for this arm; STOP was not sent.");cJSON_AddItemToArray(stops,entry);
+        failed|=!delivered;
+    }
+    put(result,"stops",stops);
+    if (failed) { *status=409;flag(result,"ok",false);str(result,"error","One or more STOP deliveries are unverified; inspect each arm's result."); }
+    return result;
+}
+static cJSON *global_reconnect(struct controller *c,int *status)
+{
+    for (unsigned i=0;i<CANBUS_MAX;++i) c->lanes[i].query=QUERY_IDLE;
+    can_bus_reconnect(&c->bus);discover_lanes(c);
+    struct controller_lane scratch={0},*l=lane_for(c,c->selected);
+    if (!l) l=&scratch; /* No selected arm: report on a detached lane. */
+    const char *why=start_query(c,l,can_bus_find(&c->bus,c->selected),piper_now());
+    if (why) message(l,"monitor","CAN sockets reopened. %s Read firmware & limits once connected.",why);
+    return reply(status,200,l->message);
+}
+cJSON *controller_action(struct controller *c,const char *path,const cJSON *body,int *status)
 {
     discover_lanes(c);
+    enum api_route route=parse_route(path);
     const char *requested=text_field(body,"device_id");
     if (field(body,"device_id")&&!cJSON_IsString(field(body,"device_id"))) return reply(status,400,"device_id must be an explicit adapter identity.");
-    if (!strcmp(route,"/api/select")) {
-        struct can_device *device=can_bus_find(&c->bus,requested);
-        if (!device) return reply(status,404,"Adapter not found.");
-        str(c->saved,"selected",device->id);
-        str(record(c,device->id),"name",*device->label?device->label:device->name);
-        if (!persist(c)) return reply(status,500,"Adapter selection could not be saved; control is blocked.");
-        snprintf(c->selected,sizeof c->selected,"%s",device->id);
-        discover_lanes(c);
-        return reply(status,200,"Display selection changed. All device-qualified control lanes are unchanged.");
-    }
-    if (!strcmp(route,"/api/stop")&&!*requested) {
-        if (field(body,"generation")||field(body,"request_id"))
-            return reply(status,409,"A scoped cleanup STOP requires its explicit device_id. It cannot become a global STOP.");
-        cJSON *result=reply(status,200,"STOP requested independently on every known arm. Previous targets were discarded."),*stops=cJSON_CreateArray();
-        bool failed=false;
-        for (unsigned i=0;i<CANBUS_MAX;++i) if (*c->bus.devices[i].id) {
-            struct can_device *device=&c->bus.devices[i];
-            /* discover_lanes makes one lane per device; if that ever fails,
-               report this arm as unverified and keep stopping the others. */
-            struct controller_lane *l=lane_for(c,device->id);
-            if (l) stop_lane(c,l,"Operator global stop.");
-            cJSON *entry=cJSON_CreateObject();str(entry,"device_id",device->id);num(entry,"generation",device->generation);
-            bool delivered=l&&l->stop_delivered;flag(entry,"ok",delivered);str(entry,"message",l?l->message:"No control lane for this arm; STOP was not sent.");cJSON_AddItemToArray(stops,entry);
-            failed|=!delivered;
-        }
-        put(result,"stops",stops);
-        if (failed) { *status=409;flag(result,"ok",false);str(result,"error","One or more STOP deliveries are unverified; inspect each arm's result."); }
-        return result;
-    }
-    bool maintenance=!strcmp(route,"/api/query")||!strcmp(route,"/api/reconnect");
-    if (maintenance&&controller_any_motion_active(c)) return reply(status,409,"Finish all arm movements before opening or querying a CAN transport.");
-    if (!strcmp(route,"/api/reconnect")&&!*requested) {
-        for (unsigned i=0;i<CANBUS_MAX;++i) c->lanes[i].query=QUERY_IDLE;
-        can_bus_reconnect(&c->bus);discover_lanes(c);
-        struct controller_lane scratch={0},*l=lane_for(c,c->selected);
-        if (!l) l=&scratch; /* No selected arm: report on a detached lane. */
-        const char *why=start_query(c,l,can_bus_find(&c->bus,c->selected),piper_now());
-        if (why) message(l,"monitor","CAN sockets reopened. %s Read firmware & limits once connected.",why);
-        return reply(status,200,l->message);
+    /* Requests that act on the display or, without a device id, on every arm. */
+    switch (route) {
+    case ROUTE_SELECT: return select_adapter(c,requested,status);
+    case ROUTE_STOP: if (!*requested) return global_stop(c,body,status); break;
+    case ROUTE_QUERY: case ROUTE_RECONNECT:
+        if (controller_any_motion_active(c)) return reply(status,409,"Finish all arm movements before opening or querying a CAN transport.");
+        if (route==ROUTE_RECONNECT&&!*requested) return global_reconnect(c,status);
+        break;
+    default: break;
     }
     const char *id=*requested?requested:c->selected;
     struct can_device *device=can_bus_find(&c->bus,id);
     if (!device) return reply(status,409,"The requested CAN adapter is not known; no other arm was selected.");
-    if ((!strcmp(route,"/api/heartbeat")&&*requested)||!strcmp(route,"/api/command")||!strcmp(route,"/api/query")||
-        (!strcmp(route,"/api/reconnect")&&field(body,"generation"))) {
+    bool pinned_generation=route==ROUTE_COMMAND||route==ROUTE_QUERY||(route==ROUTE_HEARTBEAT&&*requested)||
+        (route==ROUTE_RECONNECT&&field(body,"generation"));
+    if (pinned_generation) {
         double generation;
         if (!numeric(body,"generation",1,UINT32_MAX,&generation)||generation!=device->generation)
             return reply(status,409,"The request belongs to a different CAN connection generation.");
     }
     struct controller_lane *l=lane_for(c,id);
     if (!l) return reply(status,409,"No control lane is available for this adapter.");
-    const char *action=text_field(body,"action");
-    bool disabling=!strcmp(route,"/api/command")&&!strcmp(action,"disable");
-    if (disabling) l->query=QUERY_IDLE;
-    if (!strcmp(route,"/api/command")&&!disabling&&l->op==OP_IDLE&&controller_any_query_active(c)) {
-        return reply(status,409,"Wait for all read-only configuration queries to finish before starting an arm action.");
-    }
-    if (!strcmp(route,"/api/command")&&l->op==OP_IDLE&&c->next_request_id==UINT32_MAX&&strcmp(action,"hold")) {
-        return reply(status,409,"The request identity counter is exhausted. Restart the idle backend before starting another action.");
+    enum control_action action=route==ROUTE_COMMAND?parse_action(text_field(body,"action")):ACTION_UNKNOWN;
+    if (route==ROUTE_COMMAND) {
+        bool disabling=action==ACTION_DISABLE;
+        if (disabling) l->query=QUERY_IDLE;
+        if (!disabling&&l->op==OP_IDLE&&controller_any_query_active(c))
+            return reply(status,409,"Wait for all read-only configuration queries to finish before starting an arm action.");
+        if (l->op==OP_IDLE&&c->next_request_id==UINT32_MAX&&action!=ACTION_HOLD)
+            return reply(status,409,"The request identity counter is exhausted. Restart the idle backend before starting another action.");
     }
     cJSON *qualified=NULL;
     if (!*requested) { qualified=cJSON_Duplicate(body,true);str(qualified,"device_id",id); }
-    cJSON *result=lane_action(c,l,route,qualified?qualified:body,status);lane_check(l);
-    cJSON_Delete(qualified);return result;
+    cJSON *result=lane_action(c,l,route,action,qualified?qualified:body,status);
+    cJSON_Delete(qualified);
+    /* A broken invariant stops the lane; the reply must not report success. */
+    if (!lane_check(c,l)) { cJSON_Delete(result); result=reply(status,500,l->message); }
+    return result;
 }
 
 /* Which read-only request `request` (0..13) is, and whether its reply is
@@ -1630,7 +1796,7 @@ static void lane_tick(struct controller *c,struct controller_lane *l,double now)
         return;
     }
     double dt=now-l->last_tick; if (dt<.02) return;
-    if (l->trajectory_follow&&dt>.050001) {
+    if (trajectory_following(l)&&dt>.050001) {
         follow_hold(c,l,d,now,"Trajectory reference tick exceeded 50 ms. Delayed references discarded; holding the measured pose. Start a new follow session to continue."); return;
     }
     l->last_tick=now; dt=fmin(dt,.05);
@@ -1670,7 +1836,7 @@ static void lane_tick(struct controller *c,struct controller_lane *l,double now)
     }
     if (!enabled(d,true,0)) { stop_lane(c,l,"Motor enable changed during motion."); return; }
     if (l->op!=OP_GRIPPER&&(s->control!=1||s->motion_mode!=1)&&l->sent_at&&now-l->sent_at>.5) { stop_lane(c,l,"Controller did not enter CAN MoveJ mode."); return; }
-    if (l->position_seed_pending) {
+    if (l->pose_phase==POSE_SEEDING) {
         /* A mode request can activate the MCU's previously latched endpoint.
            Seed this admission's frozen measured pose before issuing any mode
            or new destination. Return to receive draining between the three
@@ -1685,13 +1851,13 @@ static void lane_tick(struct controller *c,struct controller_lane *l,double now)
         if (!piper_targets(l->initial,seed)||!can_bus_send(&c->bus,d,l->generation,seed,3)) {
             stop_lane(c,l,"Initial measured hold pose could not finish transmitting; position-mode entry cancelled."); return;
         }
-        l->position_seed_pending=false;
+        l->pose_phase=POSE_TRACKING;
         return;
     }
     double error=0;
     if (l->op==OP_MOVE||l->op==OP_ALIGN||l->op==OP_CYCLE) {
         if (!valid_target(l,d,l->target)) { stop_lane(c,l,l->error); return; }
-        if (l->trajectory_follow) {
+        if (trajectory_following(l)) {
             enum trajectory_step_result step=trajectory_reference_step(l,d,now,dt);
             if (step==TRAJECTORY_STEP_INVALID) { stop_lane(c,l,l->error); return; }
             if (step==TRAJECTORY_STEP_BOUNDARY) {
@@ -1711,10 +1877,10 @@ static void lane_tick(struct controller *c,struct controller_lane *l,double now)
                 follow_hold(c,l,d,now,reason); return;
             }
         }
-        if (l->arrival_hold&&(!valid_target(l,d,l->arrival_hold_pose)||now-l->arrival_hold_at>2)) {
+        if (arrival_holding(l)&&(!valid_target(l,d,l->arrival_hold_pose)||now-l->arrival_hold_at>2)) {
             stop_lane(c,l,"Measured arrival hold did not verify stable fresh feedback within two seconds."); return;
         }
-        if (!l->arrival_hold&&(l->op==OP_CYCLE||l->synchronized_pose)) {
+        if (!arrival_holding(l)&&leg_interpolated(l)) {
             if (l->op==OP_CYCLE&&!valid_target(l,d,l->initial)) { stop_lane(c,l,"The saved return pose no longer satisfies joint limits."); return; }
             double fraction=l->leg_span>0?fmin(1,l->leg_fraction+l->speed*dt/l->leg_span):1;
             for (unsigned i=0;i<6;++i) {
@@ -1728,12 +1894,12 @@ static void lane_tick(struct controller *c,struct controller_lane *l,double now)
         }
         for (unsigned i=0;i<6;++i) {
             if (fabs(l->command[i]-s->deg[i])>3) { stop_lane(c,l,"Measured joint deviated more than 3 degrees from the commanded path."); return; }
-            if (l->trajectory_follow) {
+            if (trajectory_following(l)) {
                 /* All six quantized references were advanced transactionally
                    above; do not apply the legacy lead snap/interpolator. */
-            } else if (l->arrival_hold) {
+            } else if (arrival_holding(l)) {
                 l->command[i]=l->arrival_hold_pose[i];
-            } else if (l->op==OP_CYCLE||l->synchronized_pose) {
+            } else if (leg_interpolated(l)) {
                 l->command[i]=l->leg_start[i]+(l->target[i]-l->leg_start[i])*l->leg_fraction;
             } else if (l->op==OP_ALIGN) {
                 /* An out-of-range intermediate target is not valid. Entry is
@@ -1786,7 +1952,7 @@ static void lane_tick(struct controller *c,struct controller_lane *l,double now)
         final_command=fabs(l->gripper_command-l->gripper_target)<.0005;
         post_target=d->feedback.gripper_at>l->final_sent_at&&d->feedback.gripper_enabled;
     } else for (unsigned i=0;i<6;++i) {
-        final_command=final_command&&(l->arrival_hold||fabs(l->command[i]-l->target[i])<.0005);
+        final_command=final_command&&(arrival_holding(l)||fabs(l->command[i]-l->target[i])<.0005);
         post_target=post_target&&s->joint_at[i]>l->final_sent_at;
     }
     if (final_command&&!l->final_sent_at) { l->final_sent_at=l->op==OP_GRIPPER?now:l->pose_tx_at; post_target=false; }
@@ -1797,9 +1963,9 @@ static void lane_tick(struct controller *c,struct controller_lane *l,double now)
         const struct piper_limit *lim=&d->feedback.limit[i];
         if (s->deg[i]<lim->min-limit_feedback_slop_deg||s->deg[i]>lim->max+limit_feedback_slop_deg) independent_arrival=false;
         measured_hold[i]=clamp_limit(lim,s->deg[i]);
-        if (l->arrival_hold&&fabs(s->deg[i]-l->arrival_hold_pose[i])>fmax(.03,fmin(l->tolerance,.1))) independent_arrival=false;
+        if (arrival_holding(l)&&fabs(s->deg[i]-l->arrival_hold_pose[i])>fmax(.03,fmin(l->tolerance,.1))) independent_arrival=false;
     }
-    bool arrival_ack=l->arrival_hold?independent_arrival&&(s->motion_status==0||s->motion_status==1):
+    bool arrival_ack=arrival_holding(l)?independent_arrival&&(s->motion_status==0||s->motion_status==1):
         s->motion_status==0||(s->motion_status==1&&independent_arrival);
     if (!(l->final_sent_at&&post_target&&s->status_at>l->final_sent_at&&error<=(l->op==OP_GRIPPER?.5:l->tolerance)&&arrival_ack)) {
         l->settled_at=0; if (l->stage==STAGE_CYCLE_UPRIGHT) l->pause_until=now+2;
@@ -1807,7 +1973,7 @@ static void lane_tick(struct controller *c,struct controller_lane *l,double now)
     }
     if (!l->settled_at) l->settled_at=now;
     if (now-l->settled_at<settle_hold_s) return;
-    if (l->arrival_hold||s->motion_status==1) {
+    if (arrival_holding(l)||s->motion_status==1) {
         /* One packet that remains younger than 500ms is not evidence of a
            full settling interval. Busy-bit fallback and its hold must be
            covered by new encoder/status/velocity samples at the endpoint. */
@@ -1815,26 +1981,26 @@ static void lane_tick(struct controller *c,struct controller_lane *l,double now)
         if (s->status_at<endpoint) return;
         for (unsigned i=0;i<6;++i) if (s->joint_at[i]<endpoint||d->feedback.motor[i].high_at<endpoint) return;
     }
-    if (s->motion_status==1&&!l->arrival_hold) {
+    if (s->motion_status==1&&!arrival_holding(l)) {
         /* Some MCUs retain busy for a sub-resolution residual already
            inside the operator's tolerance. Independent fresh encoder
            stillness is required first; then remove the old demand by
            sending a legal measured hold and verify new feedback. */
         if (!valid_target(l,d,measured_hold)) { stop_lane(c,l,l->error); return; }
         memcpy(l->arrival_hold_pose,measured_hold,sizeof measured_hold);
-        l->arrival_hold=true; l->arrival_hold_at=now;
+        l->pose_phase=POSE_ARRIVAL_HOLD; l->arrival_hold_at=now;
         memcpy(l->command,measured_hold,sizeof measured_hold);
         if (!send_pose(c,l,d,measured_hold)) { stop_lane(c,l,"Measured arrival hold could not be transmitted."); return; }
         l->final_sent_at=l->pose_tx_at; l->settled_at=0;
         message(l,"settling","Inside requested tolerance; verifying a stationary measured hold because the MCU still reports busy.");
         return;
     }
-    if (l->op==OP_ALIGN&&l->range_followup) {
+    if (l->stage==STAGE_ALIGN_FOLLOWUP) {
         if (range_distance(d)>0||!valid_target(l,d,l->range_followup_target)) {
             stop_lane(c,l,"Range entry did not verify a legal pose for the pending destination; that destination was discarded."); return;
         }
         memcpy(l->target,l->range_followup_target,sizeof l->target);
-        l->range_followup=false; l->op=OP_MOVE; l->synchronized_pose=true;
+        l->op=OP_MOVE; l->stage=STAGE_MOVE_SYNCHRONIZED;
         l->speed=l->range_followup_speed; l->speed_percent=l->range_followup_percent;
         cycle_leg(l,d,now);
         message(l,"moving","Range entry verified. Moving to the explicitly requested destination; Stop movement cancels it.");
@@ -1852,7 +2018,7 @@ static void lane_tick(struct controller *c,struct controller_lane *l,double now)
         }
         return;
     }
-    finish(c,l,d,l->op==OP_CYCLE?"Complete movement finished: upright and back to the starting pose within 0.2 degrees. Motors remain enabled.":l->op==OP_GRIPPER?"Gripper opening reached within 0.5 mm; gripper remains enabled.":l->arrival_hold?"Joint target reached within the selected tolerance; fresh stationary measured hold verified despite retained MCU busy. Motors remain enabled.":"Joint target reached within the selected tolerance; motors remain enabled.",true);
+    finish(c,l,d,l->op==OP_CYCLE?"Complete movement finished: upright and back to the starting pose within 0.2 degrees. Motors remain enabled.":l->op==OP_GRIPPER?"Gripper opening reached within 0.5 mm; gripper remains enabled.":arrival_holding(l)?"Joint target reached within the selected tolerance; fresh stationary measured hold verified despite retained MCU busy. Motors remain enabled.":"Joint target reached within the selected tolerance; motors remain enabled.",true);
 }
 
 void controller_tick(struct controller *c,double now)
@@ -1877,7 +2043,7 @@ void controller_tick(struct controller *c,double now)
             /* A previous lane's send can pump newer RX frames. Do not add real
                elapsed time to an already-advanced deterministic caller clock. */
             double lane_now=advanced?fmax(now,piper_now()):now;
-            advanced=true;lane_tick(c,l,lane_now);lane_check(l);
+            advanced=true;lane_tick(c,l,lane_now);lane_check(c,l);
         }
     }
     c->defer_transport_maintenance=false;
@@ -1893,20 +2059,20 @@ static cJSON *lane_motion(struct controller *c,const struct controller_lane *l,d
     num(motion,"request_id",l->request_id); num(motion,"speed_deg_s",l->speed); num(motion,"tolerance_deg",l->tolerance);
     num(motion,"speed_percent",l->speed_percent);
     flag(motion,"following",l->follow==FOLLOW_LIVE);
-    flag(motion,"trajectory_follow",l->op==OP_MOVE&&l->trajectory_follow);
+    flag(motion,"trajectory_follow",trajectory_following(l));
     str(motion,"trajectory_transport","position-velocity");
     flag(motion,"streamed_position_hold",false);
     cJSON *reference_velocity=cJSON_CreateArray();
-    if (l->op==OP_MOVE&&l->trajectory_follow) for (unsigned i=0;i<6;++i) cJSON_AddItemToArray(reference_velocity,cJSON_CreateNumber(l->trajectory_velocity[i]));
+    if (trajectory_following(l)) for (unsigned i=0;i<6;++i) cJSON_AddItemToArray(reference_velocity,cJSON_CreateNumber(l->trajectory_velocity[i]));
     put(motion,"reference_velocity_deg_s",reference_velocity);
     flag(motion,"finishing_target",l->follow==FOLLOW_COMMITTED);
     num(motion,"follow_sequence",l->follow_sequence);
     num(motion,"teaching_return_stage",teach_stage(l->stage)?l->stage-STAGE_TEACH_STANDBY+1:0);
     num(motion,"elapsed_s",l->op!=OP_IDLE?now-l->started:0);
     str(motion,"sequence_stage",l->stage==STAGE_CYCLE_RAISING?"raising":l->stage==STAGE_CYCLE_UPRIGHT?"upright":l->stage==STAGE_CYCLE_RETURNING?"returning":"");
-    if (l->range_followup) str(motion,"sequence_stage","range-entry-before-destination");
-    flag(motion,"range_destination_pending",l->range_followup);
-    flag(motion,"verifying_arrival_hold",l->arrival_hold);
+    if (l->stage==STAGE_ALIGN_FOLLOWUP) str(motion,"sequence_stage","range-entry-before-destination");
+    flag(motion,"range_destination_pending",l->stage==STAGE_ALIGN_FOLLOWUP);
+    flag(motion,"verifying_arrival_hold",arrival_holding(l));
     cJSON *return_pose=cJSON_CreateArray();
     if (l->op==OP_CYCLE) for (unsigned i=0;i<6;++i) cJSON_AddItemToArray(return_pose,cJSON_CreateNumber(l->initial[i]));
     put(motion,"return_degrees",return_pose);

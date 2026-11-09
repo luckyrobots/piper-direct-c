@@ -31,6 +31,9 @@ build/test-protocol: tests/test_protocol.c src/protocol.c src/protocol.h tests/c
 build/test-obstruction: tests/test_obstruction.c src/obstruction.h tests/check.h | build
 	$(CC) $(CPPFLAGS) $(CFLAGS) tests/test_obstruction.c -o $@ $(LDLIBS)
 
+build/test-can-lost: tests/test_can_lost.c src/canbus.c src/protocol.c $(HEADERS) | build
+	$(CC) $(CPPFLAGS) $(CFLAGS) tests/test_can_lost.c src/canbus.c src/protocol.c -o $@ $(LDLIBS)
+
 build/test-camera: tests/test_camera.c src/camera.c src/camera.h src/canbus.c src/protocol.c vendor/cJSON.c $(HEADERS) | build
 	$(CC) $(CPPFLAGS) $(CFLAGS) tests/test_camera.c src/camera.c src/canbus.c src/protocol.c vendor/cJSON.c -o $@ $(LDLIBS)
 
@@ -63,9 +66,14 @@ comma := ,
 $(CONTROLLER_TESTS:%=build/test-%): build/test-%: tests/test_$$(subst -,_,$$*).c $(CORE) $(HEADERS) | build
 	$(CC) $(CPPFLAGS) $(CFLAGS) $< $(CORE) $(patsubst %,-Wl$(comma)--wrap=%,$(WRAP_$*)) -o $@ $(LDLIBS)
 
-TESTS = $(CONTROLLER_TESTS) obstruction protocol camera
+TESTS = $(CONTROLLER_TESTS) can-lost obstruction protocol camera
 test: all $(TESTS:%=build/test-%)
-	for t in $(TESTS); do ./build/test-$$t || { echo "FAILED: build/test-$$t"; exit 1; }; done
+	@rm -f build/test-skips.log
+	for t in $(TESTS); do ./build/test-$$t >build/test-$$t.log 2>&1; rc=$$?; cat build/test-$$t.log; \
+		grep "^SKIP" build/test-$$t.log >>build/test-skips.log; \
+		[ $$rc -eq 0 ] || { echo "FAILED: build/test-$$t"; exit 1; }; done
+	@# A skipped check still exits 0, so machines without its tool pass; say so loudly.
+	@if [ -s build/test-skips.log ]; then echo "==== SKIPPED native checks ===="; cat build/test-skips.log; echo "==============================="; fi
 	./build/piper-can --help >/dev/null
 	! ./build/piper-can --query-firmware >/dev/null 2>&1
 	! ./build/piper-can --seconds nonsense >/dev/null 2>&1

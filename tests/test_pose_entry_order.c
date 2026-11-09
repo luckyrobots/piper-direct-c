@@ -144,7 +144,7 @@ int main(void)
     mode_commit(&stale,actual);CHECK(actual[4]==27.239);
     struct controller *c=calloc(1,sizeof *c);CHECK(c);char directory[512];
     fixture(c,directory,sizeof directory,1);start(c,0);start(c,1);tick(c);
-    for(unsigned n=0;n<2;++n) CHECK(mcu[n].seeds==1&&!mcu[n].modes&&!lane(c,n)->position_seed_pending);
+    for(unsigned n=0;n<2;++n) CHECK(mcu[n].seeds==1&&!mcu[n].modes&&!(lane(c,n)->pose_phase==POSE_SEEDING));
     tick(c);
     for(unsigned n=0;n<2;++n) CHECK(mcu[n].seeds==1&&mcu[n].modes==1&&lane(c,n)->op!=OP_IDLE&&!stops[n]);
     for(unsigned i=0;i<8;++i)tick(c);
@@ -155,15 +155,15 @@ int main(void)
        the other lane still seeds once and advances independently. */
     for(unsigned failure=1;failure<=3;++failure) {
         fixture(c,directory,sizeof directory,1+failure);start(c,0);start(c,1);fail_seed=0;fail_frame=failure;tick(c);
-        CHECK(lane(c,0)->op==OP_IDLE&&!lane(c,0)->position_seed_pending&&stops[0]==1&&!mcu[0].modes);
+        CHECK(lane(c,0)->op==OP_IDLE&&!(lane(c,0)->pose_phase==POSE_SEEDING)&&stops[0]==1&&!mcu[0].modes);
         for(unsigned i=0;i<4;++i)tick(c);
         CHECK(!mcu[0].modes&&mcu[1].seeds==1&&mcu[1].modes&&!stops[1]);cleanup(c,directory);
     }
     fixture(c,directory,sizeof directory,5);start(c,0);tick(c);++c->bus.devices[0].generation;tick(c);
-    CHECK(lane(c,0)->op==OP_IDLE&&!lane(c,0)->position_seed_pending&&!mcu[0].modes);cleanup(c,directory);
+    CHECK(lane(c,0)->op==OP_IDLE&&!(lane(c,0)->pose_phase==POSE_SEEDING)&&!mcu[0].modes);cleanup(c,directory);
     fixture(c,directory,sizeof directory,6);start(c,0);
     c->bus.devices[0].feedback.arm[0].deg[4]+=.501;tick(c);
-    CHECK(lane(c,0)->op==OP_IDLE&&!lane(c,0)->position_seed_pending&&!mcu[0].seeds&&!mcu[0].modes&&stops[0]==1);
+    CHECK(lane(c,0)->op==OP_IDLE&&!(lane(c,0)->pose_phase==POSE_SEEDING)&&!mcu[0].seeds&&!mcu[0].modes&&stops[0]==1);
     cleanup(c,directory);
     fixture(c,directory,sizeof directory,7);start(c,0);tick(c);
     cJSON *cancel=cJSON_CreateObject();struct can_device *d=&c->bus.devices[0];
@@ -171,11 +171,11 @@ int main(void)
     cJSON_AddStringToObject(cancel,"owner","pose-entry-order-test");cJSON_AddNumberToObject(cancel,"request_id",lane(c,0)->request_id);
     int status;cJSON *result=controller_action(c,"/api/stop",cancel,&status);CHECK(status==200);
     cJSON_Delete(cancel);cJSON_Delete(result);for(unsigned i=0;i<4;++i)tick(c);
-    CHECK(lane(c,0)->op==OP_IDLE&&!lane(c,0)->position_seed_pending&&!mcu[0].modes&&stops[0]==1);cleanup(c,directory);
+    CHECK(lane(c,0)->op==OP_IDLE&&!(lane(c,0)->pose_phase==POSE_SEEDING)&&!mcu[0].modes&&stops[0]==1);cleanup(c,directory);
     fixture(c,directory,sizeof directory,8);start(c,0);
     c->bus.devices[0].feedback.arm[0].control=2;c->bus.devices[0].feedback.arm[0].teach=1;
     c->bus.devices[0].feedback.arm[0].arm_status=11;tick(c);
-    CHECK(lane(c,0)->op==OP_IDLE&&!lane(c,0)->position_seed_pending&&!mcu[0].seeds&&!mcu[0].modes&&!stops[0]);
+    CHECK(lane(c,0)->op==OP_IDLE&&!(lane(c,0)->pose_phase==POSE_SEEDING)&&!mcu[0].seeds&&!mcu[0].modes&&!stops[0]);
     c->bus.devices[0].feedback.arm[0].control=1;c->bus.devices[0].feedback.arm[0].teach=0;
     c->bus.devices[0].feedback.arm[0].arm_status=0;tick(c);
     CHECK(!mcu[0].seeds&&!mcu[0].modes);cleanup(c,directory);

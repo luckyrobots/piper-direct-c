@@ -46,19 +46,19 @@ static void drive(struct controller *c)
 {
     double now=LANE(c)->started; unsigned request=LANE(c)->request_id; bool destination_seen=false;
     for (unsigned tick=0;tick<1000&&LANE(c)->op!=OP_IDLE;++tick) {
-        bool seed=LANE(c)->position_seed_pending;
+        bool seed=(LANE(c)->pose_phase==POSE_SEEDING);
         now+=.03; LANE(c)->heartbeat=now; controller_tick(c,now);
         for (unsigned i=0;i<6;++i) {
             if(seed) CHECK(fabs(c->bus.sim_target[i]-LANE(c)->initial[i])<.00051);
             else CHECK(c->bus.sim_target[i]>=limits[i][0]&&c->bus.sim_target[i]<=limits[i][1]);
         }
         if (LANE(c)->op==OP_MOVE) {
-            destination_seen=true; CHECK(!LANE(c)->range_followup && LANE(c)->synchronized_pose && LANE(c)->speed_percent==100);
+            destination_seen=true; CHECK(!(LANE(c)->stage==STAGE_ALIGN_FOLLOWUP) && (LANE(c)->stage==STAGE_MOVE_SYNCHRONIZED) && LANE(c)->speed_percent==100);
             CHECK(c->bus.devices[0].feedback.arm[0].deg[1]>=0); /* Never advance before entry is measured. */
         }
         CHECK(LANE(c)->request_id==request); /* One explicit lease, not an automatic new command. */
     }
-    CHECK(destination_seen && LANE(c)->op==OP_IDLE && !strcmp(LANE(c)->phase,"complete") && !LANE(c)->range_followup);
+    CHECK(destination_seen && LANE(c)->op==OP_IDLE && !strcmp(LANE(c)->phase,"complete") && !(LANE(c)->stage==STAGE_ALIGN_FOLLOWUP));
     CHECK(c->bus.sim_enabled==63);
 }
 int main(void)
@@ -76,7 +76,7 @@ int main(void)
     cJSON_Delete(state);
     uint64_t tx=d->tx; CHECK(command(&c,"joint",6,1)==409 && d->tx==tx);
     CHECK(command(&c,"jog",2,-1)==400 && d->tx==tx);
-    CHECK(command(&c,"jog",2,1)==202 && LANE(&c)->range_followup && LANE(&c)->op==OP_ALIGN);
+    CHECK(command(&c,"jog",2,1)==202 && (LANE(&c)->stage==STAGE_ALIGN_FOLLOWUP) && LANE(&c)->op==OP_ALIGN);
     CHECK(LANE(&c)->range_followup_target[1]==1 && LANE(&c)->range_followup_target[5]==pose[5]);
     drive(&c); CHECK(LANE(&c)->target[1]==1 && LANE(&c)->target[5]==pose[5]); close_fixture(&c);
 
@@ -99,13 +99,13 @@ int main(void)
         if (failure==4) d->feedback.motor[4].enabled=false;
         if (failure==5) d->feedback.limit[1].seen=false;
         if (failure==6) d->feedback.arm[0].deg[1]=-3.001;
-        CHECK(command(&c,"move-to-zero",0,0)==409 && !LANE(&c)->range_followup && LANE(&c)->op==OP_IDLE && d->tx==tx);
+        CHECK(command(&c,"move-to-zero",0,0)==409 && !(LANE(&c)->stage==STAGE_ALIGN_FOLLOWUP) && LANE(&c)->op==OP_IDLE && d->tx==tx);
         close_fixture(&c);
     }
     /* STOP/hold/teaching/scope loss discard the explicitly queued destination. */
     for (unsigned cancel=0;cancel<7;++cancel) {
-        init(&c); d=&c.bus.devices[0]; CHECK(command(&c,"move-to-zero",0,0)==202 && LANE(&c)->range_followup);
-        tx=d->tx; CHECK(command(&c,"stale-hold",0,0)==409&&LANE(&c)->range_followup&&d->tx==tx);
+        init(&c); d=&c.bus.devices[0]; CHECK(command(&c,"move-to-zero",0,0)==202 && (LANE(&c)->stage==STAGE_ALIGN_FOLLOWUP));
+        tx=d->tx; CHECK(command(&c,"stale-hold",0,0)==409&&(LANE(&c)->stage==STAGE_ALIGN_FOLLOWUP)&&d->tx==tx);
         if (cancel==0) controller_stop(&c,"Operator stop fixture.");
         if (cancel==1) CHECK(command(&c,"hold",0,0)==200);
         double now=piper_now()+.03;
@@ -114,11 +114,11 @@ int main(void)
         if (cancel==4) d->present=false;
         if (cancel==5) d->feedback.limit[1].min=1; /* Pending range target lost its reported legality. */
         LANE(&c)->heartbeat=cancel==6?now-1:now; controller_tick(&c,now);
-        CHECK(LANE(&c)->op==OP_IDLE&&!LANE(&c)->range_followup);
+        CHECK(LANE(&c)->op==OP_IDLE&&!(LANE(&c)->stage==STAGE_ALIGN_FOLLOWUP));
         tx=d->tx;
         d->present=true; d->feedback.arm[0].control=0; d->feedback.arm[0].teach=0; d->feedback.arm[0].arm_status=0;
         for (unsigned tick=0;tick<30;++tick) { now+=.03; controller_tick(&c,now); }
-        CHECK(LANE(&c)->op==OP_IDLE&&!LANE(&c)->range_followup&&d->tx==tx); /* Refresh is never a resume trigger. */
+        CHECK(LANE(&c)->op==OP_IDLE&&!(LANE(&c)->stage==STAGE_ALIGN_FOLLOWUP)&&d->tx==tx); /* Refresh is never a resume trigger. */
         close_fixture(&c);
     }
     init(&c); d=&c.bus.devices[0]; CHECK(command(&c,"move-to-zero",0,0)==202);
@@ -127,7 +127,7 @@ int main(void)
         memcpy(c.bus.sim_target,d->feedback.arm[0].deg,sizeof c.bus.sim_target);
         frozen_now+=.03; LANE(&c)->heartbeat=frozen_now; controller_tick(&c,frozen_now);
     }
-    CHECK(LANE(&c)->op==OP_IDLE&&!LANE(&c)->range_followup&&strstr(LANE(&c)->message,"Possible obstruction"));
+    CHECK(LANE(&c)->op==OP_IDLE&&!(LANE(&c)->stage==STAGE_ALIGN_FOLLOWUP)&&strstr(LANE(&c)->message,"Possible obstruction"));
     close_fixture(&c);
     puts("Range transition passed: selected inward control, verified slow entry then zero, strict full-pose limits, fresh/fault guards and cancellation without destination replay.");
 }
