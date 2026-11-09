@@ -175,7 +175,7 @@
     "/api/command": {
       "post": {
         "summary": "Control joints, a pose, motor power, gripper or recovery",
-        "description": "enable requires all six drivers disabled and supported=true. joint sets one absolute degree target; jog adds a signed increment to the current measured angle; zero sets one target to 0 degrees without calibration writes. pose takes six absolute angles; synchronized=true uses one shared interpolation fraction so joints follow the planned straight line in joint space. gripper sets opening from 0 to the freshly queried hardware maximum (70 or 100 mm), at 5 mm/s and effort_nm 0.02\u20130.5 N\u00b7m (default 0.1). If raw closed feedback is between \u22122 and 0 mm, allow_closed_offset=true permits an explicit opening to at least 5 mm with a bounded 1 mm entry target; no encoder calibration is changed. Configuration is checked throughout motion. disable/reset require physical support, known firmware and fresh status. reset powers motors off, sends once and verifies fresh disabled, stationary feedback. A pending reset cannot be resent. verify-reset requires reset_completed=true after an operator reset/power cycle. hold is accepted from the owner during an active joint/pose move or gripper ramp. For a gripper it ends the ramp while retaining the last sent target and effort; it does not certify contact or a secure grasp. New moves require a stationary arm and fresh limits. All asynchronous actions require heartbeats. Enable transmits only driver power commands, without a position target or mode change. align explicitly moves resting joints at most 3 degrees to 0.5 degrees inside their command ranges, at 1% MCU speed, retaining all other targets. Larger corrections are rejected. verify-disabled clears a recovery record without CAN transmission only when all drivers are healthy, stationary and disabled; pending resets still require verify-reset. A successful normal disable clears only its own in-flight record; earlier stops remain latched. cycle requires enabled motors and a starting pose within limits. It captures that measured pose, raises toward [start J1,82,-160,0,-7,start J6] degrees, pauses for two seconds after verified arrival, and returns to the captured pose. Cycle speed is fixed at up to 3 degrees/second with 0.2-degree feedback tolerance; it uses synchronized joint interpolation and a 180-second deadline. Stop, Hold, lease loss, faults or disconnection cancel the remaining cycle; return is never automatic after interruption. Motion remains supervised by the existing heartbeat. motion.sequence_stage is raising/upright/returning while active; motion.return_degrees contains the captured pose.",
+        "description": "enable requires all six drivers disabled and supported=true. joint sets one absolute degree target; jog adds a signed increment to the current measured angle; zero sets one target to 0 degrees without calibration writes. pose takes six absolute angles; synchronized=true uses one shared interpolation fraction so joints follow the planned straight line in joint space. gripper sets opening from 0 to the freshly queried hardware maximum (70 or 100 mm), at 5 mm/s and effort_nm 0.02\u20130.5 N\u00b7m (default 0.1). If raw closed feedback is between \u22122 and 0 mm, allow_closed_offset=true permits an explicit opening to at least 5 mm with a bounded 1 mm entry target; no encoder calibration is changed. Configuration is checked throughout motion. disable/reset require physical support, known firmware and fresh status. reset powers motors off, sends once and verifies fresh disabled, stationary feedback. A pending reset cannot be resent. verify-reset requires supported=true and reset_completed=true; send reset_completed only after the operator confirms that this reset or power cycle completed. Each confirmation flag is read only by the actions listed in the Command schema's x-piper-confirmations; do not send it on others. hold is accepted from the owner during an active joint/pose move or gripper ramp. For a gripper it ends the ramp while retaining the last sent target and effort; it does not certify contact or a secure grasp. New moves require a stationary arm and fresh limits. All asynchronous actions require heartbeats. Enable transmits only driver power commands, without a position target or mode change. align explicitly moves resting joints at most 3 degrees to 0.5 degrees inside their command ranges, at 1% MCU speed, retaining all other targets. Larger corrections are rejected. verify-disabled clears a recovery record without CAN transmission only when all drivers are healthy, stationary and disabled; pending resets still require verify-reset. A successful normal disable clears only its own in-flight record; earlier stops remain latched. cycle requires enabled motors and a starting pose within limits. It captures that measured pose, raises toward [start J1,82,-160,0,-7,start J6] degrees, pauses for two seconds after verified arrival, and returns to the captured pose. Cycle speed is fixed at up to 3 degrees/second with 0.2-degree feedback tolerance; it uses synchronized joint interpolation and a 180-second deadline. Stop, Hold, lease loss, faults or disconnection cancel the remaining cycle; return is never automatic after interruption. Motion remains supervised by the existing heartbeat. motion.sequence_stage is raising/upright/returning while active; motion.return_degrees contains the captured pose.",
         "requestBody": {
           "required": true,
           "content": {
@@ -214,6 +214,27 @@
                     ],
                     "standalone": true,
                     "clear": true
+                  }
+                },
+                "verify-reset": {
+                  "value": {
+                    "device_id": "usb:YOUR_ADAPTER_SERIAL",
+                    "generation": 1,
+                    "owner": "YOUR_UNIQUE_CLIENT_ID",
+                    "action": "verify-reset",
+                    "standalone": true,
+                    "supported": true,
+                    "reset_completed": true
+                  }
+                },
+                "disable": {
+                  "value": {
+                    "device_id": "usb:YOUR_ADAPTER_SERIAL",
+                    "generation": 1,
+                    "owner": "YOUR_UNIQUE_CLIENT_ID",
+                    "action": "disable",
+                    "standalone": true,
+                    "supported": true
                   }
                 }
               }
@@ -712,8 +733,7 @@
             "type": "object",
             "required": [
               "action",
-              "owner",
-              "standalone"
+              "owner"
             ],
             "properties": {
               "action": {
@@ -750,19 +770,19 @@
               },
               "standalone": {
                 "type": "boolean",
-                "description": "Operator confirms no linked leader or competing controller"
+                "description": "Operator confirms no linked leader or competing controller. Required true on every action admitted from idle. hold, follow-update, follow-commit and follow-end on the caller's active lane do not read it."
               },
               "clear": {
                 "type": "boolean",
-                "description": "Operator confirms full path clear and attended; required for enable/moves"
+                "description": "Operator confirms the full motion path is clear and the arm is attended. Required true on enable, joint, jog, zero, pose, gripper, align, cycle, move-to-zero, follow-start, reset, verify-current, teach-return and recover-at-pose. disable, verify-reset and verify-disabled do not read it."
               },
               "supported": {
                 "type": "boolean",
-                "description": "Operator confirms physical support; required for power/recovery"
+                "description": "Operator confirms the arm is physically supported. Required true on enable, disable, reset, verify-reset, verify-disabled, verify-current, teach-return and recover-at-pose. Motion and gripper actions do not read it."
               },
               "reset_completed": {
                 "type": "boolean",
-                "description": "Operator confirms manual reset/power-cycle completed"
+                "description": "Read only by verify-reset, where it is required true. Send it only after an explicit operator confirmation, for that verify-reset request, that the controller reset or power cycle has completed. It is never a default: every other action ignores it."
               },
               "button_off": {
                 "type": "boolean",
@@ -837,8 +857,201 @@
                 "description": "Percentage of the slowest fresh reported joint speed limit. Mutually exclusive with legacy speed_deg_s. Zero blocks new joint moves; it does not stop an active move. Alignment and scripted cycle retain explicit rates."
               }
             }
+          },
+          {
+            "if": {
+              "not": {
+                "properties": {
+                  "action": {
+                    "enum": [
+                      "hold",
+                      "follow-update",
+                      "follow-commit",
+                      "follow-end"
+                    ]
+                  }
+                },
+                "required": [
+                  "action"
+                ]
+              }
+            },
+            "then": {
+              "properties": {
+                "standalone": {
+                  "const": true
+                }
+              },
+              "required": [
+                "standalone"
+              ]
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "action": {
+                  "enum": [
+                    "enable",
+                    "joint",
+                    "jog",
+                    "zero",
+                    "pose",
+                    "gripper",
+                    "align",
+                    "cycle",
+                    "move-to-zero",
+                    "follow-start",
+                    "reset",
+                    "verify-current",
+                    "teach-return",
+                    "recover-at-pose"
+                  ]
+                }
+              },
+              "required": [
+                "action"
+              ]
+            },
+            "then": {
+              "allOf": [
+                {
+                  "properties": {
+                    "clear": {
+                      "const": true
+                    }
+                  },
+                  "required": [
+                    "clear"
+                  ]
+                }
+              ]
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "action": {
+                  "enum": [
+                    "enable",
+                    "disable",
+                    "reset",
+                    "verify-reset",
+                    "verify-disabled",
+                    "verify-current",
+                    "teach-return",
+                    "recover-at-pose"
+                  ]
+                }
+              },
+              "required": [
+                "action"
+              ]
+            },
+            "then": {
+              "allOf": [
+                {
+                  "properties": {
+                    "supported": {
+                      "const": true
+                    }
+                  },
+                  "required": [
+                    "supported"
+                  ]
+                }
+              ]
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "action": {
+                  "const": "verify-reset"
+                }
+              },
+              "required": [
+                "action"
+              ]
+            },
+            "then": {
+              "allOf": [
+                {
+                  "properties": {
+                    "reset_completed": {
+                      "const": true
+                    }
+                  },
+                  "required": [
+                    "reset_completed"
+                  ]
+                }
+              ]
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "action": {
+                  "enum": [
+                    "teach-return",
+                    "recover-at-pose"
+                  ]
+                }
+              },
+              "required": [
+                "action"
+              ]
+            },
+            "then": {
+              "allOf": [
+                {
+                  "properties": {
+                    "button_off": {
+                      "const": true
+                    }
+                  },
+                  "required": [
+                    "button_off"
+                  ]
+                }
+              ]
+            }
           }
-        ]
+        ],
+        "x-piper-confirmations": {
+          "description": "Operator attestations that lane_action() in src/controller.c reads for each action. A client sends a flag only on the actions listed for it. teach-return and recover-at-pose also need button_off and, by firmware, same_pose_confirmed or zero_pose_confirmed.",
+          "standalone": "every action except hold, follow-update, follow-commit, follow-end",
+          "clear": [
+            "enable",
+            "joint",
+            "jog",
+            "zero",
+            "pose",
+            "gripper",
+            "align",
+            "cycle",
+            "move-to-zero",
+            "follow-start",
+            "reset",
+            "verify-current",
+            "teach-return",
+            "recover-at-pose"
+          ],
+          "supported": [
+            "enable",
+            "disable",
+            "reset",
+            "verify-reset",
+            "verify-disabled",
+            "verify-current",
+            "teach-return",
+            "recover-at-pose"
+          ],
+          "reset_completed": [
+            "verify-reset"
+          ]
+        }
       },
       "Result": {
         "type": "object",
@@ -963,6 +1176,86 @@
                       }
                     }
                   }
+                },
+                "recovery_required": {
+                  "type": "boolean",
+                  "description": "The persisted recovery record is not clear (or a legacy stop is unacknowledged) and no action is running."
+                },
+                "reset_pending": {
+                  "type": "boolean",
+                  "description": "The persisted record state is reset_pending; only reset retry or verify-reset can proceed."
+                },
+                "stop_reason": {
+                  "type": "string",
+                  "description": "Display text for the latched reason. Clients must not branch on it; use stop_event.kind and reset_pending."
+                },
+                "stop_event": {
+                  "type": [
+                    "object",
+                    "null"
+                  ],
+                  "description": "First unacknowledged STOP evidence, kept until recovery clears the record. The persisted control-state.json record also carries state (clear, latched, reset_pending) and kind (intent, stop, obstruction, power, reset); recovery eligibility reads those fields, never reason text.",
+                  "properties": {
+                    "kind": {
+                      "enum": [
+                        "stop",
+                        "obstruction"
+                      ],
+                      "description": "Why the STOP was latched. obstruction makes the incident eligible for recover-at-pose."
+                    },
+                    "reason": {
+                      "type": "string",
+                      "description": "Display text only"
+                    },
+                    "joint": {
+                      "type": "integer",
+                      "description": "Joint (1-6) recorded by a joint-specific stop such as an obstruction; 0 when none was recorded"
+                    },
+                    "request_id": {
+                      "type": "integer"
+                    },
+                    "unix_time": {
+                      "type": "number"
+                    },
+                    "phase_before_stop": {
+                      "type": "string"
+                    },
+                    "following": {
+                      "type": "boolean"
+                    },
+                    "finishing_target": {
+                      "type": "boolean"
+                    },
+                    "trajectory_follow": {
+                      "type": "boolean"
+                    },
+                    "arm_status": {
+                      "type": "number"
+                    },
+                    "error": {
+                      "type": "number"
+                    },
+                    "transport": {
+                      "type": "object"
+                    },
+                    "joints": {
+                      "type": "array",
+                      "items": {
+                        "type": "object"
+                      }
+                    }
+                  }
+                },
+                "last_fault": {
+                  "type": [
+                    "object",
+                    "null"
+                  ],
+                  "description": "Robot fault captured before the STOP changed the reported state"
+                },
+                "last_cleanup_error": {
+                  "type": "string",
+                  "description": "Latest power-cleanup failure; the primary stop_event is kept"
                 }
               }
             }
