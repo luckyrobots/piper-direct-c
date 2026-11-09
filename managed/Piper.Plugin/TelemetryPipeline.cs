@@ -271,7 +271,7 @@ public sealed partial class PipersPlugin
             var receipt = telemetry.Latest;
             if (group is null && !HasFreshControlTelemetry(out receipt))
             {
-                if (!RecoveryExpectedGap(receipt)) DisarmTelemetryTargets("Measured robot feedback exceeded the 500 ms freshness window", clearLink: false);
+                if (!RecoveryExpectedGap(receipt)) DisarmTelemetryTargets($"Measured robot feedback exceeded the {TelemetryReceipt.MaximumAgeMilliseconds:F0} ms freshness window", clearLink: false);
                 continue;
             }
             if (CommandAuthority.Current.Lease is not { } lease) continue;

@@ -1,6 +1,7 @@
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using LuckyEngine.PluginSdk;
+using LuckyRobots.Piper.Pika;
 
 namespace LuckyRobots.Piper.Plugin;
 
@@ -211,8 +212,8 @@ public sealed partial class PipersPlugin
         if (!artifact.HasPositionCommands) EpisodeReplayPlanner.ValidateJointRanges(artifact.Samples.Select(sample => sample.JointDegrees).ToArray(), limits);
         if (!PikaMatchesProfile() || !PikaDisplayOpening(state?["pika"] as JsonObject, out double opening))
             throw new InvalidOperationException("Fresh measured Pika opening for this robot is required to compare the first pose.");
-        if (artifact.Samples.Any(sample => (artifact.HasPositionCommands ? sample.CommandedGripperOpeningMm!.Value : sample.GripperOpeningMm) > 90))
-            throw new InvalidOperationException("A simulated gripper sample exceeds the physical Pika 90 mm opening limit; no clipping is available.");
+        if (artifact.Samples.Any(sample => (artifact.HasPositionCommands ? sample.CommandedGripperOpeningMm!.Value : sample.GripperOpeningMm) > PikaProtocol.MaximumOpeningMm))
+            throw new InvalidOperationException($"A simulated gripper sample exceeds the physical Pika {PikaProtocol.MaximumOpeningMm} mm opening limit; no clipping is available.");
         poseMatches &= Math.Abs(opening - artifact.Samples[0].GripperOpeningMm) <= 1;
         if (artifact.HasPositionCommands)
             firstCommandMatches &= Math.Abs(artifact.Samples[0].CommandedGripperOpeningMm!.Value - artifact.Samples[0].GripperOpeningMm) <= 1;

@@ -1,6 +1,7 @@
 using System.Text;
 using System.Text.Json;
 using System.Globalization;
+using LuckyRobots.Piper.Pika;
 
 namespace LuckyRobots.Piper.Plugin;
 
@@ -170,8 +171,8 @@ public static class EpisodeReplayReader
         {
             Equal(robot, "commandConvention", CommandConvention);
             reference = Number(robot, "gripperReferenceGapMm");
-            if (maximum > 90 || reference < maximum || reference > 100)
-                throw Invalid("Actual Pika opening must be at most 90 mm and distinct from its declared geometric zero-slide reference gap.");
+            if (maximum > PikaProtocol.MaximumOpeningMm || reference < maximum || reference > 100)
+                throw Invalid($"Actual Pika opening must be at most {PikaProtocol.MaximumOpeningMm} mm and distinct from its declared geometric zero-slide reference gap.");
             var proof = Object(robot, "positionActuatorProvenance");
             Properties(proof, "positionActuatorProvenance", "sourceSha256", "validation", "runtimeChecks", "runtimeTuning");
             string digest = Text(proof, "sourceSha256");

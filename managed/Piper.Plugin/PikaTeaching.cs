@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json.Nodes;
+using LuckyRobots.Piper.Pika;
 
 namespace LuckyRobots.Piper.Plugin;
 
@@ -102,7 +103,7 @@ public sealed class PikaTeachingRecorder
         if (observation.HostReceiptUnixMicroseconds <= 0 || observation.JointDegrees.Length != 6 || observation.JointSourceAgesMs.Length != 6 ||
             observation.JointDegrees.Any(v => !double.IsFinite(v) || Math.Abs(v) > 360) ||
             !double.IsFinite(observation.RawPikaAngleRad) || Math.Abs(observation.RawPikaAngleRad) > Math.PI ||
-            observation.DisplayOpeningMm is double width && (!double.IsFinite(width) || width is < 0 or > 90) ||
+            observation.DisplayOpeningMm is double width && !PikaProtocol.ValidOpening(width) ||
             !double.IsFinite(observation.PikaFeedbackTimeSeconds) || observation.PikaFeedbackTimeSeconds < 0 ||
             new[] { observation.ControllerSourceAgeMs, observation.PikaSourceAgeMs }.Concat(observation.JointSourceAgesMs)
                 .Any(v => !double.IsFinite(v) || v < 0 || v > MaximumEvidenceAgeMs))
@@ -161,7 +162,7 @@ public sealed class PikaTeachingRecorder
             joints.Any(j => j?["fresh"]?.GetValue<bool>() != true || !Number(j["actual_deg"], out _)) ||
             !Number(pika["telemetry"]?["motor"]?["Position"], out double raw) || !Number(pika["feedback_time_s"], out double pikaTime))
             throw new InvalidOperationException("Fresh six-joint and Pika observations are required");
-        double? width = GripperLink.TryMeasuredOpening(pika, out double opening, displayReference) && opening <= 90 ? opening : null;
+        double? width = GripperLink.TryMeasuredOpening(pika, out double opening, displayReference) && opening <= PikaProtocol.MaximumOpeningMm ? opening : null;
         return new(identity, receipt.Sequence, receipt.ReceivedTicks, hostReceiptUnixMicroseconds,
             joints.Select(j => j!["actual_deg"]!.GetValue<double>()).ToArray(), raw, width,
             Age(device["status"]), joints.Select(Age).ToArray(), Age(pika), pikaTime, pika["enabled"]?.GetValue<bool>() == true);

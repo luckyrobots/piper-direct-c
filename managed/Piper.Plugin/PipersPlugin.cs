@@ -477,7 +477,7 @@ public sealed partial class PipersPlugin : ILuckyPlugin
             {
                 if (!PikaDisplayOpening(pika!, out double currentOpening))
                     throw new InvalidOperationException("Waiting for a valid gripper opening. If the physical jaws are closed, set their display reference first.");
-                opening = Math.Clamp(currentOpening + (id == "pika.plus" ? 1 : -1), 0, 90);
+                opening = Math.Clamp(currentOpening + (id == "pika.plus" ? 1 : -1), PikaProtocol.MinimumOpeningMm, PikaProtocol.MaximumOpeningMm);
             }
             if (epoch != CommandAuthority.Epoch || profile != ActiveProfile)
                 throw new InvalidOperationException("Control permission changed before the gripper target was sent.");

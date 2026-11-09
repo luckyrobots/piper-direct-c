@@ -23,7 +23,7 @@ public static class HeightValidation
     public const int MaximumChecks = 256;
     public static bool FreshAge(double sourceAgeMilliseconds, double elapsedMilliseconds) =>
         double.IsFinite(sourceAgeMilliseconds) && double.IsFinite(elapsedMilliseconds) && sourceAgeMilliseconds >= 0 &&
-        elapsedMilliseconds >= 0 && sourceAgeMilliseconds + elapsedMilliseconds <= 500;
+        elapsedMilliseconds >= 0 && sourceAgeMilliseconds + elapsedMilliseconds <= TelemetryReceipt.MaximumAgeMilliseconds;
 
     public static double ParseMeasurement(string text)
     {

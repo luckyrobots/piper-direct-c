@@ -195,10 +195,10 @@ public sealed partial class PipersPlugin
             throw new InvalidOperationException("Fresh matching disabled-jaw feedback and an updated backend are required. No enable command was sent.");
         if (pika["telemetry"]?["motor"]?["Position"] is not JsonValue raw || !raw.TryGetValue<double>(out double angle) || !double.IsFinite(angle) ||
             pika["telemetry"]?["motor"]?["Speed"] is not JsonValue measuredSpeed || !measuredSpeed.TryGetValue<double>(out double speed) || !double.IsFinite(speed) ||
-            Math.Abs(speed) > OrderedSimulationExecution.StationaryGripperSpeed)
+            Math.Abs(speed) > PikaProtocol.StationarySpeedRadiansPerSecond)
             throw new InvalidOperationException("Hold the Pika jaws still before choosing Hold jaws here.");
         if (!PikaMeasuredHoldResume.ValidMeasuredAngle(angle))
-            throw new InvalidOperationException("The measured raw jaw opening is outside the supported 0–90 mm hold range (with up to 1 mm closed-reading noise). Move the free jaws back into range by hand. No motor command was sent.");
+            throw new InvalidOperationException($"The measured raw jaw opening is outside the supported {PikaProtocol.MinimumOpeningMm}–{PikaProtocol.MaximumOpeningMm} mm hold range (with up to 1 mm closed-reading noise). Move the free jaws back into range by hand. No motor command was sent.");
         string expectedToken = token, expectedProfile = ActiveProfile.Id;
         string expectedDevice = device["id"]!.GetValue<string>(); long generation = device["generation"]!.GetValue<long>();
         long permissionEpoch = CommandAuthority.Epoch;

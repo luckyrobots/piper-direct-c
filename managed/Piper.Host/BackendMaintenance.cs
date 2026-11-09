@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Text.Json.Serialization;
+using LuckyRobots.Piper.Pika;
 
 namespace LuckyRobots.Piper.Host;
 
@@ -218,7 +219,7 @@ public sealed class BackendMaintenance
             return "Stop active arm actions and finish queries before shutting down the server.";
         if (pikaSnapshots().OfType<JsonObject>().Any(pika => pika["pending"]?.GetValue<bool>() == true ||
             pika["following"]?.GetValue<bool>() == true || pika["resuming_hold"]?.GetValue<bool>() == true ||
-            pika["connected"]?.GetValue<bool>() == true && Finite(pika["telemetry"]?["motor"] as JsonObject, "Speed", out double speed) && Math.Abs(speed) > .02))
+            pika["connected"]?.GetValue<bool>() == true && Finite(pika["telemetry"]?["motor"] as JsonObject, "Speed", out double speed) && Math.Abs(speed) > PikaProtocol.StationarySpeedRadiansPerSecond))
             return "Finish active Pika gripper movements before shutting down the server.";
         return null;
     }
@@ -279,7 +280,7 @@ public sealed class BackendMaintenance
             if (!connected || pika["fresh"]?.GetValue<bool>() != true ||
                 pika["pending"]?.GetValue<bool>() != false || pika["following"]?.GetValue<bool>() != false ||
                 pika["resuming_hold"]?.GetValue<bool>() == true || pika["driver_fault"]?.GetValue<bool>() != false ||
-                !Finite(pika["telemetry"]?["motor"] as JsonObject, "Speed", out double speed) || Math.Abs(speed) > .02 ||
+                !Finite(pika["telemetry"]?["motor"] as JsonObject, "Speed", out double speed) || Math.Abs(speed) > PikaProtocol.StationarySpeedRadiansPerSecond ||
                 (powered || uncertain) && pika["post_request_feedback_verified"]?.GetValue<bool>() != true)
                 return name + ": stop gripper following and wait for fresh stationary, acknowledged motor feedback before restarting.";
         }

@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using LuckyEngine.PluginSdk;
+using LuckyRobots.Piper.Pika;
 
 namespace LuckyRobots.Piper.Plugin;
 
@@ -350,7 +351,8 @@ public sealed partial class PipersPlugin
                 var usb = pikaDevices.SingleOrDefault(d => d["device"]?.GetValue<string>() == before.PikaDevice)
                     ?? throw new InvalidOperationException("Choose a detected USB gripper first.");
                 string instance = usb["windows_instance_id"]?.GetValue<string>() ?? "";
-                if (!OperatingSystem.IsWindows() || !System.Text.RegularExpressions.Regex.IsMatch(instance, @"^USB\\VID_1A86&PID_7522\\[^\r\n]+$"))
+                if (!OperatingSystem.IsWindows() || !instance.StartsWith(PikaProtocol.WindowsInstanceIdPrefix, StringComparison.OrdinalIgnoreCase) ||
+                    instance.Length == PikaProtocol.WindowsInstanceIdPrefix.Length || instance.AsSpan().IndexOfAny('\r', '\n') >= 0)
                     throw new InvalidOperationException("Only a detected Pika USB device can be shared with WSL.");
                 string installer = Path.Combine(engine.Start.PackageDirectory, "tools", "Setup-PikaUsb.ps1");
                 if (!File.Exists(installer)) throw new InvalidOperationException("Update the plugin package to include its USB setup helper.");
