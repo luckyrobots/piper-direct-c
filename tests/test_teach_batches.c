@@ -11,7 +11,7 @@ static double clock_now=100,batch_at[2],frozen[6];
 static unsigned batches,stops,fail_batch,fail_frame;
 static int stale_joint=-1,stale_high=-1;
 static double stale_at;
-double __wrap_piper_now(void) { return clock_now; }
+FIXTURE_WRAP_PIPER_NOW(clock_now)
 void __wrap_can_bus_receive(struct can_bus *bus,double now)
 {
     struct can_device *d=&bus->devices[0]; struct piper_sample *s=&d->feedback.arm[0];
@@ -54,7 +54,7 @@ bool __wrap_can_bus_send(struct can_bus *bus,struct can_device *d,unsigned gener
 }
 static void fixture(struct controller *c,char directory[96])
 {
-    strcpy(directory,"/tmp/piper-teach-batches-XXXXXX"); CHECK(mkdtemp(directory));
+    fixture_directory(directory,96,"piper-teach-batches");
     clock_now+=10; CHECK(controller_init(c,true,directory,""));
     batches=stops=fail_batch=fail_frame=0; stale_joint=stale_high=-1;
     struct can_device *d=&c->bus.devices[0];
@@ -63,12 +63,8 @@ static void fixture(struct controller *c,char directory[96])
     strcpy(d->feedback.hardware,"H-V1.2-1"); strcpy(d->feedback.version,"S-V1.9-0");
     d->feedback.arm[0].control=2; d->feedback.arm[0].teach=2; d->feedback.arm[0].motion_mode=1;
     const double pose[6]={2,25,-25,-20,60,8}; memcpy(frozen,pose,sizeof frozen); memcpy(d->feedback.arm[0].deg,pose,sizeof pose);
-    const double limits[6][2]={{-150,150},{0,180},{-170,0},{-100,100},{-70,70},{-180,180}};
-    for (unsigned i=0;i<6;++i) {
-        d->feedback.motor[i].enabled=true;
-        d->feedback.limit[i]=(struct piper_limit){.seen=true,.min=limits[i][0],.max=limits[i][1],.speed=.3,.at=clock_now};
-        d->feedback.acceleration[i]=(struct piper_acceleration){.seen=true,.max=5,.at=clock_now};
-    }
+    fixture_vendor_limits(d,.3,clock_now);
+    for (unsigned i=0;i<6;++i) d->feedback.motor[i].enabled=true;
     d->rx=123; d->local=45; __wrap_can_bus_receive(&c->bus,clock_now);
 }
 static void start(struct controller *c,int expected)
@@ -83,15 +79,13 @@ static void start(struct controller *c,int expected)
 static void tick(struct controller *c,double dt) { clock_now+=dt; LANE(c)->heartbeat=clock_now; controller_tick(c,clock_now); }
 static void close_fixture(struct controller *c,const char *directory)
 {
-    CHECK(LANE(c)->op==OP_IDLE); c->bus.devices[0].fd=-1; controller_close(c);
-    char path[128]; snprintf(path,sizeof path,"%s/control-state.json",directory); CHECK(!unlink(path)); CHECK(!rmdir(directory));
+    CHECK(LANE(c)->op==OP_IDLE); c->bus.devices[0].fd=-1; fixture_cleanup(c,directory);
 }
 static void check_persisted_failure(struct controller *c,const char *directory,unsigned count,unsigned index,unsigned id)
 {
     struct can_device *d=&c->bus.devices[0]; ++d->generation; d->problem[0]=0;
-    char path[128]; snprintf(path,sizeof path,"%s/control-state.json",directory); FILE *f=fopen(path,"rb"); CHECK(f);
-    char text[16384]; size_t n=fread(text,1,sizeof text-1,f); fclose(f); text[n]=0;
-    cJSON *saved=cJSON_Parse(text),*device=cJSON_GetObjectItem(cJSON_GetObjectItem(saved,"devices"),d->id);
+    char path[128]; snprintf(path,sizeof path,"%s/control-state.json",directory);
+    cJSON *saved=fixture_read_json(path),*device=cJSON_GetObjectItem(cJSON_GetObjectItem(saved,"devices"),d->id);
     cJSON *transport=cJSON_GetObjectItem(cJSON_GetObjectItem(device,"stop_event"),"transport");
     CHECK(cJSON_IsObject(transport));
     CHECK(cJSON_GetNumberValue(cJSON_GetObjectItem(transport,"failed_frame_index"))==index);

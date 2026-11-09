@@ -13,7 +13,7 @@ static char directory[96];
 
 static void init(struct controller *c)
 {
-    strcpy(directory,"/tmp/piper-range-transition-XXXXXX"); CHECK(mkdtemp(directory));
+    fixture_directory(directory,96,"piper-range-transition");
     CHECK(controller_init(c,true,directory,""));
     struct can_device *d=&c->bus.devices[0]; double now=piper_now();
     memcpy(d->feedback.arm[0].deg,pose,sizeof pose); memcpy(c->bus.sim_target,pose,sizeof pose);
@@ -27,9 +27,7 @@ static void init(struct controller *c)
 }
 static void close_fixture(struct controller *c)
 {
-    controller_close(c);
-    char path[128]; snprintf(path,sizeof path,"%s/control-state.json",directory);
-    CHECK(!unlink(path)); CHECK(!rmdir(directory));
+    fixture_cleanup(c,directory);
 }
 static int command(struct controller *c,const char *action,unsigned joint,double degrees)
 {

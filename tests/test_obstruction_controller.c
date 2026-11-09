@@ -10,15 +10,11 @@ static cJSON *event(struct controller *c) {
     cJSON *e=cJSON_Duplicate(cJSON_GetObjectItem(d,"stop_event"),true); cJSON_Delete(s); return e;
 }
 int main(void) {
-    char dir[]="/tmp/piper-obstruction-XXXXXX"; CHECK(mkdtemp(dir));
+    char dir[96]; fixture_directory(dir,sizeof dir,"piper-obstruction");
     struct controller c; CHECK(controller_init(&c,true,dir,""));
     double now=piper_now(); struct can_device *d=&c.bus.devices[0];
     c.bus.sim_enabled=63; controller_tick(&c,now);
-    strcpy(d->feedback.hardware,"H-V1.2-1"); strcpy(d->feedback.version,"S-V1.8-2");
-    for(unsigned i=0;i<6;i++) {
-        d->feedback.limit[i]=(struct piper_limit){.seen=true,.min=-180,.max=180,.speed=.3,.at=now};
-        d->feedback.acceleration[i]=(struct piper_acceleration){.seen=true,.max=5,.at=now};
-    }
+    fixture_configure(d,"S-V1.8-2",-180,180,.3,now);
     fixture_still(d,now-1);
     cJSON *j=cJSON_CreateObject();
     cJSON_AddStringToObject(j,"device_id",d->id);cJSON_AddNumberToObject(j,"generation",d->generation);

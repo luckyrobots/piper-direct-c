@@ -9,7 +9,7 @@
 /* All protocol/receipt clocks use the same deterministic monotonic fixture.
    CPU load must not turn a reference-math test into a real 500-ms stale gap. */
 static double test_clock=1000;
-double __wrap_piper_now(void) { return test_clock; }
+FIXTURE_WRAP_PIPER_NOW(test_clock)
 
 static cJSON *request(struct controller *c,const char *action,bool trajectory)
 {
@@ -42,8 +42,7 @@ static void setup(struct controller *c,char *directory)
 }
 static void cleanup(struct controller *c,const char *directory)
 {
-    controller_close(c); char path[256]; snprintf(path,sizeof path,"%s/control-state.json",directory);
-    CHECK(!unlink(path)); CHECK(!rmdir(directory));
+    fixture_cleanup(c,directory);
 }
 static double tick(struct controller *c,double now,double dt)
 {

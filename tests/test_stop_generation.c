@@ -19,7 +19,7 @@ static cJSON *identity(struct can_device *d)
 }
 int main(void)
 {
-    char directory[]="/tmp/piper-stop-generation-XXXXXX"; CHECK(mkdtemp(directory));
+    char directory[96]; fixture_directory(directory,sizeof directory,"piper-stop-generation");
     struct controller c; CHECK(controller_init(&c,true,directory,""));
     double now=piper_now(); controller_tick(&c,now);
     struct can_device *d=&c.bus.devices[0];
@@ -62,8 +62,6 @@ int main(void)
     stop(&c,body,200); CHECK(d->tx==tx+1);
     // Existing manual STOP callers need no generation or feedback-health check.
     tx=d->tx; stop(&c,cJSON_CreateObject(),200); CHECK(d->tx==tx+1);
-    controller_close(&c);
-    char path[256]; snprintf(path,sizeof path,"%s/control-state.json",directory);
-    CHECK(!unlink(path)); CHECK(!rmdir(directory));
+    fixture_cleanup(&c,directory);
     puts("STOP generation: stale same-serial requests and malformed generations rejected before TX; current-generation cleanup and legacy manual STOP preserved.");
 }

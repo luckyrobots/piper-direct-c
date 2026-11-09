@@ -8,7 +8,7 @@
 
 static double clock_now=100;
 static unsigned targeted_reopens,inventory_scans,query_attempts;
-double __wrap_piper_now(void) { return clock_now; }
+FIXTURE_WRAP_PIPER_NOW(clock_now)
 void __wrap_can_bus_receive(struct can_bus *bus,double now) { CHECK(now==clock_now);bus->devices[0].last_rx=now; }
 void __wrap_can_bus_reconnect(struct can_bus *bus) { (void)bus;CHECK(!"An automatic retry must never reconnect the whole bus"); }
 void __wrap_can_bus_reconnect_device(struct can_bus *bus,struct can_device *device)

@@ -22,7 +22,7 @@ struct fake_mcu { double frozen[6],latched[6]; unsigned seeds,modes; bool active
 static struct fake_mcu mcu[2];
 static int fail_seed=-1;
 static unsigned fail_frame,stops[2];
-double __wrap_piper_now(void) { return clock_now; }
+FIXTURE_WRAP_PIPER_NOW(clock_now)
 static unsigned slot(struct can_bus *bus,struct can_device *d)
 {
     CHECK(d>=bus->devices&&d<bus->devices+2);return (unsigned)(d-bus->devices);

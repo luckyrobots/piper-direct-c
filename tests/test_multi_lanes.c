@@ -21,7 +21,7 @@ static unsigned receives;
 static int injected_fault=-1;
 static int failed_stop=-1;
 static const char *owner="two-lane-native-test";
-double __wrap_piper_now(void) { return clock_now; }
+FIXTURE_WRAP_PIPER_NOW(clock_now)
 void __real_can_bus_receive(struct can_bus *bus,double now);
 void __wrap_can_bus_receive(struct can_bus *bus,double now)
 {

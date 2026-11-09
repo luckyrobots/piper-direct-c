@@ -26,7 +26,7 @@ struct fake_mcu {
 };
 static struct fake_mcu mcu[2];
 static int failed_device=-1,failed_joint=-1;
-double __wrap_piper_now(void) { return clock_now; }
+FIXTURE_WRAP_PIPER_NOW(clock_now)
 static struct controller_lane *lane(struct controller *c,unsigned n)
 {
     for(unsigned i=0;i<CANBUS_MAX;++i)if(!strcmp(c->lanes[i].lane_device,c->bus.devices[n].id))return &c->lanes[i];

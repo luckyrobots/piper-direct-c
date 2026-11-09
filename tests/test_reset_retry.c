@@ -10,7 +10,7 @@
    every transmitted packet is checked: recovery must never enable or move. */
 static double clock_now=100;
 static unsigned resets,stops;
-double __wrap_piper_now(void) { return clock_now; }
+FIXTURE_WRAP_PIPER_NOW(clock_now)
 void __wrap_can_bus_receive(struct can_bus *bus,double now) { (void)bus; (void)now; }
 bool __wrap_can_bus_send(struct can_bus *bus,struct can_device *d,unsigned generation,const struct can_frame *f,size_t count)
 {
@@ -57,7 +57,7 @@ static bool pending(struct controller *c)
 }
 static void fixture(struct controller *c,char directory[96])
 {
-    strcpy(directory,"/tmp/piper-reset-retry-XXXXXX"); CHECK(mkdtemp(directory));
+    fixture_directory(directory,96,"piper-reset-retry");
     clock_now+=10; CHECK(controller_init(c,true,directory,""));
     struct can_device *d=&c->bus.devices[0];
     strcpy(d->feedback.hardware,"H-V1.2-1"); strcpy(d->feedback.version,"S-V1.8-2");
@@ -69,8 +69,7 @@ static void fixture(struct controller *c,char directory[96])
 }
 static void close_fixture(struct controller *c,const char *directory)
 {
-    CHECK(LANE(c)->op==OP_IDLE); controller_close(c);
-    char path[128]; snprintf(path,sizeof path,"%s/control-state.json",directory); CHECK(!unlink(path)); CHECK(!rmdir(directory));
+    CHECK(LANE(c)->op==OP_IDLE); fixture_cleanup(c,directory);
 }
 int main(void)
 {

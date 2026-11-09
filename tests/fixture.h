@@ -22,9 +22,7 @@
 #define FIXTURE_FD (-2)
 
 /* Deterministic clock for tests linked with -Wl,--wrap=piper_now. */
-#define FIXTURE_WRAP_CLOCK(start) \
-    static double clock_now=(start); \
-    double __wrap_piper_now(void) { return clock_now; }
+#define FIXTURE_WRAP_PIPER_NOW(clock) double __wrap_piper_now(void) { return (clock); }
 
 /* Mark a device strictly still since `since` (both detector timestamps). */
 static inline void fixture_still(struct can_device *d,double since)

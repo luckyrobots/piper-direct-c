@@ -8,7 +8,7 @@
 #include <unistd.h>
 
 static double clock_now=100;
-double __wrap_piper_now(void) { return clock_now; }
+FIXTURE_WRAP_PIPER_NOW(clock_now)
 static void feed_at(struct can_device *d,const double pose[6],double elapsed)
 {
     clock_now+=elapsed;
@@ -34,15 +34,11 @@ static bool ready(struct controller *c)
 }
 int main(void)
 {
-    char directory[]="/tmp/piper-stationary-XXXXXX"; CHECK(mkdtemp(directory));
+    char directory[96]; fixture_directory(directory,sizeof directory,"piper-stationary");
     struct controller c; CHECK(controller_init(&c,true,directory,""));
     struct can_device *d=&c.bus.devices[0];
     const double fixed[6]={2,25,-25,-20,60,8}; double pose[6]; memcpy(pose,fixed,sizeof pose);
-    strcpy(d->feedback.hardware,"H-V1.2-1"); strcpy(d->feedback.version,"S-V1.9-0");
-    for (unsigned i=0;i<6;++i) {
-        d->feedback.limit[i]=(struct piper_limit){.seen=true,.min=-180,.max=180,.speed=.3,.at=clock_now};
-        d->feedback.acceleration[i]=(struct piper_acceleration){.seen=true,.max=5,.at=clock_now};
-    }
+    fixture_configure(d,"S-V1.9-0",-180,180,.3,clock_now);
     for (unsigned n=0;n<25;++n) feed(d,pose);
     CHECK(ready(&c)); double qualified=d->stationary_since;
     /* Independent encoder quantization phases used to reset the common timer
@@ -154,8 +150,6 @@ int main(void)
     CHECK(command_status==202&&LANE(&c)->op==OP_MOVE&&LANE(&c)->target[5]==.1&&c.bus.simulated);
     cJSON_Delete(response); cJSON_Delete(command);
     d->simulated=true; d->fd=-1;
-    controller_close(&c);
-    char path[160]; snprintf(path,sizeof path,"%s/control-state.json",directory);
-    CHECK(!unlink(path)); CHECK(!rmdir(directory));
+    fixture_cleanup(&c,directory);
     puts("Position readiness passed: noisy angles plus 106 idle/192 loaded real samples keep controls usable; genuine joint/independent encoder movement, faults and stale/generation guards reject; strict velocity-dependent dwell remains separate.");
 }

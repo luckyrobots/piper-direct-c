@@ -24,7 +24,7 @@ static void reject(struct controller *c,struct can_device *d,cJSON *j)
 }
 int main(void)
 {
-    char directory[]="/tmp/piper-control-unit-XXXXXX"; CHECK(mkdtemp(directory));
+    char directory[96]; fixture_directory(directory,sizeof directory,"piper-control-unit");
     struct controller c; CHECK(controller_init(&c,true,directory,""));
     double now=piper_now(); controller_tick(&c,now);
     struct can_device *d=&c.bus.devices[0]; cJSON *j=body(d);
@@ -125,8 +125,7 @@ int main(void)
     j=cJSON_CreateObject(); r=controller_action(&c,"/api/reconnect",j,&status);
     CHECK(status==200&&!LANE(&c)->query&&LANE(&c)->op==OP_IDLE); cJSON_Delete(r); cJSON_Delete(j);
     CHECK(c.bus.devices[0].tx==0&&missing->tx==0);
-    controller_close(&c);
-    char path[256]; snprintf(path,sizeof path,"%s/control-state.json",directory); CHECK(!unlink(path)); CHECK(!rmdir(directory));
+    fixture_cleanup(&c,directory);
     puts("Control guards passed: stale feedback, faults, mode, limits, foreign sender, identity, storage, raw-command rejection, local echo, durable interruption.");
     return 0;
 }

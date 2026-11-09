@@ -9,7 +9,7 @@
 
 static bool slow_first_enable=true;
 static double clock_now=100;
-double __wrap_piper_now(void) { return clock_now; }
+FIXTURE_WRAP_PIPER_NOW(clock_now)
 
 static void tick(struct controller *c)
 {
@@ -71,15 +71,13 @@ static bool recovery(struct controller *c)
 }
 int main(void)
 {
-    char directory[]="/tmp/piper-startup-XXXXXX"; CHECK(mkdtemp(directory));
+    char directory[96]; fixture_directory(directory,sizeof directory,"piper-startup");
     struct controller c; CHECK(controller_init(&c,true,directory,""));
     struct can_device *d=&c.bus.devices[0]; double now=piper_now();
     const double rest[6]={-9.805,-1.983,-.463,-3.049,31.002,78.301};
     memcpy(d->feedback.arm[0].deg,rest,sizeof rest); memcpy(c.bus.sim_target,rest,sizeof rest);
     strcpy(d->feedback.hardware,"H-V1.2-1"); strcpy(d->feedback.version,"S-V1.8-2");
-    const double limits[6][2]={{-150,150},{0,180},{-170,0},{-100,100},{-70,70},{-180,180}};
-    for (unsigned i=0;i<6;++i) d->feedback.limit[i]=(struct piper_limit){.seen=true,.min=limits[i][0],.max=limits[i][1],.speed=.3,.at=now};
-    for (unsigned i=0;i<6;++i) d->feedback.acceleration[i]=(struct piper_acceleration){.seen=true,.max=5,.at=now};
+    fixture_vendor_limits(d,.3,now);
     settle(&c);
     CHECK(!controller_blocker(&c,d,piper_now()));
     uint64_t tx=d->tx;
@@ -161,7 +159,6 @@ int main(void)
         can_bus_ingest(d,&status_frame,false,t);
         if (sample>6) CHECK(!d->stationary_since||t-d->stationary_since<.3);
     }
-    controller_close(&c);
-    char path[256]; snprintf(path,sizeof path,"%s/control-state.json",directory); CHECK(!unlink(path)); CHECK(!rmdir(directory));
+    fixture_cleanup(&c,directory);
     puts("Startup regression passed: measured resting pose, power-only enable, explicit bounded range entry, retained joints, normal disable/re-enable, verified recovery without CAN writes, pending-reset/fault/movement rejection.");
 }

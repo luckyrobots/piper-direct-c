@@ -9,7 +9,7 @@
 static double clock_now=100;
 static unsigned full_poses,stops,sequence;
 static bool fail_pose;
-double __wrap_piper_now(void) { return clock_now; }
+FIXTURE_WRAP_PIPER_NOW(clock_now)
 void __wrap_can_bus_receive(struct can_bus *b,double now)
 {
     struct can_device *d=&b->devices[0]; struct piper_sample *s=&d->feedback.arm[0];
@@ -44,21 +44,17 @@ static void command(struct controller *c,const char *action,double wrist,int exp
 }
 static void fixture(struct controller *c,char directory[96])
 {
-    strcpy(directory,"/tmp/piper-follow-noop-XXXXXX"); CHECK(mkdtemp(directory)); clock_now+=10;
+    fixture_directory(directory,96,"piper-follow-noop"); clock_now+=10;
     CHECK(controller_init(c,true,directory,"")); full_poses=stops=sequence=0; fail_pose=false;
     struct can_device *d=&c->bus.devices[0]; fixture_still(d,clock_now-1); d->feedback.arm[0].motion_mode=1;
     memset(d->feedback.arm[0].deg,0,sizeof d->feedback.arm[0].deg);
-    strcpy(d->feedback.hardware,"H-V1.2-1"); strcpy(d->feedback.version,"S-V1.8-2");
-    for (unsigned i=0;i<6;++i) {
-        d->feedback.limit[i]=(struct piper_limit){.seen=true,.min=-180,.max=180,.speed=.3,.at=clock_now};
-        d->feedback.acceleration[i]=(struct piper_acceleration){.seen=true,.max=5,.at=clock_now};
-    }
+    fixture_configure(d,"S-V1.8-2",-180,180,.3,clock_now);
     __wrap_can_bus_receive(&c->bus,clock_now); command(c,"follow-start",0,202);
 }
 static void tick(struct controller *c) { clock_now+=.025; LANE(c)->heartbeat=clock_now; controller_tick(c,clock_now); }
 static void close_fixture(struct controller *c,const char *directory)
 {
-    CHECK(LANE(c)->op==OP_IDLE); controller_close(c); char path[128]; snprintf(path,sizeof path,"%s/control-state.json",directory); CHECK(!unlink(path)); CHECK(!rmdir(directory));
+    CHECK(LANE(c)->op==OP_IDLE); fixture_cleanup(c,directory);
 }
 int main(void)
 {

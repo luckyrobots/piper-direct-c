@@ -46,16 +46,12 @@ struct fixture { struct controller c; char directory[96]; double now; };
 static void setup(struct fixture *f,double speed,double target)
 {
     injection=NONE; stops=power=0; post_hold_timestamp=0; subject=&f->c;
-    strcpy(f->directory,"/tmp/piper-arrival-tolerance-XXXXXX"); CHECK(mkdtemp(f->directory));
+    fixture_directory(f->directory,sizeof f->directory,"piper-arrival-tolerance");
     CHECK(controller_init(&f->c,true,f->directory,""));
     struct can_device *d=&f->c.bus.devices[0]; f->now=piper_now();
     memset(d->feedback.arm[0].deg,0,sizeof d->feedback.arm[0].deg); memset(f->c.bus.sim_target,0,sizeof f->c.bus.sim_target);
     f->c.bus.sim_enabled=63; controller_tick(&f->c,f->now);
-    strcpy(d->feedback.hardware,"H-V1.2-1"); strcpy(d->feedback.version,"S-V1.8-2");
-    for (unsigned i=0;i<6;++i) {
-        d->feedback.limit[i]=(struct piper_limit){.seen=true,.min=-180,.max=180,.speed=.3,.at=f->now};
-        d->feedback.acceleration[i]=(struct piper_acceleration){.seen=true,.max=5,.at=f->now};
-    }
+    fixture_configure(d,"S-V1.8-2",-180,180,.3,f->now);
     fixture_still(d,f->now-1);
     cJSON *body=cJSON_CreateObject();
     cJSON_AddStringToObject(body,"device_id",d->id); cJSON_AddNumberToObject(body,"generation",d->generation);

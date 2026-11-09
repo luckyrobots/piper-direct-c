@@ -91,9 +91,7 @@ static void run_case(double measured,const char *action,unsigned joint,double de
         CHECK(c.bus.sim_enabled==63);
         for (unsigned i=0;i<6;++i) CHECK(fabs(d->feedback.arm[0].deg[i]-LANE(&c)->target[i])<=LANE(&c)->tolerance);
     } else CHECK(LANE(&c)->op==OP_IDLE && d->tx==tx);
-    controller_close(&c);
-    char path[256]; snprintf(path,sizeof path,"%s/control-state.json",directory);
-    CHECK(!unlink(path)); CHECK(!rmdir(directory));
+    fixture_cleanup(&c,directory);
 }
 
 int main(void)

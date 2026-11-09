@@ -13,7 +13,7 @@ static double clock_now=100,first_wire[6],last_wire[6],wire_pose[6],ack_delay[6]
 static unsigned power_count[6],stops;
 static double previous_power;
 static bool pump_before_completion;
-double __wrap_piper_now(void) { return clock_now; }
+FIXTURE_WRAP_PIPER_NOW(clock_now)
 void __wrap_can_bus_receive(struct can_bus *bus,double now)
 {
     struct can_device *d=&bus->devices[0]; struct piper_sample *s=&d->feedback.arm[0];
@@ -55,7 +55,7 @@ bool __wrap_can_bus_send(struct can_bus *bus,struct can_device *d,unsigned gener
 }
 static void fixture_pose(struct controller *c,char directory[96],const double *resting_pose)
 {
-    strcpy(directory,"/tmp/piper-enable-sequence-XXXXXX"); CHECK(mkdtemp(directory));
+    fixture_directory(directory,96,"piper-enable-sequence");
     clock_now+=10; CHECK(controller_init(c,true,directory,""));
     memset(first_wire,0,sizeof first_wire); memset(last_wire,0,sizeof last_wire);
     memset(power_count,0,sizeof power_count); previous_power=0; stops=0;
@@ -96,8 +96,7 @@ static void complete(struct controller *c)
 }
 static void close_fixture(struct controller *c,const char *directory)
 {
-    CHECK(LANE(c)->op==OP_IDLE); controller_close(c);
-    char path[128]; snprintf(path,sizeof path,"%s/control-state.json",directory); CHECK(!unlink(path)); CHECK(!rmdir(directory));
+    CHECK(LANE(c)->op==OP_IDLE); fixture_cleanup(c,directory);
 }
 int main(void)
 {

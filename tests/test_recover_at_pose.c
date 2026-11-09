@@ -11,7 +11,7 @@ static double clock_now=100;
 static unsigned pose_batches,stop_packets;
 static bool stale_high;
 static double frozen[6];
-double __wrap_piper_now(void) { return clock_now; }
+FIXTURE_WRAP_PIPER_NOW(clock_now)
 void __wrap_can_bus_receive(struct can_bus *bus,double now)
 {
     struct can_device *d=&bus->devices[0]; struct piper_sample *s=&d->feedback.arm[0];
@@ -49,19 +49,15 @@ static bool blocked(struct controller *c) { return cJSON_IsTrue(cJSON_GetObjectI
 static void tick(struct controller *c,double dt) { clock_now+=dt; LANE(c)->heartbeat=clock_now; controller_tick(c,clock_now); }
 static void fixture(struct controller *c,char directory[96])
 {
-    strcpy(directory,"/tmp/piper-recover-at-pose-XXXXXX"); CHECK(mkdtemp(directory)); clock_now+=10;
+    fixture_directory(directory,96,"piper-recover-at-pose"); clock_now+=10;
     CHECK(controller_init(c,true,directory,"")); struct can_device *d=&c->bus.devices[0];
     stale_high=false; pose_batches=stop_packets=0;
     d->simulated=false; d->fd=FIXTURE_FD; fixture_still(d,clock_now-1);
     strcpy(d->feedback.hardware,"H-V1.2-1"); strcpy(d->feedback.version,"S-V1.9-0");
     d->feedback.arm[0].control=1; d->feedback.arm[0].motion_mode=1;
     const double pose[6]={2,25,-25,-20,60,8}; memcpy(frozen,pose,sizeof frozen); memcpy(d->feedback.arm[0].deg,pose,sizeof pose);
-    const double limits[6][2]={{-150,150},{0,180},{-170,0},{-100,100},{-70,70},{-180,180}};
-    for (unsigned i=0;i<6;++i) {
-        d->feedback.motor[i].enabled=true;
-        d->feedback.limit[i]=(struct piper_limit){.seen=true,.min=limits[i][0],.max=limits[i][1],.speed=.3,.at=clock_now};
-        d->feedback.acceleration[i]=(struct piper_acceleration){.seen=true,.max=5,.at=clock_now};
-    }
+    fixture_vendor_limits(d,.3,clock_now);
+    for (unsigned i=0;i<6;++i) d->feedback.motor[i].enabled=true;
     __wrap_can_bus_receive(&c->bus,clock_now);
     LANE(c)->obstruction_joint=1;
     controller_stop_obstruction(c,"Possible obstruction at J1: no measured progress for 0.5 seconds.");
@@ -89,8 +85,7 @@ static void action(struct controller *c,const char *name,int expected)
 }
 static void close_fixture(struct controller *c,const char *directory)
 {
-    CHECK(LANE(c)->op==OP_IDLE); c->bus.devices[0].fd=-1; controller_close(c);
-    char path[160]; snprintf(path,sizeof path,"%s/control-state.json",directory); CHECK(!unlink(path)); CHECK(!rmdir(directory));
+    CHECK(LANE(c)->op==OP_IDLE); c->bus.devices[0].fd=-1; fixture_cleanup(c,directory);
 }
 int main(void)
 {

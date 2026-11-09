@@ -11,15 +11,13 @@ struct fixture { struct controller c; char directory[80]; double now; };
 static const double original[6]={-1,.5,-.5,44.8,31.3,164.8};
 static void setup(struct fixture *f)
 {
-    strcpy(f->directory,"/tmp/piper-cycle-XXXXXX"); CHECK(mkdtemp(f->directory));
+    fixture_directory(f->directory,sizeof f->directory,"piper-cycle");
     CHECK(controller_init(&f->c,true,f->directory,"")); f->now=piper_now();
     struct can_device *d=&f->c.bus.devices[0];
     memcpy(d->feedback.arm[0].deg,original,sizeof original); memcpy(f->c.bus.sim_target,original,sizeof original);
     f->c.bus.sim_enabled=63; controller_tick(&f->c,f->now);
     strcpy(d->feedback.hardware,"H-V1.2-1"); strcpy(d->feedback.version,"S-V1.8-2");
-    const double limits[6][2]={{-150,150},{0,180},{-170,0},{-100,100},{-70,70},{-180,180}};
-    for (unsigned i=0;i<6;++i) d->feedback.limit[i]=(struct piper_limit){.seen=true,.min=limits[i][0],.max=limits[i][1],.speed=.3,.at=f->now};
-    for (unsigned i=0;i<6;++i) d->feedback.acceleration[i]=(struct piper_acceleration){.seen=true,.max=5,.at=f->now};
+    fixture_vendor_limits(d,.3,f->now);
     fixture_still(d,f->now-1);
 }
 static int request(struct fixture *f,const char *action)

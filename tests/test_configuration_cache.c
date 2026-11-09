@@ -78,8 +78,6 @@ int main(void)
     CHECK(!LANE(&c)->query && !controller_blocker(&c,d,piper_now()));
     CHECK(strstr(LANE(&c)->message,"Standard CAN gripper configuration unavailable"));
     CHECK(c.bus.sim_enabled==63 && LANE(&c)->op==OP_IDLE);
-    cJSON_Delete(body); controller_close(&c);
-    char path[256]; snprintf(path,sizeof path,"%s/control-state.json",directory);
-    CHECK(!unlink(path)); CHECK(!rmdir(directory));
+    cJSON_Delete(body); fixture_cleanup(&c,directory);
     puts("Configuration cache passed: no timed refresh or expiry, optional gripper independence, status-gap invalidation, reconnect rereads, no motion replay.");
 }

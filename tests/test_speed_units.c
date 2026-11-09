@@ -93,7 +93,7 @@ int main(void)
     CHECK(piper_decode(&acceleration,0x473,range,8,51)&&acceleration.limit[0].speed_raw==65535);
     CHECK(fabs(acceleration.limit[0].speed-655.35)<1e-10);
 
-    char directory[]="/tmp/piper-speed-units-XXXXXX"; CHECK(mkdtemp(directory));
+    char directory[96]; fixture_directory(directory,sizeof directory,"piper-speed-units");
     struct controller c; CHECK(controller_init(&c,true,directory,""));
     c.bus.sim_enabled=63; double now=piper_now(); controller_tick(&c,now);
     struct can_device *d=&c.bus.devices[0];
@@ -125,7 +125,6 @@ int main(void)
     CHECK(!controller_blocker(&c,d,now));
     d->feedback.limit[0].speed=NAN;
     CHECK(controller_blocker(&c,d,now)); /* An unresolved unit cannot pass a comparison with NaN. */
-    controller_close(&c); char path[256]; snprintf(path,sizeof path,"%s/control-state.json",directory);
-    CHECK(!unlink(path)); CHECK(!rmdir(directory));
+    fixture_cleanup(&c,directory);
     puts("Speed units: V1.5-8 boundary, firmware ordering/provenance/reconnect; acceleration raw500=5 with unchanged admission cap passed.");
 }

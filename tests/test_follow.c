@@ -43,19 +43,14 @@ static void setup(struct controller *c,char *directory)
     c->bus.sim_enabled=63;
     double now=piper_now(); controller_tick(c,now);
     struct can_device *d=&c->bus.devices[0];
-    strcpy(d->feedback.hardware,"H-V1.2-1"); strcpy(d->feedback.version,"S-V1.8-2");
-    for(unsigned i=0;i<6;i++) {
-        d->feedback.limit[i]=(struct piper_limit){.seen=true,.min=-180,.max=180,.speed=.3,.at=now};
-        d->feedback.acceleration[i]=(struct piper_acceleration){.seen=true,.max=5,.at=now};
-    }
+    fixture_configure(d,"S-V1.8-2",-180,180,.3,now);
     fixture_still(d,now-1);
     send_command(c,command(c,"follow-start",0,0),202);
     CHECK(LANE(c)->follow==FOLLOW_LIVE&&LANE(c)->op==OP_MOVE);
 }
 static void cleanup(struct controller *c,const char *directory)
 {
-    controller_close(c); char path[256]; snprintf(path,sizeof path,"%s/control-state.json",directory);
-    CHECK(!unlink(path)); CHECK(!rmdir(directory));
+    fixture_cleanup(c,directory);
 }
 int main(void)
 {

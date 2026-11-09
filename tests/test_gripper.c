@@ -32,7 +32,7 @@ static void act(struct controller *c,double width,bool offset,int expected)
 }
 int main(void)
 {
-    char directory[]="/tmp/piper-gripper-XXXXXX"; CHECK(mkdtemp(directory));
+    char directory[96]; fixture_directory(directory,sizeof directory,"piper-gripper");
     struct controller c; CHECK(controller_init(&c,true,directory,""));
     struct can_device *d=&c.bus.devices[0]; double now=piper_now();
     c.bus.sim_enabled=63; controller_tick(&c,now);
@@ -85,8 +85,7 @@ int main(void)
     CHECK(can_bus_send(&c.bus,d,d->generation,&frame,1));
     frame.data[1]=1; uint64_t tx=d->tx;
     CHECK(!can_bus_send(&c.bus,d,d->generation,&frame,1)&&d->tx==tx); /* No parameter writes. */
-    controller_close(&c);
-    char path[256]; snprintf(path,sizeof path,"%s/control-state.json",directory); CHECK(!unlink(path)); CHECK(!rmdir(directory));
+    fixture_cleanup(&c,directory);
     puts("Gripper guards passed: verified range, low effort, raw negative feedback, bounded entry, range change, disable and read-only query.");
     return 0;
 }

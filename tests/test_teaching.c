@@ -15,18 +15,13 @@ static void setup(struct controller *c,char *directory)
     memset(d->feedback.arm[0].deg,0,sizeof d->feedback.arm[0].deg);
     c->bus.sim_enabled=63;
     double now=piper_now(); controller_tick(c,now);
-    strcpy(d->feedback.hardware,"H-V1.2-1"); strcpy(d->feedback.version,"S-V1.8-2");
-    for (unsigned i=0;i<6;++i) {
-        d->feedback.limit[i]=(struct piper_limit){.seen=true,.min=-180,.max=180,.speed=.3,.at=now};
-        d->feedback.acceleration[i]=(struct piper_acceleration){.seen=true,.max=5,.at=now};
-    }
+    fixture_configure(d,"S-V1.8-2",-180,180,.3,now);
     d->feedback.arm[0].control=2; d->feedback.arm[0].teach=2;
     fixture_still(d,now-1);
 }
 static void cleanup(struct controller *c,const char *directory)
 {
-    controller_close(c); char path[256]; snprintf(path,sizeof path,"%s/control-state.json",directory);
-    CHECK(!unlink(path)); CHECK(!rmdir(directory));
+    fixture_cleanup(c,directory);
 }
 static cJSON *request(struct controller *c,const char *action)
 {
