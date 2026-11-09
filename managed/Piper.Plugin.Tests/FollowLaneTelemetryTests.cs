@@ -49,6 +49,16 @@ internal static class FollowLaneTelemetryTests
             sent[1].Body["pika_distribution"]?.GetValue<string>() == (OperatingSystem.IsWindows() ? "Pika-WSL" : null) &&
             sent[2] is { Route: "/api/heartbeat", Cancelable: true } &&
             sent[2].Body["request_id"]?.GetValue<long>() == 77, "Typed controller changed lane routing, request sequence or cancellation policy");
+        check(sent[0].Body["standalone"]?.GetValue<bool>() == true && !sent[0].Body.ContainsKey("clear") &&
+            !sent[0].Body.ContainsKey("supported") && !sent[0].Body.ContainsKey("reset_completed"),
+            "Follow update carried safety declarations that only other actions read");
+        sent.Clear();
+        foreach (var action in new[] { FollowArmAction.MatchPose, FollowArmAction.Start, FollowArmAction.Hold })
+            controller.Arm(action, null).GetAwaiter().GetResult();
+        check(sent.All(s => s.Body["standalone"]?.GetValue<bool>() == true && !s.Body.ContainsKey("supported") &&
+                !s.Body.ContainsKey("reset_completed")) &&
+            sent[0].Body["clear"]?.GetValue<bool>() == true && sent[1].Body["clear"]?.GetValue<bool>() == true &&
+            !sent[2].Body.ContainsKey("clear"), "Follow sent clear, supported or reset_completed beyond the actions that read them");
 
         clock.AdvanceMilliseconds(2);
         Reject(() => _ = reader.Read("backend").Hardware("owner", clock.GetTimestamp()), "Cached Pika evidence gained a new 250 ms window");

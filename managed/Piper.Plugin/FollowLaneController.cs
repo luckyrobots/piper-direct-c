@@ -23,10 +23,11 @@ internal sealed class FollowLaneController(string backend, string owner, RobotPr
         body["owner"] = owner;
         body["device_id"] = profile.CanDeviceId;
         body["generation"] = generation;
+        // The controller reads "standalone" on every admitted /api/command and
+        // "clear" only when it admits new motion. Follow never changes motor
+        // power, so "supported" and "reset_completed" are never sent.
         body["standalone"] = true;
-        body["supported"] = true;
-        body["clear"] = true;
-        body["reset_completed"] = true;
+        if (action is FollowArmAction.MatchPose or FollowArmAction.Start) body["clear"] = true;
         body["speed_percent"] = action == FollowArmAction.MatchPose ? 10 : profile.Speed;
         body["tolerance_deg"] = profile.Tolerance;
         return send("/api/command", body, CancellationToken.None, backend);
