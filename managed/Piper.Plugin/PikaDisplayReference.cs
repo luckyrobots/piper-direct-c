@@ -47,8 +47,7 @@ public sealed record PikaClosedDisplayReference(int Schema, string ProfileId, st
         return new(1, profile, device, distribution, pika!["telemetry"]!["motor"]!["Position"]!.GetValue<double>(), DateTimeOffset.UtcNow);
     }
 
-    /// <summary>Identity of the assignment a saved reference belongs to.</summary>
-    internal static string Key(RobotProfile profile) => profile.Id + "\n" + profile.PikaDevice + "\n" + profile.PikaDistribution;
+    internal static PikaDisplayReferenceKey Key(RobotProfile profile) => new(profile.Id, profile.PikaDevice, profile.PikaDistribution);
     internal static string PathFor(string settingsDirectory, string profileId) =>
         Path.Combine(settingsDirectory, "gripper-reference", profileId + ".json");
 
@@ -75,15 +74,18 @@ public sealed record PikaClosedDisplayReference(int Schema, string ProfileId, st
         Matches(profile.Id, profile.PikaDevice, profile.PikaDistribution, pika) ? MotorAngle : null;
 }
 
+/// <summary>Identity of the Pika assignment a saved display reference belongs to.</summary>
+internal readonly record struct PikaDisplayReferenceKey(string ProfileId, string Device, string? Distribution);
+
 public sealed partial class PipersPlugin
 {
-    internal string pikaDisplayReferenceKey = "";
+    internal PikaDisplayReferenceKey? pikaDisplayReferenceKey;
     internal PikaClosedDisplayReference? pikaDisplayReference;
     private string PikaReferencePath => PikaClosedDisplayReference.PathFor(engine.Start.SettingsDirectory, ActiveProfile.Id);
 
     private void LoadPikaDisplayReference()
     {
-        string key = PikaClosedDisplayReference.Key(ActiveProfile);
+        var key = PikaClosedDisplayReference.Key(ActiveProfile);
         if (pikaDisplayReferenceKey == key) return;
         pikaDisplayReferenceKey = key;
         pikaDisplayReference = PikaClosedDisplayReference.TryLoad(engine.Start.SettingsDirectory, ActiveProfile);

@@ -14,11 +14,11 @@ public sealed partial class PipersPlugin
     private long ghostCapabilityAttempt;
     private const double GhostProbeBackoffSeconds = 5;
     internal bool? publishedGhostVisibility;
-    private readonly Dictionary<string, PikaClosedDisplayReference?> ghostDisplayReferences = new();
+    private readonly Dictionary<PikaDisplayReferenceKey, PikaClosedDisplayReference?> ghostDisplayReferences = new();
 
     private double? GhostDisplayReference(RobotProfile profile, JsonObject pika)
     {
-        string key = PikaClosedDisplayReference.Key(profile);
+        var key = PikaClosedDisplayReference.Key(profile);
         if (profile.Id == ActiveProfile.Id)
         {
             double? angle = PikaDisplayReferenceAngle(pika);
@@ -108,8 +108,8 @@ public sealed partial class PipersPlugin
         if (!passiveMeasuredTrackingStarted || switchingProfile) return;
         try
         {
-            var referenceKeys = (preferences.Robots ?? []).Select(PikaClosedDisplayReference.Key).ToHashSet(StringComparer.Ordinal);
-            foreach (string obsolete in ghostDisplayReferences.Keys.Where(key => !referenceKeys.Contains(key)).ToArray())
+            var referenceKeys = (preferences.Robots ?? []).Select(PikaClosedDisplayReference.Key).ToHashSet();
+            foreach (var obsolete in ghostDisplayReferences.Keys.Where(key => !referenceKeys.Contains(key)).ToArray())
                 ghostDisplayReferences.Remove(obsolete);
             if (await ProbeGhostCapabilities(cancellation) is not { } capabilities) return;
             if (publishedGhostVisibility != preferences.ShowMeasuredGhosts)

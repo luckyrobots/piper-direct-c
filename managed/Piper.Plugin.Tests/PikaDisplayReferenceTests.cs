@@ -130,7 +130,7 @@ internal static class PikaDisplayReferenceTests
             string path = Path.Combine(folder, "gripper-reference", "piper-1.json");
             Check(File.Exists(path) && JsonSerializer.Deserialize<PikaClosedDisplayReference>(File.ReadAllText(path), PluginProtocol.Json)?.MotorAngle == ClosedAngle,
                 "Actual display-reference action did not atomically persist the observed closed position");
-            plugin.pikaDisplayReferenceKey = ""; plugin.pikaDisplayReference = null;
+            plugin.pikaDisplayReferenceKey = null; plugin.pikaDisplayReference = null;
             await Event("link");
             Check(feedback.Count == 1 && feedback[0]["joints"]?["joint7"]?.GetValue<double>() == -travel && feedback[0]["joints"]?["joint8"]?.GetValue<double>() == travel,
                 "Initial link failed to restore the saved reference and send both closed finger positions");
