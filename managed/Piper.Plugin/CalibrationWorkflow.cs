@@ -29,11 +29,45 @@ public sealed partial class PipersPlugin
     private string RobotCalibrationDirectory => Path.Combine(engine.Start.SettingsDirectory, "calibration", ActiveProfile.Id);
     private static string CalibrationNumber(double value) => value.ToString("0.###", CultureInfo.InvariantCulture);
 
+    // Desk calibration session (Cal-A), derived from the session fields:
+    //   None -> Capturing           start pins identity and original placement
+    //   Capturing -> Fitted         fit
+    //   Fitted -> Capturing         capture, correction or re-evaluation clears the fit
+    //   Fitted|Applied -> WritePending   apply or rollback sent; reply not verified yet
+    //   WritePending -> Applied     verified apply, or inspect finds the proposal
+    //   WritePending -> Fitted      verified rollback, a failed pre-send check, or inspect finds the original
+    //   any -> None                 new/archive (WritePending and Applied ask first) or a profile change
+    // Illegal and asserted: placement or samples without an identity, or an
+    // applied placement without the fit that proposed it.
+    private enum CalibrationPhase { None, Capturing, Fitted, WritePending, Applied }
+
+    private CalibrationPhase CalibrationSessionPhase
+    {
+        get
+        {
+            Debug.Assert(calibrationIdentity is not null || calibrationOriginal is null && calibrationApplied is null && calibrationFit is null &&
+                !calibrationPlacementUnverified && calibrationSamples.Count == 0, "Calibration session data exists without its identity.");
+            Debug.Assert(calibrationApplied is null || calibrationFit is not null, "An applied placement lost the fit that proposed it.");
+            return calibrationIdentity is null ? CalibrationPhase.None
+                : calibrationPlacementUnverified ? CalibrationPhase.WritePending
+                : calibrationApplied is not null ? CalibrationPhase.Applied
+                : calibrationFit is not null ? CalibrationPhase.Fitted
+                : CalibrationPhase.Capturing;
+        }
+    }
+
+    // The one exit to CalibrationPhase.None.
+    private void ClearCalibrationSession()
+    {
+        calibrationIdentity = null; calibrationOriginal = calibrationApplied = null; calibrationFit = null; calibrationReevaluation = null;
+        calibrationSamples.Clear(); calibrationPlacementUnverified = calibrationArchiveConfirmation = false;
+    }
+
     private void LoadCalibrationPreferences()
     {
         if (calibrationProfile == ActiveProfile.Id) return;
         calibrationProfile = ActiveProfile.Id;
-        calibrationIdentity = null; calibrationOriginal = calibrationApplied = null; calibrationFit = null; calibrationReevaluation = null; calibrationSamples.Clear(); calibrationPlacementUnverified = calibrationArchiveConfirmation = false;
+        ClearCalibrationSession();
         calibrationDesk = preferences.BenchReference?.Apply(new()) ?? new(); calibrationMeasurement = new();
         string path = Path.Combine(RobotCalibrationDirectory, "settings.json");
         try
@@ -134,11 +168,11 @@ public sealed partial class PipersPlugin
         if (action == "archive.cancel") { calibrationArchiveConfirmation = false; await Render(cancellation); return; }
         if (action is "new" or "archive")
         {
-            if (action == "new" && (calibrationPlacementUnverified || calibrationApplied is not null))
+            if (action == "new" && CalibrationSessionPhase is CalibrationPhase.WritePending or CalibrationPhase.Applied)
             { calibrationArchiveConfirmation = true; await Render(cancellation); return; }
             if (action == "archive" && !calibrationArchiveConfirmation) throw new InvalidOperationException("Review the saved-placement archive warning first.");
             await SaveCalibration(cancellation);
-            calibrationIdentity = null; calibrationOriginal = calibrationApplied = null; calibrationFit = null; calibrationReevaluation = null; calibrationSamples.Clear(); calibrationPlacementUnverified = calibrationArchiveConfirmation = false;
+            ClearCalibrationSession();
             await Render(cancellation); return;
         }
         RequireCalibrationIdle();
@@ -230,6 +264,7 @@ public sealed partial class PipersPlugin
 
     private async Task SaveCalibration(CancellationToken cancellation)
     {
+        _ = CalibrationSessionPhase; // Asserts the session invariants before they are persisted.
         Directory.CreateDirectory(RobotCalibrationDirectory);
         await File.WriteAllTextAsync(Path.Combine(RobotCalibrationDirectory, "settings.json"), JsonSerializer.Serialize(new CalibrationPreferences(calibrationDesk, calibrationMeasurement), PluginProtocol.Json), cancellation);
         if (calibrationIdentity is null || calibrationOriginal is null || calibrationPath.Length == 0) return;

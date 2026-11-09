@@ -106,7 +106,7 @@ public sealed record CalibrationReport(int Schema, CalibrationIdentity Identity,
         if (Schema != 1 || Identity is null || Desk is null || OriginalPlacement?.Rotation is not { Length: 4 } ||
             Identity.ProfileId != profileId || string.IsNullOrWhiteSpace(Identity.ModelAssetId) || string.IsNullOrWhiteSpace(Identity.ModelRevision) ||
             Samples is null || Samples.Length > 24 || Samples.Any(s => s is null || !s.MeasuredWorld.Finite || !s.SceneWorld.Finite || s.JointDegrees is not { Length: 6 } || s.Measurement is null) ||
-            AppliedPlacement is { Rotation: not { Length: 4 } } || Fit is not null && Fit.ProposedPlacement?.Rotation is not { Length: 4 })
+            AppliedPlacement is { Rotation: not { Length: 4 } } || AppliedPlacement is not null && Fit is null || Fit is not null && Fit.ProposedPlacement?.Rotation is not { Length: 4 })
             throw new InvalidOperationException("Saved calibration identity/geometry is invalid; inspect the report before starting a new check.");
         Desk.Validate(); _ = CalibrationPlacement.Read(OriginalPlacement.Json());
         if (AppliedPlacement is not null) _ = CalibrationPlacement.Read(AppliedPlacement.Json());

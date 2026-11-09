@@ -145,6 +145,7 @@ public static class CalibrationTests
         check(!(report with { PlacementUnverified = false }).RequiresInspection, "An unapplied completed report silently resumed an old fit");
         check(!System.Text.Json.JsonSerializer.Serialize(report).Contains("RequiresInspection", StringComparison.Ordinal), "A derived restore flag was persisted in the report");
         Reject(() => report.Validate("another-profile"), "Saved rollback state crossed robot profiles");
+        Reject(() => (applied with { Fit = null }).Validate("piper-1"), "A saved applied placement without its proposing fit was restored");
         Reject(() => CalibrationCapture.ValidateLive(identity, identity with { Generation = 8 }, device, true), "Post-save scope guard allowed a new CAN generation");
     }
 }
