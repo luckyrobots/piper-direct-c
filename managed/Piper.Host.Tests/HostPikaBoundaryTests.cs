@@ -89,7 +89,7 @@ internal static class HostPikaBoundaryTests
                     "HTTP Pika state ignored the current registry distribution after configure.");
             else
                 Check(moved.Status == 409 && moved.Error?.Contains("only on Windows", StringComparison.Ordinal) == true &&
-                    registry.DefaultAssignment == (replacement, null) && context.Control.PikaState(replacement, null)["transport"]?.GetValue<string>() == "linux-serial",
+                    registry.DefaultAssignment == (replacement, null) && context.Control.PikaState(replacement, null)["distribution"] is null,
                     "A WSL distribution was configured on a non-Windows host: " + moved.Error);
             _ = await context.Control.DiscoverPikaAsync(null, deadline.Token);
             Check(discovery.Distributions[^1] == (OperatingSystem.IsWindows() ? "Debian" : null),
