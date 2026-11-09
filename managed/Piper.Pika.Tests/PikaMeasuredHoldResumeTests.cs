@@ -5,7 +5,7 @@ internal static class PikaMeasuredHoldResumeTests
     public static void Run(Action<bool, string> check)
     {
         double angle = PikaProtocol.Angle(20);
-        var writes = new List<(int Command, double Value)>();
+        var writes = new List<(PikaCommand Command, double Value)>();
         var resume = new PikaMeasuredHoldResume((command, value) => writes.Add((command, value)));
         void Start(double now = 10, double feedback = 10, double? measured = null, double speed = 0, bool enabled = false,
             bool pending = false, bool following = false, double? expected = null, double expectedTime = 10) =>
@@ -27,7 +27,7 @@ internal static class PikaMeasuredHoldResumeTests
         Reject(() => Start(measured: double.NaN), "nonfinite angle");
         Reject(() => Start(measured: PikaProtocol.Angle(90) + .01, expected: PikaProtocol.Angle(90) + .01), "outside 90 mm");
         Start();
-        check(writes.Count == 3 && writes[0] == (22, angle) && writes[1] == (11, 0) && writes[2] == (22, angle),
+        check(writes.Count == 3 && writes[0] == (PikaCommand.Position, angle) && writes[1] == (PikaCommand.Enable, 0) && writes[2] == (PikaCommand.Position, angle),
             "Measured resume did not seed → enable → repeat the exact measured target");
         Reject(() => Start(), "second active attempt");
         resume.Tick(10.1, 10, angle, 0, true, true);
@@ -35,9 +35,11 @@ internal static class PikaMeasuredHoldResumeTests
         resume.Tick(10.5, 10.5, angle, 0, true, true); // Supported unsolicited 2 Hz feedback.
         check(!resume.Active && resume.Succeeded && writes.Count == 3, "Fresh same-opening enabled feedback failed to arm without extra targets");
         check(resume.Audit is { RequestId: "resume-audit-fixture", RequestedAtSeconds: 10, RequestFeedbackTimeSeconds: 10,
-            VerifiedAtSeconds: 10.5, VerifiedFeedbackTimeSeconds: 10.5, VerifiedDriftMm: 0, Outcome: "verified" } &&
+            VerifiedAtSeconds: 10.5, VerifiedFeedbackTimeSeconds: 10.5, VerifiedDriftMm: 0, Outcome: PikaMeasuredHoldOutcome.Verified } &&
             resume.Audit.RequestedRawAngleRad == angle && resume.Audit.ExpectedRawAngleRad == angle && resume.Audit.VerifiedRawAngleRad == angle,
             "Measured hold audit did not retain its actual request-time target and causal verification tuple");
+        check(System.Text.Json.JsonSerializer.Serialize(resume.Audit).Contains("\"Outcome\":\"verified\"", StringComparison.Ordinal),
+            "The measured-hold outcome changed its lowercase string wire form");
 
         foreach (double closed in new[] { -.0005, -.0096 })
         {
@@ -54,7 +56,7 @@ internal static class PikaMeasuredHoldResumeTests
             if (failure == 1) resume.Tick(10.1, 10.1, PikaProtocol.Angle(22), 0, true, true);
             if (failure == 2) resume.Tick(10.1, 10.1, angle, .03, true, true);
             if (failure == 3) resume.Tick(10.1, 10, angle, 0, false, false);
-            check(!resume.Active && !resume.Succeeded && writes.Count == 4 && writes[^1].Command == 10,
+            check(!resume.Active && !resume.Succeeded && writes.Count == 4 && writes[^1].Command == PikaCommand.Disable,
                 "Failed measured resume did not request one bounded disable");
             resume.Tick(12, 12, angle, 0, true, true);
             check(writes.Count == 4 && !resume.Succeeded, "A failed resume retried or armed from later feedback");
@@ -63,11 +65,11 @@ internal static class PikaMeasuredHoldResumeTests
         var failingWriter = new PikaMeasuredHoldResume((command, value) =>
         {
             writes.Add((command, value));
-            if (command == 11) throw new IOException("Synthetic enable write failure");
+            if (command == PikaCommand.Enable) throw new IOException("Synthetic enable write failure");
         });
         try { failingWriter.Start(10, 10, angle, 0, false, false, false, angle, 10); }
         catch (IOException) { }
-        check(writes.Select(w => w.Command).SequenceEqual(new[] { 22, 11, 10 }) && !failingWriter.Active && !failingWriter.Succeeded,
+        check(writes.Select(w => w.Command).SequenceEqual(new[] { PikaCommand.Position, PikaCommand.Enable, PikaCommand.Disable }) && !failingWriter.Active && !failingWriter.Succeeded,
             "Partial write failure left a measured resume armed or repeated its old target");
     }
 }
