@@ -118,7 +118,7 @@ internal static class PikaMultiDeviceTests
         await using var uncertainRegistry = new PikaSessionRegistry(a, "unused", "Ubuntu", discovery: discovery,
             factory: (path, _) => path == a ? uncertain : independent);
         foreach (string path in new[] { a, b })
-            await uncertainRegistry.ExecuteAsync("configure", JsonSerializer.SerializeToElement(new { owner = ownerA, pika_device = path, device = path }), default);
+            await uncertainRegistry.ConfigureAsync(JsonSerializer.SerializeToElement(new { owner = ownerA, pika_device = path, device = path }), default, Commit);
         var uncertainStop = await uncertainRegistry.HoldOwnedAsync(ownerA, default);
         var outcomes = uncertainStop["sessions"]!.AsArray().ToDictionary(result => result!["device"]!.GetValue<string>());
         check(uncertainStop["ok"]?.GetValue<bool>() == false && outcomes.Count == 2 &&
@@ -134,13 +134,38 @@ internal static class PikaMultiDeviceTests
         await using var defaultRegistry = new PikaSessionRegistry(a, "unused", "Ubuntu", discovery: discovery, factory: (_, _) => connecting);
         var connectingTask = defaultRegistry.ExecuteAsync("connect", JsonSerializer.SerializeToElement(new { owner = ownerA }), default);
         await connecting.ConnectEntered.Task.WaitAsync(TimeSpan.FromSeconds(2));
-        var clearing = defaultRegistry.ExecuteAsync("configure", JsonSerializer.SerializeToElement(new { owner = ownerA, device = "" }), default);
+        var clearing = defaultRegistry.ConfigureAsync(JsonSerializer.SerializeToElement(new { owner = ownerA, device = "" }), default, Commit);
         try { check(!clearing.IsCompleted, "Legacy assignment cleared while its connection was in flight"); }
         finally { connecting.PendingConnect.TrySetResult(); }
         await connectingTask;
         await Reject(() => clearing, "Pending clear did not recheck current ownership after connect completed");
         check(defaultRegistry.Snapshot()["device"]?.GetValue<string>() == a, "Rejected concurrent clear changed the default device");
+
+        // B17: configuration commits only through the authorizer-carrying entry point.
+        bool unauthorized = false;
+        try { await defaultRegistry.ExecuteAsync("configure", JsonSerializer.SerializeToElement(new { owner = ownerA, device = b }), default); }
+        catch (ArgumentException) { unauthorized = true; }
+        bool authorizerRequired = false;
+        try { await defaultRegistry.ConfigureAsync(JsonSerializer.SerializeToElement(new { owner = ownerA, device = b }), default, null!); }
+        catch (ArgumentNullException) { authorizerRequired = true; }
+        check(unauthorized && authorizerRequired && defaultRegistry.Snapshot()["device"]?.GetValue<string>() == a,
+            "Pika configuration bypassed the arm-idle commit authorizer");
+
+        // Pika-C: an explicit null distribution is native Linux, never the default.
+        var probe = new Discovery(a);
+        await using var routing = new PikaSessionRegistry(a, "unused", "Ubuntu", discovery: probe, factory: (path, distro) => new Session(path, distro));
+        await routing.ExecuteAsync("devices", JsonSerializer.SerializeToElement(new { }), default);
+        check(probe.Requested.SequenceEqual(new string?[] { "Ubuntu" }), "Device inventory without a distribution did not use the default");
+        await routing.ExecuteAsync("devices", JsonSerializer.SerializeToElement(new { pika_distribution = (string?)null }), default);
+        check(probe.Requested.Count == 2 && probe.Requested[1] is null,
+            "An explicit native-Linux inventory request was turned into the default WSL distribution");
+        check(PikaDistribution.ForCurrentPlatform(" ") is null && PikaDistribution.Normalize("") is null &&
+            PikaDistribution.Same("ubuntu", "Ubuntu") && !PikaDistribution.Same(null, "Ubuntu") && PikaDistribution.Same("", null) &&
+            PikaDistribution.ToKeyText(null) == "" && PikaDistribution.Transport(null) == "linux-serial" &&
+            PikaDistribution.Transport("Ubuntu") == "wsl-linux-serial", "The distribution convention changed");
         Console.WriteLine("Pika multi-device tests passed: independent owners/commands/ACKs/evidence, alias binding, USBIP inventory, all-owned holds and failed-channel isolation.");
+
+        static JsonObject Commit(Func<JsonObject> commit) => commit();
 
         async Task Reject(Func<Task> operation, string message)
         { bool rejected = false; try { await operation(); } catch (Exception error) when (error is ArgumentException or InvalidOperationException) { rejected = true; } check(rejected, message); }
@@ -188,11 +213,16 @@ internal static class PikaMultiDeviceTests
     private sealed class Discovery(params string[] devices) : IPikaDeviceDiscovery
     {
         public JsonObject Devices = Inventory(devices);
+        public List<string?> Requested { get; } = [];
         public static JsonObject Inventory(params string[] paths) => new() { ["ok"] = true,
             ["devices"] = new JsonArray(paths.Select((path, index) => (JsonNode)new JsonObject {
                 ["device"] = path, ["distribution"] = "Ubuntu", ["available"] = true,
                 ["aliases"] = new JsonArray(index == 0 ? "/dev/serial/by-id/usb-1a86_USB_Serial-if00-port0" : "/dev/ttyUSB1") }).ToArray()) };
-        public Task<JsonObject> DiscoverAsync(string? distribution, CancellationToken cancellation) => Task.FromResult(Devices.DeepClone().AsObject());
+        public Task<JsonObject> DiscoverAsync(string? distribution, CancellationToken cancellation)
+        {
+            Requested.Add(distribution);
+            return Task.FromResult(Devices.DeepClone().AsObject());
+        }
     }
 
     private sealed class Session(string path, string? distribution) : IPikaSession
