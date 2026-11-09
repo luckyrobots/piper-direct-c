@@ -61,13 +61,15 @@ internal sealed class HostControlDispatcher(ControllerService controller, PikaSe
     internal JsonObject PikaState(string? device, string? distribution)
     {
         if (device is null) return pika.Snapshot(includeRawEvidence: true);
-        return pika.Snapshot(device, distribution ?? pika.Snapshot()["distribution"]?.GetValue<string>(), includeRawEvidence: true);
+        return pika.Snapshot(device, distribution ?? pika.DefaultAssignment.Distribution, includeRawEvidence: true);
     }
 
+    /// <summary>A null distribution means the registry's current default; the
+    /// registry itself treats null as native Linux.</summary>
     internal async Task<HostControlResult> DiscoverPikaAsync(string? distribution, CancellationToken cancellation)
     {
         if (simulated) return new(200, EmptySimulatedInventory);
-        try { return new(200, await pika.DiscoverAsync(distribution, cancellation)); }
+        try { return new(200, await pika.DiscoverAsync(distribution ?? pika.DefaultAssignment.Distribution, cancellation)); }
         catch (Exception error) when (IsControlOperationError(error)) { return new(409, Error: error.Message); }
     }
 
