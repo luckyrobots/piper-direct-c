@@ -54,12 +54,12 @@ int main(void)
     CHECK(targeted_reopens==2&&query_attempts==2&&failed->generation==4&&!memcmp(healthy,&saved_healthy,sizeof *healthy));
 
     /* An existing read-only query retains its connection until it retires. */
-    controller.query=true;controller.query_generation=failed->generation;
+    controller.query=QUERY_INITIAL;controller.query_generation=failed->generation;
     clock_now+=9;controller.query_start=clock_now;controller.query_next=clock_now+1;
     controller_tick(&controller,clock_now);
     saved_healthy.last_rx=clock_now;
     CHECK(targeted_reopens==2&&query_attempts==2&&!memcmp(healthy,&saved_healthy,sizeof *healthy));
-    controller.query=false;
+    controller.query=QUERY_IDLE;
 
     /* Unknown saved selection only discovers inventory; it must not close a
        healthy peer just because that selection has no device object yet. */

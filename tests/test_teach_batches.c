@@ -106,8 +106,8 @@ static void check_persisted_failure(struct controller *c,const char *directory,u
 int main(void)
 {
     struct controller c; char directory[96]; fixture(&c,directory); start(&c,202);
-    CHECK(batches==1&&c.teach_return_stage==3&&c.bus.devices[0].feedback.arm[0].control==2);
-    tick(&c,.01); CHECK(batches==1); tick(&c,.015); CHECK(batches==2&&c.teach_return_stage==4&&c.op==OP_TEACH_RETURN);
+    CHECK(batches==1&&c.stage==STAGE_TEACH_SEEDED&&c.bus.devices[0].feedback.arm[0].control==2);
+    tick(&c,.01); CHECK(batches==1); tick(&c,.015); CHECK(batches==2&&c.stage==STAGE_TEACH_MODE&&c.op==OP_TEACH_RETURN);
     stale_at=c.sent_at; stale_joint=3; tick(&c,.01); CHECK(c.op==OP_TEACH_RETURN);
     stale_joint=-1; stale_high=4; tick(&c,.01); CHECK(c.op==OP_TEACH_RETURN);
     stale_high=-1; tick(&c,.01); CHECK(c.op==OP_IDLE&&!strcmp(c.phase,"complete")&&stops==0);

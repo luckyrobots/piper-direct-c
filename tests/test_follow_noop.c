@@ -65,7 +65,7 @@ int main(void)
     struct controller c; char directory[96]; fixture(&c,directory); tick(&c); CHECK(full_poses==1);
     double sent=c.sent_at,wire=c.pose_tx_at;
     for (unsigned n=0;n<25;++n) { command(&c,"follow-update",0,202); tick(&c); }
-    CHECK(full_poses==1&&c.sent_at==sent&&c.pose_tx_at==wire&&c.op==OP_MOVE&&c.following);
+    CHECK(full_poses==1&&c.sent_at==sent&&c.pose_tx_at==wire&&c.op==OP_MOVE&&c.follow==FOLLOW_LIVE);
     command(&c,"follow-commit",0,202); tick(&c);
     CHECK(c.final_sent_at==wire&&c.pose_tx_at==wire&&full_poses==1);
     for (unsigned n=0;n<30&&c.op!=OP_IDLE;++n) tick(&c);

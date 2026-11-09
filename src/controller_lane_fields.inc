@@ -23,7 +23,7 @@
     double range_followup_target[6], range_followup_speed, range_followup_percent;
     bool arrival_hold;
     double arrival_hold_at, arrival_hold_pose[6];
-    bool following, follow_committed;
+    enum follow_phase follow;
     /* Opt-in simulation follower: wire-quantized reference intervals are
        bounded by this connection's reported speed and acceleration limits. */
     bool trajectory_follow;
@@ -32,17 +32,18 @@
     double trajectory_minimum[6], trajectory_maximum[6];
     double follow_updated;
     unsigned follow_sequence;
-    unsigned cycle_stage;
-    unsigned teach_return_stage;
+    enum lane_stage stage;
     /* Volatile evidence from this connection, never restored from a session
        file. A new STOP, disconnect, fault or playback invalidates the cycle. */
-    char teaching_cycle_device[160];
+    enum teach_cycle teaching_cycle;
     unsigned teaching_cycle_generation;
     double teaching_cycle_seen, teaching_cycle_completed;
     bool recovering_at_pose;
     double leg_start[6], leg_span, leg_fraction, pause_until;
-    bool query, disable_keeps_recovery;
-    unsigned query_joint, query_generation;
+    enum query_phase query;
+    bool disable_keeps_recovery;
+    /* INITIAL: next limit request 0..11. RETRY: rotating request 0..13. */
+    unsigned query_cursor, query_generation;
     double query_start, query_next;
     double auto_reconnect_at, auto_query_at;
     struct obstruction_watch obstruction[6];

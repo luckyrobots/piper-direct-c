@@ -134,7 +134,7 @@ int main(void)
     CHECK(cJSON_GetObjectItem(fault,"arm_status")->valueint==5);
     CHECK(cJSON_GetObjectItem(fault,"error")->valueint==63);
     // Expire the five-second information query while preserving the fault record.
-    c.query=true; c.query_generation=d->generation; c.query_start=piper_now()-6;
+    c.query=QUERY_INITIAL; c.query_generation=d->generation; c.query_start=piper_now()-6;
     controller_tick(&c,piper_now());
     CHECK(!c.query && !strcmp(c.phase,"blocked"));
     CHECK(strstr(c.message,"Joint-drive communication fixture."));

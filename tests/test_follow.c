@@ -50,7 +50,7 @@ static void setup(struct controller *c,char *directory)
     }
     fixture_still(d,now-1);
     send_command(c,command(c,"follow-start",0,0),202);
-    CHECK(c->following&&c->op==OP_MOVE);
+    CHECK(c->follow==FOLLOW_LIVE&&c->op==OP_MOVE);
 }
 static void cleanup(struct controller *c,const char *directory)
 {
@@ -76,7 +76,7 @@ int main(void)
     CHECK(fabs(c.command[5]-previous)<=c.speed*(elapsed+.000001)&&fabs(c.command[5]-d->feedback.arm[0].deg[5])<=1);
     for(unsigned i=0;i<5;i++) CHECK(c.command[i]==0);
     send_command(&c,command(&c,"follow-end",3,0),200);
-    CHECK(c.op==OP_IDLE&&!c.following&&c.bus.sim_enabled==63);
+    CHECK(c.op==OP_IDLE&&c.follow!=FOLLOW_LIVE&&c.bus.sim_enabled==63);
     tx=d->tx; send_command(&c,command(&c,"follow-update",4,5),400); CHECK(d->tx==tx);
     cleanup(&c,first);
 
@@ -84,7 +84,7 @@ int main(void)
     send_command(&c,command(&c,"follow-update",1,8),202);
     double expired=c.follow_updated+.251;
     controller_tick(&c,expired);
-    CHECK(c.op==OP_IDLE&&!c.following&&c.bus.sim_enabled==63);
+    CHECK(c.op==OP_IDLE&&c.follow!=FOLLOW_LIVE&&c.bus.sim_enabled==63);
     CHECK(strstr(c.message,"expired"));
     CHECK(fabs(c.target[5]-c.bus.devices[0].feedback.arm[0].deg[5])<.0001);
     cleanup(&c,second);
@@ -94,7 +94,7 @@ int main(void)
     char committed[]="/tmp/piper-follow-commit-XXXXXX"; setup(&c,committed);
     send_command(&c,command(&c,"follow-update",1,1),202);
     send_command(&c,command(&c,"follow-commit",2,3),202);
-    CHECK(!c.following&&c.follow_committed&&c.op==OP_MOVE&&c.target[5]==3);
+    CHECK(c.follow!=FOLLOW_LIVE&&c.follow==FOLLOW_COMMITTED&&c.op==OP_MOVE&&c.target[5]==3);
     send_command(&c,command(&c,"follow-update",3,-3),409);
     double completion_started=piper_now();
     while(c.op!=OP_IDLE&&piper_now()-completion_started<4) {
@@ -111,7 +111,7 @@ int main(void)
     send_command(&c,command(&c,"follow-commit",1,30),202);
     usleep(21000); controller_tick(&c,piper_now());
     send_command(&c,command(&c,"follow-end",2,0),200);
-    CHECK(c.op==OP_IDLE&&!c.follow_committed&&c.bus.sim_enabled==63);
+    CHECK(c.op==OP_IDLE&&c.follow!=FOLLOW_COMMITTED&&c.bus.sim_enabled==63);
     CHECK(fabs(c.target[5]-c.bus.devices[0].feedback.arm[0].deg[5])<.001);
     cleanup(&c,cancelled);
 
@@ -128,7 +128,7 @@ int main(void)
        so a later STOP cannot report a stale following session. */
     cJSON *record=cJSON_GetObjectItem(cJSON_GetObjectItem(c.saved,"devices"),c.bus.devices[0].id);
     CHECK(cJSON_IsTrue(cJSON_GetObjectItem(cJSON_GetObjectItem(record,"stop_event"),"following")));
-    CHECK(!c.following&&!c.follow_committed&&!c.trajectory_follow&&!c.synchronized_pose);
+    CHECK(c.follow!=FOLLOW_LIVE&&c.follow!=FOLLOW_COMMITTED&&!c.trajectory_follow&&!c.synchronized_pose);
     cJSON_ReplaceItemInObject(record,"stop_event_active",cJSON_CreateFalse());
     controller_stop(&c,"Second stop after recovery.");
     CHECK(cJSON_IsFalse(cJSON_GetObjectItem(cJSON_GetObjectItem(record,"stop_event"),"following")));

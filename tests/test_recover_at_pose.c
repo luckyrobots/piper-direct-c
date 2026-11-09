@@ -71,9 +71,9 @@ static void physical_cycle(struct controller *c)
 {
     struct piper_sample *s=&c->bus.devices[0].feedback.arm[0];
     s->control=2; s->teach=1; s->arm_status=11; tick(c,.05);
-    CHECK(c->teaching_cycle_seen&&!c->teaching_cycle_completed);
+    CHECK(c->teaching_cycle==TEACH_CYCLE_SEEN);
     s->teach=2; s->arm_status=0; tick(c,.05);
-    CHECK(c->teaching_cycle_completed);
+    CHECK(c->teaching_cycle==TEACH_CYCLE_COMPLETED);
 }
 static void action(struct controller *c,const char *name,int expected)
 {
@@ -101,7 +101,7 @@ int main(void)
     cJSON *state=controller_state(&c,"recovery-test"),*device=cJSON_GetArrayItem(cJSON_GetObjectItem(state,"devices"),0);
     CHECK(cJSON_IsTrue(cJSON_GetObjectItem(cJSON_GetObjectItem(device,"teaching"),"can_recover_at_pose"))); cJSON_Delete(state);
     action(&c,"recover-at-pose",202); CHECK(c.op==OP_TEACH_RETURN&&blocked(&c)&&pose_batches==1);
-    CHECK(!c.teaching_cycle_completed&&c.recovering_at_pose);
+    CHECK(c.teaching_cycle!=TEACH_CYCLE_COMPLETED&&c.recovering_at_pose);
     for (unsigned i=0;i<6;++i) CHECK(c.target[i]==frozen[i]&&c.command[i]==frozen[i]);
     tick(&c,.025); CHECK(blocked(&c)&&pose_batches==2);
     tick(&c,.025); CHECK(c.op==OP_IDLE&&!blocked(&c)&&!c.recovering_at_pose&&stop_packets==0);

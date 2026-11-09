@@ -56,13 +56,13 @@ int main(void)
     unsigned long long tx_before=c.bus.devices[0].tx;
     cJSON *streamed=request(&c,"follow-start",true); cJSON_AddStringToObject(streamed,"trajectory_transport","streamed-position");
     action(&c,streamed,409); CHECK(c.op==OP_IDLE&&c.bus.devices[0].tx==tx_before);
-    action(&c,request(&c,"follow-start",true),202); CHECK(c.trajectory_follow&&c.following);
+    action(&c,request(&c,"follow-start",true),202); CHECK(c.trajectory_follow&&c.follow==FOLLOW_LIVE);
     cJSON *update=request(&c,"follow-update",false);
     cJSON_AddNumberToObject(update,"sequence",1); double goal[6]={8,-8,8,-8,8,-8};
     cJSON_AddItemToObject(update,"degrees",cJSON_CreateDoubleArray(goal,6)); action(&c,update,202);
     cJSON *old=request(&c,"follow-update",false); cJSON_AddNumberToObject(old,"sequence",1);
     cJSON_AddItemToObject(old,"degrees",cJSON_CreateDoubleArray(goal,6)); action(&c,old,409); CHECK(c.follow_sequence==1);
-    cJSON *commit=request(&c,"follow-commit",false); action(&c,commit,409); CHECK(c.following);
+    cJSON *commit=request(&c,"follow-commit",false); action(&c,commit,409); CHECK(c.follow==FOLLOW_LIVE);
     double now=c.last_tick,previous_velocity[6]={0},previous_dt=0;
     for (unsigned n=0;n<1200;++n) {
         double before[6]; memcpy(before,c.command,sizeof before);

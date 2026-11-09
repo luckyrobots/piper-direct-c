@@ -100,10 +100,10 @@ int main(void)
     CHECK(cJSON_IsTrue(cJSON_GetObjectItem(first,"recovery_required"))); cJSON_Delete(snapshot);
     /* A lost information reply is retried without motor commands, and the
        existing query deadline still bounds all retries. */
-    c.query_joint=12; c.query_next=0; d->feedback.limit[0].seen=false;
+    c.query=QUERY_RETRY; c.query_cursor=0; c.query_next=0; d->feedback.limit[0].seen=false;
     tx=d->tx; controller_tick(&c,piper_now());
     CHECK(d->tx==tx+1&&d->feedback.limit[0].seen&&c.bus.sim_enabled==0);
-    now=piper_now(); c.query_start=now; c.query_joint=12; c.query_next=0;
+    now=piper_now(); c.query_start=now; c.query=QUERY_RETRY; c.query_cursor=0; c.query_next=0;
     for (unsigned i=0;i<6;i++) { d->feedback.limit[i].seen=true; d->feedback.limit[i].at=now; d->feedback.acceleration[i].seen=true; d->feedback.acceleration[i].at=now; }
     d->feedback.version[0]=0; d->feedback.gripper_config_at=now;
     tx=d->tx; controller_tick(&c,piper_now());

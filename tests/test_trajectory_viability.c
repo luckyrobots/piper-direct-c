@@ -141,7 +141,7 @@ int main(void)
         clock_now+=.025;c.heartbeat=c.follow_updated=clock_now;controller_tick(&c,clock_now);
         CHECK(c.op==OP_IDLE&&!c.trajectory_follow);
         if (!failure) {
-            CHECK(!c.following&&!stop_packets&&pose_packets==1&&device->feedback.motor[1].enabled);
+            CHECK(c.follow!=FOLLOW_LIVE&&!stop_packets&&pose_packets==1&&device->feedback.motor[1].enabled);
             CHECK(strstr(c.message,"boundary")&&strstr(c.message,"Holding"));
             for (unsigned i=0;i<6;++i) CHECK(c.command[i]==device->feedback.arm[0].deg[i]&&c.bus.sim_target[i]==c.command[i]);
         } else {

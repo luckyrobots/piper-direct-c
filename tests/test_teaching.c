@@ -109,9 +109,9 @@ int main(void)
     CHECK(d->tx==tx);
     /* Stale status cannot acknowledge either stage. Exactly two mode packets
        are sent: no position, reset, teaching-start or motor power writes. */
-    action(&c,request(&c,"teach-return"),202); CHECK(c.op==OP_TEACH_RETURN&&c.teach_return_stage==1&&d->tx==tx+1&&d->feedback.arm[0].control==0);
-    double sent=c.sent_at; controller_tick(&c,sent); CHECK(c.teach_return_stage==1&&d->tx==tx+1);
-    usleep(2000); controller_tick(&c,piper_now()); CHECK(c.teach_return_stage==2&&d->tx==tx+2&&d->feedback.arm[0].control==1);
+    action(&c,request(&c,"teach-return"),202); CHECK(c.op==OP_TEACH_RETURN&&c.stage==STAGE_TEACH_STANDBY&&d->tx==tx+1&&d->feedback.arm[0].control==0);
+    double sent=c.sent_at; controller_tick(&c,sent); CHECK(c.stage==STAGE_TEACH_STANDBY&&d->tx==tx+1);
+    usleep(2000); controller_tick(&c,piper_now()); CHECK(c.stage==STAGE_TEACH_CAN&&d->tx==tx+2&&d->feedback.arm[0].control==1);
     sent=c.sent_at; controller_tick(&c,sent); CHECK(c.op==OP_TEACH_RETURN&&d->tx==tx+2);
     usleep(2000); controller_tick(&c,piper_now()); CHECK(c.op==OP_IDLE&&d->tx==tx+2&&c.bus.sim_enabled==63);
     for(unsigned i=0;i<6;++i) CHECK(c.bus.sim_target[i]==0&&d->feedback.arm[0].deg[i]==0);
@@ -128,7 +128,7 @@ int main(void)
     c.heartbeat=piper_now()-1; // Physical teaching takes priority over our expired lease.
     cJSON *heartbeat=request(&c,""); cJSON_AddNumberToObject(heartbeat,"request_id",prior_request);
     int status; cJSON *result=controller_action(&c,"/api/heartbeat",heartbeat,&status); cJSON_Delete(result); cJSON_Delete(heartbeat);
-    CHECK(status==409&&c.op==OP_IDLE&&!c.following&&!c.follow_committed&&!*c.owner&&d->tx==tx);
+    CHECK(status==409&&c.op==OP_IDLE&&c.follow!=FOLLOW_LIVE&&c.follow!=FOLLOW_COMMITTED&&!*c.owner&&d->tx==tx);
     cJSON *device=snapshot(&c); CHECK(!cJSON_IsTrue(cJSON_GetObjectItem(device,"recovery_required"))); cJSON_Delete(device);
     controller_tick(&c,piper_now()); CHECK(d->tx==tx&&c.bus.sim_enabled==63);
     d->feedback.arm[0].teach=2; d->feedback.arm[0].arm_status=0;
@@ -175,7 +175,7 @@ int main(void)
         d->feedback.arm[0].deg[5]=c.bus.sim_target[5]=noise?.2:.06;
         fixture_still(d,piper_now()); // Model a refreshed anchor after small supported settling.
         usleep(2000); controller_tick(&c,piper_now());
-        CHECK(c.op==OP_TEACH_RETURN&&c.teach_return_stage==2&&d->tx==tx+1);
+        CHECK(c.op==OP_TEACH_RETURN&&c.stage==STAGE_TEACH_CAN&&d->tx==tx+1);
         CHECK(d->feedback.arm[0].arm_status==0&&c.bus.sim_enabled==63);
         // Settling has not qualified a new stationary window, but remains
         // inside the supported handoff settling allowance of 0.5 degrees.
@@ -214,11 +214,11 @@ int main(void)
         d->feedback.motor[3].fault=0; d->feedback.foreign_seen=false; d->feedback.arm[0].joint_at[0]=piper_now();
     }
     cJSON *j=request(&c,"teach-return"); cJSON_AddBoolToObject(j,"same_pose_confirmed",true);
-    action(&c,j,202); CHECK(c.op==OP_TEACH_RETURN&&c.teach_return_stage==3&&d->tx==tx+3);
+    action(&c,j,202); CHECK(c.op==OP_TEACH_RETURN&&c.stage==STAGE_TEACH_SEEDED&&d->tx==tx+3);
     CHECK(c.bus.sim_enabled==63&&d->feedback.arm[0].control==2);
     for(unsigned i=0;i<6;++i) { CHECK(fabs(c.bus.sim_target[i]-pose[i])<.00001); CHECK(c.target[i]==pose[i]); }
     sent=c.sent_at; controller_tick(&c,sent); CHECK(c.op==OP_TEACH_RETURN); // No stale status acknowledgement.
-    usleep(25000); controller_tick(&c,piper_now()); CHECK(c.op==OP_TEACH_RETURN&&c.teach_return_stage==4&&d->tx==tx+7);
+    usleep(25000); controller_tick(&c,piper_now()); CHECK(c.op==OP_TEACH_RETURN&&c.stage==STAGE_TEACH_MODE&&d->tx==tx+7);
     sent=c.sent_at; controller_tick(&c,sent); CHECK(c.op==OP_TEACH_RETURN); // Seed feedback cannot acknowledge the final batch.
     usleep(2000); controller_tick(&c,piper_now()); CHECK(c.op==OP_IDLE&&d->tx==tx+7&&c.bus.sim_enabled==63);
     for(unsigned i=0;i<6;++i) CHECK(fabs(d->feedback.arm[0].deg[i]-pose[i])<.00001);

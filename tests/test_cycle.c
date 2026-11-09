@@ -44,10 +44,10 @@ static void cleanup(struct fixture *f)
     controller_close(&f->c); char path[160]; snprintf(path,sizeof path,"%s/control-state.json",f->directory);
     CHECK(!unlink(path)); CHECK(!rmdir(f->directory));
 }
-static void reach_stage(struct fixture *f,unsigned wanted)
+static void reach_stage(struct fixture *f,enum lane_stage wanted)
 {
-    for (unsigned i=0;i<7000&&f->c.cycle_stage!=wanted&&f->c.op!=OP_IDLE;++i) tick(f,true);
-    CHECK(f->c.op==OP_CYCLE&&f->c.cycle_stage==wanted);
+    for (unsigned i=0;i<7000&&f->c.stage!=wanted&&f->c.op!=OP_IDLE;++i) tick(f,true);
+    CHECK(f->c.op==OP_CYCLE&&f->c.stage==wanted);
 }
 int main(void)
 {
@@ -58,28 +58,28 @@ int main(void)
     bool saw_pause=false,saw_return=false; double paused_at=0;
     for (unsigned t=0;t<7000&&f.c.op!=OP_IDLE;++t) {
         double before[6]; memcpy(before,f.c.command,sizeof before);
-        unsigned stage=f.c.cycle_stage; tick(&f,true);
+        enum lane_stage stage=f.c.stage; tick(&f,true);
         for (unsigned i=0;i<6;++i) CHECK(fabs(f.c.command[i]-before[i])<=.15+.001);
         CHECK(fabs(f.c.command[0]-original[0])<.001&&fabs(f.c.command[5]-original[5])<.001);
-        if (f.c.cycle_stage==2&&!saw_pause) { saw_pause=true; paused_at=f.now; }
-        if (stage==2&&f.c.cycle_stage==3) { saw_return=true; CHECK(f.now-paused_at>=2); }
+        if (f.c.stage==STAGE_CYCLE_UPRIGHT&&!saw_pause) { saw_pause=true; paused_at=f.now; }
+        if (stage==STAGE_CYCLE_UPRIGHT&&f.c.stage==STAGE_CYCLE_RETURNING) { saw_return=true; CHECK(f.now-paused_at>=2); }
     }
     CHECK(saw_pause&&saw_return); CHECK(f.c.op==OP_IDLE&&!strcmp(f.c.phase,"complete"));
     for (unsigned i=0;i<6;++i) CHECK(fabs(f.c.bus.devices[0].feedback.arm[0].deg[i]-original[i])<.001);
     cleanup(&f);
     // Cancelling at any phase must never resume or begin an automatic return.
-    for (unsigned stage=1;stage<=3;++stage) {
+    for (enum lane_stage stage=STAGE_CYCLE_RAISING;stage<=STAGE_CYCLE_RETURNING;++stage) {
         setup(&f); CHECK(request(&f,"cycle")==202); reach_stage(&f,stage);
         controller_stop(&f.c,"Cycle stop fixture.");
         uint64_t tx=f.c.bus.devices[0].tx;
         for (unsigned i=0;i<100;++i) tick(&f,true);
-        CHECK(f.c.op==OP_IDLE&&f.c.cycle_stage==0&&f.c.bus.devices[0].tx==tx); cleanup(&f);
+        CHECK(f.c.op==OP_IDLE&&f.c.stage==STAGE_NONE&&f.c.bus.devices[0].tx==tx); cleanup(&f);
     }
     setup(&f); CHECK(request(&f,"cycle")==202);
     for (unsigned i=0;i<40;++i) tick(&f,false);
     CHECK(f.c.op==OP_IDLE&&strstr(f.c.message,"heartbeat expired")); cleanup(&f);
     setup(&f); CHECK(request(&f,"cycle")==202); CHECK(request(&f,"hold")==202);
-    CHECK(f.c.op==OP_MOVE&&f.c.cycle_stage==0);
+    CHECK(f.c.op==OP_MOVE&&f.c.stage==STAGE_NONE);
     for (unsigned i=0;i<100&&f.c.op!=OP_IDLE;++i) tick(&f,true);
     CHECK(f.c.op==OP_IDLE&&!strcmp(f.c.phase,"complete")); cleanup(&f);
     setup(&f); f.c.bus.devices[0].feedback.limit[2].min=-100;

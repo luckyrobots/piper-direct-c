@@ -108,7 +108,7 @@ static void setup(struct controller *c,const char *directory)
     for (unsigned i=0;i<60;++i) tick(c,false,false);
     for (unsigned i=0;i<2;++i) cJSON_Delete(request(c,"/api/query",identity(c,i),202));
     for (unsigned i=0;i<300&&controller_any_query_active(c);++i) tick(c,false,false);
-    if (controller_any_query_active(c)) for (unsigned i=0;i<2;++i) fprintf(stderr,"query %u active %d joint %u start %.3f next %.3f now %.3f gen %u/%u op %d firmware %s hardware %s limit %d at %.3f speed%.3f acc%d at %.3f since%.3f\n",i,lane(c,i)->query,lane(c,i)->query_joint,lane(c,i)->query_start,lane(c,i)->query_next,clock_now,lane(c,i)->query_generation,c->bus.devices[i].generation,lane(c,i)->op,c->bus.devices[i].feedback.version,c->bus.devices[i].feedback.hardware,c->bus.devices[i].feedback.limit[0].seen,c->bus.devices[i].feedback.limit[0].at,c->bus.devices[i].feedback.limit[0].speed,c->bus.devices[i].feedback.acceleration[0].seen,c->bus.devices[i].feedback.acceleration[0].at,c->bus.devices[i].configuration_since);
+    if (controller_any_query_active(c)) for (unsigned i=0;i<2;++i) fprintf(stderr,"query %u active %d joint %u start %.3f next %.3f now %.3f gen %u/%u op %d firmware %s hardware %s limit %d at %.3f speed%.3f acc%d at %.3f since%.3f\n",i,lane(c,i)->query,lane(c,i)->query_cursor,lane(c,i)->query_start,lane(c,i)->query_next,clock_now,lane(c,i)->query_generation,c->bus.devices[i].generation,lane(c,i)->op,c->bus.devices[i].feedback.version,c->bus.devices[i].feedback.hardware,c->bus.devices[i].feedback.limit[0].seen,c->bus.devices[i].feedback.limit[0].at,c->bus.devices[i].feedback.limit[0].speed,c->bus.devices[i].feedback.acceleration[0].seen,c->bus.devices[i].feedback.acceleration[0].at,c->bus.devices[i].configuration_since);
     CHECK(!controller_any_query_active(c));
     CHECK(!controller_blocker(c,&c->bus.devices[0],clock_now)&&!controller_blocker(c,&c->bus.devices[1],clock_now));
     unsigned first=command(c,0,"enable",0),second=command(c,1,"enable",0);CHECK(first&&second>first);
@@ -174,11 +174,11 @@ int main(void)
     for (unsigned i=1;i<=100;++i) {
         follow(c,0,"follow-update",i,1.5,202);follow(c,1,"follow-update",i,-2,202);
         tick(c,true,true);
-        CHECK(lane(c,0)->following&&lane(c,1)->following&&lane(c,0)->request_id==a&&lane(c,1)->request_id==b);
+        CHECK(lane(c,0)->follow==FOLLOW_LIVE&&lane(c,1)->follow==FOLLOW_LIVE&&lane(c,0)->request_id==a&&lane(c,1)->request_id==b);
     }
     CHECK(fabs(c->bus.sim_target[5]-c->bus.devices[1].sim_target[5])>3);
     follow(c,0,"follow-end",101,0,200);
-    CHECK(!lane(c,0)->following&&lane(c,1)->following);
+    CHECK(lane(c,0)->follow!=FOLLOW_LIVE&&lane(c,1)->follow==FOLLOW_LIVE);
     follow(c,1,"follow-end",101,0,200);
     settle(c,60);CHECK(!controller_any_motion_active(c));
 
