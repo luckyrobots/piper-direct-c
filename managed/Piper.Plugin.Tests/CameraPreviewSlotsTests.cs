@@ -4,6 +4,32 @@ internal static class CameraPreviewSlotsTests
 {
     public static async Task Run(Action<bool, string> check)
     {
+        // A paused preview never launches the camera runtime, so the lifecycle
+        // guard can be exercised without a camera or engine connection.
+        static bool Throws(Action action) { try { action(); return false; } catch (InvalidOperationException) { return true; } }
+        var paused = new CameraCapture(null!, "bench", new CameraPreferences("none", Enabled: false), (_, _) => { });
+        paused.Start();
+        check(Throws(paused.Start), "A camera capture started a second worker");
+        await paused.DisposeAsync();
+        await paused.DisposeAsync();
+        check(Throws(paused.Start), "A disposed camera capture started a worker");
+        var neverStarted = new CameraCapture(null!, "bench", new CameraPreferences("none", Enabled: false), (_, _) => { });
+        await neverStarted.DisposeAsync();
+        check(Throws(neverStarted.Start), "A camera capture disposed before start could still start");
+        var probe = new ThrottledProbe<string>(TimeSpan.FromHours(1));
+        var gate = new TaskCompletionSource<string?>(TaskCreationOptions.RunContinuationsAsynchronously);
+        int reads = 0;
+        probe.Queue(() => { reads++; return gate.Task; });
+        probe.Queue(() => { reads++; return Task.FromResult<string?>("second"); }, force: true);
+        check(reads == 1 && !probe.HasPending, "A camera discovery probe ran two reads at once");
+        gate.SetResult("first");
+        await probe.Reading!;
+        check(probe.Take() == "first" && probe.Take() is null, "A probe result was lost or applied twice");
+        probe.Queue(() => { reads++; return Task.FromResult<string?>("throttled"); });
+        check(reads == 1, "A camera discovery probe ignored its interval");
+        probe.Queue(() => { reads++; return Task.FromResult<string?>(null); }, force: true);
+        await probe.Retire();
+        check(reads == 2 && !probe.HasPending, "A forced refresh was throttled or a failed read left a result");
         var slots = new CameraPreviewSlots<ControlledCapture>();
         var previous = new ControlledCapture(paused: true);
         var survivor = new ControlledCapture();

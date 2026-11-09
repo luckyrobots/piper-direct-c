@@ -13,28 +13,24 @@ public sealed partial class PipersPlugin
     // Reading a visual reference must not fabricate any physical confirmation.
     private async Task<CalibrationPlacement> ReadSheetReference(CancellationToken cancellation)
     {
-        var current = link ?? throw new InvalidOperationException("Link the scene robot first.");
+        if (link is null) throw new InvalidOperationException("Link the scene robot first.");
         var identity = CurrentCalibrationIdentity();
         _ = Device(identity.DeviceId, identity.Generation);
-        var reply = await engine.RequestAsync("robot.read", new JsonObject { ["sceneId"] = current.SceneId, ["entityId"] = current.EntityId }, cancellation);
-        var pose = JsonNode.Parse(reply.GetRawText())!.AsObject();
-        if (!ReferenceEquals(link, current) || identity != CurrentCalibrationIdentity() ||
-            pose["sceneId"]?.GetValue<string>() != current.SceneId || pose["entityId"]?.GetValue<string>() != current.EntityId ||
-            pose["metricPlacementSupported"]?.GetValue<bool>() != true || pose["metricFrame"]?.GetValue<string>() != "engine-world-y-up" ||
+        const string loading = "Wait for the matching metric scene model to load.";
+        var (_, pose) = await ReadMetricPose("Link the scene robot first.", loading, cancellation);
+        if (identity != CurrentCalibrationIdentity() ||
             pose["modelAssetId"]?.GetValue<string>() is not { Length: > 0 } asset || pose["modelRevision"]?.GetValue<string>() is not { Length: > 0 } revision)
-            throw new InvalidOperationException("Wait for the matching metric scene model to load.");
+            throw new InvalidOperationException(loading);
         _ = Device(identity.DeviceId, identity.Generation);
         var root = CalibrationPlacement.Read(pose["rootPlacement"]);
         bool changed = Wizard.ModelAssetId != asset || Wizard.ModelRevision != revision;
         if (changed && calibrationIdentity is not null) throw new InvalidOperationException("The recorded model changed. Re-evaluate saved poses with the corrected model before confirming its pointers; the original report is retained.");
+        // A changed model voids the edge proofs and the jaw-tip comparison together.
         if (changed)
-        {
-            calibrationWizard = Wizard with { ModelAssetId = asset, ModelRevision = revision, OperatorSaysTcpMatches = false };
-            Wizard.Answers.Remove("leftedgeconfirmed"); Wizard.Answers.Remove("frame"); Wizard.Answers.Remove("edgeroot");
-        }
-        if (!Wizard.Answers.ContainsKey("sceneconfirmed"))
-            Wizard.Answers["observedrooty"] = Wizard.Answers["sceney"] = CalibrationNumber(root.Position.Y * 1000);
-        Wizard.Answers["sheetreferencepreview"] = "read-only visual reference; not operator confirmation";
+            calibrationWizard = Wizard with { ModelAssetId = asset, ModelRevision = revision, Setup = Wizard.Setup.ClearEdges() with { JawTipsConfirmed = false } };
+        if (!Wizard.Setup.SurfaceConfirmed)
+            Wizard.Answers["sceney"] = CalibrationNumber(root.Position.Y * 1000);
+        UpdateSetup(setup => setup with { ReferencePreviewed = true });
         return root;
     }
 

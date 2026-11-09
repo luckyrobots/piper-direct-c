@@ -150,9 +150,9 @@ internal static class CalibrationSheetIntegrationTests
             await Event("left.show"); await Event("left.confirm"); await Event("back.show"); await Event("back.confirm");
             await Event("tool.show");
             await Invoke("MaintainWizardHighlight", CancellationToken.None);
-            check(Get<object?>("wizardHighlightScope") is not null, "Background edge renewal erased the jaw-tip confirmation context");
+            check(Get<object>("wizardMarker") is MarkerState.Tool, "Background edge renewal erased the jaw-tip confirmation context");
             await Event("tool.confirm"); await Event("surface");
-            check(Get<CalibrationWizardDraft>("calibrationWizard").OperatorSaysTcpMatches, "The actual confirmation event did not persist jaw-tip approval");
+            check(Get<CalibrationWizardDraft>("calibrationWizard").Setup.JawTipsConfirmed, "The actual confirmation event did not persist jaw-tip approval");
             string WidgetId(string suffix) => Walk(view!).Single(w => w["id"]!.GetValue<string>().EndsWith(suffix, StringComparison.Ordinal))["id"]!.GetValue<string>();
             bool CaptureEnabled(int row) => patches?[WidgetId(".sheet.capture." + row)]?["enabled"]?.GetValue<bool>() == true;
             string Status(string suffix) => patches?[WidgetId(suffix)]?["text"]?.GetValue<string>() ?? "";
@@ -302,6 +302,23 @@ internal static class CalibrationSheetIntegrationTests
                 "An applied alignment permitted changing its captured measurement without rollback");
             await Event("inspect");
             check(Get<CalibrationPlacement>("calibrationApplied").Same(root) && calls.Count(c => c == "robot.placement") == 1, "Checking an applied placement repeated a scene write");
+            // Jaw-height phases (Cal-D). The page value stands in for the
+            // navigation fix (B3) that makes this check reachable from the sheet.
+            Set("workspacePage", "calibration");
+            async Task Height(string action, string text = "") { Fresh(); await Invoke("HeightCheckEvent", action, JsonSerializer.SerializeToElement(text), CancellationToken.None); }
+            string HeightPhase() => typeof(PipersPlugin).GetField("heightPhase", hidden)!.GetValue(plugin)!.ToString()!;
+            await Height("toggle");
+            check(HeightPhase() == "Live" && Get<string>("heightActionError") == "", "Check jaw height did not start live: " + Get<string>("heightActionError"));
+            await Height("pin");
+            check(HeightPhase() == "Pinned", "Measure this pose did not pin the pose: " + Get<string>("heightActionError"));
+            await Height("measured", "250");
+            await Height("save");
+            check(HeightPhase() == "Saved", "Save check did not record the pinned pose: " + Get<string>("heightActionError"));
+            await Height("another");
+            check(HeightPhase() == "Live" && Get<object?>("heightFrozen") is null, "Check another pose kept the previous pinned pose");
+            await Height("toggle");
+            check(HeightPhase() == "Inactive", "Stop height check left the check active");
+            Set("workspacePage", "settings"); await Invoke("Render", CancellationToken.None);
             // Reopening the same compiled model must not tell users to redo an
             // already applied alignment just to perform independent height checks.
             var reopenedPose = Pose(); reopenedPose["sceneId"] = "reopened-scene";

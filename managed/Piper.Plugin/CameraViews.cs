@@ -74,7 +74,7 @@ public sealed partial class PipersPlugin
                 Widget.Label("camera." + id + ".calibration.help", "Print the 8 × 6 checkerboard at actual size, 20 mm squares. Move the flat board, keeping the robot stationary, and capture 20+ varied views.") with { Height = 48, Hint = "Include different tilts, distances and image edges. The camera lens solve does not calibrate its mount." },
                 Widget.Row("camera." + id + ".calibration.actions", Widget.Button("camera." + id + ".calibrationboard", "Printable board"), Widget.Button("camera." + id + ".calibrationnew", "New session"), Widget.Button("camera." + id + ".calibrationcapture", "Capture board")),
                 Widget.Button("camera." + id + ".calibrationsolve", "Solve & validate fisheye lens") with { Appearance = "primary" },
-                Widget.Label("camera." + id + ".calibration.status", calibrationStatus) with { Height = 46 }) with { Visible = cameraLensDetailsOpen && id == "gripper", Spacing = 12 },
+                Widget.Label("camera." + id + ".calibration.status", lens.Status) with { Height = 46 }) with { Visible = cameraLensDetailsOpen && id == "gripper", Spacing = 12 },
             Widget.Label("workspace.settings.factory-profile", "D405 uses its selected stream's factory intrinsics. Bench and wrist camera mounts still need independent verification.") with { Visible = cameraLensDetailsOpen && id != "gripper", Height = 48, Appearance = "muted" }) with { Spacing = 14 };
     }
 }

@@ -137,12 +137,15 @@ public static class CalibrationTests
         check(!CalibrationCommandGuard.Blocks("stop", true) && !CalibrationCommandGuard.Blocks("disable", true) && !CalibrationCommandGuard.Blocks("calibration.capture", true), "Calibration routing blocked STOP/disable/passive capture");
         var report = new CalibrationReport(1, modelBound, desk, original, samples, fit, null, true, DateTimeOffset.UtcNow);
         var decoded = System.Text.Json.JsonSerializer.Deserialize<CalibrationReport>(System.Text.Json.JsonSerializer.Serialize(report))!;
-        var saved = CalibrationSavedState.Recover(decoded, "piper-1");
-        check(saved is { RequiresInspection: true } && saved.Report.OriginalPlacement.Same(original) && saved.Report.Fit!.ProposedPlacement.Same(fit.ProposedPlacement), "Restart discarded pending scene-write original/proposed rollback evidence");
-        saved = CalibrationSavedState.Recover(report with { PlacementUnverified = false, AppliedPlacement = fit.ProposedPlacement }, "piper-1");
-        check(saved is { RequiresInspection: true } && saved.Report.AppliedPlacement!.Same(fit.ProposedPlacement), "Reload treated a previous applied root as currently verified or lost rollback placement");
-        check(CalibrationSavedState.Recover(report with { PlacementUnverified = false }, "piper-1") is null, "An unapplied completed report silently resumed an old fit");
-        Reject(() => CalibrationSavedState.Recover(report, "another-profile"), "Saved rollback state crossed robot profiles");
+        decoded.Validate("piper-1");
+        check(decoded.RequiresInspection && decoded.OriginalPlacement.Same(original) && decoded.Fit!.ProposedPlacement.Same(fit.ProposedPlacement), "Restart discarded pending scene-write original/proposed rollback evidence");
+        var applied = report with { PlacementUnverified = false, AppliedPlacement = fit.ProposedPlacement };
+        applied.Validate("piper-1");
+        check(applied.RequiresInspection && applied.AppliedPlacement!.Same(fit.ProposedPlacement), "Reload treated a previous applied root as currently verified or lost rollback placement");
+        check(!(report with { PlacementUnverified = false }).RequiresInspection, "An unapplied completed report silently resumed an old fit");
+        check(!System.Text.Json.JsonSerializer.Serialize(report).Contains("RequiresInspection", StringComparison.Ordinal), "A derived restore flag was persisted in the report");
+        Reject(() => report.Validate("another-profile"), "Saved rollback state crossed robot profiles");
+        Reject(() => (applied with { Fit = null }).Validate("piper-1"), "A saved applied placement without its proposing fit was restored");
         Reject(() => CalibrationCapture.ValidateLive(identity, identity with { Generation = 8 }, device, true), "Post-save scope guard allowed a new CAN generation");
     }
 }

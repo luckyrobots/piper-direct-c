@@ -656,7 +656,7 @@ public sealed partial class PipersPlugin : ILuckyPlugin
             patches["camera." + id + ".image"] = new() { ["visible"] = CameraFrameReady(id) };
             patches["camera." + id + ".info"] = new() { ["text"] = cameraStatus.GetValueOrDefault(id, "Waiting for a fresh frame…") };
         }
-        patches["camera.gripper.calibration.status"] = new() { ["text"] = calibrationStatus };
+        patches["camera.gripper.calibration.status"] = new() { ["text"] = lens.Status };
         AddTeachingPatches(patches, device);
         AddHeightCheckPatches(patches, device);
         AddCameraComparisonPatches(patches);
@@ -688,15 +688,7 @@ public sealed partial class PipersPlugin : ILuckyPlugin
                 catch (Exception error) { Trace.TraceWarning("Recovery shutdown: {0}", error.Message); }
             }
         }
-        {
-            await cameraDiscoveryShutdown.CancelAsync();
-            var discoveryWorkers = new[] { simulationCameraRefreshWorker, cameraDeviceDiscoveryWorker }.OfType<Task>().ToArray();
-            try { await Task.WhenAll(discoveryWorkers); }
-            catch (OperationCanceledException) { }
-            Interlocked.Exchange(ref pendingSimulationCameraDiscovery, null);
-            Interlocked.Exchange(ref pendingCameraDeviceInventory, null);
-            cameraDiscoveryShutdown.Dispose();
-        }
+        await RetireCameraDiscovery();
         using (var markerTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(1)))
         {
             try { await StopHeightCheck(markerTimeout.Token); }
@@ -728,7 +720,7 @@ public sealed partial class PipersPlugin : ILuckyPlugin
         }
         await shutdown.CancelAsync();
         if (wizardHighlightMaintenance is not null) { try { await wizardHighlightMaintenance; } catch (OperationCanceledException) { } }
-        if (calibrationWorker is not null) { try { await calibrationWorker; } catch (OperationCanceledException) { } }
+        if (lensWorker is not null) { try { await lensWorker; } catch (OperationCanceledException) { } }
         try { await cameraRetirement; }
         catch (Exception error) { Trace.TraceWarning("Camera shutdown: {0}", error.Message); }
         if (worker is not null) { try { await worker; } catch (OperationCanceledException) { } catch (RpcException error) when (error.StatusCode == StatusCode.Cancelled) { } }
