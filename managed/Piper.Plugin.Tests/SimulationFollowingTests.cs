@@ -679,32 +679,17 @@ internal static partial class SimulationFollowingTests
             plugin.token = "fixture-backend"; plugin.approved = true; plugin.pikaRole = (int)PikaSessionRole.Owned; plugin.linkCommandsEnabled = true;
             var model = SimulationFollowTests.Pose();
             var sample = SimulationFollowSample.Read(model);
-            Snapshot = new JsonObject
+            var arm = Fixtures.Arm(joint: (index, joint) =>
             {
-                ["token"] = "fixture-backend", ["selected"] = "can-a", ["trajectory_follow_supported"] = true,
-                ["motion"] = new JsonObject { ["active"] = false, ["request_id"] = 0L, ["owner"] = plugin.owner,
-                    ["following"] = false, ["trajectory_follow"] = false, ["follow_sequence"] = 0L },
-                ["devices"] = new JsonArray(new JsonObject
-                {
-                    ["id"] = "can-a", ["name"] = "Fixture", ["generation"] = 7L, ["present"] = true, ["up"] = true, ["fresh"] = true,
-                    ["firmware_supported"] = true, ["recovery_required"] = false, ["reset_pending"] = false, ["blocker"] = "",
-                    ["status"] = new JsonObject { ["control"] = 1, ["teach_state"] = 0, ["arm_status"] = 0, ["error"] = 0, ["age_s"] = .001, ["stationary_s"] = 1d },
-                    ["joints"] = new JsonArray(Enumerable.Range(0, 6).Select(i => (JsonNode)new JsonObject
-                    {
-                        ["index"] = i + 1, ["enabled"] = true, ["fresh"] = true, ["fault"] = 0, ["age_s"] = .001,
-                        ["actual_deg"] = sample.MeasuredDegrees[i] + (i == 0 && mismatch ? 2 : 0),
-                        ["command_deg"] = sample.MeasuredDegrees[i] + (i == 0 && mismatch ? 2 : 0),
-                        ["min_deg"] = -180d, ["max_deg"] = 180d, ["max_speed_rad_s"] = 1d,
-                        ["max_acceleration_rad_s2"] = 3d, ["limits_fresh"] = true, ["acceleration_fresh"] = true
-                    }).ToArray())
-                }),
-                ["pika"] = new JsonObject
-                {
-                    ["configured"] = true, ["device"] = "/dev/pika-a", ["distribution"] = RobotProfile.PikaDistributionFor("Ubuntu"), ["owner"] = plugin.owner,
-                    ["fresh"] = true, ["connected"] = true, ["armed"] = true, ["enabled"] = true, ["pending"] = false, ["age_s"] = .001,
-                    ["telemetry"] = new JsonObject { ["motor"] = new JsonObject { ["Position"] = PikaProtocol.Angle(20), ["Speed"] = 0d } }
-                }
-            };
+                double degrees = sample.MeasuredDegrees[index - 1] + (index == 1 && mismatch ? 2 : 0);
+                joint["actual_deg"] = degrees; joint["command_deg"] = degrees;
+                joint["max_speed_rad_s"] = 1d; joint["max_acceleration_rad_s2"] = 3d; joint["acceleration_fresh"] = true;
+            });
+            Snapshot = Fixtures.Snapshot("fixture-backend", arm,
+                Fixtures.Pika("/dev/pika-a", RobotProfile.PikaDistributionFor("Ubuntu"), plugin.owner, enabled: true, position: PikaProtocol.Angle(20)),
+                new JsonObject { ["active"] = false, ["request_id"] = 0L, ["owner"] = plugin.owner,
+                    ["following"] = false, ["trajectory_follow"] = false, ["follow_sequence"] = 0L });
+            Snapshot["trajectory_follow_supported"] = true;
             plugin.state = Snapshot; plugin.telemetryScope = new TelemetryScope("fixture-backend", "can-a", 7);
             Rpc.Accepted = (route, body) =>
             {

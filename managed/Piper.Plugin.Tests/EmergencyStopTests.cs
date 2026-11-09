@@ -294,27 +294,8 @@ internal static class EmergencyStopTests
             plugin.preferences = RobotProfileRouting.Normalize(new Preferences(Robots:
                 [new("piper-1", "Fixture", "can-one", PikaDevice: "/dev/pika-one")], ActiveRobotId: "piper-1"));
             plugin.token = "fake-backend-session";
-            var snapshot = new JsonObject
-            {
-                ["token"] = "fake-backend-session", ["selected"] = "can-one", ["motion"] = new JsonObject { ["active"] = false, ["request_id"] = 0L },
-                ["devices"] = new JsonArray(new JsonObject
-                {
-                    ["id"] = "can-one", ["name"] = "Fixture", ["generation"] = 1L, ["present"] = true, ["up"] = true, ["fresh"] = true,
-                    ["recovery_required"] = false, ["reset_pending"] = false, ["blocker"] = "", ["firmware_supported"] = true,
-                    ["status"] = new JsonObject { ["control"] = 1, ["teach_state"] = 0, ["arm_status"] = 0, ["error"] = 0, ["age_s"] = .001 },
-                    ["joints"] = new JsonArray(Enumerable.Range(1, 6).Select(i => (JsonNode)new JsonObject
-                    {
-                        ["index"] = i, ["fresh"] = true, ["enabled"] = true, ["fault"] = 0, ["actual_deg"] = 0.0,
-                        ["age_s"] = .001, ["limits_fresh"] = true, ["min_deg"] = -180.0, ["max_deg"] = 180.0, ["max_speed_rad_s"] = .3
-                    }).ToArray())
-                }),
-                ["pika"] = new JsonObject
-                {
-                    ["configured"] = true, ["device"] = "/dev/pika-one", ["distribution"] = "Ubuntu", ["owner"] = plugin.owner,
-                    ["fresh"] = true, ["connected"] = true, ["armed"] = true, ["enabled"] = true, ["pending"] = false,
-                    ["telemetry"] = new JsonObject { ["motor"] = new JsonObject { ["Position"] = .1, ["Speed"] = 0.0 } }
-                }
-            };
+            var snapshot = Fixtures.Snapshot("fake-backend-session", Fixtures.Arm("can-one", generation: 1),
+                Fixtures.Pika("/dev/pika-one", "Ubuntu", plugin.owner, enabled: true, position: .1));
             plugin.state = snapshot;
             plugin.telemetry.Publish(new(snapshot, "fake-backend-session", 1, Stopwatch.GetTimestamp(), 0));
             var context = (PluginContext)Activator.CreateInstance(typeof(PluginContext), BindingFlags.Instance | BindingFlags.NonPublic, null,

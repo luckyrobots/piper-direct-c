@@ -14,12 +14,7 @@ internal static class PikaDisplayReferenceTests
     private const string DevicePath = "/dev/pika-fixture";
     private static readonly RobotProfile Profile = new("piper-1", "Fixture", "can-a", RobotId: "fixture-robot", PikaDevice: DevicePath);
     private static string? Distribution => Profile.PikaDistribution;
-    private static JsonObject Pika() => new()
-    {
-        ["device"] = DevicePath, ["distribution"] = Distribution, ["connected"] = true, ["fresh"] = true,
-        ["configured"] = true, ["pending"] = false, ["enabled"] = false, ["armed"] = false,
-        ["telemetry"] = new JsonObject { ["motor"] = new JsonObject { ["Position"] = ClosedAngle, ["Speed"] = 0.0 } }
-    };
+    private static JsonObject Pika() => Fixtures.Pika(DevicePath, Distribution, position: ClosedAngle);
 
     public static async Task Run()
     {
@@ -100,14 +95,9 @@ internal static class PikaDisplayReferenceTests
         const double travel = .0470221912391186;
         model.Add(new JsonObject { ["name"] = "joint7", ["unit"] = "m", ["limited"] = true, ["min"] = -travel, ["max"] = 0 });
         model.Add(new JsonObject { ["name"] = "joint8", ["unit"] = "m", ["limited"] = true, ["min"] = 0, ["max"] = travel });
-        var device = new JsonObject
-        {
-            ["id"] = "can-a", ["name"] = "Fixture", ["generation"] = 1L, ["fresh"] = true, ["present"] = true, ["up"] = true,
-            ["firmware_supported"] = true, ["status"] = new JsonObject { ["age_s"] = .001, ["control"] = 1, ["teach_state"] = 0, ["arm_status"] = 0, ["error"] = 0, ["stationary_s"] = 1.0 },
-            ["joints"] = new JsonArray(Enumerable.Range(1, 6).Select(i => (JsonNode)new JsonObject { ["actual_deg"] = 0.0, ["fresh"] = true, ["age_s"] = .001, ["fault"] = 0, ["enabled"] = false, ["limits_fresh"] = true, ["min_deg"] = -180.0, ["max_deg"] = 180.0, ["max_speed_rad_s"] = .3 }).ToArray())
-        };
+        var device = Fixtures.Arm(generation: 1, enabled: false);
         var pika = Pika();
-        var state = new JsonObject { ["token"] = "fixture-session", ["selected"] = "can-a", ["devices"] = new JsonArray(device), ["pika"] = pika, ["motion"] = new JsonObject { ["active"] = false } };
+        var state = Fixtures.Snapshot("fixture-session", device, pika, new JsonObject { ["active"] = false });
         plugin.state = state;
         void Fresh() => plugin.telemetry.Publish(new(state, "fixture-session", 1, Stopwatch.GetTimestamp(), 0));
         var engineCalls = new List<string>(); var feedback = new List<JsonObject>();

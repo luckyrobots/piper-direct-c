@@ -14,23 +14,12 @@ internal static class TelemetryPipelineTests
     {
         long utc = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() * 1000, ticks = Stopwatch.GetTimestamp();
         long At(double ms) => ticks + (long)(Stopwatch.Frequency * ms / 1000);
-        JsonObject State(string token = "session-a", long generation = 7) => new()
+        JsonObject State(string token = "session-a", long generation = 7)
         {
-            ["token"] = token, ["selected"] = "can-a",
-            ["devices"] = new JsonArray(new JsonObject
-            {
-                ["id"] = "can-a", ["name"] = "Fixture", ["generation"] = generation, ["fresh"] = true, ["present"] = true, ["up"] = true,
-                ["firmware_supported"] = true, ["recovery_required"] = false, ["reset_pending"] = false, ["blocker"] = "",
-                ["status"] = new JsonObject { ["control"] = 1, ["teach_state"] = 0, ["motion_mode"] = 1, ["arm_status"] = 0, ["error"] = 0, ["stationary_s"] = 1.0, ["age_s"] = .005 },
-                ["joints"] = new JsonArray(Enumerable.Range(1, 6).Select(i => (JsonNode)new JsonObject
-                {
-                    ["index"] = i, ["actual_deg"] = 0.0, ["fresh"] = true, ["enabled"] = true, ["fault"] = 0, ["age_s"] = .005,
-                    ["current_a"] = 0.0, ["limits_fresh"] = true, ["min_deg"] = -180.0, ["max_deg"] = 180.0, ["max_speed_rad_s"] = .3
-                }).ToArray())
-            }),
-            ["motion"] = new JsonObject { ["active"] = true, ["request_id"] = 7L, ["owner"] = "fixture-owner" },
-            ["pika"] = new JsonObject { ["configured"] = false, ["fresh"] = false, ["connected"] = false }
-        };
+            var arm = Fixtures.Arm(generation: generation, ageSeconds: .005, joint: (_, joint) => joint["current_a"] = 0.0);
+            arm["status"]!["motion_mode"] = 1;
+            return Fixtures.Snapshot(token, arm, motion: new JsonObject { ["active"] = true, ["request_id"] = 7L, ["owner"] = "fixture-owner" });
+        }
         var inbox = new LatestTelemetry();
         bool Prepare(JsonObject state, long sequence, long source, string clock, long now, long monotonic, out TelemetryReceipt? receipt) =>
             inbox.TryPrepare(state, sequence, source, clock, now, monotonic, out receipt, out _);
