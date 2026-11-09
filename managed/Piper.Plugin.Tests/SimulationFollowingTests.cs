@@ -382,9 +382,9 @@ internal static partial class SimulationFollowingTests
             }
             await confirmed.Click("safety.accept");
             var result = await WaitPrimary(confirmed, failConfirmation ? "failed" : "complete", initial["id"]!.GetValue<string>());
-            check(!confirmed.Get<bool>("primaryActionBusy") && (failConfirmation
-                ? !confirmed.Get<bool>("approved") && confirmed.Get<string>("primaryActionStatus").StartsWith("Could not start:", StringComparison.Ordinal) && result["failure"]!.GetValue<string>().Contains("hand guiding", StringComparison.OrdinalIgnoreCase)
-                : confirmed.Get<string>("primaryActionStatus").Length == 0 && result["failure"] is null && confirmed.Get<string>("message").StartsWith("Ready ·", StringComparison.Ordinal)),
+            check(confirmed.Get<PipersPlugin.PrimaryActionState>("primaryAction").Phase == PrimaryActionPhase.Idle && (failConfirmation
+                ? !confirmed.Get<bool>("approved") && confirmed.Get<PipersPlugin.PrimaryActionState>("primaryAction").Status.StartsWith("Could not start:", StringComparison.Ordinal) && result["failure"]!.GetValue<string>().Contains("hand guiding", StringComparison.OrdinalIgnoreCase)
+                : confirmed.Get<PipersPlugin.PrimaryActionState>("primaryAction").Status.Length == 0 && result["failure"] is null && confirmed.Get<string>("message").StartsWith("Ready ·", StringComparison.Ordinal)),
                 "Safety confirmation did not complete its shared progress/failure lifecycle");
             check(confirmed.Session is null && !confirmed.EngineRequests.Any(r => r.Action == "prepare-start") && confirmed.Rpc.Requests.IsEmpty,
                 "Safety confirmation of an already enabled arm silently started following or sent a physical request");
@@ -395,7 +395,7 @@ internal static partial class SimulationFollowingTests
             long began = Stopwatch.GetTimestamp();
             while (true)
             {
-                if (!fixture.Get<bool>("primaryActionBusy") && File.Exists(fixture.PrimaryReceipt))
+                if (fixture.Get<PipersPlugin.PrimaryActionState>("primaryAction").Phase == PrimaryActionPhase.Idle && File.Exists(fixture.PrimaryReceipt))
                 {
                     var receipt = JsonNode.Parse(await File.ReadAllTextAsync(fixture.PrimaryReceipt))!.AsObject();
                     if (receipt["stage"]?.GetValue<string>() == stage && receipt["id"]?.GetValue<string>() != previousId) return receipt;
