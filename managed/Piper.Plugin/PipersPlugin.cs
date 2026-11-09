@@ -550,7 +550,6 @@ public sealed partial class PipersPlugin : ILuckyPlugin
                 CheckEnableScope();
                 if (!TryAdvancePikaRole(role, PikaSessionRole.Owned))
                     throw new InvalidOperationException("The Pika session was released while Enable connected it. Enable again when the gripper is reconnected.");
-                pikaMonitorStatus = "Pika control session active.";
                 long started = Stopwatch.GetTimestamp();
                 while (state?["pika"]?["fresh"]?.GetValue<bool>() != true)
                 {
@@ -682,12 +681,12 @@ public sealed partial class PipersPlugin : ILuckyPlugin
         double? opening = PikaDisplayOpening(pika as JsonObject, out double measuredOpening) ? measuredOpening : null;
         string pikaReading = string.IsNullOrEmpty(profile.PikaDevice) ? "Unassigned" : opening.HasValue ? $"{opening.Value:F1} mm"
             : pika?["connected"]?.GetValue<bool>() != true ? "Disconnected" : GripperLink.ClosedDisplayReferenceNeeded(pika as JsonObject) ? "Set closed ref." : "No feedback";
-        patches["pika.value"] = new() { ["text"] = pikaReading, ["hint"] = pikaMonitorStatus + " Raw encoder: " +
+        patches["pika.value"] = new() { ["text"] = pikaReading, ["hint"] = PikaMonitorStatus + " Raw encoder: " +
             (pika?["telemetry"]?["motor"]?["Position"]?.ToJsonString() ?? "unavailable") + " rad. " +
             (PikaDisplayReferenceAngle(pika as JsonObject) is double angle ? $"Closed display reference {angle:F5} rad; motor targets unchanged." : "Nominal reference; a negative closed reading may need an operator-confirmed display reference.") };
         bool manualPika = scope.Context.Page == WorkspacePage.Controls && ManualPikaBlocker(device, pika as JsonObject) is null;
         patches["pika.target"] = new() { ["value"] = opening ?? 0, ["enabled"] = manualPika };
-        patches["pika.monitor"] = new() { ["text"] = pikaMonitorStatus };
+        patches["pika.monitor"] = new() { ["text"] = PikaMonitorStatus };
         var recoveryCard = RecoveryCardState(device);
         bool verifiable = VerifiesOnly(recoveryCard) && RecoveryCardCanRun(recoveryCard);
         patches["recovery.run"] = new() { ["enabled"] = verifiable, ["text"] = verifiable ? recoveryCard.ActionText : "Verify controller state",

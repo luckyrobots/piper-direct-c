@@ -38,9 +38,28 @@ public sealed partial class PipersPlugin
         do current = ObservePikaRole(); while (!TryAdvancePikaRole(current, PikaSessionRole.None));
     }
 
-    private string pikaMonitorStatus = "Pika telemetry starts read-only when the scene is linked.";
-    // One field, written only through its own TryStart/CancelAsync/Stop/StopAsync.
+    // One field, written only through its own TryStart/CancelAsync/Stop/StopAsync/Report.
     internal readonly PikaMonitorRetry pikaMonitor = new(TimeSpan.FromSeconds(3));
+
+    /// <summary>Plugin-F status text, derived rather than written: the monitor's last
+    /// outcome while the role it was reported under still holds, otherwise the role.</summary>
+    internal string PikaMonitorStatus
+    {
+        get
+        {
+            var role = ObservePikaRole();
+            if (pikaMonitor.Outcome is { } outcome && outcome.Role == role) return outcome.Text;
+            return role.Role switch
+            {
+                PikaSessionRole.Owned => "Pika control session active.",
+                PikaSessionRole.Monitoring => "Pika monitoring only · motor power unchanged.",
+                _ => "Pika telemetry starts read-only when the scene is linked."
+            };
+        }
+    }
+
+    /// <summary>Records one monitor outcome with the role observed after its transition.</summary>
+    private void ReportPikaMonitor(string text) => pikaMonitor.Report(new(ObservePikaRole(), text));
 
     private bool PikaMonitorRetryNeeded() => TelemetryIsFresh() && !switchingProfile && CurrentRecovery is null &&
         PikaMonitorConnectionPolicy.ShouldRetry(state?["pika"] as JsonObject, PikaMatchesProfile(), owner, link is not null, PikaRole,
@@ -61,7 +80,7 @@ public sealed partial class PipersPlugin
                 if (!pikaMonitor.Stopped && PikaMonitorRetryNeeded()) await MonitorLinkedPika(cancellation);
             }
             catch (OperationCanceledException) when (cancellation.IsCancellationRequested) { }
-            catch (Exception error) { pikaMonitorStatus = "Pika monitor retry unavailable: " + error.Message; }
+            catch (Exception error) { ReportPikaMonitor("Pika monitor retry unavailable: " + error.Message); }
             finally { if (entered) commands.Release(); }
         });
     }
@@ -79,10 +98,10 @@ public sealed partial class PipersPlugin
         if (!PikaMonitorConnectionPolicy.MayConnect(pika, matches, owner))
         {
             if (pika?["owner"]?.GetValue<string>() != owner) TryAdvancePikaRole(role, PikaSessionRole.None);
-            pikaMonitorStatus = !matches ? "Pika assignment is unconfigured or differs from this robot."
+            ReportPikaMonitor(!matches ? "Pika assignment is unconfigured or differs from this robot."
                 : pika?["owner"]?.GetValue<string>() == owner ? pikaOwned ? "Pika control session active."
                     : "This Pika session has a recorded power request; use its explicit control or cleanup flow."
-                : "Pika is owned by another client; fresh shared telemetry is read without taking over.";
+                : "Pika is owned by another client; fresh shared telemetry is read without taking over.");
             return;
         }
         try
@@ -96,19 +115,22 @@ public sealed partial class PipersPlugin
             if (!ReferenceEquals(link, expectedLink) || token != expectedToken || ActiveProfile.Id != expectedProfile || !PikaMatchesProfile())
             {
                 if (role.Role == PikaSessionRole.Monitoring) TryAdvancePikaRole(role, PikaSessionRole.None);
-                pikaMonitorStatus = "Pika monitor scope changed while connecting; no control permission was granted.";
+                ReportPikaMonitor("Pika monitor scope changed while connecting; no control permission was granted.");
                 return;
             }
             if (role.Role == PikaSessionRole.None) TryAdvancePikaRole(role, PikaSessionRole.Monitoring);
-            pikaMonitorStatus = pikaOwned ? "Pika control session active." : "Pika monitoring only · motor power unchanged.";
+            ReportPikaMonitor(pikaOwned ? "Pika control session active." : "Pika monitoring only · motor power unchanged.");
         }
         catch (Exception error) when (error is not OperationCanceledException)
         {
             if (role.Role == PikaSessionRole.Monitoring) TryAdvancePikaRole(role, PikaSessionRole.None);
-            pikaMonitorStatus = "Pika monitor unavailable: " + error.Message;
+            ReportPikaMonitor("Pika monitor unavailable: " + error.Message);
         }
     }
 }
+
+/// <summary>One monitor outcome and the exact role observation it describes.</summary>
+internal sealed record PikaMonitorOutcome(PikaRoleObservation Role, string Text);
 
 /// <summary>The read-only Pika monitor's connect attempts, one at a time.
 /// <code>
@@ -122,8 +144,12 @@ internal sealed class PikaMonitorRetry(TimeSpan backoff)
     private CancellationTokenSource? cancellation;
     private long attemptAt;
     private volatile bool stopped;
+    private PikaMonitorOutcome? outcome;
 
     public bool Stopped => stopped;
+    /// <summary>The latest attempt's outcome, the only source of monitor status text.</summary>
+    public PikaMonitorOutcome? Outcome => Volatile.Read(ref outcome);
+    public void Report(PikaMonitorOutcome latest) => Volatile.Write(ref outcome, latest);
     public bool Running => worker is { IsCompleted: false };
     /// <summary>The latest attempt, for callers that must drain it.</summary>
     public Task? Worker => worker;
