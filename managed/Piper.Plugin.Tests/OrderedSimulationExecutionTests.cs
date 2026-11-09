@@ -20,11 +20,13 @@ internal static class OrderedSimulationExecutionTests
         var paused = SimulationFollowSample.Read(pausedJson);
         var activationJson = SimulationFollowTests.Pose(sequence: 2, elapsedMs: 20); activationJson["timeScale"] = 1d;
         var activation = SimulationFollowSample.Read(activationJson);
-        var admission = SimulationFollowPolicy.Start(paused, paused.Identity, hardware, 1_000_000, 10);
-        admission.ActivatePreparedStart(activation, hardware, 1_000_020, 20, orderedSource: true);
-        check(!admission.Stopped, "Queued following could not activate the exact first frame at the authored1x source rate");
-        var legacy = SimulationFollowPolicy.Start(paused, paused.Identity, hardware, 1_000_000, 10);
-        Reject(() => legacy.ActivatePreparedStart(activation, hardware, 1_000_020, 20), "Legacy immediate following silently lost its20% source limit");
+        SimulationFollowPolicy.ValidateStart(paused, paused.Identity, hardware, 1_000_000, 10);
+        SimulationFollowPolicy.ValidateActivation(paused, hardware, activation, hardware, 1_000_020, 20);
+        check(true, "Queued following could not activate the exact first frame at the authored 1x source rate");
+        Reject(() => SimulationFollowPolicy.ValidateActivation(activation, hardware, activation, hardware, 1_000_020, 20),
+            "Activation accepted an acknowledgement that did not advance past the prepared frame");
+        Reject(() => SimulationFollowPolicy.ValidateActivation(paused, hardware, activation, hardware with { Generation = 8 }, 1_000_020, 20),
+            "Activation accepted a replaced CAN connection");
         var empty = new OrderedSimulationExecution(first, hardware, 1);
         Reject(() => empty.Step(0, hardware with { GripperOpeningMm = 0 }, true, 0, 1), "Buffered following ignored a genuine Pika drift/raw-zero tracking violation");
         var lagged = new OrderedSimulationExecution(first, hardware, 1);

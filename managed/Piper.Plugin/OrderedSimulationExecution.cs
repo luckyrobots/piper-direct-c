@@ -30,9 +30,9 @@ public sealed class OrderedSimulationExecution
     private long nativeRequest, nativeSequence;
     private readonly string limits;
 
-    public OrderedSimulationExecution(SimulationFollowSample first, SimulationFollowHardware hardware, double selectedSpeedFraction, bool preserveSemanticPhases = false)
+    public OrderedSimulationExecution(SimulationFollowSample first, SimulationFollowHardware hardware, double selectedSpeedFraction)
     {
-        Path = new(hardware.JointLimits, selectedSpeedFraction, preserveSemanticPhases);
+        Path = new(hardware.JointLimits, selectedSpeedFraction);
         Target = new(Array.AsReadOnly(first.CommandDegrees.ToArray()), first.CommandOpeningMm);
         expectedOpening = first.MeasuredOpeningMm;
         limits = Signature(hardware);

@@ -19,7 +19,6 @@ public sealed partial class PipersPlugin
         public readonly FollowLaneTelemetry Feedback = feedback;
         public readonly FollowLaneController Controller = controller;
         public SimulationFollowSample? First, LastSample;
-        public SimulationFollowPolicy? Policy;
         public OrderedSimulationExecution? Execution;
         public SimulationFollowDiagnostics? Diagnostics;
         public readonly SimulationPublishDiagnostics Publications = new();
@@ -204,18 +203,7 @@ public sealed partial class PipersPlugin
                     throw new InvalidOperationException(profile.Name + ": use Enable robot and confirm its workspace before selecting it as a follower.");
                 var robot = new RobotLink(sceneId, entity, model["joints"]!.AsArray(), device, profile.RobotJointPrefix);
                 var pika = ProfilePikaRouting.Find(receipt.State, profile);
-                double? closedReference = null;
-                try
-                {
-                    string distribution = OperatingSystem.IsWindows() ? profile.WslDistribution : "";
-                    string path = Path.Combine(engine.Start.SettingsDirectory, "gripper-reference", profile.Id + ".json");
-                    if (File.Exists(path))
-                    {
-                        var saved = JsonSerializer.Deserialize<PikaClosedDisplayReference>(File.ReadAllText(path), PluginProtocol.Json);
-                        if (saved?.Matches(profile.Id, profile.PikaDevice, distribution, pika) == true) closedReference = saved.MotorAngle;
-                    }
-                }
-                catch (Exception error) when (error is IOException or JsonException) { }
+                double? closedReference = PikaClosedDisplayReference.TryLoad(engine.Start.SettingsDirectory, profile)?.AngleFor(profile, pika);
                 lanes.Add(new(profile, robot, approval, closedReference,
                     new(profile, generation, closedReference, () => telemetry.Latest, followClock),
                     new(receipt.BackendToken, owner, profile, generation, Call)));

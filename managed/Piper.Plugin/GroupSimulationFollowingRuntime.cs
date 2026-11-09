@@ -55,13 +55,16 @@ public sealed partial class PipersPlugin
             GroupFollowStatus = "Matching all selected robots to the first frame";
             await MatchGroupStart(group, raw, ct);
             raw = await prepared.ReadMatchingFrameAsync(ct);
-            foreach (var lane in group.Lanes)
+            var starts = new (SimulationFollowSample Sample, SimulationFollowHardware Hardware)[group.Lanes.Length];
+            for (int i = 0; i < group.Lanes.Length; i++)
             {
+                var lane = group.Lanes[i];
                 var sample = SimulationFollowSample.Read(raw, lane.Robot.JointPrefix);
                 SimulationFollowPolicy.ValidatePausedStart(sample, lane.First!);
                 var hardware = GroupHardware(group, lane);
-                lane.Policy = SimulationFollowPolicy.Start(sample, sample.Identity, hardware, group.Clock.GetUtcNow().ToUnixTimeMilliseconds(), 0);
-                lane.Execution = new(sample, hardware, lane.Profile.Speed / 100, preserveSemanticPhases: true);
+                SimulationFollowPolicy.ValidateStart(sample, sample.Identity, hardware, group.Clock.GetUtcNow().ToUnixTimeMilliseconds(), 0);
+                starts[i] = (sample, hardware);
+                lane.Execution = new(sample, hardware, lane.Profile.Speed / 100);
             }
             var initial = await prepared.OpenFramesAsync(raw, ct);
             AppendGroupFrames(group, initial, initial: true);
@@ -70,11 +73,10 @@ public sealed partial class PipersPlugin
             group.Advance(GroupFollowPhase.Activating);
             var activation = await prepared.ActivateAsync(ct);
             long activationObserved = group.Clock.GetTimestamp();
-            foreach (var lane in group.Lanes)
-            {
-                var sample = SimulationFollowSample.Read(activation, lane.Robot.JointPrefix);
-                lane.Policy!.ActivatePreparedStart(sample, GroupHardware(group, lane), group.Clock.GetUtcNow().ToUnixTimeMilliseconds(), 0, orderedSource: true);
-            }
+            for (int i = 0; i < group.Lanes.Length; i++)
+                SimulationFollowPolicy.ValidateActivation(starts[i].Sample, starts[i].Hardware,
+                    SimulationFollowSample.Read(activation, group.Lanes[i].Robot.JointPrefix), GroupHardware(group, group.Lanes[i]),
+                    group.Clock.GetUtcNow().ToUnixTimeMilliseconds(), 0);
             group.Observation = new(SimulationFollowSample.Read(activation, group.Lanes[0].Robot.JointPrefix));
             group.Advance(GroupFollowPhase.DrainingPrimer);
             if (group.Primer is { } primer) await primer;
@@ -215,8 +217,8 @@ public sealed partial class PipersPlugin
         GroupFollowStatus = "Starting selected followers · simulation remains paused";
         foreach (var lane in group.Lanes)
         {
-            var admitted = await GroupArmCommand(group, lane, FollowArmAction.Start, SimulationTrajectoryTransport.StartFields(SimulationTrajectoryTransport.PositionVelocity));
-            SimulationTrajectoryTransport.ValidateAcknowledgement(SimulationTrajectoryTransport.PositionVelocity, admitted);
+            var admitted = await GroupArmCommand(group, lane, FollowArmAction.Start, SimulationTrajectoryTransport.StartFields());
+            SimulationTrajectoryTransport.ValidateAcknowledgement(admitted);
             lane.ArmRequest = admitted["request_id"]?.GetValue<long>() ?? 0;
             if (lane.ArmRequest <= 0 || admitted["trajectory_follow"]?.GetValue<bool>() != true) throw new InvalidOperationException(lane.Profile.Name + ": native following was not acknowledged.");
             lane.AdmissionTicks = group.Clock.GetTimestamp(); lane.AdmissionSequence = telemetry.Latest?.Sequence ?? 0;
@@ -448,7 +450,7 @@ public sealed partial class PipersPlugin
                     throw new InvalidOperationException(lane.Profile.Name + ": arm hold could not be verified on the original CAN connection.");
                 long retired = Volatile.Read(ref lane.ArmAdmissionRetiredTicks);
                 bool measuredIdle = receipt!.BackendToken == group.Backend && retired > 0 &&
-                    receipt.ReceivedTicks - receipt.SourceAgeMilliseconds * group.Clock.TimestampFrequency / 1000 > retired &&
+                    receipt.CapturedTicks(group.Clock.TimestampFrequency) > retired &&
                     receipt.HasFreshDevice(device, group.Clock.GetTimestamp()) && device["motion"]?["device_id"]?.GetValue<string>() == lane.Robot.DeviceId &&
                     device["motion"]?["generation"]?.GetValue<long>() == lane.Robot.Generation && device["motion"]?["active"]?.GetValue<bool>() == false &&
                     (lane.ArmRequest == 0 || device["motion"]?["request_id"]?.GetValue<long>() == lane.ArmRequest);

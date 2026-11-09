@@ -69,7 +69,7 @@ public sealed partial class PipersPlugin
         var scope = operation.Scope;
         if (resetAt == 0) return false;
         if (operation.Kind == RecoveryKind.ReturnToZero)
-            return TeachingResetAssisted.ExpectedFeedbackGap(true, receipt.State, scope.Device, scope.Generation);
+            return TeachingResetAssisted.ExpectedFeedbackGap(receipt.State, scope.Device, scope.Generation);
         if (Stopwatch.GetElapsedTime(resetAt).TotalSeconds > 5 || receipt.State["selected"]?.GetValue<string>() != scope.Device) return false;
         var device = receipt.State["devices"]?.AsArray().OfType<JsonObject>().SingleOrDefault(d => d["id"]?.GetValue<string>() == scope.Device);
         return device?["generation"]?.GetValue<long>() == scope.Generation && device["present"]?.GetValue<bool>() == true &&

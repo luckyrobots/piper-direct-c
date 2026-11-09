@@ -12,13 +12,13 @@ internal static class OrderedSimulationPathTests
         double[] positions = [0, 5, 10, 10.001, 10.002, 15, 20];
         var frames = positions.Select((position, row) => Frame((ulong)row + 1, sourceTimes[row], position)).ToArray();
         var phase = new OrderedSimulationPhase(frames, frames.Length, limits);
-        check(phase.RetimingIterations is > 0 and <= 500 && phase.TimeScale > 1 && phase.PhysicalWaypointTimes.Count == frames.Length,
+        check(phase.RetimingIterations is > 0 and <= 500 && phase.DurationSeconds > phase.SourceDurationSeconds && phase.PhysicalWaypointTimes.Count == frames.Length,
             "A local acceleration peak must converge within the bounded iteration count and retain every source knot");
         var intervalScales = Enumerable.Range(1, frames.Length - 1).Select(row =>
             (phase.PhysicalWaypointTimes[row] - phase.PhysicalWaypointTimes[row - 1]) / (sourceTimes[row] - sourceTimes[row - 1])).ToArray();
         check(intervalScales.Max() - intervalScales.Min() > .1,
             "One local peak must not force a uniform slowdown of the entire semantic arm phase");
-        check(phase.PeakVelocityDegreesPerSecond.All(v => v <= 20 + 1e-8) && phase.PeakAccelerationDegreesPerSecondSquared.All(a => a <= 10 + 1e-8),
+        check(WithinSampledLimits(phase, 20, 10),
             "Analytic extrema after all tangent rebuilds must respect every physical velocity and acceleration limit");
         for (int row = 0; row < frames.Length; row++)
         {
@@ -54,7 +54,7 @@ internal static class OrderedSimulationPathTests
             }
         }
         var slower = new OrderedSimulationPhase(frames, frames.Length, limits, .1);
-        check(slower.PeakVelocityDegreesPerSecond.All(v => v <= 2 + 1e-8) && slower.PeakAccelerationDegreesPerSecondSquared.All(a => a <= 10 + 1e-8),
+        check(WithinSampledLimits(slower, 2, 10),
             "The selected speed percentage must limit local velocity while retaining the physical acceleration bound");
 
         var metadata = frames.Concat([frames[^1] with { Cursor = 8, Phase = "finish:2", EpisodeComplete = true }]).ToArray();
@@ -63,7 +63,7 @@ internal static class OrderedSimulationPathTests
             sealedPhase.At(sealedPhase.DurationSeconds).JointDegrees.SequenceEqual(frames[^1].CommandDegrees),
             "A metadata-only terminal event must survive without inventing a zero-duration movement segment");
         var flat = new OrderedSimulationPhase([Frame(1, 0, 0), Frame(2, 1, 0)], 2, limits);
-        check(flat.DurationSeconds == 1 && flat.TimeScale == 1 && flat.RetimingIterations == 0,
+        check(flat.DurationSeconds == 1 && flat.SourceDurationSeconds == 1 && flat.RetimingIterations == 0,
             "A stationary hold retains its source duration without artificial slowdown");
 
         var initialPath = new OrderedSimulationPath(limits);
@@ -94,5 +94,23 @@ internal static class OrderedSimulationPathTests
             "Local retiming must never invent an acceleration limit when the robot has not reported one");
         Reject(() => new OrderedSimulationPhase([Frame(1, 0, 0), Frame(2, 1, 181)], 2, limits),
             "An out-of-range path must be rejected without clipping its source waypoint");
+    }
+
+    /// <summary>Dense central-difference samples of every joint; the phase exposes only positions.</summary>
+    internal static bool WithinSampledLimits(OrderedSimulationPhase phase, double velocityLimit, double accelerationLimit)
+    {
+        double duration = phase.DurationSeconds, epsilon = duration * 1e-4;
+        for (int sample = 1; sample < 4000; sample++)
+        {
+            double t = Math.Clamp(duration * sample / 4000, epsilon, duration - epsilon);
+            var before = phase.At(t - epsilon).JointDegrees; var centre = phase.At(t).JointDegrees; var after = phase.At(t + epsilon).JointDegrees;
+            for (int joint = 0; joint < 6; joint++)
+            {
+                double v = (after[joint] - before[joint]) / (2 * epsilon);
+                double a = (after[joint] - 2 * centre[joint] + before[joint]) / (epsilon * epsilon);
+                if (Math.Abs(v) > velocityLimit * (1 + 1e-3) + 1e-7 || Math.Abs(a) > accelerationLimit * (1 + 1e-3) + 1e-7) return false;
+            }
+        }
+        return true;
     }
 }

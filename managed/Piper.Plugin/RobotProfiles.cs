@@ -6,12 +6,19 @@ using LuckyRobots.Piper.Pika;
 
 namespace LuckyRobots.Piper.Plugin;
 
+public sealed record AlignmentReference(string Name = "Desk cross / reference object", double X = 0, double DeskY = 0, double Z = 0,
+    double ObjectHeightMm = 0, string ToolPoint = "grasp_site");
+
 public sealed record RobotProfile(string Id, string Name, string CanDeviceId = "", double Speed = 10, double Step = 1, double Tolerance = .5,
     string RobotId = "", CameraPreferences? Gripper = null, CameraPreferences? Depth = null, string DepthSerial = "",
     Dictionary<string, SimulationCameraPreferences>? SimulationCameras = null, string PikaDevice = "", string WslDistribution = "Ubuntu", int CameraSlot = -1,
     AlignmentReference? Alignment = null, bool? RememberMeasuredLink = null, string SimulationTransport = SimulationTrajectoryTransport.PositionVelocity, string RobotJointPrefix = "", bool FollowSimulationSelected = false)
 {
-    internal string? PikaDistribution => OperatingSystem.IsWindows() ? WslDistribution : null;
+    /// <summary>The Pika agent distribution for this host. <c>null</c> means a native
+    /// Linux agent; Windows runs it inside the profile's WSL distribution. This is
+    /// the only place that convention is decided.</summary>
+    internal string? PikaDistribution => PikaDistributionFor(WslDistribution);
+    internal static string? PikaDistributionFor(string wslDistribution) => OperatingSystem.IsWindows() ? wslDistribution : null;
 }
 
 /// <summary>Persistent identity and settings projection, independent of the editor and hardware.</summary>
