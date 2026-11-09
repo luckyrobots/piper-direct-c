@@ -1,10 +1,23 @@
 # Run without elevation. This restarts the dashboard only; it sends no motor commands.
+param(
+    [int]$Port=8765,
+    # Defaults to the saved data-windows-managed/pika-default.json distribution, then Ubuntu.
+    [string]$Distribution=''
+)
 $ErrorActionPreference='Stop'
 $repo=Split-Path $PSScriptRoot -Parent
-$uri='http://127.0.0.1:8765'
+$uri="http://127.0.0.1:$Port"
+$publish=Join-Path $repo 'build\publish-windows'
+$log=Join-Path $repo 'data-windows-managed'
+if(!$Distribution) {
+    $pikaDefault=Join-Path $log 'pika-default.json'
+    if(Test-Path -LiteralPath $pikaDefault) { $Distribution=[string](Get-Content -LiteralPath $pikaDefault -Raw | ConvertFrom-Json).distribution }
+    if(!$Distribution) { $Distribution='Ubuntu' }
+}
+if($Distribution.Length -gt 128 -or $Distribution -match '["\x00-\x1f]'){throw 'Invalid WSL distribution.'}
 $state=Invoke-RestMethod "$uri/api/state" -TimeoutSec 5
 if ($state.motion.active) { throw 'Wait for the active robot action to finish before restarting.' }
-$listener=Get-NetTCPConnection -LocalPort 8765 -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
+$listener=Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
 $serverId=$listener.OwningProcess
 if (-not ('PiperProcessIdentity' -as [type])) { Add-Type -TypeDefinition @"
 using System;
@@ -18,52 +31,50 @@ public static string Path(int pid){var h=OpenProcess(0x1000,false,pid);if(h==Int
 }
 "@
 }
-$expected=Join-Path $repo 'build\publish-windows\Piper.Host.exe'
+$expected=Join-Path $publish 'Piper.Host.exe'
 if (!$serverId) {
     # Some Windows sessions omit the listener's State while still reporting
     # established connections. Their local-port owner is independently
     # checked against the exact executable path below.
-    $portOwners=@(Get-NetTCPConnection -LocalPort 8765 -ErrorAction SilentlyContinue |
+    $portOwners=@(Get-NetTCPConnection -LocalPort $Port -ErrorAction SilentlyContinue |
         Where-Object { $_.OwningProcess -gt 0 } | Select-Object -ExpandProperty OwningProcess -Unique)
     if ($portOwners.Count -eq 1) { $serverId=$portOwners[0] }
 }
 if (!$serverId) {
     # Some Windows sessions hide the TCP ownership table. Accept only one
     # exact executable match; shutdown still uses the live API's auth token.
-    $matches=@(Get-CimInstance Win32_Process -Filter "Name='Piper.Host.exe'" | Where-Object { $_.ExecutablePath -eq $expected })
-    if ($state.kind -ne 'piper_direct_c' -or $matches.Count -ne 1) { throw 'Cannot uniquely identify the dashboard backend.' }
-    $serverId=$matches[0].ProcessId
+    $hostProcesses=@(Get-CimInstance Win32_Process -Filter "Name='Piper.Host.exe'" | Where-Object { $_.ExecutablePath -eq $expected })
+    if ($state.kind -ne 'piper_direct_c' -or $hostProcesses.Count -ne 1) { throw 'Cannot uniquely identify the dashboard backend.' }
+    $serverId=$hostProcesses[0].ProcessId
 }
-if ([PiperProcessIdentity]::Path($serverId) -ne $expected) { throw 'Port 8765 belongs to another program; refusing to stop it.' }
+if ([PiperProcessIdentity]::Path($serverId) -ne $expected) { throw "Port $Port belongs to another program; refusing to stop it." }
 Invoke-RestMethod -Method Post -Uri "$uri/api/shutdown" -Headers @{'X-Piper-Token'=$state.token} -ContentType application/json -Body '{}' -TimeoutSec 10 | Out-Null
 $deadline=(Get-Date).AddSeconds(15)
 while((Get-Process -Id $serverId -ErrorAction SilentlyContinue) -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 200 }
 if(Get-Process -Id $serverId -ErrorAction SilentlyContinue) { throw 'Backend did not exit cleanly; no process was killed.' }
 # Apply already-built transport/core updates only after the old backend exits.
 $pikaUpdate=Join-Path $repo 'managed\Piper.Pika\bin\Release\net9.0\Piper.Pika.dll'
-if(Test-Path -LiteralPath $pikaUpdate) { Copy-Item -LiteralPath $pikaUpdate -Destination (Join-Path $repo 'build\publish-windows\Piper.Pika.dll') -Force }
-foreach($file in @('piper-core.dll','piper-cando.dll')) {
-    $built=Join-Path $repo ('build\windows-x64\'+$file)
-    $live=Join-Path $repo ('build\publish-windows\'+$file)
-    if((Test-Path -LiteralPath $built) -and ((Get-FileHash -LiteralPath $built).Hash -ne (Get-FileHash -LiteralPath $live).Hash)) {
-        Copy-Item -LiteralPath $built -Destination $live -Force
-    }
-}
+if(Test-Path -LiteralPath $pikaUpdate) { Copy-Item -LiteralPath $pikaUpdate -Destination (Join-Path $publish 'Piper.Pika.dll') -Force }
+& (Join-Path $PSScriptRoot 'build-windows.ps1') -StageOnly -StageTo $publish
 Start-Sleep -Seconds 2
 $agentUpdate=Join-Path $repo 'build\pika-agent-linux\Piper.Pika.Agent'
-if(Test-Path -LiteralPath $agentUpdate) {
+$packagedAgent=Join-Path $publish 'pika-agent'
+if((Test-Path -LiteralPath $agentUpdate) -and (Test-Path -LiteralPath $packagedAgent)) {
+    # The supervisor runs the packaged agent beside the host whenever it exists.
+    Copy-Item -Path (Join-Path (Split-Path $agentUpdate -Parent) '*') -Destination $packagedAgent -Recurse -Force
+} elseif(Test-Path -LiteralPath $agentUpdate) {
+    # Legacy standalone installation without a packaged agent.
     $windowsSource=(Split-Path $agentUpdate -Parent).Replace('\','/')
-    $linuxSource=(& wsl.exe -d Ubuntu -- wslpath -a $windowsSource | Out-String).Trim()
+    $linuxSource=(& wsl.exe -d $Distribution -- wslpath -a $windowsSource | Out-String).Trim()
     if($LASTEXITCODE -ne 0 -or !$linuxSource){throw 'Cannot resolve staged Linux agent path.'}
-    & wsl.exe -d Ubuntu -u root -- cp -a ($linuxSource+'/.') /opt/luckyrobots/piper/pika/
+    & wsl.exe -d $Distribution -u root -- cp -a ($linuxSource+'/.') /opt/luckyrobots/piper/pika/
     if($LASTEXITCODE -ne 0){throw 'Could not install the updated Pika agent; dashboard remains stopped.'}
-    & wsl.exe -d Ubuntu -u root -- chmod +x /opt/luckyrobots/piper/pika/Piper.Pika.Agent
+    & wsl.exe -d $Distribution -u root -- chmod +x /opt/luckyrobots/piper/pika/Piper.Pika.Agent
     if($LASTEXITCODE -ne 0){throw 'Could not set agent executable permission.'}
 }
 $launch=Join-Path $PSScriptRoot 'Start-WindowsDashboard.ps1'
-$log=Join-Path $repo 'data-windows-managed'
 $stamp=Get-Date -Format 'yyyyMMdd-HHmmss-fff'
-$supervisor=Start-Process powershell.exe -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-File',('"'+$launch+'"')) -WorkingDirectory $repo -WindowStyle Hidden -PassThru -RedirectStandardOutput (Join-Path $log "launcher-$stamp.log") -RedirectStandardError (Join-Path $log "launcher-$stamp-error.log")
+$supervisor=Start-Process powershell.exe -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-File',('"'+$launch+'"'),'-Port',"$Port",'-Distribution',('"'+$Distribution+'"')) -WorkingDirectory $repo -WindowStyle Hidden -PassThru -RedirectStandardOutput (Join-Path $log "launcher-$stamp.log") -RedirectStandardError (Join-Path $log "launcher-$stamp-error.log")
 $deadline=(Get-Date).AddSeconds(15)
 $ready=$false
 while((Get-Date) -lt $deadline) {
