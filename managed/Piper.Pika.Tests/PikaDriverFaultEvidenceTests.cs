@@ -15,10 +15,10 @@ internal static class PikaDriverFaultEvidenceTests
         var recorder = new PikaDriverFaultRecorder();
         byte[] read = Enumerable.Range(0, 1024).Select(i => (byte)i).ToArray();
         for (int i = 0; i < 40; i++) recorder.Read(i * .001, read);
-        byte[] packet = PikaProtocol.Packet(22, PikaProtocol.Angle(44));
+        byte[] packet = PikaProtocol.Packet(PikaCommand.Position, PikaProtocol.Angle(44));
         for (int i = 0; i < 40; i++)
         {
-            var write = recorder.BeginWrite(.04 + i * .001, 22, PikaProtocol.Angle(44), packet);
+            var write = recorder.BeginWrite(.04 + i * .001, PikaCommand.Position, PikaProtocol.Angle(44), packet);
             PikaDriverFaultRecorder.FinishWrite(write, .0401 + i * .001);
         }
         check(recorder.Observe(.1, Packet(.835, "0x40", 23.9), .835, 0, true) is null,

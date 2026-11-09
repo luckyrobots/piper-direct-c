@@ -50,7 +50,7 @@ internal static class PikaDiagnosticsTests
         })
         {
             using var document = JsonDocument.Parse(json);
-            check(!PikaProtocol.Telemetry(document.RootElement, out _, out _, out _) && PikaProtocol.TelemetryRejectionPath(document.RootElement) == reason,
+            check(!PikaProtocol.Telemetry(document.RootElement, out _, out _, out _) && PikaProtocol.ValidateTelemetry(document.RootElement) == reason,
                 "Telemetry rejection diagnostics changed acceptance or classified the wrong field");
         }
     }

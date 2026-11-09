@@ -37,12 +37,12 @@ internal static class PikaTelemetryIntegrityTests
             corrupt.GetProperty("motorstatus").GetProperty("MotorTemp").GetInt32() == 40 && corrupt.GetProperty("motorstatus").GetProperty("BusCurrent").GetInt32() == 64,
             "Captured argument-shift fingerprint was changed or incorrectly blamed on JSON scalar conversion");
         check(!PikaProtocol.Telemetry(corrupt, out double rejectedPosition, out double rejectedSpeed, out bool rejectedEnabled) &&
-            rejectedPosition == 0 && rejectedSpeed == 0 && !rejectedEnabled && PikaProtocol.TelemetryRejectionPath(corrupt) == "$.motorstatus.Voltage",
+            rejectedPosition == 0 && rejectedSpeed == 0 && !rejectedEnabled && PikaProtocol.ValidateTelemetry(corrupt) == "$.motorstatus.Voltage",
             "A whole corrupt frame exposed a valid-looking position/power bit or renewed the physical sample");
         var repairedVoltage = JsonNode.Parse(corrupt.GetRawText())!.AsObject();
         repairedVoltage["motorstatus"]!["Voltage"] = 23.9;
         using (var document = JsonDocument.Parse(repairedVoltage.ToJsonString()))
-            check(!PikaProtocol.Telemetry(document.RootElement, out _, out _, out _) && PikaProtocol.TelemetryRejectionPath(document.RootElement) == "$.motorstatus.DriverTemp",
+            check(!PikaProtocol.Telemetry(document.RootElement, out _, out _, out _) && PikaProtocol.ValidateTelemetry(document.RootElement) == "$.motorstatus.DriverTemp",
                 "A plausible voltage hid the independently impossible shifted temperature");
 
         foreach (int fragment in new[] { 1, 2, 7, 32, 64, 4096 })
@@ -84,7 +84,7 @@ internal static class PikaTelemetryIntegrityTests
         {
             var bad = Packet(); change(bad);
             using var document = JsonDocument.Parse(bad.ToJsonString());
-            check(!PikaProtocol.Telemetry(document.RootElement, out _, out _, out _) && PikaProtocol.TelemetryRejectionPath(document.RootElement) == path,
+            check(!PikaProtocol.Telemetry(document.RootElement, out _, out _, out _) && PikaProtocol.ValidateTelemetry(document.RootElement) == path,
                 "Present wrong-type/implausible metadata became fresh, or rejection reporting disagreed with acceptance: " + path);
         }
         foreach (var (status, volts, driverTemp, motorTemp) in new[] { ("0x21", 0d, -40, -30), ("0x21", 8d, 40, 33), ("0x2A", 23.9, 350, 300) })
@@ -92,7 +92,7 @@ internal static class PikaTelemetryIntegrityTests
             var genuine = Packet(status); genuine["motor"]!["Current"] = -32000; genuine["motorstatus"]!["BusCurrent"] = -4000;
             genuine["motorstatus"]!["Voltage"] = volts; genuine["motorstatus"]!["DriverTemp"] = driverTemp; genuine["motorstatus"]!["MotorTemp"] = motorTemp;
             using var document = JsonDocument.Parse(genuine.ToJsonString());
-            check(PikaProtocol.Telemetry(document.RootElement, out double angle, out _, out bool enabled) && !enabled && PikaProtocol.TelemetryRejectionPath(document.RootElement) == "",
+            check(PikaProtocol.Telemetry(document.RootElement, out double angle, out _, out bool enabled) && !enabled && PikaProtocol.ValidateTelemetry(document.RootElement) == "",
                 "Broad corruption checks filtered a legitimate low-voltage/hot fault or signed current");
             PikaDriverStatus.TryRead(status, out var decoded);
             var writes = new List<double>(); var follow = new PikaFollowSession(writes.Add);

@@ -4,15 +4,34 @@ using System.Text.Json;
 
 namespace LuckyRobots.Piper.Pika;
 
-/// <summary>Display acknowledgement only; it does not grant ownership or motor authority.</summary>
-public readonly record struct PikaPowerFeedback(bool ExpectedEnabled, double RequestedAt)
+/// <summary>One accepted telemetry packet, decoded once per frame.</summary>
+public readonly record struct PikaTelemetrySample(double Position, double Speed, PikaDriverStatus Driver, string RawStatus)
 {
-    public bool IsConfirmed(bool enabled, double feedbackAt) => enabled == ExpectedEnabled &&
-        double.IsFinite(RequestedAt) && RequestedAt >= 0 && double.IsFinite(feedbackAt) && feedbackAt > RequestedAt;
+    public bool Enabled => Driver.Enabled;
 }
+
+/// <summary>Single-byte opcodes of the vendor serial protocol.</summary>
+public enum PikaCommand : byte { Disable = 10, Enable = 11, Position = 22 }
 
 public static class PikaProtocol
 {
+    /// <summary>USB identity of the Pika CH340K adapter (sysfs spelling).</summary>
+    public const string UsbVendorId = "1a86", UsbProductId = "7522";
+    /// <summary>Windows PnP instance prefix of the same adapter (compare case-insensitively).</summary>
+    public const string WindowsInstanceIdPrefix = "USB\\VID_" + UsbVendorId + "&PID_" + UsbProductId + "\\";
+    public const int BaudRate = 460800;
+    /// <summary>Commandable jaw opening range.</summary>
+    public const double MinimumOpeningMm = 0, MaximumOpeningMm = 90;
+    /// <summary>Jaw speed at or below which the motor counts as stationary.</summary>
+    public const double StationarySpeedRadiansPerSecond = .02;
+    /// <summary>A telemetry sample older than this is not fresh evidence.</summary>
+    public const double FeedbackFreshSeconds = 2;
+    /// <summary>The agent disables an armed gripper whose client heartbeat is older than this.</summary>
+    public const double HeartbeatTimeoutSeconds = 1.5;
+    /// <summary>True for a finite opening inside the commandable range.</summary>
+    public static bool ValidOpening(double millimeters) => double.IsFinite(millimeters) &&
+        millimeters >= MinimumOpeningMm && millimeters <= MaximumOpeningMm;
+
     // Model-derived opening tolerance; not an independent jaw calibration.
     public const double ArrivalToleranceMm = 1.0;
     private const double MaximumAngle = (180 - 43.99) * Math.PI / 180;
@@ -25,15 +44,14 @@ public static class PikaProtocol
     public static bool ValidAngle(double angle) => double.IsFinite(angle) && angle >= 0 && angle <= MaximumAngle;
     public static double Angle(double millimeters)
     {
-        if (!double.IsFinite(millimeters) || millimeters < 0 || millimeters > 90)
-            throw new ArgumentOutOfRangeException(nameof(millimeters));
+        if (!ValidOpening(millimeters)) throw new ArgumentOutOfRangeException(nameof(millimeters));
         double low = 0, high = MaximumAngle;
         for (int n = 0; n < 40; n++) { double middle = (low + high) / 2; if (Width(middle) < millimeters) low = middle; else high = middle; }
         return (low + high) / 2;
     }
-    public static byte[] Packet(int command, double value = 0)
+    public static byte[] Packet(PikaCommand command, double value = 0)
     {
-        if (command is not (10 or 11 or 22) || !double.IsFinite(value) || !float.IsFinite((float)value))
+        if (!Enum.IsDefined(command) || !double.IsFinite(value) || !float.IsFinite((float)value))
             throw new ArgumentException("Unsupported Pika command or value");
         byte[] result = [(byte)command, 0, 0, 0, 0, 13, 10];
         BinaryPrimitives.WriteSingleLittleEndian(result.AsSpan(1), (float)value);
@@ -41,21 +59,32 @@ public static class PikaProtocol
     }
     public static bool Telemetry(JsonElement data, out double position, out double speed, out bool enabled)
     {
-        position = speed = 0; enabled = false;
-        if (ValidateTelemetry(data) != "") return false;
+        bool valid = TryReadTelemetry(data, out var sample, out _);
+        position = sample.Position; speed = sample.Speed; enabled = valid && sample.Driver.Enabled;
+        return valid;
+    }
+
+    /// <summary>Validates one vendor packet and decodes it once: position, speed
+    /// and the parsed driver status. On rejection, <paramref name="rejectionPath"/>
+    /// names the first offending known field path.</summary>
+    public static bool TryReadTelemetry(JsonElement data, out PikaTelemetrySample sample, out string rejectionPath)
+    {
+        rejectionPath = ValidateTelemetry(data, out var driver);
+        if (rejectionPath.Length > 0) { sample = default; return false; }
         var motor = data.GetProperty("motor");
-        position = motor.GetProperty("Position").GetDouble(); speed = motor.GetProperty("Speed").GetDouble();
-        PikaDriverStatus.TryRead(data.GetProperty("motorstatus").GetProperty("Status").GetString(), out var driver);
-        enabled = driver!.Enabled;
+        sample = new(motor.GetProperty("Position").GetDouble(), motor.GetProperty("Speed").GetDouble(), driver!,
+            data.GetProperty("motorstatus").GetProperty("Status").GetString()!);
         return true;
     }
 
     // Diagnostics classify only known field paths; no telemetry values, unknown
     // property names or authorization data are copied into rejection messages.
-    public static string TelemetryRejectionPath(JsonElement data) => ValidateTelemetry(data);
+    // Returns "" for an accepted packet.
+    public static string ValidateTelemetry(JsonElement data) => ValidateTelemetry(data, out _);
 
-    private static string ValidateTelemetry(JsonElement data)
+    private static string ValidateTelemetry(JsonElement data, out PikaDriverStatus? driver)
     {
+        driver = null;
         if (data.ValueKind != JsonValueKind.Object) return "$";
         if (!data.TryGetProperty("motor", out var motor) || motor.ValueKind != JsonValueKind.Object) return "$.motor";
         if (!data.TryGetProperty("motorstatus", out var status) || status.ValueKind != JsonValueKind.Object) return "$.motorstatus";
@@ -71,7 +100,7 @@ public static class PikaProtocol
         if (!Scalar(status, "MotorTemp", -1000, 1000, integral: true)) return "$.motorstatus.MotorTemp";
         if (!Scalar(status, "BusCurrent", -100000, 100000, integral: true)) return "$.motorstatus.BusCurrent";
         if (!status.TryGetProperty("Status", out var state) || state.ValueKind != JsonValueKind.String ||
-            !PikaDriverStatus.TryRead(state.GetString(), out var driver)) return "$.motorstatus.Status";
+            !PikaDriverStatus.TryRead(state.GetString(), out driver)) return "$.motorstatus.Status";
         // A healthy enabled jaw cannot report an arbitrary signed motor turn.
         // Preserve the established closed-reference allowance and GripperLink's
         // 0.25 mm endpoint feedback noise allowance; commands remain 0–90 mm. Fault
@@ -80,7 +109,7 @@ public static class PikaProtocol
         if (driver!.Enabled && !driver.HasFault)
         {
             double angle = motor.GetProperty("Position").GetDouble(), width = Width(angle);
-            if (angle < -.15 || angle > MaximumAngle || width < -ArrivalToleranceMm || width > 90.25)
+            if (angle < -.15 || angle > MaximumAngle || width < -ArrivalToleranceMm || width > MaximumOpeningMm + .25)
                 return "$.motor.Position";
         }
         return "";

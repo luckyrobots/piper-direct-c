@@ -27,7 +27,7 @@ internal static class PikaHealthyPositionTests
                 "Healthy measured-angle validation rejected an established closed offset or measured endpoint noise");
         foreach (double angle in new[] { -2d, -1, -.15, FeedbackAngle(90.251), 2 * Math.PI })
             check(!PikaProtocol.Telemetry(Packet(angle), out double read, out double speed, out bool enabled) && read == 0 && speed == 0 && !enabled &&
-                PikaProtocol.TelemetryRejectionPath(Packet(angle)) == "$.motor.Position",
+                PikaProtocol.ValidateTelemetry(Packet(angle)) == "$.motor.Position",
                 "An impossible healthy enabled angle became fresh feedback or was treated as a new motor mode");
         try { PikaProtocol.Angle(90.25); check(false, "Measured endpoint noise widened the command range"); }
         catch (ArgumentOutOfRangeException) { }
