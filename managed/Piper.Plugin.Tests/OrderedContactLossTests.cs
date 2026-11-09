@@ -86,7 +86,8 @@ internal static class OrderedContactLossTests
             {
                 // The source phase is immutable in production. Corrupt its
                 // retained command here to exercise the invariant directly.
-                typeof(OrderedSimulationExecution).GetField("resolvedCommand", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!.SetValue(value, 31d);
+                var jawField = typeof(OrderedSimulationExecution).GetField("jaw", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
+                jawField.SetValue(value, (JawReference)jawField.GetValue(value)! with { Command = 31 });
                 Reject(() => value.Step(time + .05, Real(30), false, 0, 5), "A changed close-command identity retained the old loss qualification");
             }
         }
