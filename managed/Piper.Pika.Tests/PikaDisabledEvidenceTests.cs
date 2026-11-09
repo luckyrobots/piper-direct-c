@@ -53,7 +53,7 @@ internal static class PikaDisabledEvidenceTests
         var service = new PikaProcessService("/dev/pika-fixture", "never-launched");
         using var current = Process.GetCurrentProcess();
         service.AttachForTest(current, owner, PikaAgentPhase.Ready);
-        service.SetEvidenceForTest(PikaPowerEvidence.VerifiedDisabled, null, "verified-disable", Evidence().ToJsonString());
+        service.SetEvidenceForTest(PikaPowerEvidence.VerifiedDisabled, owner, "verified-disable", Evidence().ToJsonString());
         try
         {
             var result = await service.ExecuteAsync("hold", JsonSerializer.SerializeToElement(new { owner }), default);

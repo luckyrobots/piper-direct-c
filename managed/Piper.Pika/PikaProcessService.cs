@@ -12,8 +12,10 @@ namespace LuckyRobots.Piper.Pika;
 //   Launching | Ready ──read failure or a run of malformed lines──▶ Faulted
 //   Faulted   ──retire (own task)────▶ Closing  (EOF, bounded wait, then tree kill)
 //   any       ──CloseAsync───────────▶ Closing ──▶ Idle
-// Invariants: process ≠ null ⇒ phase ∈ {Launching, Ready, Exited, Faulted} and owner ≠ null;
-// phase ∈ {Ready, Exited, Faulted} ⇒ process ≠ null. Only Ready is "connected".
+// Each phase is a slot record carrying exactly the data valid in it, so these
+// hold by construction: a process exists only in Launching, Ready, Exited and
+// Faulted, always with an owner; Ready, Exited and Faulted always have one.
+// Only Ready is "connected".
 internal enum PikaAgentPhase { Idle, Launching, Ready, Exited, Faulted, Closing }
 
 // Pika-A power evidence for motor requests this service sent.
@@ -23,8 +25,10 @@ internal enum PikaAgentPhase { Idle, Launching, Ready, Exited, Faulted, Closing 
 //   Uncertain ──fresh disabled feedback──▶ None
 //   Exited + verified disabled idle final sample ──▶ None
 //   close: verified disabled ──▶ None; Requested | Acked | VerifiedDisabled ──▶ Uncertain
-// unresolvedOwner ≠ null ⇔ power ∈ {Requested, Acked, Uncertain}. After a close,
-// power ∈ {None, Uncertain}: a failed process never proves its motor was disabled.
+// Each evidence is a record carrying its requesting owner and request ID where
+// valid; the unresolved owner exists exactly for Requested, Acked and Uncertain.
+// After a close, power ∈ {None, Uncertain}: a failed process never proves its
+// motor was disabled.
 internal enum PikaPowerEvidence { None, Requested, Acked, VerifiedDisabled, Uncertain }
 
 /// <summary>Reusable C# owner of a Linux serial agent, local or through WSL.
@@ -56,16 +60,45 @@ public sealed class PikaProcessService : IPikaSession
     private readonly SemaphoreSlim operations = new(1);
     private readonly object stateGate = new();
     private readonly ConcurrentDictionary<string, TaskCompletionSource<JsonElement>> pending = new();
-    private PikaAgentPhase phase;
-    private Process? process;
-    private Task? pumpTask;
-    private Task<string>? stderrTask;
-    private string? owner;
-    private PikaPowerEvidence power;
+    // ── Pika-A agent slots. ──
+
+    // One launched agent. Pump is set once, under stateGate, right after the
+    // slot holding this agent is published (the pump needs that slot to publish).
+    private sealed class AgentProcess(Process process, Task<string> stderr)
+    {
+        public Process Process { get; } = process;
+        public Task<string> Stderr { get; } = stderr;
+        public Task? Pump { get; set; }
+    }
+
+    private abstract record AgentSlot(PikaAgentPhase Phase);
+    private sealed record IdleSlot() : AgentSlot(PikaAgentPhase.Idle);
+    private abstract record OwnedSlot(PikaAgentPhase Phase, string Owner) : AgentSlot(Phase);
+    // Owner reserved; Agent is set once the process has started.
+    private sealed record LaunchingSlot(string Owner, AgentProcess? Agent = null) : OwnedSlot(PikaAgentPhase.Launching, Owner);
+    private abstract record LiveSlot(PikaAgentPhase Phase, string Owner, AgentProcess Agent) : OwnedSlot(Phase, Owner);
+    private sealed record ReadySlot(string Owner, AgentProcess Agent) : LiveSlot(PikaAgentPhase.Ready, Owner, Agent);
+    // The exited process is retained as exit evidence.
+    private sealed record ExitedSlot(string Owner, AgentProcess Agent) : LiveSlot(PikaAgentPhase.Exited, Owner, Agent);
+    private sealed record FaultedSlot(string Owner, AgentProcess Agent) : LiveSlot(PikaAgentPhase.Faulted, Owner, Agent);
+    // The process is detached and being stopped; the owner stays until Idle.
+    private sealed record ClosingSlot(string Owner) : OwnedSlot(PikaAgentPhase.Closing, Owner);
+
+    // ── Pika-A power evidence records. ──
+
+    private abstract record PowerState(PikaPowerEvidence Evidence);
+    private sealed record NoPower() : PowerState(PikaPowerEvidence.None);
+    // A motor request this service sent: its owner and agent request ID.
+    private abstract record SentPower(PikaPowerEvidence Evidence, string Owner, string RequestId) : PowerState(Evidence);
+    private sealed record RequestedPower(string Owner, string RequestId) : SentPower(PikaPowerEvidence.Requested, Owner, RequestId);
+    private sealed record AckedPower(string Owner, string RequestId) : SentPower(PikaPowerEvidence.Acked, Owner, RequestId);
+    private sealed record VerifiedDisabledPower(string Owner, string RequestId) : SentPower(PikaPowerEvidence.VerifiedDisabled, Owner, RequestId);
     // Closing a failed process does not prove that its motor was disabled. Keep
     // this identity until fresh disabled feedback is observed on the same port.
-    private string? unresolvedOwner;
-    private string motorRequestId = "";
+    private sealed record UncertainPower(string Owner) : PowerState(PikaPowerEvidence.Uncertain);
+
+    private AgentSlot slot = new IdleSlot();
+    private PowerState power = new NoPower();
     private JsonObject? state;
     private PikaAgentState? agentState;
     private PikaFollowAudit? followAudit;
@@ -73,14 +106,31 @@ public sealed class PikaProcessService : IPikaSession
     private string error = "Not connected";
     private long stateAt;
     private bool Configured => !string.IsNullOrWhiteSpace(device);
-    private bool PowerRequested => power is PikaPowerEvidence.Requested or PikaPowerEvidence.Acked or PikaPowerEvidence.VerifiedDisabled;
+
+    // Derived views. Callers hold stateGate.
+    private string? Owner => (slot as OwnedSlot)?.Owner;
+    private (string Owner, AgentProcess Agent)? Attached => slot switch
+    {
+        LaunchingSlot { Agent: { } agent } launching => (launching.Owner, agent),
+        LiveSlot live => (live.Owner, live.Agent),
+        _ => null
+    };
+    private bool IsAttached(Process agent) => Attached is { } current && ReferenceEquals(current.Agent.Process, agent);
+    private string? UnresolvedOwner => power switch
+    {
+        RequestedPower requested => requested.Owner,
+        AckedPower acked => acked.Owner,
+        UncertainPower uncertain => uncertain.Owner,
+        _ => null
+    };
+    private bool PowerRequested => power is SentPower;
 
     public PikaSessionStatus Status
     {
-        get { lock (stateGate) return new(phase == PikaAgentPhase.Ready, owner, ConfigurationBlocked()); }
+        get { lock (stateGate) return new(slot is ReadySlot, Owner, ConfigurationBlocked()); }
     }
 
-    internal PikaAgentPhase Phase { get { lock (stateGate) return phase; } }
+    internal PikaAgentPhase Phase { get { lock (stateGate) return slot.Phase; } }
 
     public async Task<PikaHoldResult> HoldForOwnerAsync(string requestedOwner, CancellationToken cancellation)
     {
@@ -92,14 +142,14 @@ public sealed class PikaProcessService : IPikaSession
         {
             // Skip unrelated devices without waiting for their operations. Pin
             // the matching process so a queued STOP cannot reach its replacement.
-            agent = owner == requestedOwner ? process : null;
+            agent = Attached is { } current && current.Owner == requestedOwner ? current.Agent.Process : null;
             // A faulted or closing agent cannot take a hold: its retirement
             // (EOF, bounded wait, tree kill) owns the operation gate, and a hold
             // queued behind it would only time out. Report that retirement,
             // still unverified, instead of waiting for it.
-            bool retiringAgent = owner == requestedOwner && phase is PikaAgentPhase.Faulted or PikaAgentPhase.Closing;
+            bool retiringAgent = slot is FaultedSlot or ClosingSlot && Owner == requestedOwner;
             if (agent is null)
-                return unresolvedOwner == requestedOwner
+                return UnresolvedOwner == requestedOwner
                     ? new(PikaHoldOutcome.Unverified, retiringAgent ? retiring : noLiveSession)
                     : new(PikaHoldOutcome.Skipped);
             if (retiringAgent) return new(PikaHoldOutcome.Unverified, retiring);
@@ -109,7 +159,7 @@ public sealed class PikaProcessService : IPikaSession
         try
         {
             bool live;
-            lock (stateGate) live = ReferenceEquals(process, agent) && owner == requestedOwner && phase != PikaAgentPhase.Faulted && !agent.HasExited;
+            lock (stateGate) live = IsAttached(agent) && Owner == requestedOwner && slot is not FaultedSlot && !agent.HasExited;
             if (!live) return new(PikaHoldOutcome.Unverified, noLiveSession);
             var reply = await ExecuteAgentAsync(agent, "hold", default, requestedOwner, cancellation);
             return new(PikaHoldOutcome.Acknowledged, reply["message"]?.GetValue<string>());
@@ -126,7 +176,7 @@ public sealed class PikaProcessService : IPikaSession
         lock (stateGate)
         {
             double age = EvidenceAgeSeconds();
-            bool connected = phase == PikaAgentPhase.Ready;
+            bool connected = slot is ReadySlot;
             var snapshot = state?.DeepClone().AsObject() ?? new JsonObject();
             snapshot.Remove("driver_fault_evidence_raw");
             if (driverFaultEvidence.LastOrDefault() is { } fault)
@@ -134,15 +184,15 @@ public sealed class PikaProcessService : IPikaSession
             if (includeRawEvidence) snapshot["driver_fault_evidence_raw"] = JsonSerializer.SerializeToNode(driverFaultEvidence.ToArray());
             if (followAudit is not null) snapshot["follow_audit"] = JsonSerializer.SerializeToNode(followAudit);
             WriteSessionFields(snapshot, device, distribution, commandPeriodSeconds);
-            snapshot["owner"] = owner;
+            snapshot["owner"] = Owner;
             snapshot["power_requested"] = PowerRequested;
-            snapshot["power_uncertain"] = unresolvedOwner is not null;
+            snapshot["power_uncertain"] = UnresolvedOwner is not null;
             // A retained power reservation also exists during a healthy enabled
             // session. Maintenance must distinguish that from an unresolved
             // request, using private ACK identity and post-request feedback.
             snapshot["post_request_feedback_verified"] = HasPostRequestEvidence();
             snapshot["configuration_blocked"] = ConfigurationBlocked();
-            snapshot["agent_phase"] = phase.ToString().ToLowerInvariant();
+            snapshot["agent_phase"] = slot.Phase.ToString().ToLowerInvariant();
             snapshot["connected"] = connected;
             // A client may adopt only this privately verified dead, unpowered
             // observer. ExecuteAsync rechecks this under the mutation lock.
@@ -188,8 +238,8 @@ public sealed class PikaProcessService : IPikaSession
             string? fault; bool deadObserver;
             lock (stateGate)
             {
-                fault = phase == PikaAgentPhase.Faulted ? error : null;
-                deadObserver = process is { HasExited: true } && power == PikaPowerEvidence.None;
+                fault = slot is FaultedSlot ? error : null;
+                deadObserver = Attached?.Agent.Process is { HasExited: true } && power is NoPower;
             }
             if (fault is not null) await CloseAsync(fault);
             else if (deadObserver) await CloseAsync();
@@ -197,7 +247,7 @@ public sealed class PikaProcessService : IPikaSession
             if (!Configured) throw new InvalidOperationException("Pika Linux serial transport has not been configured");
             if (action == "connect") return await ConnectAsync(input, requestedOwner, cancellation);
             Process? currentAgent;
-            lock (stateGate) currentAgent = owner == requestedOwner ? process : null;
+            lock (stateGate) currentAgent = Attached is { } current && current.Owner == requestedOwner ? current.Agent.Process : null;
             if (currentAgent is null) throw new InvalidOperationException("This dashboard does not own the Pika session");
             return await ExecuteAgentAsync(currentAgent, action, input, requestedOwner, cancellation);
         }
@@ -226,7 +276,7 @@ public sealed class PikaProcessService : IPikaSession
             // A dead process may have left enabled hardware behind. Never
             // discard its owner/state as a side effect of changing routing.
             if (ConfigurationBlocked())
-                throw new InvalidOperationException((owner ?? unresolvedOwner) != requestedOwner
+                throw new InvalidOperationException((Owner ?? UnresolvedOwner) != requestedOwner
                     ? "Another dashboard owns the Pika session. It must verify disabled feedback and disconnect before changing the serial device."
                     : "Verify disabled Pika feedback and disconnect this session before changing its serial device. Reconnect the same device if its agent exited.");
             string nextDevice = input.GetProperty("device").GetString() ?? "";
@@ -243,24 +293,24 @@ public sealed class PikaProcessService : IPikaSession
         bool takeOver = TakeOver(input), exited;
         lock (stateGate)
         {
-            if ((owner ?? unresolvedOwner) is { } previousOwner && previousOwner != requestedOwner && !takeOver)
+            if ((Owner ?? UnresolvedOwner) is { } previousOwner && previousOwner != requestedOwner && !takeOver)
                 throw new InvalidOperationException("Pika is controlled by another dashboard tab");
-            exited = process is { HasExited: true };
+            exited = Attached?.Agent.Process is { HasExited: true };
         }
         if (exited) await CloseAsync();
         bool replace;
         lock (stateGate)
         {
-            if (process is not null && owner == requestedOwner) return new JsonObject { ["ok"] = true, ["message"] = "Session already connected" };
-            replace = process is not null;
-            // A live process always has an owner, and a foreign owner already
-            // required take_over above. Nothing else changes them under this gate.
+            if (Attached is { } current && current.Owner == requestedOwner) return new JsonObject { ["ok"] = true, ["message"] = "Session already connected" };
+            replace = Attached is not null;
+            // A foreign owner already required take_over above. Nothing else
+            // changes the slot under this gate.
             Debug.Assert(!replace || takeOver, "A foreign live Pika session reached replacement without take_over.");
         }
         // EOF disables the old session before another agent opens the port.
         // Ownership changes never replay a position target.
         if (replace) await CloseAsync();
-        lock (stateGate) { owner = requestedOwner; SetPhase(PikaAgentPhase.Launching); }
+        lock (stateGate) slot = new LaunchingSlot(requestedOwner);
         try
         {
             // Setup failures, including WSL path resolution before process
@@ -269,9 +319,10 @@ public sealed class PikaProcessService : IPikaSession
             var ready = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             var agent = Process.Start(info) ?? throw new IOException("Could not start the Pika serial agent");
             var stderr = agent.StandardError.ReadToEndAsync();
-            lock (stateGate) { process = agent; stderrTask = stderr; }
+            var launched = new AgentProcess(agent, stderr);
+            lock (stateGate) slot = new LaunchingSlot(requestedOwner, launched);
             var pump = PumpAsync(agent, ready, stderr);
-            lock (stateGate) if (ReferenceEquals(process, agent)) pumpTask = pump;
+            lock (stateGate) launched.Pump = pump;
             await ready.Task.WaitAsync(TimeSpan.FromSeconds(15), cancellation);
         }
         catch { await CloseAsync(); throw; }
@@ -307,7 +358,7 @@ public sealed class PikaProcessService : IPikaSession
         if (action == "disconnect" && agent.HasExited)
         {
             bool unresolved;
-            lock (stateGate) unresolved = unresolvedOwner is not null || PowerRequested && !KnownDisabled();
+            lock (stateGate) unresolved = UnresolvedOwner is not null || PowerRequested && !KnownDisabled();
             if (unresolved)
                 throw new InvalidOperationException("The Pika agent exited without verified disabled feedback. Reconnect the same device, disable it and verify feedback before changing its assignment.");
             await CloseAsync(); return new JsonObject { ["ok"] = true, ["message"] = "Disconnected" };
@@ -359,7 +410,7 @@ public sealed class PikaProcessService : IPikaSession
         try
         {
             if (motorRequest)
-                lock (stateGate) { SetPower(PikaPowerEvidence.Requested, requestedOwner); motorRequestId = id; }
+                lock (stateGate) power = new RequestedPower(requestedOwner, id);
             await agent.StandardInput.WriteLineAsync(command.ToJsonString().AsMemory(), cancellation);
             await agent.StandardInput.FlushAsync(cancellation);
             var response = await completion.Task.WaitAsync(TimeSpan.FromSeconds(3), cancellation);
@@ -376,7 +427,7 @@ public sealed class PikaProcessService : IPikaSession
             if (motorRequest)
                 lock (stateGate)
                 {
-                    if (power == PikaPowerEvidence.Requested && motorRequestId == id) SetPower(PikaPowerEvidence.Acked, unresolvedOwner);
+                    if (power is RequestedPower requested && requested.RequestId == id) power = new AckedPower(requested.Owner, id);
                     if (KnownDisabled()) ResolveDisabled();
                     RetireVerifiedEndedPower();
                 }
@@ -395,37 +446,18 @@ public sealed class PikaProcessService : IPikaSession
 
     // ── Pika-A transition functions. Callers hold stateGate. ──
 
-    private void SetPhase(PikaAgentPhase next)
-    {
-        phase = next;
-        Debug.Assert(process is null || phase is PikaAgentPhase.Launching or PikaAgentPhase.Ready or PikaAgentPhase.Exited or PikaAgentPhase.Faulted,
-            "A live Pika process has no running phase.");
-        Debug.Assert(process is null || owner is not null, "A Pika process exists without an owner.");
-        Debug.Assert(process is not null || phase is not (PikaAgentPhase.Ready or PikaAgentPhase.Exited or PikaAgentPhase.Faulted),
-            "A running Pika phase has no process.");
-    }
-
-    private void SetPower(PikaPowerEvidence next, string? unresolved = null)
-    {
-        Debug.Assert((unresolved is not null) == (next is PikaPowerEvidence.Requested or PikaPowerEvidence.Acked or PikaPowerEvidence.Uncertain),
-            "Pika power evidence and its unresolved owner disagree.");
-        power = next; unresolvedOwner = unresolved;
-        if (next is PikaPowerEvidence.None or PikaPowerEvidence.Uncertain) motorRequestId = "";
-    }
-
     // Fresh feedback proves the motor disabled (KnownDisabled already checked).
     private void ResolveDisabled()
     {
-        if (power == PikaPowerEvidence.Acked) SetPower(PikaPowerEvidence.VerifiedDisabled);
-        else if (power == PikaPowerEvidence.Uncertain) SetPower(PikaPowerEvidence.None);
+        if (power is AckedPower acked) power = new VerifiedDisabledPower(acked.Owner, acked.RequestId);
+        else if (power is UncertainPower) power = new NoPower();
     }
 
-    private bool ConfigurationBlocked() => process is not null || owner is not null || unresolvedOwner is not null;
+    private bool ConfigurationBlocked() => slot is OwnedSlot || UnresolvedOwner is not null;
 
     // Caller holds stateGate. Cached public booleans cannot grant takeover:
     // private process-exit and power-request evidence are authoritative.
-    private bool ReadOnlyAdoptable() => phase == PikaAgentPhase.Exited && owner is not null &&
-        power == PikaPowerEvidence.None && pending.IsEmpty &&
+    private bool ReadOnlyAdoptable() => slot is ExitedSlot && power is NoPower && pending.IsEmpty &&
         agentState is { Enabled: false, Armed: false, Pending: false, Following: false } && agentState.ResumingHold != true;
 
     // Caller holds stateGate.
@@ -435,15 +467,15 @@ public sealed class PikaProcessService : IPikaSession
     // Receipt order is insufficient: an old disabled packet may have been
     // buffered before enable. Match the acknowledged mutation and compare
     // hardware-feedback/request times from the same agent monotonic clock.
-    private bool HasPostRequestEvidence() => (power is PikaPowerEvidence.Acked or PikaPowerEvidence.VerifiedDisabled) &&
-        motorRequestId.Length > 0 && agentState?.LastMotorRequest == motorRequestId &&
+    private bool HasPostRequestEvidence() => power is SentPower { Evidence: PikaPowerEvidence.Acked or PikaPowerEvidence.VerifiedDisabled } sent &&
+        sent.RequestId.Length > 0 && agentState?.LastMotorRequest == sent.RequestId &&
         agentState.RequestTimeSeconds is { } requestTime && double.IsFinite(requestTime) && requestTime >= 0 &&
         agentState.FeedbackTimeSeconds is { } feedbackTime && double.IsFinite(feedbackTime) && feedbackTime > requestTime;
 
     private void RetireVerifiedEndedPower()
     {
-        if (phase == PikaAgentPhase.Exited && KnownDisabled() && agentState is { Armed: false, Pending: false })
-            SetPower(PikaPowerEvidence.None);
+        if (slot is ExitedSlot && KnownDisabled() && agentState is { Armed: false, Pending: false })
+            power = new NoPower();
     }
 
     // Call only under stateGate. Missing/invalid source age is not fresh
@@ -541,8 +573,8 @@ public sealed class PikaProcessService : IPikaSession
             await agent.WaitForExitAsync();
             lock (stateGate)
             {
-                if (!ReferenceEquals(process, agent) || phase == PikaAgentPhase.Faulted) return;
-                SetPhase(PikaAgentPhase.Exited);
+                if (Attached is not { } current || !ReferenceEquals(current.Agent.Process, agent) || slot is FaultedSlot) return;
+                slot = new ExitedSlot(current.Owner, current.Agent);
                 // The old client's heartbeat can expire during an editor
                 // reload. Its agent disables first and then exits. A verified
                 // disabled, idle final sample releases only that obsolete
@@ -570,8 +602,8 @@ public sealed class PikaProcessService : IPikaSession
     {
         lock (stateGate)
         {
-            if (!ReferenceEquals(process, agent) || phase == PikaAgentPhase.Faulted) return;
-            SetPhase(PikaAgentPhase.Faulted);
+            if (Attached is not { } current || !ReferenceEquals(current.Agent.Process, agent) || slot is FaultedSlot) return;
+            slot = new FaultedSlot(current.Owner, current.Agent);
             error = reason;
             FailAgentRequests(sessionReady, new IOException(reason));
         }
@@ -584,7 +616,7 @@ public sealed class PikaProcessService : IPikaSession
         try
         {
             bool current;
-            lock (stateGate) current = ReferenceEquals(process, agent);
+            lock (stateGate) current = IsAttached(agent);
             if (current) await CloseAsync(reason);
         }
         finally { operations.Release(); }
@@ -619,11 +651,11 @@ public sealed class PikaProcessService : IPikaSession
         lock (stateGate)
         {
             // Detach and publication share this lock, including ACKs and terminal request failures.
-            if (!ReferenceEquals(process, agent)) return false;
+            if (Attached is not { } current || !ReferenceEquals(current.Agent.Process, agent)) return false;
             switch (type)
             {
                 case "ready":
-                    if (phase == PikaAgentPhase.Launching) { SetPhase(PikaAgentPhase.Ready); error = ""; }
+                    if (slot is LaunchingSlot) { slot = new ReadySlot(current.Owner, current.Agent); error = ""; }
                     sessionReady.TrySetResult();
                     break;
                 case "state":
@@ -632,7 +664,7 @@ public sealed class PikaProcessService : IPikaSession
                     if (agentState!.Fresh == true)
                     {
                         if (KnownDisabled()) ResolveDisabled();
-                        else if (power == PikaPowerEvidence.VerifiedDisabled) SetPower(PikaPowerEvidence.Acked, owner);
+                        else if (power is VerifiedDisabledPower verified) power = new AckedPower(verified.Owner, verified.RequestId);
                         // Observing externally enabled hardware creates no power ownership.
                     }
                     break;
@@ -665,11 +697,11 @@ public sealed class PikaProcessService : IPikaSession
         Process? agent; Task? pump; Task<string>? stderr;
         lock (stateGate)
         {
-            if (KnownDisabled()) SetPower(PikaPowerEvidence.None);
-            else if (PowerRequested) SetPower(PikaPowerEvidence.Uncertain, unresolvedOwner ?? owner);
-            agent = process; pump = pumpTask; stderr = stderrTask;
-            process = null; pumpTask = null; stderrTask = null;
-            SetPhase(agent is null ? PikaAgentPhase.Idle : PikaAgentPhase.Closing);
+            if (KnownDisabled()) power = new NoPower();
+            else if (power is SentPower sent) power = new UncertainPower(sent.Owner);
+            var current = Attached;
+            agent = current?.Agent.Process; pump = current?.Agent.Pump; stderr = current?.Agent.Stderr;
+            slot = current is { } closing ? new ClosingSlot(closing.Owner) : new IdleSlot();
         }
         if (agent is not null)
         {
@@ -686,10 +718,9 @@ public sealed class PikaProcessService : IPikaSession
         }
         lock (stateGate)
         {
-            Debug.Assert(power is PikaPowerEvidence.None or PikaPowerEvidence.Uncertain, "A closed Pika session retained live power evidence.");
-            owner = null; motorRequestId = "";
+            Debug.Assert(power is NoPower or UncertainPower, "A closed Pika session retained live power evidence.");
             followAudit = null; driverFaultEvidence.Clear(); state = null; agentState = null; stateAt = 0; error = finalError ?? "Disconnected";
-            SetPhase(PikaAgentPhase.Idle);
+            slot = new IdleSlot();
         }
     }
 
@@ -710,23 +741,40 @@ public sealed class PikaProcessService : IPikaSession
 
     // ── Test seams (InternalsVisibleTo Piper.Pika.Tests). They never open a transport. ──
 
-    internal void AttachForTest(Process agent, string? agentOwner, PikaAgentPhase agentPhase)
+    internal void AttachForTest(Process agent, string agentOwner, PikaAgentPhase agentPhase)
     {
-        lock (stateGate) { owner = agentOwner; process = agent; SetPhase(agentPhase); }
+        var attached = new AgentProcess(agent, Task.FromResult(""));
+        AgentSlot next = agentPhase switch
+        {
+            PikaAgentPhase.Launching => new LaunchingSlot(agentOwner, attached),
+            PikaAgentPhase.Ready => new ReadySlot(agentOwner, attached),
+            PikaAgentPhase.Exited => new ExitedSlot(agentOwner, attached),
+            PikaAgentPhase.Faulted => new FaultedSlot(agentOwner, attached),
+            _ => throw new ArgumentOutOfRangeException(nameof(agentPhase), "Only a process-carrying phase can attach an agent.")
+        };
+        lock (stateGate) slot = next;
     }
 
-    internal void SetEvidenceForTest(PikaPowerEvidence evidence, string? unresolved, string requestId, string stateJson)
+    internal void SetEvidenceForTest(PikaPowerEvidence evidence, string powerOwner, string requestId, string stateJson)
     {
         using var document = JsonDocument.Parse(stateJson);
+        PowerState next = evidence switch
+        {
+            PikaPowerEvidence.None => new NoPower(),
+            PikaPowerEvidence.Requested => new RequestedPower(powerOwner, requestId),
+            PikaPowerEvidence.Acked => new AckedPower(powerOwner, requestId),
+            PikaPowerEvidence.VerifiedDisabled => new VerifiedDisabledPower(powerOwner, requestId),
+            _ => new UncertainPower(powerOwner)
+        };
         lock (stateGate)
         {
-            SetPower(evidence, unresolved); motorRequestId = requestId;
+            power = next;
             state = JsonNode.Parse(stateJson)!.AsObject(); agentState = document.RootElement.Deserialize<PikaAgentState>(); stateAt = Stopwatch.GetTimestamp();
         }
     }
 
     internal void DetachForTest()
     {
-        lock (stateGate) { process = null; owner = null; SetPower(PikaPowerEvidence.None); SetPhase(PikaAgentPhase.Idle); }
+        lock (stateGate) { slot = new IdleSlot(); power = new NoPower(); }
     }
 }
