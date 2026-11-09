@@ -601,7 +601,7 @@ public sealed partial class PipersPlugin : ILuckyPlugin
         };
         patches["safety"] = new() { ["visible"] = scope.View?.Confirmation is { } presented &&
             ReferenceEquals(CommandAuthority.Current.Confirmation, presented) };
-        patches["backend.restart.confirmation"] = new() { ["visible"] = backendRestartConfirmation };
+        patches["backend.restart.confirmation"] = new() { ["visible"] = backendRestart == BackendRestartPhase.Confirming };
         patches["backend.status"] = new() { ["text"] = backendStatus };
         patches["backend.prerequisites"] = new() { ["text"] = setupStatus };
         patches["workspace.action-error"] = new() { ["text"] = uiActionError, ["hint"] = uiActionError, ["visible"] = uiActionError.Length > 0 };

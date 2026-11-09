@@ -4,17 +4,6 @@ using LuckyEngine.PluginSdk;
 
 namespace LuckyRobots.Piper.Plugin;
 
-public static class BackendActivity
-{
-    public static bool AnyMotion(JsonNode? state) => state?["any_motion_active"]?.GetValue<bool>() == true ||
-        state?["motion"]?["active"]?.GetValue<bool>() == true ||
-        state?["motions"] is JsonArray lanes && lanes.Any(lane => lane?["active"]?.GetValue<bool>() == true) ||
-        state?["devices"] is JsonArray devices && devices.Any(device => device?["motion"]?["active"]?.GetValue<bool>() == true);
-    public static bool AnyQuery(JsonNode? state) => state?["any_query_active"]?.GetValue<bool>() == true ||
-        state?["query_active"]?.GetValue<bool>() == true ||
-        state?["motions"] is JsonArray lanes && lanes.Any(lane => lane?["query_active"]?.GetValue<bool>() == true);
-}
-
 public sealed partial class PipersPlugin
 {
     // Only the captured profile's scalar assignments and motion settings are used by Follow.
