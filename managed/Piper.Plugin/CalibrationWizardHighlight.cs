@@ -37,7 +37,7 @@ public sealed partial class PipersPlugin
     private readonly SemaphoreSlim wizardHighlightGate = new(1);
     // Written only through SetMarker/MoveMarker; ClearWizardHighlight may run
     // outside wizardHighlightGate, so conditional moves compare and swap.
-    private MarkerState wizardMarker = MarkerState.None;
+    internal MarkerState wizardMarker = MarkerState.None;
     private long wizardHighlightAttempt;
 
     private WizardHighlightScope? ToolMarker => (wizardMarker as MarkerState.Tool)?.Scope;
@@ -94,7 +94,7 @@ public sealed partial class PipersPlugin
 
     // Called after measured scene publication. Marker refresh is visual only and
     // must never throw into telemetry/heartbeats or change motion permission.
-    private async Task MaintainWizardHighlight(CancellationToken cancellation)
+    internal async Task MaintainWizardHighlight(CancellationToken cancellation)
     {
         if (cancellation.IsCancellationRequested) return;
         bool entered = false;

@@ -71,7 +71,7 @@ public sealed class GripperLink
         if (!TryRawAngle(pika, out double angle)) return false;
         if (closedDisplayReference is double reference)
         {
-            if (!double.IsFinite(reference) || Math.Abs(reference) > .15 ||
+            if (!double.IsFinite(reference) || Math.Abs(reference) > PikaClosedDisplayReference.MaximumMotorAngleRad ||
                 Math.Abs(PikaProtocol.Width(reference)) > PikaClosedDisplayReference.MaximumNominalOffsetMm) return false;
             angle -= reference;
         }
@@ -79,14 +79,14 @@ public sealed class GripperLink
             return false;
         width = PikaProtocol.Width(angle);
         // Noise at either physical endpoint is not extra jaw travel. The same
-        // small allowance applies at 0 and 90 mm; larger/model mismatches fail.
+        // small allowance applies at both ends of the range; larger/model mismatches fail.
         if (width >= -ClosedNoiseToleranceMm && width < 0) width = 0;
-        if (width > 90 && width <= 90 + ClosedNoiseToleranceMm) width = 90;
-        return double.IsFinite(width) && width >= 0 && width <= 90;
+        if (width > PikaProtocol.MaximumOpeningMm && width <= PikaProtocol.MaximumOpeningMm + ClosedNoiseToleranceMm) width = PikaProtocol.MaximumOpeningMm;
+        return PikaProtocol.ValidOpening(width);
     }
 
     public static bool ClosedDisplayReferenceNeeded(JsonObject? pika) => TryRawAngle(pika, out double angle) &&
-        angle < 0 && Math.Abs(angle) <= .15 && PikaProtocol.Width(angle) < -ClosedNoiseToleranceMm &&
+        angle < 0 && Math.Abs(angle) <= PikaClosedDisplayReference.MaximumMotorAngleRad && PikaProtocol.Width(angle) < -ClosedNoiseToleranceMm &&
         PikaProtocol.Width(angle) >= -PikaClosedDisplayReference.MaximumNominalOffsetMm;
 
     private static bool TryRawAngle(JsonObject? pika, out double angle)

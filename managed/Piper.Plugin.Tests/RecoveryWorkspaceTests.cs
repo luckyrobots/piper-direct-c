@@ -27,51 +27,49 @@ internal static class RecoveryWorkspaceTests
         }).ToArray())
     };
 
-    public static void Run(Action<bool, string> check)
+    public static void Run()
     {
         var device = Stopped();
         var view = RecoveryWorkspaceState.Inspect(device, false);
-        check(view is { Action: "supported-stop", NextAction: RecoveryWorkspaceAction.SupportedStop, CanAct: true } && view.Cause.Contains("Unexpected joint movement", StringComparison.Ordinal) &&
+        Check(view is { Action: "supported-stop", NextAction: RecoveryWorkspaceAction.SupportedStop, CanAct: true } && view.Cause.Contains("Unexpected joint movement", StringComparison.Ordinal) &&
             view.NextStep.Contains("cannot clear", StringComparison.Ordinal) && view.ActionText.Contains("supported", StringComparison.Ordinal),
             "A latched STOP did not provide its cause and one explicitly supported recovery acknowledgement");
-        check(view.Requirements.Contains("J2: -1.339", StringComparison.Ordinal) && view.Requirements.Contains("J3: 18.901", StringComparison.Ordinal) &&
+        Check(view.Requirements.Contains("J2: -1.339", StringComparison.Ordinal) && view.Requirements.Contains("J3: 18.901", StringComparison.Ordinal) &&
             view.Requirements.Contains("600.00", StringComparison.Ordinal), "Recovery hid the affected joints or confused stable position with strict power/return feedback");
         foreach (var joint in device["joints"]!.AsArray()) joint!["enabled"] = false;
         view = RecoveryWorkspaceState.Inspect(device, false);
-        check(view is { Action: "supported-stop", NextAction: RecoveryWorkspaceAction.SupportedStop, CanAct: true } && view.NextStep.Contains("One acknowledgement", StringComparison.Ordinal),
+        Check(view is { Action: "supported-stop", NextAction: RecoveryWorkspaceAction.SupportedStop, CanAct: true } && view.NextStep.Contains("One acknowledgement", StringComparison.Ordinal),
             "All-six-off STOP required another reset/verify acknowledgement");
         device["status"]!["stationary_s"] = 0d;
         view = RecoveryWorkspaceState.Inspect(device, false);
-        check(view.NextAction == RecoveryWorkspaceAction.SupportedStop && view.Requirements.Contains("0.00 s", StringComparison.Ordinal),
+        Check(view.NextAction == RecoveryWorkspaceAction.SupportedStop && view.Requirements.Contains("0.00 s", StringComparison.Ordinal),
             "The recovery acknowledgement hid the strict stillness that its runner must wait for");
         device["status"]!["stationary_s"] = .54; device["status"]!["arm_status"] = 0;
         device["recovery_required"] = false; device["blocker"] = ""; device["teaching"]!["phase"] = "off";
         view = RecoveryWorkspaceState.Inspect(device, false);
-        check(!view.CanAct && view.NextStep.Contains("green-light", StringComparison.Ordinal) && view.Requirements.Contains("J3", StringComparison.Ordinal),
+        Check(!view.CanAct && view.NextStep.Contains("green-light", StringComparison.Ordinal) && view.Requirements.Contains("J3", StringComparison.Ordinal),
             "Clearing STOP hid range correction or exposed enable at an illegal pose");
         device["joints"]![1]!["actual_deg"] = .5; device["joints"]![2]!["actual_deg"] = -.5;
-        check(RecoveryWorkspaceState.Inspect(device, false) is { Action: "enable", NextAction: RecoveryWorkspaceAction.EnableHold, CanAct: true },
+        Check(RecoveryWorkspaceState.Inspect(device, false) is { Action: "enable", NextAction: RecoveryWorkspaceAction.EnableHold, CanAct: true },
             "A legal supported pose could not reach the holding-enable step");
         device["recovery_required"] = true; device["status"]!["control"] = 2; device["status"]!["teach_state"] = 2;
         device["teaching"]!["phase"] = "ended"; device["teaching"]!["can_recover_at_pose"] = true;
         foreach (var joint in device["joints"]!.AsArray()) joint!["enabled"] = true;
-        check(RecoveryWorkspaceState.Inspect(device, false).NextAction != RecoveryWorkspaceAction.RecoverAtPose, "UI accepted a recovery capability without a completed native teaching cycle");
+        Check(RecoveryWorkspaceState.Inspect(device, false).NextAction != RecoveryWorkspaceAction.RecoverAtPose, "UI accepted a recovery capability without a completed native teaching cycle");
         device["teaching"]!["recovery_teach_cycle_complete"] = true;
-        check(RecoveryWorkspaceState.Inspect(device, false) is { Action: "recover-at-pose", NextAction: RecoveryWorkspaceAction.RecoverAtPose, CanAct: true },
+        Check(RecoveryWorkspaceState.Inspect(device, false) is { Action: "recover-at-pose", NextAction: RecoveryWorkspaceAction.RecoverAtPose, CanAct: true },
             "A qualified completed guide cycle could not resume at its measured pose");
-        check(RecoveryWorkspaceState.Inspect(device, false, waiting: true) is { Action: null, NextAction: RecoveryWorkspaceAction.None },
+        Check(RecoveryWorkspaceState.Inspect(device, false, waiting: true) is { Action: null, NextAction: RecoveryWorkspaceAction.None },
             "A recovery already waiting for an acknowledgement exposed another action");
         device["fresh"] = false;
-        check(!RecoveryWorkspaceState.Inspect(device, false).CanAct, "Stale recovery feedback exposed a command");
+        Check(!RecoveryWorkspaceState.Inspect(device, false).CanAct, "Stale recovery feedback exposed a command");
     }
 
-    public static async Task RunEvents(Action<bool, string> check)
+    public static async Task RunEvents()
     {
-        const BindingFlags flags = BindingFlags.Instance | BindingFlags.NonPublic;
         var plugin = new PipersPlugin();
         string folder = Path.Combine(Path.GetTempPath(), "piper-recovery-ui-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(folder);
-        T Get<T>(string field) => (T)typeof(PipersPlugin).GetField(field, flags)!.GetValue(plugin)!;
         PipersPlugin.RecoveryOperation SimulatedRecovery(PipersPlugin.RecoveryKind kind)
         {
             var operation = new PipersPlugin.RecoveryOperation(kind, new("piper-2", "recovery-ui-fixture", "can-b", 7),
@@ -85,21 +83,21 @@ internal static class RecoveryWorkspaceTests
             ["motion"] = new JsonObject { ["active"] = false, ["request_id"] = 77L } };
         plugin.preferences = RobotProfileRouting.Normalize(new Preferences(Robots: [new("piper-2", "Piper 2", "can-b")], ActiveRobotId: "piper-2"));
         plugin.token = "recovery-ui-fixture"; plugin.client = new PiperControl.PiperControlClient(calls); plugin.state = snapshot;
-        plugin.engine = (PluginContext)Activator.CreateInstance(typeof(PluginContext), flags, null,
+        plugin.engine = (PluginContext)Activator.CreateInstance(typeof(PluginContext), BindingFlags.Instance | BindingFlags.NonPublic, null,
             [new PluginStart("fixture", folder, folder), (Func<object, CancellationToken, Task>)((_, _) => Task.CompletedTask),
                 (Func<string, JsonObject, CancellationToken, Task<JsonElement>>)((_, _, _) => Task.FromResult(JsonSerializer.SerializeToElement(new { applied = false })))], null)!;
-        void Fresh() => Get<LatestTelemetry>("telemetry").Publish(new(snapshot, "recovery-ui-fixture", 1, Stopwatch.GetTimestamp(), 0));
+        void Fresh() => plugin.telemetry.Publish(new(snapshot, "recovery-ui-fixture", 1, Stopwatch.GetTimestamp(), 0));
         Task Click(string id) => plugin.HandleEventAsync(new("fixture", WorkspaceEventScope.Wrap(plugin.workspaceViewEpoch, "piper-2", id), "click", JsonSerializer.SerializeToElement(true)), CancellationToken.None);
         try
         {
             Fresh(); await Click("enable");
-            check(calls.Actions.Count == 0 && plugin.recoveryGuide is not null, "Generic Recover click removed torque instead of opening its supported guide");
+            Check(calls.Actions.Count == 0 && plugin.recoveryGuide is not null, "Generic Recover click removed torque instead of opening its supported guide");
             Fresh(); await Click("recovery.run");
-            check(calls.Actions.Count == 0, "Diagnostics' Verify controller state ran a power-changing supported STOP recovery");
+            Check(calls.Actions.Count == 0, "Diagnostics' Verify controller state ran a power-changing supported STOP recovery");
             using (SimulatedRecovery(PipersPlugin.RecoveryKind.ReturnToZero))
             {
                 Fresh(); await Click("disable");
-                check(calls.Actions.SequenceEqual(["disable"]), "A visible Disable action was blocked by the STOP teaching presentation or sent a reset/target");
+                Check(calls.Actions.SequenceEqual(["disable"]), "A visible Disable action was blocked by the STOP teaching presentation or sent a reset/target");
                 plugin.recoveryOperation = null;
             }
             calls.Actions.Clear();
@@ -110,11 +108,11 @@ internal static class RecoveryWorkspaceTests
             using (SimulatedRecovery(PipersPlugin.RecoveryKind.ReturnToZero))
             {
                 Fresh(); await Click("recovery.card.run");
-                check(calls.Actions.Count == 0, "A queued recovery click ran while its card was disabled by another recovery action");
+                Check(calls.Actions.Count == 0, "A queued recovery click ran while its card was disabled by another recovery action");
                 plugin.recoveryOperation = null;
             }
             Fresh(); await Click("recovery.card.run");
-            check(calls.Actions.SequenceEqual(["recover-at-pose"]) && plugin.recoveryGuide?.CommandSent == true,
+            Check(calls.Actions.SequenceEqual(["recover-at-pose"]) && plugin.recoveryGuide?.CommandSent == true,
                 "A qualified green/off cycle did not admit the explicit same-pose return");
             calls.Actions.Clear(); plugin.recoveryGuide = plugin.recoveryGuide! with { CommandSent = false };
             device["status"]!["arm_status"] = 0; device["teaching"]!["phase"] = "off";
@@ -122,49 +120,49 @@ internal static class RecoveryWorkspaceTests
             foreach (var joint in device["joints"]!.AsArray()) joint!["enabled"] = false;
             device["recovery_required"] = false; device["blocker"] = ""; device.Remove("stop_event");
             Fresh();
-            await (Task)typeof(PipersPlugin).GetMethod("ObserveHandGuideRecovery", flags)!.Invoke(plugin, [CancellationToken.None])!;
-            check(plugin.recoveryGuide is { Gate: null } && calls.Actions.Count == 0,
+            await plugin.ObserveHandGuideRecovery(CancellationToken.None);
+            Check(plugin.recoveryGuide is { Gate: null } && calls.Actions.Count == 0,
                 "Reset's retired stop record closed the visible range/holding guide or reused old teaching proof");
             using var reset = SimulatedRecovery(PipersPlugin.RecoveryKind.HoldHere);
             reset.ResetAt = Stopwatch.GetTimestamp();
             device["fresh"] = false; device["joints"]![0]!["fresh"] = false; Fresh();
-            bool Gap() => (bool)typeof(PipersPlugin).GetMethod("RecoveryExpectedGap", flags)!.Invoke(plugin, [Get<LatestTelemetry>("telemetry").Latest])!;
-            check(Gap(), "A bounded same-device reset feedback gap invalidated supported recovery");
-            device["generation"] = 8L; Fresh(); check(!Gap(), "Another CAN generation inherited a reset-gap exception"); device["generation"] = 7L;
-            device["present"] = false; Fresh(); check(!Gap(), "A disconnected adapter inherited a reset-gap exception"); device["present"] = true;
-            device["joints"]![0]!["fault"] = 1; Fresh(); check(!Gap(), "Reset-gap handling masked a known motor-driver fault"); device["joints"]![0]!["fault"] = 0;
-            reset.ResetAt = 0; Fresh(); check(!Gap(), "Stale feedback outside reset was treated as an expected gap");
-            reset.ResetAt = Stopwatch.GetTimestamp() - Stopwatch.Frequency * 6; Fresh(); check(!Gap(), "The reset-gap exception outlived its five-second bound");
+            bool Gap() => plugin.RecoveryExpectedGap(plugin.telemetry.Latest);
+            Check(Gap(), "A bounded same-device reset feedback gap invalidated supported recovery");
+            device["generation"] = 8L; Fresh(); Check(!Gap(), "Another CAN generation inherited a reset-gap exception"); device["generation"] = 7L;
+            device["present"] = false; Fresh(); Check(!Gap(), "A disconnected adapter inherited a reset-gap exception"); device["present"] = true;
+            device["joints"]![0]!["fault"] = 1; Fresh(); Check(!Gap(), "Reset-gap handling masked a known motor-driver fault"); device["joints"]![0]!["fault"] = 0;
+            reset.ResetAt = 0; Fresh(); Check(!Gap(), "Stale feedback outside reset was treated as an expected gap");
+            reset.ResetAt = Stopwatch.GetTimestamp() - Stopwatch.Frequency * 6; Fresh(); Check(!Gap(), "The reset-gap exception outlived its five-second bound");
             reset.ResetAt = Stopwatch.GetTimestamp();
-            Get<LatestTelemetry>("telemetry").Publish(new(snapshot, "recovery-ui-fixture", 1, Stopwatch.GetTimestamp() - Stopwatch.Frequency * 2, 0));
-            check(!Gap(), "An old telemetry envelope was accepted as a fresh reset gap");
+            plugin.telemetry.Publish(new(snapshot, "recovery-ui-fixture", 1, Stopwatch.GetTimestamp() - Stopwatch.Frequency * 2, 0));
+            Check(!Gap(), "An old telemetry envelope was accepted as a fresh reset gap");
             Fresh(); plugin.CommandAuthority.Revoke(revokeLocalApproval: () => plugin.approved = false);
-            check(!Gap(), "A STOP/permission change retained the reset-gap exception");
+            Check(!Gap(), "A STOP/permission change retained the reset-gap exception");
             bool retiredGrant = false;
-            try { typeof(PipersPlugin).GetMethod("GrantRecoveryHolding", flags)!.Invoke(plugin, [reset, CancellationToken.None]); }
-            catch (TargetInvocationException error) when (error.InnerException is InvalidOperationException) { retiredGrant = true; }
-            check(retiredGrant && !plugin.approved && calls.Actions.Count == 0, "A recovery continuation granted holding permission after STOP");
+            try { plugin.GrantRecoveryHolding(reset, CancellationToken.None); }
+            catch (InvalidOperationException) { retiredGrant = true; }
+            Check(retiredGrant && !plugin.approved && calls.Actions.Count == 0, "A recovery continuation granted holding permission after STOP");
             plugin.recoveryOperation = null;
             device["fresh"] = true; device["joints"]![0]!["fresh"] = true;
             device["reset_pending"] = true; device["recovery_required"] = true;
             Fresh(); await Click("recovery.run");
-            check(calls.Actions.SequenceEqual(["verify-reset"]), "Diagnostics' Verify controller state did not run the recovery card's verification");
+            Check(calls.Actions.SequenceEqual(["verify-reset"]), "Diagnostics' Verify controller state did not run the recovery card's verification");
             calls.Actions.Clear(); device["reset_pending"] = false; device["recovery_required"] = false;
             device["blocker"] = "Another controller is sending commands on this CAN bus.";
             plugin.approved = true;
             Fresh(); await Click("enable");
-            check(calls.Actions.Count == 0 && plugin.primaryAction.Status.Contains("Another controller", StringComparison.Ordinal),
+            Check(calls.Actions.Count == 0 && plugin.primaryAction.Status.Contains("Another controller", StringComparison.Ordinal),
                 "A queued primary click sent Enable even though the current header reported a controller blocker");
         }
         finally
         {
             plugin.shutdown.Cancel();
-            ((IDisposable)plugin.channel).Dispose(); plugin.commands.Dispose();
+            plugin.channel.Dispose(); plugin.commands.Dispose();
             if (Directory.Exists(folder)) Directory.Delete(folder, true);
         }
     }
 
-    public static async Task RunSupportedSequence(Action<bool, string> check)
+    public static async Task RunSupportedSequence()
     {
         foreach (bool legal in new[] { false, true })
         {
@@ -198,7 +196,7 @@ internal static class RecoveryWorkspaceTests
                 actions.Add("enable"); foreach (var joint in device["joints"]!.AsArray()) joint!["enabled"] = true;
                 return Task.CompletedTask;
             }, _ => { }, CancellationToken.None);
-            check(held == legal && actions.SequenceEqual(legal ? ["disable", "reset", "verify-reset", "enable"] : ["disable", "reset", "verify-reset"]),
+            Check(held == legal && actions.SequenceEqual(legal ? ["disable", "reset", "verify-reset", "enable"] : ["disable", "reset", "verify-reset"]),
                 "One supported STOP acknowledgement did not tolerate its bounded reset gap, recover once, or preserve the range guard");
         }
         foreach (string interruption in new[] { "identity", "stale", "driver", "cancel", "cached-ack" })
@@ -223,7 +221,7 @@ internal static class RecoveryWorkspaceTests
                 }, _ => throw new InvalidOperationException("Unexpected enable"), _ => { }, cancel.Token);
             }
             catch (Exception error) when (error is InvalidOperationException or OperationCanceledException) { rejected = true; }
-            check(rejected && actions.SequenceEqual(["disable"]), "Recovery continued to reset/enable after " + interruption);
+            Check(rejected && actions.SequenceEqual(["disable"]), "Recovery continued to reset/enable after " + interruption);
         }
         foreach (bool identityChanged in new[] { false, true })
         {
@@ -251,7 +249,7 @@ internal static class RecoveryWorkspaceTests
                 }, _ => throw new InvalidOperationException("Unexpected holding enable after cancelled reset"), _ => { }, cancel.Token);
             }
             catch (Exception error) when (error is InvalidOperationException or OperationCanceledException) { rejected = true; }
-            check(rejected && actions.SequenceEqual(["disable", "reset"]), "Recovery enabled or verified after cancellation/identity change during its reset feedback gap");
+            Check(rejected && actions.SequenceEqual(["disable", "reset"]), "Recovery enabled or verified after cancellation/identity change during its reset feedback gap");
         }
     }
 

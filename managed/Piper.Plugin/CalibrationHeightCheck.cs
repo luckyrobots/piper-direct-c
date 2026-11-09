@@ -17,8 +17,8 @@ public sealed partial class PipersPlugin
     //   any -> Inactive                     Stop height check, or a profile change
     // Live has no pinned pose; Pinned and Saved have one. Inactive may keep the
     // saved draft pose so the next Check jaw height resumes it.
-    private enum HeightCheckPhase { Inactive, Live, Pinned, Saved }
-    private HeightCheckPhase heightPhase;
+    internal enum HeightCheckPhase { Inactive, Live, Pinned, Saved }
+    internal HeightCheckPhase heightPhase;
     // Kept under its old field name so the B3 workspace-page lines stay untouched.
     private bool heightCheckActive => heightPhase != HeightCheckPhase.Inactive;
     private void SetHeightPhase(HeightCheckPhase next)
@@ -34,10 +34,10 @@ public sealed partial class PipersPlugin
     }
     private bool heightGuidePublished, heightStorageBlocked;
     private string heightProfile = "", heightMeasuredText = "", heightStatus = "Move to a few different heights and compare them with a tape measure.";
-    private string heightIssue = "", heightGuideIssue = "", heightActionError = "";
+    internal string heightIssue = "", heightGuideIssue = "", heightActionError = "";
     private sealed record LiveHeightPreview(HeightObservation Observation, long ReadAtTicks, double SourceAgeMilliseconds);
     private LiveHeightPreview? heightLive;
-    private HeightObservation? heightFrozen;
+    internal HeightObservation? heightFrozen;
     private long heightGuideAt, heightEpoch;
     private HeightCheck[] heightChecks = [];
     private Task? heightMaintenance;
@@ -79,7 +79,7 @@ public sealed partial class PipersPlugin
         File.Move(HeightCheckPath + ".tmp", HeightCheckPath, true);
     }
 
-    private CalibrationIdentity HeightContext()
+    internal CalibrationIdentity HeightContext()
     {
         if (!calibrationOpen) throw new InvalidOperationException("Open Calibration to check the jaw height.");
         if (calibrationIdentity is not { } saved || calibrationApplied is null || calibrationDesk.ToolPoint != "calibration_jaw_tips")
@@ -137,7 +137,7 @@ public sealed partial class PipersPlugin
         await SaveHeightChecks(cancellation);
     }
 
-    private async Task HeightCheckEvent(string action, JsonElement value, CancellationToken cancellation)
+    internal async Task HeightCheckEvent(string action, JsonElement value, CancellationToken cancellation)
     {
         EnsureIndependentCalibration();
         heightActionError = "";

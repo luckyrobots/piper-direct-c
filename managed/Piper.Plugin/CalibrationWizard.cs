@@ -7,9 +7,9 @@ namespace LuckyRobots.Piper.Plugin;
 
 public sealed partial class PipersPlugin
 {
-    private CalibrationWizardDraft? calibrationWizard;
+    internal CalibrationWizardDraft? calibrationWizard;
     private string[] wizardDiscoveredSites = [];
-    private string wizardProfile = "", wizardMessage = "", wizardModelPoint = "Show the point, then compare its marker with the real jaw tips.";
+    internal string wizardProfile = "", wizardMessage = "", wizardModelPoint = "Show the point, then compare its marker with the real jaw tips.";
     private string wizardModelPointDetails = "Model coordinates and site identity are not a verified physical TCP calibration.";
     private CalibrationWizardDraft Wizard => calibrationWizard ?? throw new InvalidOperationException("Open the calibration wizard first.");
     private string WizardId(string action) => "wizard." + Wizard.Epoch + "." + action;
@@ -18,7 +18,7 @@ public sealed partial class PipersPlugin
     private bool WizardValidation => Wizard.Answers.GetValueOrDefault("role") == "validation";
     private string WizardDraftPath => Path.Combine(RobotCalibrationDirectory, "wizard-draft.json");
 
-    private void LoadWizard()
+    internal void LoadWizard()
     {
         LoadCalibrationPreferences();
         if (wizardProfile == ActiveProfile.Id && calibrationWizard is not null) return;
@@ -101,7 +101,7 @@ public sealed partial class PipersPlugin
         }
     }
 
-    private async Task WizardEvent(string action, JsonElement value, CancellationToken cancellation)
+    internal async Task WizardEvent(string action, JsonElement value, CancellationToken cancellation)
     {
         EnsureIndependentCalibration();
         try

@@ -71,8 +71,8 @@ public sealed record CalibrationCapture(CalibrationPoint ToolWorld, CalibrationP
         ValidateLive(expected, current, device, requireHandGuiding);
         if (pose["sceneId"]?.GetValue<string>() != expected.SceneId || pose["entityId"]?.GetValue<string>() != expected.RobotId)
             throw new InvalidOperationException("Robot/profile/backend/scene identity changed. Start a new calibration; old measurements cannot authorize a new connection.");
-        if (nowMs < requestStartedMs || nowMs - requestStartedMs > 500)
-            throw new InvalidOperationException("Capture needs healthy, fresh arm and scene feedback within 500 ms. Hold still and try again.");
+        if (nowMs < requestStartedMs || nowMs - requestStartedMs > TelemetryReceipt.MaximumAgeMilliseconds)
+            throw new InvalidOperationException($"Capture needs healthy, fresh arm and scene feedback within {TelemetryReceipt.MaximumAgeMilliseconds:F0} ms. Hold still and try again.");
         if (!CalibrationPose.IsMetric(pose, expected.SceneId, expected.RobotId) ||
             pose["modelAssetId"]?.GetValue<string>() is not { Length: > 0 } modelAssetId || pose["modelRevision"]?.GetValue<string>() is not { Length: > 0 } modelRevision)
             throw new InvalidOperationException("This model has no supported engine-world metric placement/FK contract. " + (pose["metricPlacementReason"]?.GetValue<string>() ?? "Update the engine and use a flat, unparented, unit-scale robot model."));

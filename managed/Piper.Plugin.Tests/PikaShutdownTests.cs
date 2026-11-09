@@ -1,6 +1,5 @@
 using System.Collections.Concurrent;
 using System.Diagnostics;
-using System.Reflection;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using Grpc.Core;
@@ -9,17 +8,16 @@ using LuckyRobots.Piper.Plugin;
 
 internal static class PikaShutdownTests
 {
-    public static async Task Run(Action<bool, string> check)
+    public static async Task Run()
     {
-        const BindingFlags fields = BindingFlags.Instance | BindingFlags.NonPublic;
         const string backend = "shutdown-fixture";
         const string linux = "/dev/pika-linux", stalled = "/dev/pika-stalled", monitor = "/dev/pika-monitor",
             transferred = "/dev/pika-transferred", foreign = "/dev/pika-foreign";
         var plugin = new PipersPlugin();
-        string owner = (string)typeof(PipersPlugin).GetField("owner", fields)!.GetValue(plugin)!;
+        string owner = plugin.owner;
         string otherOwner = Guid.NewGuid().ToString();
-        var telemetry = (LatestTelemetry)typeof(PipersPlugin).GetField("telemetry", fields)!.GetValue(plugin)!;
-        typeof(PipersPlugin).GetField("token", fields)!.SetValue(plugin, backend);
+        var telemetry = plugin.telemetry;
+        plugin.token = backend;
         var requests = new ConcurrentQueue<(string Route, string Device, string? Distribution, string Owner)>();
         var linuxDisconnected = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var calls = new Calls(async (command, cancellation) =>
@@ -35,7 +33,7 @@ internal static class PikaShutdownTests
                 ? JsonSerializer.Serialize(new { ok = true, motor_request_id = device + "-shutdown" })
                 : "{\"ok\":true}" };
         });
-        typeof(PipersPlugin).GetField("client", fields)!.SetValue(plugin, new PiperControl.PiperControlClient(calls));
+        plugin.client = new PiperControl.PiperControlClient(calls);
         var grippers = new[]
         {
             Gripper(linux, null, owner, powered: true), Gripper(stalled, "PeerWsl", owner, powered: true),
@@ -49,22 +47,22 @@ internal static class PikaShutdownTests
         }, backend, sequence, Stopwatch.GetTimestamp(), 0));
         Publish(1);
         using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(3));
-        var release = (Task)typeof(PipersPlugin).GetMethod("ReleaseOwnedPikas", fields)!.Invoke(plugin, [deadline.Token])!;
+        var release = plugin.ReleaseOwnedPikas(deadline.Token);
         try
         {
             var admitted = requests.ToArray();
-            check(admitted.Count(r => r.Route == "/api/pika/disable") == 3 &&
+            Check(admitted.Count(r => r.Route == "/api/pika/disable") == 3 &&
                 admitted.Any(r => r.Route == "/api/pika/disable" && r.Device == linux && r.Distribution is null) &&
                 admitted.Any(r => r.Route == "/api/pika/disable" && r.Device == stalled && r.Distribution == "PeerWsl") &&
                 admitted.Any(r => r.Route == "/api/pika/disconnect" && r.Device == monitor && r.Distribution is null),
                 "A stalled device blocked independent shutdown requests or Linux null was routed through the active WSL profile");
-            check(!linuxDisconnected.Task.IsCompleted, "Cached disabled evidence from another motor request released the Linux gripper");
+            Check(!linuxDisconnected.Task.IsCompleted, "Cached disabled evidence from another motor request released the Linux gripper");
             grippers[0]["last_motor_request"] = linux + "-shutdown";
             grippers[3]["last_motor_request"] = transferred + "-shutdown";
             grippers[3]["owner"] = otherOwner;
             Publish(2);
             await linuxDisconnected.Task.WaitAsync(TimeSpan.FromSeconds(1));
-            check(!release.IsCompleted && requests.All(r => r.Owner == owner && r.Device != foreign) &&
+            Check(!release.IsCompleted && requests.All(r => r.Owner == owner && r.Device != foreign) &&
                 requests.Where(r => r.Route == "/api/pika/disconnect").Select(r => r.Device).Order().SequenceEqual(new[] { linux, monitor }),
                 "Shutdown skipped a causally verified Linux disconnect or disconnected a foreign or unverified gripper");
         }
@@ -72,7 +70,7 @@ internal static class PikaShutdownTests
         {
             await deadline.CancelAsync();
             await release;
-            ((IDisposable)typeof(PipersPlugin).GetField("channel", fields)!.GetValue(plugin)!).Dispose();
+            plugin.channel.Dispose();
         }
 
         static JsonObject Gripper(string device, string? distribution, string owner, bool powered) => new()

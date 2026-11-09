@@ -85,15 +85,15 @@ public sealed record TelemetryScope(string BackendToken, string DeviceId, long G
 
 public sealed partial class PipersPlugin
 {
-    private readonly LatestTelemetry telemetry = new();
-    private TelemetryScope? telemetryScope;
-    private string telemetryIssue = "Waiting for controller feedback", sceneTrackingStatus = "";
+    internal readonly LatestTelemetry telemetry = new();
+    internal TelemetryScope? telemetryScope;
+    internal string telemetryIssue = "Waiting for controller feedback", sceneTrackingStatus = "";
     private string telemetryConnectionUiIssue = "";
-    private string linkBackendToken = "";
+    internal string linkBackendToken = "";
     private long scenePermissionEpoch;
 
     private bool TelemetryIsFresh() => telemetry.Latest is { } receipt && receipt.BackendToken == token && receipt.IsFresh(Stopwatch.GetTimestamp());
-    private void DisarmTelemetryTargets(string reason, bool clearLink, string? forgetApproval = null, bool forgetAllApprovals = false)
+    internal void DisarmTelemetryTargets(string reason, bool clearLink, string? forgetApproval = null, bool forgetAllApprovals = false)
     {
         CommandAuthority.Revoke(forgetApproval, () =>
         {
@@ -121,7 +121,7 @@ public sealed partial class PipersPlugin
         acknowledgedScenePose = null; linkErrorDegrees = null;
     }
 
-    private void ApplyIncomingScope(TelemetryReceipt receipt)
+    internal void ApplyIncomingScope(TelemetryReceipt receipt)
     {
         var next = receipt.State;
         var scope = TelemetryScope.Read(next, ActiveProfile.CanDeviceId);
@@ -176,7 +176,7 @@ public sealed partial class PipersPlugin
         }
     }
 
-    private async Task ReadTelemetry(CancellationToken cancellation)
+    internal async Task ReadTelemetry(CancellationToken cancellation)
     {
         while (!cancellation.IsCancellationRequested)
         {
@@ -225,7 +225,7 @@ public sealed partial class PipersPlugin
         return receipt.HasFreshDevice(device, Stopwatch.GetTimestamp());
     }
 
-    private void ObserveTelemetryConnectionPresentation(TelemetryReceipt receipt)
+    internal void ObserveTelemetryConnectionPresentation(TelemetryReceipt receipt)
     {
         long now = Stopwatch.GetTimestamp();
         if (receipt.BackendToken != token || !receipt.IsFresh(now) || ActiveProfile.CanDeviceId.Length == 0) return;
@@ -262,7 +262,7 @@ public sealed partial class PipersPlugin
             value.StartsWith("Controller telemetry interrupted", StringComparison.Ordinal);
     }
 
-    private async Task ArmHeartbeats(CancellationToken cancellation)
+    internal async Task ArmHeartbeats(CancellationToken cancellation)
     {
         using var timer = new PeriodicTimer(TimeSpan.FromMilliseconds(200));
         do
@@ -271,7 +271,7 @@ public sealed partial class PipersPlugin
             var receipt = telemetry.Latest;
             if (group is null && !HasFreshControlTelemetry(out receipt))
             {
-                if (!RecoveryExpectedGap(receipt)) DisarmTelemetryTargets("Measured robot feedback exceeded the 500 ms freshness window", clearLink: false);
+                if (!RecoveryExpectedGap(receipt)) DisarmTelemetryTargets($"Measured robot feedback exceeded the {TelemetryReceipt.MaximumAgeMilliseconds:F0} ms freshness window", clearLink: false);
                 continue;
             }
             if (CommandAuthority.Current.Lease is not { } lease) continue;
@@ -312,7 +312,7 @@ public sealed partial class PipersPlugin
         } while (await timer.WaitForNextTickAsync(cancellation));
     }
 
-    private async Task PikaHeartbeats(CancellationToken cancellation)
+    internal async Task PikaHeartbeats(CancellationToken cancellation)
     {
         using var timer = new PeriodicTimer(TimeSpan.FromMilliseconds(200));
         var pending = new Dictionary<(string Backend, string Device, string? Distribution), Task>();
@@ -406,7 +406,7 @@ public sealed partial class PipersPlugin
         }
     }
 
-    private async Task PublishMeasuredScene(CancellationToken cancellation)
+    internal async Task PublishMeasuredScene(CancellationToken cancellation)
     {
         var group = Volatile.Read(ref groupSimulation);
         if (group is not null && !GroupWaitingForUserPlay(group)) return;

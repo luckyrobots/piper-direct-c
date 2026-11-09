@@ -146,11 +146,6 @@ internal static class HostPikaBoundaryTests
         finally { directory.Delete(recursive: true); }
     }
 
-    private static void Check(bool condition, string failure)
-    {
-        if (!condition) throw new InvalidOperationException(failure);
-    }
-
     private sealed class FixtureClock : TimeProvider
     {
         public DateTimeOffset Utc = DateTimeOffset.UnixEpoch.AddDays(1);

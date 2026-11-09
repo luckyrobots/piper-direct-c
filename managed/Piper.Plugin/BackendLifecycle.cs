@@ -3,6 +3,7 @@ using System.Net.Sockets;
 using System.Text;
 using System.Text.Json.Nodes;
 using LuckyEngine.PluginSdk;
+using LuckyRobots.Piper.Pika;
 
 namespace LuckyRobots.Piper.Plugin;
 
@@ -51,7 +52,7 @@ public static class BackendActivity
 /// and is being started again) → Idle. Any failure returns to Idle.</summary>
 internal enum BackendRestartPhase { Idle, Confirming, Requested, Relaunching }
 
-public sealed record BackendSettings(string WslDistribution = "Ubuntu", string PikaDevice = "/dev/serial/by-id/usb-1a86_USB_Serial-if00-port0");
+public sealed record BackendSettings(string WslDistribution = "Ubuntu", string PikaDevice = "/dev/serial/by-id/usb-" + PikaProtocol.UsbVendorId + "_USB_Serial-if00-port0");
 
 public sealed partial class PipersPlugin
 {

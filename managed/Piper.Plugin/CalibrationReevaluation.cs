@@ -59,7 +59,7 @@ public sealed partial class PipersPlugin
 
     // A report may commit before its wizard draft. Restore the authoritative
     // model revision and discard old visual confirmations after that interruption.
-    private void ReconcileReevaluatedWizard()
+    internal void ReconcileReevaluatedWizard()
     {
         if (calibrationReevaluation is not null && calibrationIdentity is { } saved &&
             (Wizard.ModelAssetId != saved.ModelAssetId || Wizard.ModelRevision != saved.ModelRevision ||
@@ -70,7 +70,7 @@ public sealed partial class PipersPlugin
         }
     }
 
-    private async Task ReevaluateCalibrationModel(CancellationToken cancellation)
+    internal async Task ReevaluateCalibrationModel(CancellationToken cancellation)
     {
         var saved = calibrationIdentity ?? throw new InvalidOperationException("Capture and save desk points before re-evaluating a corrected model.");
         var root = calibrationOriginal ?? throw new InvalidOperationException("The saved calibration has no original base placement.");

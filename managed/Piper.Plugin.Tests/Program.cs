@@ -4,62 +4,55 @@ using Grpc.Net.Client;
 using LuckyRobots.Piper.Grpc;
 using LuckyRobots.Piper.Plugin;
 
-int checks = 0;
-void Check(bool value, string description) { if (!value) throw new Exception(description); checks++; }
-void Reject(Action action, string description)
-{
-    try { action(); } catch (InvalidOperationException) { checks++; return; }
-    throw new Exception(description);
-}
 if (args is ["--teaching-resume"])
 {
-    TeachingResumeTests.Run(Check);
-    await SimulationFollowingTests.RunTeachingResume(Check);
-    Console.WriteLine($"Passed {checks} stable teaching-resume checks.");
+    TeachingResumeTests.Run();
+    await SimulationFollowingTests.RunTeachingResume();
+    Console.WriteLine($"Passed {Checks} stable teaching-resume checks.");
     return;
 }
 if (args is ["--primary-ui"])
 {
-    await SimulationFollowingTests.RunPrimaryWorkspaceAction(Check);
-    Console.WriteLine($"Passed {checks} primary workspace action checks.");
+    await SimulationFollowingTests.RunPrimaryWorkspaceAction();
+    Console.WriteLine($"Passed {Checks} primary workspace action checks.");
     return;
 }
 if (args is ["--unified-follow"])
 {
-    await SimulationFollowingTests.RunUnifiedFollowing(Check);
-    Console.WriteLine($"Passed {checks} unified simulation characterization checks.");
+    await SimulationFollowingTests.RunUnifiedFollowing();
+    Console.WriteLine($"Passed {Checks} unified simulation characterization checks.");
     return;
 }
 if (args is ["--group-follow"])
 {
-    GroupSimulationFollowingTests.Run(Check);
-    await SimulationFollowingTests.RunGroupFollow(Check);
-    await SimulationFollowingTests.RunPrimaryWorkspaceAction(Check);
-    Console.WriteLine($"Passed {checks} grouped following and primary action checks.");
+    GroupSimulationFollowingTests.Run();
+    await SimulationFollowingTests.RunGroupFollow();
+    await SimulationFollowingTests.RunPrimaryWorkspaceAction();
+    Console.WriteLine($"Passed {Checks} grouped following and primary action checks.");
     return;
 }
 if (args is ["--endpoint-stationary"])
 {
-    SimulationEndpointStationaryTests.Run(Check);
-    OrderedSimulationExecutionTests.Run(Check);
-    await SimulationFollowingTests.RunGroupFollow(Check);
-    await SimulationFollowingTests.RunUnifiedFollowing(Check);
-    Console.WriteLine($"Passed {checks} endpoint stationarity and failure presentation checks.");
+    SimulationEndpointStationaryTests.Run();
+    OrderedSimulationExecutionTests.Run();
+    await SimulationFollowingTests.RunGroupFollow();
+    await SimulationFollowingTests.RunUnifiedFollowing();
+    Console.WriteLine($"Passed {Checks} endpoint stationarity and failure presentation checks.");
     return;
 }
 if (args is ["--telemetry-connection"])
 {
-    TelemetryConnectionPresentationTests.Run(Check);
-    await TelemetryConnectionPresentationTests.RunNavigation(Check);
-    Console.WriteLine($"Passed {checks} telemetry connection presentation checks.");
+    TelemetryConnectionPresentationTests.Run();
+    await TelemetryConnectionPresentationTests.RunNavigation();
+    Console.WriteLine($"Passed {Checks} telemetry connection presentation checks.");
     return;
 }
 if (args is ["--recovery-ui"])
 {
-    RecoveryWorkspaceTests.Run(Check);
-    await RecoveryWorkspaceTests.RunEvents(Check);
-    await RecoveryWorkspaceTests.RunSupportedSequence(Check);
-    Console.WriteLine($"Passed {checks} recovery workspace checks.");
+    RecoveryWorkspaceTests.Run();
+    await RecoveryWorkspaceTests.RunEvents();
+    await RecoveryWorkspaceTests.RunSupportedSequence();
+    Console.WriteLine($"Passed {Checks} recovery workspace checks.");
     return;
 }
 using (var authorized = System.Text.Json.JsonDocument.Parse("{\"owner\":\"plugin-session\"}"))
@@ -156,8 +149,8 @@ Check(RobotProfileRouting.EventForProfile("piper-2", "profiles.select.piper-1") 
 var reusedSlot = RobotProfileRouting.Normalize(twoProfiles with { Robots = [twoProfiles.Robots![0], new("replacement", "Replacement")] });
 Check(reusedSlot.Robots!.All(p => p.CameraSlot is >= 0 and < RobotProfileRouting.MaximumProfiles) && reusedSlot.Robots!.Select(p => p.CameraSlot).Distinct().Count() == 2, "Deleted profile's camera slot was not bounded/reusable");
 var lensProfile = JsonNode.Parse("""{"schema":1,"device":"camera-a","width":640,"height":480,"model":"kannala-brandt","fx":250,"fy":251,"cx":317,"cy":238,"coefficients":[0.01,-0.001,0,0]}""")!.AsObject();
-SimulationCameraRoutingTests.Run(Check);
-await CameraPreviewSlotsTests.Run(Check);
+SimulationCameraRoutingTests.Run();
+await CameraPreviewSlotsTests.Run();
 Check(CameraProfile.MatchesFisheye(lensProfile, "camera-a", 640, 480), "Valid fisheye profile rejected");
 Check(!CameraProfile.MatchesFisheye(lensProfile, "camera-b", 640, 480), "Lens calibration leaked to another camera");
 Check(!CameraProfile.MatchesFisheye(lensProfile, "camera-a", 1280, 720), "Calibration accepted at wrong resolution");
@@ -283,11 +276,11 @@ stopped["reset_pending"] = false;
 Check(RecoveryPlan.Inspect(stopped, false).Action == "verify-current", "Healthy stationary state needs no reset");
 stopped["status"]!["teach_state"] = 3;
 Check(RecoveryPlan.Inspect(stopped, false).Action is null, "Active teaching must not reset");
-RecoveryPlanTests.Run(Check);
-RecoveryWorkspaceTests.Run(Check);
-await RecoveryWorkspaceTests.RunEvents(Check);
-await RecoveryWorkspaceTests.RunSupportedSequence(Check);
-await RecoveryHomeTests.Run(Check);
+RecoveryPlanTests.Run();
+RecoveryWorkspaceTests.Run();
+await RecoveryWorkspaceTests.RunEvents();
+await RecoveryWorkspaceTests.RunSupportedSequence();
+await RecoveryHomeTests.Run();
 
 var gate = new FollowInputGate();
 JsonObject Gesture(string phase, long number, long sequence, long timestamp = 1000) => new() {
@@ -339,21 +332,21 @@ Check(!PipersPlugin.TeachingCanResume(manualDevice), "Real controller recovery w
 manualDevice["recovery_required"] = false; manualDevice["fresh"] = false;
 Check(!PipersPlugin.TeachingCanResume(manualDevice), "Stale teaching exit rearmed controls");
 manualDevice["fresh"] = true;
-GripperLinkTests.Run(Check);
-EpisodeReplayTests.Run(Check);
-await EpisodeReplayTests.RunFiles(Check);
-await PikaDisplayReferenceTests.Run(Check);
-CalibrationTests.Run(Check);
-CalibrationWizardTests.Run(Check);
-UnifiedWorkspaceTests.Run(Check);
-TelemetryConnectionPresentationTests.Run(Check);
-await TelemetryConnectionPresentationTests.RunNavigation(Check);
-WorkspaceViewTests.Run(Check);
-await WorkspaceViewTests.RunRendered(Check);
-await CalibrationSheetIntegrationTests.Run(Check);
-await CalibrationSheetUiTests.Run(Check);
-await CalibrationReevaluationTests.Run(Check);
-HeightValidationTests.Run(Check);
+GripperLinkTests.Run();
+EpisodeReplayTests.Run();
+await EpisodeReplayTests.RunFiles();
+await PikaDisplayReferenceTests.Run();
+CalibrationTests.Run();
+CalibrationWizardTests.Run();
+UnifiedWorkspaceTests.Run();
+TelemetryConnectionPresentationTests.Run();
+await TelemetryConnectionPresentationTests.RunNavigation();
+WorkspaceViewTests.Run();
+await WorkspaceViewTests.RunRendered();
+await CalibrationSheetIntegrationTests.Run();
+await CalibrationSheetUiTests.Run();
+await CalibrationReevaluationTests.Run();
+HeightValidationTests.Run();
 var monitorPika = new JsonObject { ["configured"] = true };
 Check(PikaMonitorConnectionPolicy.MayConnect(monitorPika, true, "this-reader"), "Unowned configured Pika could not be monitored without enabling it");
 Check(!PikaMonitorConnectionPolicy.MayConnect(monitorPika, false, "this-reader"), "Read-only monitoring used another robot's serial assignment");
@@ -394,36 +387,36 @@ monitorPika["power_uncertain"] = false;
 monitorPika["configured"] = false;
 Check(!PikaMonitorConnectionPolicy.MayConnect(monitorPika, true, "this-reader"), "Scene linking tried to configure or open an unassigned gripper");
 
-TeachingModernTests.Run(Check);
-TeachingResumeTests.Run(Check);
-await SimulationFollowingTests.RunTeachingResume(Check);
-PikaTeachingTests.Run(Check);
-PikaTeachingWorkspaceTests.Run(Check);
-PikaMonitorConnectionTests.Run(Check);
-await UiEventDispatchTests.Run(Check);
-BackendRestartRequestTests.Run(Check);
-await EmergencyStopTests.Run(Check);
-await MeasuredTrackingTests.Run(Check);
-await MeasuredGhostPublicationTests.Run(Check);
-await TelemetryPipelineTests.Run(Check);
-SimulationFollowTests.Run(Check);
-CompoundRobotBindingTests.Run(Check);
-await SimulationPublishDiagnosticsTests.Run(Check);
-await SimulationFollowDiagnosticsTests.Run(Check);
-OrderedSimulationPathTests.Run(Check);
-OrderedSimulationSpeedTests.Run(Check);
-SimulationPublishCadenceTests.Run(Check);
-SimulationTrajectoryTransportTests.Run(Check);
-SimulationFollowNativeReferenceTests.Run(Check);
-OrderedSimulationExecutionTests.Run(Check);
-GroupSimulationFollowingTests.Run(Check);
-await SimulationFollowingTests.RunGroupFollow(Check);
-await SimulationFollowingTests.RunUnifiedFollowing(Check);
-SimulationEndpointStationaryTests.Run(Check);
-OrderedPhysicalContactTests.Run(Check);
-OrderedMissedGraspTests.Run(Check);
-OrderedContactLossTests.Run(Check);
-await NativeAdmissionTests.Run(Check);
+TeachingModernTests.Run();
+TeachingResumeTests.Run();
+await SimulationFollowingTests.RunTeachingResume();
+PikaTeachingTests.Run();
+PikaTeachingWorkspaceTests.Run();
+PikaMonitorConnectionTests.Run();
+await UiEventDispatchTests.Run();
+BackendRestartRequestTests.Run();
+await EmergencyStopTests.Run();
+await MeasuredTrackingTests.Run();
+await MeasuredGhostPublicationTests.Run();
+await TelemetryPipelineTests.Run();
+SimulationFollowTests.Run();
+CompoundRobotBindingTests.Run();
+await SimulationPublishDiagnosticsTests.Run();
+await SimulationFollowDiagnosticsTests.Run();
+OrderedSimulationPathTests.Run();
+OrderedSimulationSpeedTests.Run();
+SimulationPublishCadenceTests.Run();
+SimulationTrajectoryTransportTests.Run();
+SimulationFollowNativeReferenceTests.Run();
+OrderedSimulationExecutionTests.Run();
+GroupSimulationFollowingTests.Run();
+await SimulationFollowingTests.RunGroupFollow();
+await SimulationFollowingTests.RunUnifiedFollowing();
+SimulationEndpointStationaryTests.Run();
+OrderedPhysicalContactTests.Run();
+OrderedMissedGraspTests.Run();
+OrderedContactLossTests.Run();
+await NativeAdmissionTests.Run();
 var resetGapDevice = new JsonObject { ["id"] = "reset-arm", ["generation"] = 7L, ["present"] = true, ["up"] = true, ["fresh"] = false };
 var resetGapSnapshot = new JsonObject { ["selected"] = "reset-arm", ["devices"] = new JsonArray(resetGapDevice) };
 Check(TeachingResetAssisted.ExpectedFeedbackGap(resetGapSnapshot, "reset-arm", 7), "Expected MCU reset gap discarded an unchanged connected scene binding");
@@ -442,10 +435,10 @@ if (args.Length == 1)
     var snapshot = JsonNode.Parse(frame.Json)!.AsObject();
     Check(frame.Sequence > 0 && frame.ClockDomain == "host-utc", "Snapshot metadata missing");
     string token = snapshot["token"]!.GetValue<string>();
-    try { await client.ExecuteAsync(new() { Route = "/api/query", Json = "{}" }); throw new Exception("Unauthenticated command accepted"); }
-    catch (RpcException e) when (e.StatusCode == StatusCode.Unauthenticated) { checks++; }
-    try { await client.ExecuteAsync(new() { Route = "/api/query", Json = "{\"a\":1,\"a\":2}" }, new Metadata { { "x-piper-token", token } }); throw new Exception("Duplicate command keys accepted"); }
-    catch (RpcException e) when (e.StatusCode == StatusCode.InvalidArgument) { checks++; }
+    await RejectAsync<RpcException>(async () => await client.ExecuteAsync(new() { Route = "/api/query", Json = "{}" }),
+        "Unauthenticated command accepted", e => e.StatusCode == StatusCode.Unauthenticated);
+    await RejectAsync<RpcException>(async () => await client.ExecuteAsync(new() { Route = "/api/query", Json = "{\"a\":1,\"a\":2}" }, new Metadata { { "x-piper-token", token } }),
+        "Duplicate command keys accepted", e => e.StatusCode == StatusCode.InvalidArgument);
     var pika = await client.ExecuteAsync(new() { Route = "/api/pika/connect", Json = "{}" }, new Metadata { { "x-piper-token", token } });
     Check(pika.Status == 409, "Simulation opened real Pika hardware");
     using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(3));
@@ -458,4 +451,4 @@ if (args.Length == 1)
         previous = stream.ResponseStream.Current.Sequence;
     }
 }
-Console.WriteLine($"Passed {checks} Pipers mapping, reconnect, limits and gRPC checks.");
+Console.WriteLine($"Passed {Checks} Pipers mapping, reconnect, limits and gRPC checks.");

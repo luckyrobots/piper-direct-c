@@ -3,7 +3,7 @@ using LuckyRobots.Piper.Plugin;
 
 internal static class RecoveryPlanTests
 {
-    public static void Run(Action<bool, string> check)
+    public static void Run()
     {
         JsonObject Stopped() => new()
         {
@@ -15,15 +15,15 @@ internal static class RecoveryPlanTests
                 { ["fresh"] = true, ["enabled"] = false, ["fault"] = 0 }).ToArray())
         };
         var retry = RecoveryPlan.Inspect(Stopped(), false);
-        check(retry.Action == "reset" && retry.RetryFailedReset &&
+        Check(retry.Action == "reset" && retry.RetryFailedReset &&
             retry.NextStep.Contains("Keep supporting") && retry.NextStep.Contains("verify automatically"),
             "Failed idle STOP reset with residual teach state did not offer an explicit supported retry");
-        check(RecoveryPlan.Inspect(Stopped(), true).Action is null,
+        Check(RecoveryPlan.Inspect(Stopped(), true).Action is null,
             "An in-flight reset or active arm action offered a second reset");
         foreach (int teach in new[] { 0, 1, 2, 6 })
         {
             var device = Stopped(); device["status"]!["teach_state"] = teach;
-            check(RecoveryPlan.Inspect(device, false) is { Action: "reset", RetryFailedReset: true },
+            Check(RecoveryPlan.Inspect(device, false) is { Action: "reset", RetryFailedReset: true },
                 "A stationary STOP/all-off failed reset was trapped waiting with teach state " + teach);
         }
         foreach (var (name, mutate) in new (string, Action<JsonObject>)[]
@@ -43,18 +43,18 @@ internal static class RecoveryPlanTests
         })
         {
             var device = Stopped(); mutate(device);
-            check(RecoveryPlan.Inspect(device, false).Action is null,
+            Check(RecoveryPlan.Inspect(device, false).Action is null,
                 "Failed reset retry ignored " + name);
         }
         var verified = Stopped();
         verified["status"]!["arm_status"] = 0; verified["status"]!["control"] = 1; verified["status"]!["teach_state"] = 0;
-        check(RecoveryPlan.Inspect(verified, false) is { Action: "verify-reset", RetryFailedReset: false },
+        Check(RecoveryPlan.Inspect(verified, false) is { Action: "verify-reset", RetryFailedReset: false },
             "Healthy all-off pending reset retried instead of verifying without motor commands");
         verified["reset_pending"] = false;
-        check(RecoveryPlan.Inspect(verified, false).Action == "verify-current",
+        Check(RecoveryPlan.Inspect(verified, false).Action == "verify-current",
             "Healthy current feedback unnecessarily requested a reset");
         var ordinary = Stopped(); ordinary["reset_pending"] = false;
-        check(RecoveryPlan.Inspect(ordinary, false) is { Action: "reset", RetryFailedReset: false },
+        Check(RecoveryPlan.Inspect(ordinary, false) is { Action: "reset", RetryFailedReset: false },
             "Residual teach flag in verified STOP/all-off blocked an ordinary supported reset");
         JsonObject Confirmations(string action, bool reset)
         {
@@ -64,16 +64,16 @@ internal static class RecoveryPlanTests
         }
         bool Flags(JsonObject body, bool clear, bool supported, bool completed) => body["standalone"]?.GetValue<bool>() == true &&
             body.ContainsKey("clear") == clear && body.ContainsKey("supported") == supported && body.ContainsKey("reset_completed") == completed;
-        check(Flags(Confirmations("verify-reset", true), false, true, true) && Flags(Confirmations("verify-reset", false), false, true, false),
+        Check(Flags(Confirmations("verify-reset", true), false, true, true) && Flags(Confirmations("verify-reset", false), false, true, false),
             "verify-reset carried a reset confirmation without an operator-acknowledged recovery");
-        check(Flags(Confirmations("reset", true), true, true, false) && Flags(Confirmations("verify-current", true), true, true, false),
+        Check(Flags(Confirmations("reset", true), true, true, false) && Flags(Confirmations("verify-current", true), true, true, false),
             "Reset or current-state verification carried the wrong operator confirmations");
-        check(Flags(Confirmations("enable", false), true, true, false) && Flags(Confirmations("disable", false), false, true, false),
+        Check(Flags(Confirmations("enable", false), true, true, false) && Flags(Confirmations("disable", false), false, true, false),
             "Motor-power commands carried the wrong operator confirmations");
-        check(Flags(Confirmations("joint", false), true, false, false) && Flags(Confirmations("move-to-zero", false), true, false, false) &&
+        Check(Flags(Confirmations("joint", false), true, false, false) && Flags(Confirmations("move-to-zero", false), true, false, false) &&
             Flags(Confirmations("teach-return", false), true, true, false), "Motion or teaching return carried the wrong operator confirmations");
         ordinary["status"]!["arm_status"] = 11;
-        check(RecoveryPlan.Inspect(ordinary, false).Action is null,
+        Check(RecoveryPlan.Inspect(ordinary, false).Action is null,
             "Genuine hand guiding with all motors off was mistaken for residual stopped teaching");
     }
 }

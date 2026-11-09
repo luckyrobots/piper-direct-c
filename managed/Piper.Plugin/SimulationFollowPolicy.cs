@@ -2,6 +2,7 @@ using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json.Nodes;
+using LuckyRobots.Piper.Pika;
 
 namespace LuckyRobots.Piper.Plugin;
 
@@ -94,10 +95,10 @@ public sealed class SimulationFollowSample
         if (Math.Abs(gripMin - firstMin) > 1e-6 || Math.Abs(gripMax - firstMax) > 1e-6)
             throw new InvalidOperationException("Simulated Pika actuator range does not match joint7.");
         double gap = 2000 * secondMax;
-        double maximumOpening = Math.Min(90, gap + 1000 * (firstMax - secondMin));
+        double maximumOpening = Math.Min(PikaProtocol.MaximumOpeningMm, gap + 1000 * (firstMax - secondMin));
         double opening = gap + 1000 * (q7 - q8), commandOpening = gap + 2000 * gripCtrl;
         if (maximumOpening <= 0 || opening < -.25 || opening > maximumOpening + .25 || commandOpening < -.0001 || commandOpening > maximumOpening + .0001)
-            throw new InvalidOperationException("Simulated Pika opening is outside its 0–90 mm model range.");
+            throw new InvalidOperationException($"Simulated Pika opening is outside its {PikaProtocol.MinimumOpeningMm}–{PikaProtocol.MaximumOpeningMm} mm model range.");
         Signature(signature, jointPrefix + "gripper", firstMin, firstMax, secondMin, secondMax, gripMin, gripMax, NumberAt(grip, "gain", 0), NumberAt(grip, "bias", 2));
         return new SimulationFollowSample
         {
@@ -256,7 +257,7 @@ public static class SimulationFollowPolicy
     private static void ValidateHardware(SimulationFollowHardware hardware)
     {
         if (string.IsNullOrWhiteSpace(hardware.DeviceId) || hardware.Generation <= 0 || !hardware.FeedbackFresh || !hardware.LimitsFresh || !hardware.GripperFresh ||
-            hardware.JointDegrees.Count != 6 || hardware.JointDegrees.Any(v => !double.IsFinite(v)) || !double.IsFinite(hardware.GripperOpeningMm) || hardware.GripperOpeningMm < 0 || hardware.GripperOpeningMm > 90 || hardware.JointLimits.Count != 6)
+            hardware.JointDegrees.Count != 6 || hardware.JointDegrees.Any(v => !double.IsFinite(v)) || !double.IsFinite(hardware.GripperOpeningMm) || !PikaProtocol.ValidOpening(hardware.GripperOpeningMm) || hardware.JointLimits.Count != 6)
             throw new InvalidOperationException("Fresh physical arm, reported limits and assigned Pika measurements are required.");
         for (int i = 1; i <= 6; i++)
         {

@@ -8,7 +8,7 @@ public sealed partial class PipersPlugin
     private bool sheetMarkersDirty = true;
     private long sheetMarkersAt;
     private bool sheetMarkersPublished;
-    private string sheetSaveStatus = "Measurements save automatically as you type.";
+    internal string sheetSaveStatus = "Measurements save automatically as you type.";
 
     // Reading a visual reference must not fabricate any physical confirmation.
     private async Task<CalibrationPlacement> ReadSheetReference(CancellationToken cancellation)
@@ -34,7 +34,7 @@ public sealed partial class PipersPlugin
         return root;
     }
 
-    private CalibrationPoint? SheetPoint(int row)
+    internal CalibrationPoint? SheetPoint(int row)
     {
         try
         {

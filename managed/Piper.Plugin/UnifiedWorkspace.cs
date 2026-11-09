@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using LuckyEngine.PluginSdk;
+using LuckyRobots.Piper.Pika;
 
 namespace LuckyRobots.Piper.Plugin;
 
@@ -75,7 +76,7 @@ public sealed partial class PipersPlugin
     private string pikaInventoryMessage = "Discover connected grippers";
     private long pikaInventoryAt;
 
-    private RobotReadiness Readiness(JsonObject? device) => RobotReadiness.Inspect(device, approved,
+    internal RobotReadiness Readiness(JsonObject? device) => RobotReadiness.Inspect(device, approved,
         ActiveProfile.PikaDevice.Length == 0 || PikaMatchesProfile() && pikaOwned && state?["pika"]?["fresh"]?.GetValue<bool>() == true &&
             state["pika"]?["enabled"]?.GetValue<bool>() == true && state["pika"]?["armed"]?.GetValue<bool>() == true,
         GroupFollowIncludes(ActiveProfile.Id), state?["motion"]?["active"]?.GetValue<bool>() == true,
@@ -83,7 +84,7 @@ public sealed partial class PipersPlugin
 
     private bool PrimaryActionAvailable => !switchingProfile && CurrentRecovery is null && !GroupFollowActive;
 
-    private Task PrimaryRobotAction(CancellationToken cancellation) => RunPrimaryAction(RunPrimaryRobotAction, cancellation);
+    internal Task PrimaryRobotAction(CancellationToken cancellation) => RunPrimaryAction(RunPrimaryRobotAction, cancellation);
 
     private async Task RunPrimaryAction(Func<CancellationToken, Task> action, CancellationToken cancellation)
     {
@@ -215,7 +216,7 @@ public sealed partial class PipersPlugin
         }
     }
 
-    private void AddUnifiedWorkspacePatches(Dictionary<string, JsonObject> patches, JsonObject? device)
+    internal void AddUnifiedWorkspacePatches(Dictionary<string, JsonObject> patches, JsonObject? device)
     {
         var readiness = Readiness(device);
         bool controls = Navigation.Page == WorkspacePage.Controls;
@@ -266,7 +267,7 @@ public sealed partial class PipersPlugin
         pikaInventoryAt = Stopwatch.GetTimestamp();
     }
 
-    private Widget GlobalRobotsSettings()
+    internal Widget GlobalRobotsSettings()
     {
         var robots = SceneRobotBindings.Options(scene?["robots"]?.AsArray().OfType<JsonObject>() ?? []);
         settingsRobotOptions = robots;
@@ -322,7 +323,7 @@ public sealed partial class PipersPlugin
         return [..pikaDevices, new JsonObject { ["device"] = profile.PikaDevice, ["distribution"] = profile.WslDistribution, ["name"] = "Saved Pika", ["available"] = false }];
     }
 
-    private async Task GlobalSettingsEvent(string action, JsonElement value, CancellationToken cancellation)
+    internal async Task GlobalSettingsEvent(string action, JsonElement value, CancellationToken cancellation)
     {
         if (action == "ghosts")
         {
@@ -350,7 +351,8 @@ public sealed partial class PipersPlugin
                 var usb = pikaDevices.SingleOrDefault(d => d["device"]?.GetValue<string>() == before.PikaDevice)
                     ?? throw new InvalidOperationException("Choose a detected USB gripper first.");
                 string instance = usb["windows_instance_id"]?.GetValue<string>() ?? "";
-                if (!OperatingSystem.IsWindows() || !System.Text.RegularExpressions.Regex.IsMatch(instance, @"^USB\\VID_1A86&PID_7522\\[^\r\n]+$"))
+                if (!OperatingSystem.IsWindows() || !instance.StartsWith(PikaProtocol.WindowsInstanceIdPrefix, StringComparison.OrdinalIgnoreCase) ||
+                    instance.Length == PikaProtocol.WindowsInstanceIdPrefix.Length || instance.AsSpan().IndexOfAny('\r', '\n') >= 0)
                     throw new InvalidOperationException("Only a detected Pika USB device can be shared with WSL.");
                 string installer = Path.Combine(engine.Start.PackageDirectory, "tools", "Setup-PikaUsb.ps1");
                 if (!File.Exists(installer)) throw new InvalidOperationException("Update the plugin package to include its USB setup helper.");

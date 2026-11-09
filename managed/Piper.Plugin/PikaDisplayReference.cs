@@ -33,7 +33,7 @@ public sealed record PikaClosedDisplayReference(int Schema, string ProfileId, st
             return "Waiting for fresh connected gripper feedback.";
         if (armMoving || pika["pending"]?.GetValue<bool>() == true ||
             pika["telemetry"]?["motor"]?["Speed"] is not JsonValue speed || !speed.TryGetValue<double>(out double velocity) ||
-            !double.IsFinite(velocity) || Math.Abs(velocity) > .02)
+            !double.IsFinite(velocity) || Math.Abs(velocity) > PikaProtocol.StationarySpeedRadiansPerSecond)
             return "Wait until the arm and gripper are stationary.";
         if (!new PikaClosedDisplayReference(1, profile, device, distribution, angle, DateTimeOffset.UtcNow).Valid)
             return "The encoder is too far from nominal closed (more than 5 mm). Check the gripper instead of redefining a large offset.";
@@ -77,8 +77,8 @@ public sealed record PikaClosedDisplayReference(int Schema, string ProfileId, st
 
 public sealed partial class PipersPlugin
 {
-    private string pikaDisplayReferenceKey = "";
-    private PikaClosedDisplayReference? pikaDisplayReference;
+    internal string pikaDisplayReferenceKey = "";
+    internal PikaClosedDisplayReference? pikaDisplayReference;
     private string PikaReferencePath => PikaClosedDisplayReference.PathFor(engine.Start.SettingsDirectory, ActiveProfile.Id);
 
     private void LoadPikaDisplayReference()

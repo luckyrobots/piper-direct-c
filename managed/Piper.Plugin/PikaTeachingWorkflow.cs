@@ -20,7 +20,7 @@ public sealed partial class PipersPlugin
     /// </code>
     /// A transition clears any pending confirmation, and a saved path clears the
     /// unsaved report, so neither combination can be represented.</summary>
-    private sealed record PikaTeachingState(PikaTeachingRecorder? Recorder = null, PikaTeachingReport? Unsaved = null, Task? SaveWorker = null,
+    internal sealed record PikaTeachingState(PikaTeachingRecorder? Recorder = null, PikaTeachingReport? Unsaved = null, Task? SaveWorker = null,
         string? ConfirmationIdentity = null, string Path = "", string DisableRequest = "", bool Transition = false,
         string Status = DefaultPikaTeachingStatus)
     {
@@ -35,13 +35,13 @@ public sealed partial class PipersPlugin
 
     private readonly Dictionary<PikaTeachingWorkspaceKey, PikaTeachingState> pikaTeachingWorkspaces = new();
     private readonly object pikaTeachingSync = new();
-    private PikaTeachingState pikaTeaching = new();
+    internal PikaTeachingState pikaTeaching = new();
 
     private PikaTeachingState PikaTeaching { get { lock (pikaTeachingSync) return pikaTeaching; } }
     private void UpdatePikaTeaching(Func<PikaTeachingState, PikaTeachingState> change) { lock (pikaTeachingSync) pikaTeaching = change(pikaTeaching); }
     private string pikaTeachingDisableRequest => PikaTeaching.DisableRequest;
     private bool PikaTeachingRecording => PikaTeaching.Recorder is not null;
-    private bool PikaTeachingControlsVisible
+    internal bool PikaTeachingControlsVisible
     {
         get
         {
@@ -54,7 +54,7 @@ public sealed partial class PipersPlugin
     private static PikaTeachingWorkspaceKey PikaTeachingKey(RobotProfile profile) =>
         new(profile.Id, profile.CanDeviceId, profile.PikaDevice, profile.PikaDistribution);
 
-    private void StorePikaTeachingWorkspace(RobotProfile profile)
+    internal void StorePikaTeachingWorkspace(RobotProfile profile)
     {
         lock (pikaTeachingSync)
         {
@@ -68,7 +68,7 @@ public sealed partial class PipersPlugin
         }
     }
 
-    private void RestorePikaTeachingWorkspace(RobotProfile profile)
+    internal void RestorePikaTeachingWorkspace(RobotProfile profile)
     {
         lock (pikaTeachingSync)
         {
@@ -85,7 +85,7 @@ public sealed partial class PipersPlugin
             : recording ? "Arm hand guiding has ended; the current observation session is finishing. No recording or replay was restarted."
                 : "Arm hand guiding has ended. Recording is stopped; no recording or replay was restarted.");
 
-    private Widget PikaTeachingControls() => Widget.Column("teaching.pika",
+    internal Widget PikaTeachingControls() => Widget.Column("teaching.pika",
         Widget.Label("teaching.pika.title", "Arm + Pika hand guiding") with { Appearance = "heading", Height = 28 },
         Widget.Label("teaching.pika.status", PikaTeaching.Status) with { Height = 36, Hint = PikaTeaching.Status },
         Widget.Row("teaching.pika.actions",
@@ -195,10 +195,10 @@ public sealed partial class PipersPlugin
             throw new InvalidOperationException("Fresh matching disabled-jaw feedback and an updated backend are required. No enable command was sent.");
         if (pika["telemetry"]?["motor"]?["Position"] is not JsonValue raw || !raw.TryGetValue<double>(out double angle) || !double.IsFinite(angle) ||
             pika["telemetry"]?["motor"]?["Speed"] is not JsonValue measuredSpeed || !measuredSpeed.TryGetValue<double>(out double speed) || !double.IsFinite(speed) ||
-            Math.Abs(speed) > OrderedSimulationExecution.StationaryGripperSpeed)
+            Math.Abs(speed) > PikaProtocol.StationarySpeedRadiansPerSecond)
             throw new InvalidOperationException("Hold the Pika jaws still before choosing Hold jaws here.");
         if (!PikaMeasuredHoldResume.ValidMeasuredAngle(angle))
-            throw new InvalidOperationException("The measured raw jaw opening is outside the supported 0–90 mm hold range (with up to 1 mm closed-reading noise). Move the free jaws back into range by hand. No motor command was sent.");
+            throw new InvalidOperationException($"The measured raw jaw opening is outside the supported {PikaProtocol.MinimumOpeningMm}–{PikaProtocol.MaximumOpeningMm} mm hold range (with up to 1 mm closed-reading noise). Move the free jaws back into range by hand. No motor command was sent.");
         string expectedToken = token, expectedProfile = ActiveProfile.Id;
         string expectedDevice = device["id"]!.GetValue<string>(); long generation = device["generation"]!.GetValue<long>();
         long permissionEpoch = CommandAuthority.Epoch;
@@ -366,7 +366,7 @@ public sealed partial class PipersPlugin
         if (saving is not null) await saving.WaitAsync(cancellation);
     }
 
-    private void AddPikaTeachingPatches(Dictionary<string, JsonObject> patches, JsonObject? device)
+    internal void AddPikaTeachingPatches(Dictionary<string, JsonObject> patches, JsonObject? device)
     {
         lock (pikaTeachingSync) AddPikaTeachingPatchesLocked(patches, device, pikaTeaching);
     }

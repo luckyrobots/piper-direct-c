@@ -10,14 +10,14 @@ public sealed partial class PipersPlugin
     private RobotProfile[] SelectedFollowProfiles() => RobotProfileRouting.Capture(preferences).Robots!
         .Where(p => p.FollowSimulationSelected).ToArray();
 
-    private FollowPreparationReport GroupPreparation(RobotProfile[]? selected = null, TelemetryReceipt? receipt = null, JsonObject? discovered = null)
+    internal FollowPreparationReport GroupPreparation(RobotProfile[]? selected = null, TelemetryReceipt? receipt = null, JsonObject? discovered = null)
     {
         var report = FollowPreparationReport.Inspect(selected ?? SelectedFollowProfiles(), receipt ?? telemetry.Latest, token, owner, controlApprovals,
             discovered ?? scene, followClock.GetTimestamp());
         return GroupStartConflict() is { } conflict ? report with { Issues = [.. report.Issues, new("", "", "control-busy", conflict)] } : report;
     }
 
-    private Widget GroupFollowControls()
+    internal Widget GroupFollowControls()
     {
         var preparation = GroupPreparation();
         string status = GroupStatusLabel(preparation);

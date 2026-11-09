@@ -200,7 +200,7 @@ public sealed partial class PipersPlugin
                 var lane = group.Lanes[i]; var observation = observations[i];
                 var hardware = LaneHardware(group, lane, observation);
                 bool atPose = SimulationFollowPolicy.MatchesStart(lane.First!.CommandDegrees, hardware.JointDegrees, lane.First.CommandOpeningMm, hardware.GripperOpeningMm) &&
-                    !observation.Motion.Active && observation.PikaIdle && Math.Abs(observation.PikaSpeed) <= OrderedSimulationExecution.StationaryGripperSpeed &&
+                    !observation.Motion.Active && observation.PikaIdle && Math.Abs(observation.PikaSpeed) <= PikaProtocol.StationarySpeedRadiansPerSecond &&
                     observation.ArmStationary(group.Clock.GetTimestamp());
                 double feedback = observation.PikaFeedbackTime;
                 if (!atPose) settled[i] = default;

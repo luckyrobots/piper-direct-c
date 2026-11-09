@@ -228,7 +228,7 @@ public sealed partial class PipersPlugin
         }
     }
 
-    private void AddProfilePatches(Dictionary<string, JsonObject> patches)
+    internal void AddProfilePatches(Dictionary<string, JsonObject> patches)
     {
         foreach (var profile in preferences.Robots!)
         {

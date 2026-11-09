@@ -1,5 +1,6 @@
 using System.Globalization;
 using System.Text.Json.Nodes;
+using LuckyRobots.Piper.Pika;
 
 namespace LuckyRobots.Piper.Plugin;
 
@@ -24,9 +25,9 @@ public sealed record OrderedSimulationFrame(ulong Cursor, long SceneTimeNs, doub
             throw new InvalidOperationException("A source frame cursor or clock is invalid.");
         double physics = Number(frame, "mujocoTimeSeconds"), command = Number(frame, "commandOpeningMm"), measured = Number(frame, "measuredOpeningMm");
         long ordinal = frame["episodeOrdinal"]?.GetValue<long>() ?? 0;
-        if (physics < 0 || sceneTime < 0 || command is < -.000001 or > 90.000001 || measured is < -.25 or > 90.25 || ordinal < 0)
+        if (physics < 0 || sceneTime < 0 || command is < PikaProtocol.MinimumOpeningMm - .000001 or > PikaProtocol.MaximumOpeningMm + .000001 || measured is < PikaProtocol.MinimumOpeningMm - .25 or > PikaProtocol.MaximumOpeningMm + .25 || ordinal < 0)
             throw new InvalidOperationException("A source frame clock, episode or gripper range is invalid.");
-        return new(cursor, sceneTime, physics, Joints(frame, "commandJoints"), Joints(frame, "measuredJoints"), Math.Clamp(command, 0, 90), Math.Clamp(measured, 0, 90),
+        return new(cursor, sceneTime, physics, Joints(frame, "commandJoints"), Joints(frame, "measuredJoints"), Math.Clamp(command, PikaProtocol.MinimumOpeningMm, PikaProtocol.MaximumOpeningMm), Math.Clamp(measured, PikaProtocol.MinimumOpeningMm, PikaProtocol.MaximumOpeningMm),
             Text(frame, "episodeId"), ordinal, Text(frame, "phase"), frame["episodeComplete"]?.GetValue<bool>() == true,
             frame["episodeSucceeded"]?.GetValue<bool>() == true);
     }
@@ -105,7 +106,7 @@ public sealed class OrderedSimulationPhase
             var frame = frames[row];
             if (frame.CommandDegrees.Count != 6 || frame.MeasuredDegrees.Count != 6 || frame.MeasuredDegrees.Any(q => !double.IsFinite(q)) ||
                 !double.IsFinite(frame.PhysicsTimeSeconds) || frame.PhysicsTimeSeconds < 0 || row > 0 && frame.PhysicsTimeSeconds < frames[row - 1].PhysicsTimeSeconds ||
-                !double.IsFinite(frame.CommandOpeningMm) || frame.CommandOpeningMm is < 0 or > 90)
+                !PikaProtocol.ValidOpening(frame.CommandOpeningMm))
                 throw new InvalidOperationException("A phase has invalid or unordered source data.");
             for (int joint = 0; joint < 6; joint++)
                 if (!double.IsFinite(frame.CommandDegrees[joint]) || frame.CommandDegrees[joint] < limits[joint].MinimumDegrees ||

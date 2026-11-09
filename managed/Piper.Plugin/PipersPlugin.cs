@@ -38,10 +38,10 @@ public sealed partial class PipersPlugin : ILuckyPlugin
     internal string uiActionError = "";
     internal RobotCommandAuthority CommandAuthority { get; } = new();
     internal volatile bool approved;
-    private volatile RobotLink? link;
-    private volatile bool linkCommandsEnabled;
+    internal volatile RobotLink? link;
+    internal volatile bool linkCommandsEnabled;
     private double? linkErrorDegrees;
-    private JsonObject? scene;
+    internal JsonObject? scene;
     private Task? worker;
     internal UiEventDispatch? uiEvents;
     private readonly CameraPreviewSlots<CameraCapture> cameras = new();
@@ -121,7 +121,7 @@ public sealed partial class PipersPlugin : ILuckyPlugin
         return Device(expected.Device, expected.Generation, expected.Backend, sourceReceipt);
     }
 
-    private Task Watch(CancellationToken cancellation) => Task.WhenAll(
+    internal Task Watch(CancellationToken cancellation) => Task.WhenAll(
         ReadTelemetry(cancellation), ProcessTelemetry(cancellation),
         ArmHeartbeats(cancellation), PikaHeartbeats(cancellation), MonitorAssignedPikas(cancellation));
 
@@ -215,7 +215,7 @@ public sealed partial class PipersPlugin : ILuckyPlugin
         if (resetConfirmed && action == "verify-reset") body["reset_completed"] = true;
     }
 
-    private long ControlInputEpoch => CommandAuthority.Epoch + Interlocked.Read(ref groupControlEpoch);
+    internal long ControlInputEpoch => CommandAuthority.Epoch + Interlocked.Read(ref groupControlEpoch);
 
     public async Task HandleEventAsync(UiEvent input, CancellationToken cancellation)
     {
@@ -285,7 +285,9 @@ public sealed partial class PipersPlugin : ILuckyPlugin
             message = "Recovery is in progress. STOP cancels the remaining stages.";
             await Update(cancellation); return;
         }
-        await CancelPikaMonitorAttempt();
+        // STOP must not wait behind a WSL startup; cancelling also defers the next
+        // retry so this event acquires the command gate first.
+        await pikaMonitor.CancelAsync();
         await commands.WaitAsync(cancellation);
         try
         {
@@ -477,7 +479,7 @@ public sealed partial class PipersPlugin : ILuckyPlugin
             {
                 if (!PikaDisplayOpening(pika!, out double currentOpening))
                     throw new InvalidOperationException("Waiting for a valid gripper opening. If the physical jaws are closed, set their display reference first.");
-                opening = Math.Clamp(currentOpening + (id == "pika.plus" ? 1 : -1), 0, 90);
+                opening = Math.Clamp(currentOpening + (id == "pika.plus" ? 1 : -1), PikaProtocol.MinimumOpeningMm, PikaProtocol.MaximumOpeningMm);
             }
             if (epoch != CommandAuthority.Epoch || profile != ActiveProfile)
                 throw new InvalidOperationException("Control permission changed before the gripper target was sent.");
@@ -713,9 +715,7 @@ public sealed partial class PipersPlugin : ILuckyPlugin
             await Quietly(StopHeightCheck(markerTimeout.Token), "Height guide");
             await Quietly(ClearWizardHighlight(markerTimeout.Token), "Calibration marker");
         }
-        pikaMonitorStopping = true;
-        await Quietly(CancelPikaMonitorAttempt(), "Pika monitor");
-        pikaMonitorCancellation?.Dispose();
+        await Quietly(pikaMonitor.StopAsync(), "Pika monitor");
         await Quietly(ct => FinishPikaTeaching("Plugin closed", ct), TimeSpan.FromSeconds(1), "Pika teaching");
         await Quietly(HoldFollowing, TimeSpan.FromSeconds(1), "Following");
         // Keep telemetry/heartbeats running until this session's Pika disable is

@@ -12,7 +12,7 @@ public sealed partial class PipersPlugin
         ? calibrationSamples.FirstOrDefault(s => s.HeldOut)
         : calibrationSamples.Where(s => !s.HeldOut).ElementAtOrDefault(row);
 
-    private void LoadSheetRows()
+    internal void LoadSheetRows()
     {
         // The saved report is authoritative after a correction commits. A crash
         // before the draft write must not restore old ruler values in markers.

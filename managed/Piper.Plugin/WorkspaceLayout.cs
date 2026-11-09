@@ -1,5 +1,6 @@
 using System.Text.Json.Nodes;
 using LuckyEngine.PluginSdk;
+using LuckyRobots.Piper.Pika;
 
 namespace LuckyRobots.Piper.Plugin;
 
@@ -36,7 +37,7 @@ public sealed partial class PipersPlugin
         return Widget.Row("workspace", RobotSidebar(), content) with { Spacing = 0 };
     }
 
-    private Widget ControlsPage()
+    internal Widget ControlsPage()
     {
         var widgets = new List<Widget> {
             new Widget("checkbox", "group.follow.selected") { Text = "Follow simulation with this robot", Value = ActiveProfile.FollowSimulationSelected ? 1 : 0,
@@ -46,7 +47,7 @@ public sealed partial class PipersPlugin
             Widget.Row("cameras", Camera("gripper", "Gripper fisheye"), Camera("depth", "Depth")) with { Spacing = 14 },
             Widget.Row("pika", Widget.Label("pika.name", "Pika") with { Width = 28 },
                 Widget.Label("pika.value", "— mm") with { Width = 64, Appearance = "numeric", Hint = "Measured jaw opening. Enabled together with this robot." },
-                Widget.Button("pika.minus", "−") with { Width = 28 }, Widget.Slider("pika.target", 0, 0, 90, .1) with { Enabled = false, Hint = "Absolute opening, 0–90 mm" },
+                Widget.Button("pika.minus", "−") with { Width = 28 }, Widget.Slider("pika.target", PikaProtocol.MinimumOpeningMm, PikaProtocol.MinimumOpeningMm, PikaProtocol.MaximumOpeningMm, .1) with { Enabled = false, Hint = $"Absolute opening, {PikaProtocol.MinimumOpeningMm}–{PikaProtocol.MaximumOpeningMm} mm" },
                 Widget.Button("pika.plus", "+") with { Width = 28 }, Widget.Button("pika.zero", "0") with { Width = 36 }),
             Widget.Row("joint.headings", Widget.Label("joint.name.heading", "") with { Width = 28, Appearance = "muted" },
                 Widget.Label("joint.measured.heading", "Angle °") with { Width = 64, Appearance = "muted" },
