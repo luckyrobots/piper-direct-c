@@ -753,6 +753,7 @@ public sealed partial class PipersPlugin : ILuckyPlugin
         }
         await shutdown.CancelAsync();
         if (wizardHighlightMaintenance is not null) { try { await wizardHighlightMaintenance; } catch (OperationCanceledException) { } }
+        if (heightMaintenance is not null) { try { await heightMaintenance; } catch (Exception error) { Trace.TraceWarning("Height guide maintenance shutdown: {0}", error.Message); } }
         if (calibrationWorker is not null) { try { await calibrationWorker; } catch (OperationCanceledException) { } }
         try { await cameraRetirement; }
         catch (Exception error) { Trace.TraceWarning("Camera shutdown: {0}", error.Message); }
