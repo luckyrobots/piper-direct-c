@@ -2,27 +2,11 @@ using System.Text.Json.Nodes;
 
 namespace LuckyRobots.Piper.Plugin;
 
-/// <summary>Plugin-D teaching ownership for the tracked CAN device and generation:
-/// None → ObservedWithoutApproval | ObservedAfterApproval when the physical controller
-/// takes the arm, recording whether this session's control approval existed then.
-/// It returns to None when CAN control is restored, on a connection or device change,
-/// and on STOP or a verified recovery.</summary>
-internal enum TeachingOwnership { None, ObservedWithoutApproval, ObservedAfterApproval }
-
 public sealed partial class PipersPlugin
 {
     internal TeachingState teaching = TeachingState.Inspect(null);
-    private string teachingDevice = "";
-    private long teachingGeneration;
-    internal TeachingOwnership teachingOwnership;
-
-    /// <summary>Records the hand-over to physical teaching once, keeping the approval that existed then.</summary>
-    private void ObserveTeachingOwnership()
-    {
-        if (teachingOwnership == TeachingOwnership.None)
-            teachingOwnership = approved ? TeachingOwnership.ObservedAfterApproval : TeachingOwnership.ObservedWithoutApproval;
-    }
-    private readonly TeachingReturnGate teachingReturnGate = new();
+    /// <summary>Plugin-D: teaching ownership, its scope and the automatic return.</summary>
+    internal readonly TeachingSession teachingSession = new();
     internal JsonObject? acknowledgedScenePose;
 
     private async Task ObserveTeaching(CancellationToken cancellation)
@@ -31,19 +15,15 @@ public sealed partial class PipersPlugin
         JsonObject? device = null;
         try { device = Device(); } catch (InvalidOperationException) { }
         TeachingState next = TeachingState.Inspect(device);
-        string currentDevice = device?["id"]?.GetValue<string>() ?? "";
-        long generation = device?["generation"]?.GetValue<long>() ?? 0;
-        if (teachingDevice != currentDevice || teachingGeneration != generation)
+        TeachingScope? scope = device is null ? null
+            : new(device["id"]?.GetValue<string>() ?? "", device["generation"]?.GetValue<long>() ?? 0);
+        teachingSession.Track(scope);
+        if (next.BlocksTargets && scope is { } observed)
         {
-            teachingOwnership = TeachingOwnership.None;
-            teachingDevice = currentDevice; teachingGeneration = generation;
-        }
-        if (next.BlocksTargets)
-        {
-            bool ownershipChanged = teachingOwnership == TeachingOwnership.None || next.Active && next.Phase != teaching.Phase;
+            bool ownershipChanged = !teachingSession.Current.Owned || next.Active && next.Phase != teaching.Phase;
             if (!CommandAuthority.TryInEpoch(observedEpoch, () =>
             {
-                ObserveTeachingOwnership();
+                teachingSession.ObserveHandOver(observed, approved);
                 approved = linkCommandsEnabled = false;
             })) return;
             // The controller has already yielded ownership to its physical teaching
@@ -58,15 +38,15 @@ public sealed partial class PipersPlugin
             }
             if (next.Phase != teaching.Phase) message = next.Label + ". " + next.NextStep;
         }
-        else if (!ResumeControlsBusy && teachingOwnership != TeachingOwnership.None && device is not null && TeachingCanResume(device))
+        else if (!ResumeControlsBusy && teachingSession.Current.Owned && device is not null && TeachingCanResume(device))
         {
             // Restore only a previous UI approval. This sends no enable, reset,
             // replay or position packet, and a new gesture is still required.
             if (!CommandAuthority.TryInEpoch(observedEpoch, () =>
             {
-                approved = teachingOwnership == TeachingOwnership.ObservedAfterApproval;
+                approved = teachingSession.Current.RestoresApproval;
                 linkCommandsEnabled = approved && link is not null;
-                teachingOwnership = TeachingOwnership.None;
+                teachingSession.Release();
                 message = approved ? "CAN control restored · previous targets discarded · measured scene tracking continues"
                     : "Teaching ended and CAN control is healthy. Use Enable robot when ready; no movement was resumed.";
             })) return;
@@ -84,9 +64,8 @@ public sealed partial class PipersPlugin
                 string expectedDevice = current["id"]!.GetValue<string>();
                 long expectedGeneration = current["generation"]!.GetValue<long>();
                 TeachingState currentTeaching = TeachingState.Inspect(current);
-                if (!GroupFollowActive && CurrentRecovery is null && teachingReturnGate.Observe(currentTeaching, teachingOwnership == TeachingOwnership.ObservedAfterApproval,
-                    Navigation.Page == WorkspacePage.Controls && !switchingProfile,
-                    expectedDevice + ":" + expectedGeneration + ":" + expectedToken))
+                if (!GroupFollowActive && CurrentRecovery is null && teachingSession.ObserveReturn(new(expectedDevice, expectedGeneration),
+                    currentTeaching, Navigation.Page == WorkspacePage.Controls && !switchingProfile))
                 {
                     attempting = true;
                     await Command("teach-return", currentTeaching.ReturnFlags(), cancellation, CommandPurpose.TeachingReturn,
@@ -97,7 +76,7 @@ public sealed partial class PipersPlugin
             catch (InvalidOperationException error)
             {
                 if (attempting) message = "Automatic CAN return paused: " + error.Message + " Use Return to CAN when ready.";
-                else teachingReturnGate.Invalidate();
+                else teachingSession.InvalidateReturn();
             }
             finally { commands.Release(); }
         }

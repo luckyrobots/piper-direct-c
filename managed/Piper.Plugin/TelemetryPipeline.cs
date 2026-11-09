@@ -98,11 +98,10 @@ public sealed partial class PipersPlugin
         CommandAuthority.Revoke(forgetApproval, () =>
         {
             approved = linkCommandsEnabled = false;
-            teachingOwnership = TeachingOwnership.None;
+            teachingSession.Release();
         }, forgetAllApprovals);
         CurrentRecovery?.Cancel();
         CancelGroupSimulationFollowingInput(reason);
-        teachingReturnGate.Invalidate();
         StopViewportDrag();
         acknowledgedScenePose = null; linkErrorDegrees = null;
         if (clearLink) link = null;
@@ -142,7 +141,7 @@ public sealed partial class PipersPlugin
             // Keep the old receipt from granting control under the new epoch
             // between invalidation and publication of the replacement frame.
             telemetry.Disconnect();
-            DisarmTelemetryTargets("Controller session or assigned CAN connection changed", clearLink: true); // Also clears teachingOwnership.
+            DisarmTelemetryTargets("Controller session or assigned CAN connection changed", clearLink: true); // Also releases the teaching session.
             if (backendChanged) ReleasePikaRole();
         }
         token = receipt.BackendToken;
@@ -160,15 +159,15 @@ public sealed partial class PipersPlugin
         {
             // Observe the transition on the reader even if the editor is busy,
             // so a short teaching interval cannot leave an old drag armed.
-            if (teachingOwnership == TeachingOwnership.None)
+            var linkedScope = new TeachingScope(linked.DeviceId, linked.Generation);
+            if (teachingSession.Current is not { Owned: true } owned || owned.Scope != linkedScope)
             {
                 telemetry.Disconnect();
                 CommandAuthority.Revoke(revokeLocalApproval: () =>
                 {
-                    ObserveTeachingOwnership();
+                    teachingSession.ObserveHandOver(linkedScope, approved);
                     approved = linkCommandsEnabled = false;
                 });
-                teachingDevice = linked.DeviceId; teachingGeneration = linked.Generation;
             }
             approved = linkCommandsEnabled = false;
             StopViewportDrag();

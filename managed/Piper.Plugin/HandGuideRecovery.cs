@@ -261,7 +261,7 @@ public sealed partial class PipersPlugin
             if (device["recovery_required"]?.GetValue<bool>() != true && TeachingCanResume(device))
             {
                 RememberControlApproval(expectedPermission, activate: true);
-                teachingOwnership = TeachingOwnership.None;
+                teachingSession.Release();
                 CancelHandGuideRecovery();
                 message = "Ready · holding the hand-guided pose · interrupted movement discarded";
             }

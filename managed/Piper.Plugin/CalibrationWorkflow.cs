@@ -144,7 +144,7 @@ public sealed partial class PipersPlugin
     {
         RequireCalibrationIdle();
         approved = linkCommandsEnabled = false;
-        if (teachingOwnership == TeachingOwnership.ObservedAfterApproval) teachingOwnership = TeachingOwnership.ObservedWithoutApproval;
+        teachingSession.WithdrawApproval();
         PauseSceneFollowing();
         if (link is { } current) await engine.RequestAsync("robot.teleoperate", new JsonObject { ["sceneId"] = current.SceneId, ["entityId"] = current.EntityId, ["enabled"] = false }, cancellation);
     }
