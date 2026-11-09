@@ -87,7 +87,13 @@ static bool persist(struct controller *c)
                                                      verified recovery
      "kind":  why it is latched (intent, stop, obstruction, power, reset); empty
               when clear. Recovery eligibility uses kind, never message text.
-     "stop_event_active": unacknowledged STOP evidence; it implies a latch.
+     "reason": the operator-facing text of the latch; empty when clear.
+     "kind_reason": the reason that "kind" was set for. This build writes
+              reason and kind_reason together, so a mismatch means an older
+              build rewrote reason and kind must be derived again.
+     "stop_event": the first STOP's evidence (reason, kind, joints, transport).
+     "stop_event_active": unacknowledged STOP evidence; it implies a latch,
+              so normalizing a clear record with active evidence latches it.
    A separate legacy motion-stops.json entry also blocks until acknowledged.
    The "blocked"/"reset_pending" booleans are still written so an older build
    reading this file stays blocked. Records written before "state"/"kind"
@@ -122,6 +128,8 @@ static const char *legacy_kind(const cJSON *r)
    fields, so after a rollback and upgrade "state"/"kind" can be stale.
    - state: any disagreement with the booleans resolves to the stricter
      reading (latched if either side says so, reset-pending likewise).
+     Active STOP evidence also says latched, so "stop_event_active" without
+     a latch cannot survive normalization.
    - kind: "kind_reason" records the reason kind was set for. A reason that
      no longer matches it was written by an older build, so kind is derived
      again from that text. Rewording messages in code never trips this,
@@ -130,7 +138,7 @@ static void record_normalize(cJSON *r)
 {
     const char *state=text_field(r,"state");
     bool known=record_state_valid(state);
-    bool latched=yes(r,"blocked")||yes(r,"reset_pending")||(known&&strcmp(state,RECORD_CLEAR));
+    bool latched=yes(r,"blocked")||yes(r,"reset_pending")||yes(r,"stop_event_active")||(known&&strcmp(state,RECORD_CLEAR));
     bool pending=yes(r,"reset_pending")||(known&&!strcmp(state,RECORD_RESET_PENDING));
     const char *derived=!latched?RECORD_CLEAR:pending?RECORD_RESET_PENDING:RECORD_LATCHED;
     bool state_stale=!known||strcmp(state,derived)||yes(r,"blocked")!=latched||yes(r,"reset_pending")!=pending;
@@ -815,8 +823,8 @@ static bool controller_init_devices(struct controller *c,bool simulation,unsigne
     cJSON *saved_record;
     cJSON_ArrayForEach(saved_record,field(c->saved,"devices")) {
         if (!cJSON_IsObject(saved_record)) return false;
-        const char *keys[]={"blocked","reset_pending"};
-        for (unsigned i=0;i<2;++i) if (field(saved_record,keys[i])&&!cJSON_IsBool(field(saved_record,keys[i]))) return false;
+        const char *keys[]={"blocked","reset_pending","stop_event_active"};
+        for (unsigned i=0;i<3;++i) if (field(saved_record,keys[i])&&!cJSON_IsBool(field(saved_record,keys[i]))) return false;
         if (field(saved_record,"state")&&(!cJSON_IsString(field(saved_record,"state"))||!record_state_valid(text_field(saved_record,"state")))) return false;
         if (field(saved_record,"kind")&&!cJSON_IsString(field(saved_record,"kind"))) return false;
         record_normalize(saved_record);

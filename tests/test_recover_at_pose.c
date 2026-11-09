@@ -143,6 +143,19 @@ int main(void)
     cJSON_ReplaceItemInObject(record(&c),"reset_pending",cJSON_CreateTrue());
     cJSON_Delete(controller_state(&c,"rollback-test"));
     CHECK(blocked(&c)&&!strcmp(cJSON_GetStringValue(cJSON_GetObjectItem(record(&c),"state")),"reset_pending")); close_fixture(&c,directory);
+    /* C-C: active STOP evidence implies a latch. A record cleared by an older
+       build that left stop_event_active set normalizes to latched, with kind
+       derived again from its text (here none, so the stricter "stop"). */
+    fixture(&c,directory); physical_cycle(&c);
+    cJSON_ReplaceItemInObject(record(&c),"state",cJSON_CreateString("clear"));
+    cJSON_ReplaceItemInObject(record(&c),"blocked",cJSON_CreateFalse());
+    cJSON_ReplaceItemInObject(record(&c),"reset_pending",cJSON_CreateFalse());
+    cJSON_ReplaceItemInObject(record(&c),"reason",cJSON_CreateString(""));
+    CHECK(cJSON_IsTrue(cJSON_GetObjectItem(record(&c),"stop_event_active")));
+    cJSON_Delete(controller_state(&c,"rollback-test"));
+    CHECK(blocked(&c)&&!strcmp(cJSON_GetStringValue(cJSON_GetObjectItem(record(&c),"state")),"latched"));
+    CHECK(!strcmp(cJSON_GetStringValue(cJSON_GetObjectItem(record(&c),"kind")),"stop"));
+    action(&c,"recover-at-pose",409); CHECK(blocked(&c)); close_fixture(&c,directory);
     /* A record written before "kind" existed derives it once from its text. */
     fixture(&c,directory); physical_cycle(&c);
     cJSON_DeleteItemFromObject(record(&c),"kind"); cJSON_DeleteItemFromObject(record(&c),"state");
