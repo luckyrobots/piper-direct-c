@@ -159,7 +159,7 @@ public sealed partial class PipersPlugin
             if (id == "depth" && string.IsNullOrEmpty(identity)) identity = calibration?["device"]?.GetValue<string>() ?? "";
             bool matches = calibration is not null && (id == "depth"
                 ? CameraProfile.MatchesD405(calibration, identity, size.Width, size.Height, streamKind)
-                : CameraProfile.Matches(calibration, identity, size.Width, size.Height, false));
+                : CameraProfile.MatchesFisheye(calibration, identity, size.Width, size.Height));
             patches[$"camera.{id}.sim"] = new()
             {
                 ["sceneId"] = saved?.SceneId ?? "", ["cameraId"] = saved?.CameraId ?? "",

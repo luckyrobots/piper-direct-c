@@ -4,6 +4,18 @@ internal static class CameraPreviewSlotsTests
 {
     public static async Task Run(Action<bool, string> check)
     {
+        // A paused preview never launches the camera runtime, so the lifecycle
+        // guard can be exercised without a camera or engine connection.
+        static bool Throws(Action action) { try { action(); return false; } catch (InvalidOperationException) { return true; } }
+        var paused = new CameraCapture(null!, "bench", new CameraPreferences("none", Enabled: false), (_, _) => { });
+        paused.Start();
+        check(Throws(paused.Start), "A camera capture started a second worker");
+        await paused.DisposeAsync();
+        await paused.DisposeAsync();
+        check(Throws(paused.Start), "A disposed camera capture started a worker");
+        var neverStarted = new CameraCapture(null!, "bench", new CameraPreferences("none", Enabled: false), (_, _) => { });
+        await neverStarted.DisposeAsync();
+        check(Throws(neverStarted.Start), "A camera capture disposed before start could still start");
         var slots = new CameraPreviewSlots<ControlledCapture>();
         var previous = new ControlledCapture(paused: true);
         var survivor = new ControlledCapture();

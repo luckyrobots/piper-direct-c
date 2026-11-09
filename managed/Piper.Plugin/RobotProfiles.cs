@@ -303,7 +303,7 @@ public sealed partial class PipersPlugin
         if (groupViewOnly && (append || !preferences.Robots!.Any(p => p.Id == profile.Id && p.CanDeviceId == profile.CanDeviceId &&
             p.RobotId == profile.RobotId && p.RobotJointPrefix == profile.RobotJointPrefix && p.PikaDevice == profile.PikaDevice && p.WslDistribution == profile.WslDistribution)))
             throw new InvalidOperationException("Stop grouped following before changing a robot assignment.");
-        if (calibrationWorker is { IsCompleted: false }) throw new InvalidOperationException("Finish camera setup/calibration before switching robots.");
+        if (LensWorkerBusy) throw new InvalidOperationException("Finish camera setup/calibration before switching robots.");
         switchingProfile = true;
         try
         {
@@ -318,7 +318,7 @@ public sealed partial class PipersPlugin
             RestorePikaTeachingWorkspace(ActiveProfile);
             cameraCalibration.Clear(); cameraDimensions.TryRemove("gripper", out _); cameraDimensions.TryRemove("depth", out _);
             cameraStatus["gripper"] = cameraStatus["depth"] = "Connecting…";
-            calibrationSession = null; calibrationLastSequence = 0; calibrationStatus = "No lens calibration. Camera mount remains unverified.";
+            lens = LensSession.Initial;
             await LoadCameraCalibration(cancellation);
             try
             {
