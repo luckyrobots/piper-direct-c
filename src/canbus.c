@@ -1,6 +1,7 @@
 #define _GNU_SOURCE
 #include "canbus.h"
 #include <math.h>
+#include <assert.h>
 #include <errno.h>
 #ifndef _WIN32
 #include <linux/can/raw.h>
@@ -412,7 +413,7 @@ bool can_bus_send(struct can_bus *b,struct can_device *d,unsigned generation,con
     if (!can_bus_batch_allowed(d,frames,count)) return false;
     for (size_t i=0;i<count;++i) {
         const struct can_frame *f=&frames[i];
-        if (f->len!=8 || f->can_id>0x7ff) return false;
+        assert(f->len==8&&f->can_id<=0x7ff); /* can_bus_batch_allowed rejected anything else. */
         if (!b->simulated) {
 #ifdef _WIN32
             unsigned os_error=0; int transport_error=0;

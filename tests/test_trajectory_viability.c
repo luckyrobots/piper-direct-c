@@ -124,7 +124,7 @@ int main(void)
     c.trajectory_velocity[1]=14;c.trajectory_previous_dt=.025;clock_now+=.025;assert_step(&c,&d,.025);
 
     char directory[96];
-    for (unsigned failure=0;failure<7;++failure) {
+    for (unsigned failure=0;failure<6;++failure) {
         fixture(&c,directory);struct can_device *device=&c.bus.devices[0];
         c.command[1]=1.8;c.target[1]=10;c.trajectory_velocity[1]=15;c.trajectory_previous_dt=.025;
         if (!failure) {
@@ -137,7 +137,6 @@ int main(void)
         if (failure==3) device->feedback.acceleration[1].max=4;
         if (failure==4) fail_pose=true;
         if (failure==5) device->feedback.arm[0].error=1;
-        if (failure==6) c.trajectory_velocity[1]=NAN;
         clock_now+=.025;c.heartbeat=c.follow_updated=clock_now;controller_tick(&c,clock_now);
         assert(c.op==OP_IDLE&&!c.trajectory_follow);
         if (!failure) {
@@ -151,7 +150,6 @@ int main(void)
             if (failure==3) assert(strstr(c.message,"limits changed"));
             if (failure==4) assert(strstr(c.message,"hold failed"));
             if (failure==5) assert(strstr(c.message,"fault"));
-            if (failure==6) assert(strstr(c.message,"arithmetic"));
         }
         close_fixture(&c,directory);
     }

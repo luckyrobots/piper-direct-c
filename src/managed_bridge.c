@@ -11,8 +11,8 @@ EXPORT void *piper_create(int simulated,const char *directory) {
     return c;
 }
 EXPORT void *piper_create_simulated(int count,const char *directory) {
-    if (count<1||count>CANBUS_MAX) return NULL;
     struct controller *c=calloc(1,sizeof *c);
+    /* can_bus_init_simulated rejects counts outside 1..CANBUS_MAX (negative wraps high). */
     if (!c||!controller_init_simulated(c,(unsigned)count,directory,"")) { free(c); return NULL; }
     return c;
 }

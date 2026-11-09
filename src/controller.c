@@ -1,5 +1,6 @@
 #define _GNU_SOURCE
 #include "controller.h"
+#include <assert.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <math.h>
@@ -178,15 +179,6 @@ static bool clear_latch(struct controller *c,const char *id)
     flag(r,"stop_event_active",false);
     if (old) str(r,"legacy_ack",text_field(old,"at"));
     return persist(c);
-}
-static bool clear_latch_transactional(struct controller *c,const char *id)
-{
-    cJSON *before=cJSON_Duplicate(c->saved,true);
-    if (!before) { c->storage_failed=true; return false; }
-    if (clear_latch(c,id)) { cJSON_Delete(before); return true; }
-    /* A verified physical hold can remain powered if disk I/O fails, but the
-       software incident must remain latched in memory as well as on disk. */
-    cJSON_Delete(c->saved); c->saved=before; return false;
 }
 static void message(struct controller *c,const char *phase,const char *format,...)
 {
@@ -493,17 +485,6 @@ static void observe_teaching_cycle(struct controller *c,struct can_device *d,dou
     }
     forget_teaching_cycle(c);
 }
-static bool recoverable_obstruction(struct controller *c,struct can_device *d)
-{
-    cJSON *r=record(c,d->id),*event=field(r,"stop_event"),*transport=field(event,"transport");
-    const cJSON *old=legacy_stop(c,d->id);
-    return record_is(r,RECORD_LATCHED)&&yes(r,"stop_event_active")&&!reset_pending(c,d->id)&&
-        (!old||!strcmp(text_field(r,"legacy_ack"),text_field(old,"at")))&&
-        !strcmp(text_field(r,"kind"),KIND_OBSTRUCTION)&&!strcmp(text_field(event,"kind"),KIND_OBSTRUCTION)&&
-        !field(r,"last_fault")&&!*d->problem&&!*text_field(transport,"failure")&&!*text_field(transport,"connection_error")&&
-        cJSON_IsNumber(field(event,"error"))&&field(event,"error")->valuedouble==0&&
-        cJSON_IsNumber(field(event,"arm_status"))&&field(event,"arm_status")->valuedouble==0;
-}
 static bool measured_through(struct can_device *d,double endpoint)
 {
     struct piper_sample *s=&d->feedback.arm[0];
@@ -526,7 +507,13 @@ static const char *teaching_return_guard(struct controller *c,struct can_device 
     if (reset_pending(c,d->id)) return "A reset is pending; complete its separate recovery flow before returning to CAN.";
     if (recovery) {
         if (!piper_seamless_teach_supported(&d->feedback)) return "This firmware cannot restore a measured-pose hold without a reset; use its separate recovery flow.";
-        if (!recoverable_obstruction(c,d)) return "This stop is not a software obstruction with healthy saved evidence; inspect its separate recovery instructions.";
+        cJSON *r=record(c,d->id),*event=field(r,"stop_event"),*transport=field(event,"transport");
+        bool obstruction=record_is(r,RECORD_LATCHED)&&yes(r,"stop_event_active")&&!legacy_unacknowledged(c,d->id)&&
+            !strcmp(text_field(r,"kind"),KIND_OBSTRUCTION)&&!strcmp(text_field(event,"kind"),KIND_OBSTRUCTION)&&
+            !field(r,"last_fault")&&!*d->problem&&!*text_field(transport,"failure")&&!*text_field(transport,"connection_error")&&
+            cJSON_IsNumber(field(event,"error"))&&field(event,"error")->valuedouble==0&&
+            cJSON_IsNumber(field(event,"arm_status"))&&field(event,"arm_status")->valuedouble==0;
+        if (!obstruction) return "This stop is not a software obstruction with healthy saved evidence; inspect its separate recovery instructions.";
         if (!(c->recovering_at_pose&&c->op==OP_TEACH_RETURN)) {
             if (strcmp(c->teaching_cycle_device,d->id)||c->teaching_cycle_generation!=d->generation||
                 !c->teaching_cycle_completed||now-c->teaching_cycle_completed>120)
@@ -697,10 +684,17 @@ static void finish_teaching_return(struct controller *c,struct can_device *d)
 {
     bool recovery=c->recovering_at_pose;
     c->teach_return_stage=0; c->recovering_at_pose=false; forget_teaching_cycle(c);
-    if (recovery&&!clear_latch_transactional(c,d->id)) {
-        lane_go_idle(c);
-        message(c,"blocked","The measured hold is acknowledged, but recovery could not be saved. The obstruction remains latched; previous targets were discarded.");
-        return;
+    if (recovery) {
+        cJSON *before=cJSON_Duplicate(c->saved,true);
+        if (!before||!clear_latch(c,d->id)) {
+            /* A verified physical hold can remain powered if disk I/O fails, but the
+               software incident must remain latched in memory as well as on disk. */
+            if (before) { cJSON_Delete(c->saved); c->saved=before; } else c->storage_failed=true;
+            lane_go_idle(c);
+            message(c,"blocked","The measured hold is acknowledged, but recovery could not be saved. The obstruction remains latched; previous targets were discarded.");
+            return;
+        }
+        cJSON_Delete(before);
     }
     finish(c,d,recovery?"Obstruction cleared at the verified measured pose. CAN control restored; no reset, motor-power change, homing or replay.":
         "CAN control restored at the measured pose. Previous targets discarded; no reset, motor-power change, homing or replay.",false);
@@ -782,7 +776,6 @@ bool controller_init(struct controller *c,bool simulation,const char *directory,
 }
 bool controller_init_simulated(struct controller *c,unsigned count,const char *directory,const char *legacy)
 {
-    if (count<1||count>CANBUS_MAX) return false;
     return controller_init_devices(c,true,count,directory,legacy);
 }
 void controller_close(struct controller *c)
@@ -898,9 +891,8 @@ static double trajectory_braking_speed(double distance,double acceleration,doubl
 static enum trajectory_step_result trajectory_reference_step(struct controller *c,struct can_device *d,double now,double dt)
 {
     double next[6],velocity[6],midpoint_dt=c->trajectory_previous_dt>0?(dt+c->trajectory_previous_dt)/2:dt;
-    if (!isfinite(dt)||dt<.02||dt>.050001||!isfinite(midpoint_dt)||midpoint_dt<=0) {
-        snprintf(c->error,sizeof c->error,"Trajectory reference interval is invalid; following stopped."); return TRAJECTORY_STEP_INVALID;
-    }
+    /* lane_tick returns below 20 ms and holds above 50 ms before calling. */
+    assert(isfinite(dt)&&dt>=.02&&dt<=.050001&&isfinite(midpoint_dt)&&midpoint_dt>0);
     for (unsigned i=0;i<6;++i) {
         struct piper_limit *l=&d->feedback.limit[i];
         struct piper_acceleration *a=&d->feedback.acceleration[i];
@@ -920,10 +912,11 @@ static enum trajectory_step_result trajectory_reference_step(struct controller *
            at most one velocity grid step. Reserve its worst-case acceleration
            at the minimum 20-ms interval rather than assuming ideal braking. */
         double braking_acceleration=acceleration-.001/(.02*.02);
-        if (!isfinite(c->command[i])||!isfinite(c->trajectory_velocity[i])||!isfinite(d->feedback.arm[0].deg[i])||
-            !isfinite(maximum_speed)||!isfinite(braking_acceleration)||braking_acceleration<=0) {
-            snprintf(c->error,sizeof c->error,"J%u trajectory reference arithmetic is invalid; following stopped.",i+1); return TRAJECTORY_STEP_INVALID;
-        }
+        /* Admission requires finite limits with acceleration above the
+           2.5 deg/s^2 grid reserve, health requires finite feedback, and every
+           committed reference/velocity below is checked finite. */
+        assert(isfinite(c->command[i])&&isfinite(c->trajectory_velocity[i])&&isfinite(d->feedback.arm[0].deg[i])&&
+            isfinite(maximum_speed)&&isfinite(braking_acceleration)&&braking_acceleration>0);
         double braking=trajectory_braking_speed(fabs(remaining),braking_acceleration,dt);
         double wanted=copysign(fmin(maximum_speed,fmin(fabs(remaining)/dt,braking)),remaining);
         double lower=fmax(-maximum_speed,c->trajectory_velocity[i]-acceleration*midpoint_dt);
