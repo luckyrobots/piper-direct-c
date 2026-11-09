@@ -102,7 +102,7 @@ public sealed class PikaProcessService : IPikaSession
         try
         {
             bool live;
-            lock (stateGate) live = ReferenceEquals(process, agent) && owner == requestedOwner && !agent.HasExited;
+            lock (stateGate) live = ReferenceEquals(process, agent) && owner == requestedOwner && phase != PikaAgentPhase.Faulted && !agent.HasExited;
             if (!live) return new(PikaHoldOutcome.Unverified, noLiveSession);
             var reply = await ExecuteAgentAsync(agent, "hold", default, requestedOwner, cancellation);
             return new(PikaHoldOutcome.Acknowledged, reply["message"]?.GetValue<string>());
@@ -174,11 +174,18 @@ public sealed class PikaProcessService : IPikaSession
         try
         {
             RequireReadOnlyAdoptionAllowed(action, input);
-            // A dead observer owns no motor state. Release that stale serial
-            // reservation, but retain every failed power/position attempt.
-            bool deadObserver;
-            lock (stateGate) deadObserver = process is { HasExited: true } && power == PikaPowerEvidence.None;
-            if (deadObserver) await CloseAsync();
+            // A faulted agent is retired before anything else under this gate,
+            // even if its own retirement task has not run yet. A dead observer
+            // owns no motor state: release that stale serial reservation, but
+            // retain every failed power/position attempt.
+            string? fault; bool deadObserver;
+            lock (stateGate)
+            {
+                fault = phase == PikaAgentPhase.Faulted ? error : null;
+                deadObserver = process is { HasExited: true } && power == PikaPowerEvidence.None;
+            }
+            if (fault is not null) await CloseAsync(fault);
+            else if (deadObserver) await CloseAsync();
             if (action == "configure") return Configure(input, requestedOwner);
             if (!Configured) throw new InvalidOperationException("Pika Linux serial transport has not been configured");
             if (action == "connect") return await ConnectAsync(input, requestedOwner, cancellation);
