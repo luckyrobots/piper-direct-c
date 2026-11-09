@@ -26,10 +26,8 @@ public sealed partial class PipersPlugin
     private void ReleasePikaRole() => SetPikaRole(PikaSessionRole.None);
 
     private string pikaMonitorStatus = "Pika telemetry starts read-only when the scene is linked.";
-    internal long pikaMonitorAttemptAt;
-    internal Task? pikaMonitorWorker;
-    private CancellationTokenSource? pikaMonitorCancellation;
-    internal bool pikaMonitorStopping;
+    // One field, written only through its own TryStart/CancelAsync/Stop/StopAsync.
+    internal readonly PikaMonitorRetry pikaMonitor = new(TimeSpan.FromSeconds(3));
 
     private bool PikaMonitorRetryNeeded() => TelemetryIsFresh() && !switchingProfile && CurrentRecovery is null &&
         PikaMonitorConnectionPolicy.ShouldRetry(state?["pika"] as JsonObject, PikaMatchesProfile(), owner, link is not null, PikaRole,
@@ -37,37 +35,22 @@ public sealed partial class PipersPlugin
 
     internal void RetryLinkedPikaMonitor()
     {
-        if (pikaMonitorStopping || pikaMonitorWorker is { IsCompleted: false } || !PikaMonitorRetryNeeded() ||
-            pikaMonitorAttemptAt != 0 && Stopwatch.GetElapsedTime(pikaMonitorAttemptAt).TotalSeconds < 3) return;
-        pikaMonitorAttemptAt = Stopwatch.GetTimestamp();
-        pikaMonitorCancellation?.Dispose();
-        pikaMonitorCancellation = CancellationTokenSource.CreateLinkedTokenSource(shutdown.Token);
-        var cancellation = pikaMonitorCancellation.Token;
+        if (pikaMonitor.Stopped || pikaMonitor.Running || !PikaMonitorRetryNeeded()) return;
         // Connecting can wait for WSL/agent startup. Keep Watch and heartbeats
         // draining; never queue behind an Enable that itself awaits fresh state.
-        pikaMonitorWorker = Task.Run(async () =>
+        pikaMonitor.TryStart(shutdown.Token, async cancellation =>
         {
             bool entered = false;
             try
             {
                 if (!await commands.WaitAsync(0, cancellation)) return;
                 entered = true;
-                if (!pikaMonitorStopping && PikaMonitorRetryNeeded()) await MonitorLinkedPika(cancellation);
+                if (!pikaMonitor.Stopped && PikaMonitorRetryNeeded()) await MonitorLinkedPika(cancellation);
             }
             catch (OperationCanceledException) when (cancellation.IsCancellationRequested) { }
             catch (Exception error) { pikaMonitorStatus = "Pika monitor retry unavailable: " + error.Message; }
             finally { if (entered) commands.Release(); }
-        }, CancellationToken.None);
-    }
-
-    private async Task CancelPikaMonitorAttempt()
-    {
-        if (pikaMonitorWorker is not { IsCompleted: false }) return;
-        // Operator input, especially STOP, must not wait behind a WSL startup.
-        // Defer the next retry so the event can acquire the command gate first.
-        pikaMonitorAttemptAt = Stopwatch.GetTimestamp();
-        if (pikaMonitorCancellation is not null) await pikaMonitorCancellation.CancelAsync();
-        await pikaMonitorWorker;
+        });
     }
 
     private async Task MonitorLinkedPika(CancellationToken cancellation)
@@ -108,4 +91,58 @@ public sealed partial class PipersPlugin
             pikaMonitorStatus = "Pika monitor unavailable: " + error.Message;
         }
     }
+}
+
+/// <summary>The read-only Pika monitor's connect attempts, one at a time.
+/// <code>
+///   Idle --TryStart (backoff elapsed)--> Running --attempt ends--> Idle
+///   Running --CancelAsync--> Idle (backoff restarts)
+///   any --Stop--> Stopped (terminal: no further attempts)
+/// </code></summary>
+internal sealed class PikaMonitorRetry(TimeSpan backoff)
+{
+    private Task? worker;
+    private CancellationTokenSource? cancellation;
+    private long attemptAt;
+    private volatile bool stopped;
+
+    public bool Stopped => stopped;
+    public bool Running => worker is { IsCompleted: false };
+    /// <summary>The latest attempt, for callers that must drain it.</summary>
+    public Task? Worker => worker;
+
+    /// <summary>Runs <paramref name="attempt"/> on the thread pool unless stopped,
+    /// already running or still inside the backoff after the previous attempt.</summary>
+    public bool TryStart(CancellationToken lifetime, Func<CancellationToken, Task> attempt)
+    {
+        if (stopped || Running || attemptAt != 0 && Stopwatch.GetElapsedTime(attemptAt) < backoff) return false;
+        attemptAt = Stopwatch.GetTimestamp();
+        cancellation?.Dispose();
+        cancellation = CancellationTokenSource.CreateLinkedTokenSource(lifetime);
+        var token = cancellation.Token;
+        worker = Task.Run(() => attempt(token), CancellationToken.None);
+        return true;
+    }
+
+    /// <summary>Cancels a running attempt and waits for it; the backoff restarts now.</summary>
+    public async Task CancelAsync()
+    {
+        if (worker is not { IsCompleted: false } running) return;
+        attemptAt = Stopwatch.GetTimestamp();
+        if (cancellation is not null) await cancellation.CancelAsync();
+        await running;
+    }
+
+    /// <summary>Refuses every later attempt; a running one continues until cancelled.</summary>
+    public void Stop() => stopped = true;
+
+    public async Task StopAsync()
+    {
+        Stop();
+        try { await CancelAsync(); }
+        finally { cancellation?.Dispose(); }
+    }
+
+    /// <summary>Lets the next <see cref="TryStart"/> run without waiting out the backoff.</summary>
+    internal void ExpireBackoff() => attemptAt = 0;
 }

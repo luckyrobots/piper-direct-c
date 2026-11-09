@@ -285,7 +285,9 @@ public sealed partial class PipersPlugin : ILuckyPlugin
             message = "Recovery is in progress. STOP cancels the remaining stages.";
             await Update(cancellation); return;
         }
-        await CancelPikaMonitorAttempt();
+        // STOP must not wait behind a WSL startup; cancelling also defers the next
+        // retry so this event acquires the command gate first.
+        await pikaMonitor.CancelAsync();
         await commands.WaitAsync(cancellation);
         try
         {
@@ -713,9 +715,7 @@ public sealed partial class PipersPlugin : ILuckyPlugin
             await Quietly(StopHeightCheck(markerTimeout.Token), "Height guide");
             await Quietly(ClearWizardHighlight(markerTimeout.Token), "Calibration marker");
         }
-        pikaMonitorStopping = true;
-        await Quietly(CancelPikaMonitorAttempt(), "Pika monitor");
-        pikaMonitorCancellation?.Dispose();
+        await Quietly(pikaMonitor.StopAsync(), "Pika monitor");
         await Quietly(ct => FinishPikaTeaching("Plugin closed", ct), TimeSpan.FromSeconds(1), "Pika teaching");
         await Quietly(HoldFollowing, TimeSpan.FromSeconds(1), "Following");
         // Keep telemetry/heartbeats running until this session's Pika disable is
