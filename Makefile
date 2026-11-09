@@ -14,7 +14,7 @@ build/piper-can: src/main.c src/protocol.c src/protocol.h | build
 	$(CC) $(CPPFLAGS) $(CFLAGS) src/main.c src/protocol.c -o $@ $(LDLIBS)
 
 CORE = src/controller.c src/canbus.c src/protocol.c vendor/cJSON.c
-HEADERS = src/controller.h src/controller_internal.h src/controller_lane_fields.inc src/obstruction.h src/canbus.h src/protocol.h vendor/cJSON.h
+HEADERS = tests/fixture.h tests/check.h src/controller.h src/controller_internal.h src/controller_lane_fields.inc src/obstruction.h src/canbus.h src/protocol.h vendor/cJSON.h
 build/piper-trace: src/trace.c src/canbus.c src/protocol.c $(HEADERS) | build
 	$(CC) $(CPPFLAGS) $(CFLAGS) src/trace.c src/canbus.c src/protocol.c -o $@ $(LDLIBS)
 

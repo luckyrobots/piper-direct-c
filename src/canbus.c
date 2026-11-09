@@ -20,6 +20,11 @@
 #include <time.h>
 #include <unistd.h>
 
+/* One loss path for both transports: close the platform handle, then drop
+   every connection-scoped fact (feedback, stillness, link verification). */
+static void transport_close(struct can_device *d);
+static void lost(struct can_device *d,const char *why);
+
 #ifdef _WIN32
 #include "canbus_windows.inc"
 #else
@@ -38,11 +43,10 @@ static bool number(const char *name,const char *field,unsigned long *n)
     bool ok=fgets(text,sizeof text,f)!=NULL; fclose(f); if (!ok) return false;
     errno=0; *n=strtoul(text,&end,0); return errno==0 && end!=text;
 }
-static void lost(struct can_device *d,const char *why)
+/* present/up are re-read from sysfs by every scan, so loss leaves them. */
+static void transport_close(struct can_device *d)
 {
     if (d->fd>=0) close(d->fd);
-    d->fd=-1; memset(&d->feedback,0,sizeof d->feedback);
-    d->stationary_since=0; snprintf(d->problem,sizeof d->problem,"%s",why);
 }
 static struct rtattr *attribute(struct rtattr *a,int length,unsigned type)
 {
@@ -105,6 +109,25 @@ static void identity(struct can_device *d,const char *name)
     }
 }
 #endif
+static void lost(struct can_device *d,const char *why)
+{
+    transport_close(d);
+    d->fd=-1; d->link_verified=false;
+    memset(&d->feedback,0,sizeof d->feedback); can_bus_forget_stationary(d);
+    snprintf(d->problem,sizeof d->problem,"%s",why);
+}
+void can_bus_forget_stationary(struct can_device *d)
+{
+    d->stationary_phase=STATIONARY_UNKNOWN; d->stationary_since=d->pose_stationary_since=0;
+    d->stationary_count=0; d->stationary_sample_at=0;
+}
+static void stationary_enter(struct can_device *d,enum stationary_phase phase,double now)
+{
+    if (phase<STATIONARY_POSE_QUIET) d->pose_stationary_since=0;
+    else if (d->stationary_phase<STATIONARY_POSE_QUIET) d->pose_stationary_since=now;
+    d->stationary_since=phase==STATIONARY_STRICT_STILL?(d->stationary_phase==STATIONARY_STRICT_STILL?d->stationary_since:now):0;
+    d->stationary_phase=phase;
+}
 static double *simulation_targets(struct can_bus *b,struct can_device *d) { return d==&b->devices[0]?b->sim_target:d->sim_target; }
 static double *simulation_gripper(struct can_bus *b,struct can_device *d) { return d==&b->devices[0]?&b->sim_gripper:&d->sim_gripper; }
 static double *simulation_last(struct can_bus *b,struct can_device *d) { return d==&b->devices[0]?&b->sim_last:&d->sim_last; }
@@ -171,7 +194,7 @@ void can_bus_scan(struct can_bus *b)
             int e=errno; if (fd>=0) close(fd); snprintf(d->problem,sizeof d->problem,"%s",strerror(e)); continue;
         }
         d->fd=fd; d->generation=++b->sequence; d->problem[0]=0;
-        memset(&d->feedback,0,sizeof d->feedback); d->stationary_since=0;
+        memset(&d->feedback,0,sizeof d->feedback); can_bus_forget_stationary(d);
     }
     if_freenameindex(names);
     for (unsigned i=0;i<CANBUS_MAX;++i) if (b->devices[i].id[0]&&!b->devices[i].present)
@@ -191,13 +214,10 @@ void can_bus_invalidate_configuration(struct can_device *d,double now)
 static void update_stationary(struct can_device *d,double now)
 {
     const struct piper_sample *s=&d->feedback.arm[0];
-    if (!piper_fresh(s,now)) {
-        d->stationary_since=d->pose_stationary_since=0; d->stationary_count=0; d->stationary_sample_at=0;
-        return;
-    }
+    if (!piper_fresh(s,now)) { can_bus_forget_stationary(d); return; }
     double sample_at=s->joint_at[0];
     for (unsigned i=0;i<6;++i) {
-        if (!isfinite(s->deg[i])) { d->stationary_since=d->pose_stationary_since=0; d->stationary_count=0; return; }
+        if (!isfinite(s->deg[i])) { can_bus_forget_stationary(d); return; }
         sample_at=fmin(sample_at,s->joint_at[i]);
     }
     bool reset=d->stationary_generation!=d->generation||!d->stationary_count||
@@ -206,7 +226,7 @@ static void update_stationary(struct can_device *d,double now)
     if (!reset&&(sample_at<=d->stationary_sample_at||now-d->frame_at<.04)) return;
     if (reset) {
         d->stationary_count=d->stationary_next=0; d->stationary_generation=d->generation;
-        d->stationary_since=d->pose_stationary_since=0; d->stationary_moving=d->strict_stationary_moving=true;
+        stationary_enter(d,STATIONARY_MOVING,now);
         memset(d->stationary_encoder_seen,0,sizeof d->stationary_encoder_seen);
         memcpy(d->last_angles,s->deg,sizeof d->last_angles);
     }
@@ -263,23 +283,20 @@ static void update_stationary(struct can_device *d,double now)
         if (invalid_velocity||moving_velocities>CANBUS_STATIONARY_SAMPLES/2) velocity_moving=true;
         if (invalid_velocity) { quiet=false; moving=true; }
     }
-    if (d->stationary_moving||moving) {
-        d->stationary_since=0; d->strict_stationary_moving=true;
-        if (!quiet) {
-            d->pose_stationary_since=0; d->stationary_moving=true;
-            memcpy(d->last_angles,filtered,sizeof filtered);
-        } else {
-            /* Start a new dwell at the first verified quiet window. Never
-               rebase this anchor while quiet: slow drift must accumulate. */
-            d->pose_stationary_since=now; d->stationary_moving=false;
-            memcpy(d->last_angles,filtered,sizeof filtered);
-        }
+    if (d->stationary_phase<STATIONARY_POSE_QUIET||moving) {
+        /* Start a new dwell at the first verified quiet window. Never
+           rebase this anchor while quiet: slow drift must accumulate. */
+        stationary_enter(d,STATIONARY_MOVING,now);
+        if (quiet) stationary_enter(d,STATIONARY_POSE_QUIET,now);
+        memcpy(d->last_angles,filtered,sizeof filtered);
         for (unsigned i=0;i<6;++i) if (encoder_count[i]==d->stationary_count) {
             d->stationary_encoder_anchor[i]=filtered_encoder[i]; d->stationary_encoder_seen[i]=true;
         }
     }
-    if (!d->pose_stationary_since||velocity_moving) { d->stationary_since=0; d->strict_stationary_moving=true; }
-    else if (d->strict_stationary_moving&&velocity_quiet) { d->stationary_since=now; d->strict_stationary_moving=false; }
+    if (d->stationary_phase==STATIONARY_STRICT_STILL&&velocity_moving) stationary_enter(d,STATIONARY_POSE_QUIET,now);
+    else if (d->stationary_phase==STATIONARY_POSE_QUIET&&!velocity_moving&&velocity_quiet) stationary_enter(d,STATIONARY_STRICT_STILL,now);
+    assert((d->pose_stationary_since!=0)==(d->stationary_phase>=STATIONARY_POSE_QUIET)&&
+        (d->stationary_since!=0)==(d->stationary_phase==STATIONARY_STRICT_STILL));
 }
 void can_bus_ingest(struct can_device *d,const struct can_frame *f,bool local,double now)
 {
@@ -406,7 +423,7 @@ bool can_bus_batch_allowed(const struct can_device *d,const struct can_frame *fr
 bool can_bus_send(struct can_bus *b,struct can_device *d,unsigned generation,const struct can_frame *frames,size_t count)
 {
     if (!d||!d->present||!d->up||d->generation!=generation) return false;
-    if (!b->simulated && d->fd<0) return false;
+    if (!b->simulated && !can_bus_transport_open(d)) return false;
 #ifndef _WIN32
     if (!b->simulated && if_nametoindex(d->name)!=d->index) return false;
 #endif
@@ -487,7 +504,7 @@ static void reconnect_device_with_scan(struct can_bus *b,struct can_device *d,vo
         double angles[6];
         memcpy(angles,d->feedback.arm[0].deg,sizeof angles);
         memset(&d->feedback,0,sizeof d->feedback); memcpy(d->feedback.arm[0].deg,angles,sizeof angles);
-        d->generation=++b->sequence; d->stationary_since=0;
+        d->generation=++b->sequence; can_bus_forget_stationary(d);
     } else {
         /* Discovery skips existing live handles. Closing just the failed
            identity prevents a silent peer from repeatedly invalidating every

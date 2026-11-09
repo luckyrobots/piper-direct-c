@@ -1,7 +1,8 @@
+#define _GNU_SOURCE
 /* Offline firmware accepts one power request before a receive/ACK tick and
    ignores a burst's later requests. Recovery must use individual OFF requests,
    never a reset, enable, mode, gripper or position packet. */
-#include "controller.h"
+#include "fixture.h"
 #include <assert.h>
 #include <math.h>
 #include <stdio.h>
@@ -29,7 +30,7 @@ double __wrap_piper_now(void) { return clock_now; }
 static struct controller_lane *lane(struct controller *c,unsigned n)
 {
     for(unsigned i=0;i<CANBUS_MAX;++i)if(!strcmp(c->lanes[i].lane_device,c->bus.devices[n].id))return &c->lanes[i];
-    assert(!"Missing lane");return NULL;
+    CHECK(!"Missing lane");return NULL;
 }
 static bool firmware_accept(struct fake_mcu *m,unsigned joint,double now)
 {
@@ -51,19 +52,19 @@ void __wrap_can_bus_receive(struct can_bus *bus,double now)
 }
 bool __wrap_can_bus_send(struct can_bus *bus,struct can_device *d,unsigned generation,const struct can_frame *frames,size_t count)
 {
-    assert(bus->simulated&&d>=bus->devices&&d<bus->devices+2);
+    CHECK(bus->simulated&&d>=bus->devices&&d<bus->devices+2);
     if(generation!=d->generation)return false;
     unsigned n=(unsigned)(d-bus->devices);struct fake_mcu *m=&mcu[n];
     if(count==1&&frames[0].can_id==0x150) {
-        assert(frames[0].data[0]==1);for(unsigned i=1;i<8;++i)assert(!frames[0].data[i]);
+        CHECK(frames[0].data[0]==1);for(unsigned i=1;i<8;++i)CHECK(!frames[0].data[i]);
         ++m->stops;++d->tx;return true;
     }
     for(unsigned f=0;f<count;++f) {
-        assert(frames[f].can_id==0x471&&frames[f].len==8&&frames[f].data[0]>=1&&frames[f].data[0]<=6&&frames[f].data[1]==1);
-        for(unsigned i=2;i<8;++i)assert(!frames[f].data[i]);
+        CHECK(frames[f].can_id==0x471&&frames[f].len==8&&frames[f].data[0]>=1&&frames[f].data[0]<=6&&frames[f].data[1]==1);
+        for(unsigned i=2;i<8;++i)CHECK(!frames[f].data[i]);
         unsigned joint=frames[f].data[0]-1;
-        if(count==1&&m->last_request)assert(clock_now-m->last_request>=.02-1e-9);
-        if(m->count[joint])assert(clock_now-m->last[joint]>=.15-1e-9);
+        if(count==1&&m->last_request)CHECK(clock_now-m->last_request>=.02-1e-9);
+        if(m->count[joint])CHECK(clock_now-m->last[joint]>=.15-1e-9);
         else m->first[joint]=clock_now;
         ++m->count[joint];m->last[joint]=m->last_request=clock_now;
         if(failed_device==(int)n&&failed_joint==(int)joint)return false;
@@ -82,14 +83,14 @@ static void request(struct controller *c,const char *route,cJSON *body,int expec
 {
     int status;cJSON *result=controller_action(c,route,body,&status);
     if(status!=expected){char *text=cJSON_PrintUnformatted(result);fprintf(stderr,"%s expected%d got%d %s\n",route,expected,status,text);free(text);}
-    assert(status==expected);cJSON_Delete(body);cJSON_Delete(result);
+    CHECK(status==expected);cJSON_Delete(body);cJSON_Delete(result);
 }
 static void start(struct controller *c,unsigned n)
 {
     cJSON *body=identity(c,n);cJSON_AddStringToObject(body,"action","disable");
     unsigned before=0;for(unsigned i=0;i<6;++i)before+=mcu[n].count[i];
-    request(c,"/api/command",body,202);assert(lane(c,n)->op==OP_DISABLE);
-    unsigned after=0;for(unsigned i=0;i<6;++i)after+=mcu[n].count[i];assert(after==before);
+    request(c,"/api/command",body,202);CHECK(lane(c,n)->op==OP_DISABLE);
+    unsigned after=0;for(unsigned i=0;i<6;++i)after+=mcu[n].count[i];CHECK(after==before);
 }
 static void heartbeat(struct controller *c,unsigned n)
 {
@@ -107,14 +108,14 @@ static cJSON *saved(struct controller *c,unsigned n)
 static void fixture(struct controller *c,char *directory,size_t capacity,unsigned scenario,bool incident)
 {
 #ifdef _WIN32
-    char temp[MAX_PATH];assert(GetTempPathA(sizeof temp,temp)>0);
+    char temp[MAX_PATH];CHECK(GetTempPathA(sizeof temp,temp)>0);
     snprintf(directory,capacity,"%spiper-disable-sequence-%lu-%u",temp,(unsigned long)GetCurrentProcessId(),scenario);
 #else
     snprintf(directory,capacity,"/tmp/piper-disable-sequence-%ld-%u",(long)getpid(),scenario);
 #endif
-    clock_now+=10;assert(controller_init_simulated(c,2,directory,""));memset(mcu,0,sizeof mcu);failed_device=failed_joint=-1;
+    clock_now+=10;CHECK(controller_init_simulated(c,2,directory,""));memset(mcu,0,sizeof mcu);failed_device=failed_joint=-1;
     for(unsigned n=0;n<2;++n) {
-        struct can_device *d=&c->bus.devices[n];mcu[n].pending=-1;d->stationary_since=clock_now-1;
+        struct can_device *d=&c->bus.devices[n];mcu[n].pending=-1;fixture_still(d,clock_now-1);
         strcpy(d->feedback.hardware,"H-V1.2-1");strcpy(d->feedback.version,"S-V1.9-0");
         d->feedback.arm[0].control=d->feedback.arm[0].motion_mode=1;
         for(unsigned i=0;i<6;++i){d->feedback.motor[i].enabled=true;mcu[n].delay[i]=.025;}
@@ -136,58 +137,58 @@ static void fixture(struct controller *c,char *directory,size_t capacity,unsigne
 static void complete(struct controller *c)
 {
     for(unsigned i=0;i<360&&controller_any_motion_active(c);++i)tick(c,true,true);
-    assert(!controller_any_motion_active(c));
+    CHECK(!controller_any_motion_active(c));
 }
 static void cleanup(struct controller *c,const char *directory)
 {
     controller_close(c);char path[600];snprintf(path,sizeof path,"%s/control-state.json",directory);
-    assert(!remove(path));assert(!remove_directory(directory));
+    CHECK(!remove(path));CHECK(!remove_directory(directory));
 }
 int main(void)
 {
     struct fake_mcu burst={.pending=-1};unsigned accepted=0;
     for(unsigned i=0;i<6;++i)if(firmware_accept(&burst,i,clock_now))++accepted;
-    assert(accepted==1&&burst.pending==0); /* The old six-frame burst loses J2–J6. */
-    struct controller *c=calloc(1,sizeof *c);assert(c);char directory[512];
+    CHECK(accepted==1&&burst.pending==0); /* The old six-frame burst loses J2–J6. */
+    struct controller *c=calloc(1,sizeof *c);CHECK(c);char directory[512];
     fixture(c,directory,sizeof directory,1,false);mcu[0].delay[0]=.5;start(c,0);start(c,1);
     cJSON *select=cJSON_CreateObject();cJSON_AddStringToObject(select,"device_id",c->bus.devices[1].id);request(c,"/api/select",select,200);
     complete(c);
-    for(unsigned n=0;n<2;++n)for(unsigned i=0;i<6;++i)assert(!c->bus.devices[n].feedback.motor[i].enabled&&lane(c,n)->disable_acknowledged[i]&&mcu[n].count[i]>=1);
-    assert(!mcu[0].stops&&!mcu[1].stops&&!strcmp(lane(c,0)->phase,"complete")&&!strcmp(lane(c,1)->phase,"complete"));
-    for(unsigned n=0;n<2;++n){unsigned before[6];memcpy(before,mcu[n].count,sizeof before);for(unsigned t=0;t<8;++t)tick(c,true,true);assert(!memcmp(before,mcu[n].count,sizeof before));}
+    for(unsigned n=0;n<2;++n)for(unsigned i=0;i<6;++i)CHECK(!c->bus.devices[n].feedback.motor[i].enabled&&lane(c,n)->disable_acknowledged[i]&&mcu[n].count[i]>=1);
+    CHECK(!mcu[0].stops&&!mcu[1].stops&&!strcmp(lane(c,0)->phase,"complete")&&!strcmp(lane(c,1)->phase,"complete"));
+    for(unsigned n=0;n<2;++n){unsigned before[6];memcpy(before,mcu[n].count,sizeof before);for(unsigned t=0;t<8;++t)tick(c,true,true);CHECK(!memcmp(before,mcu[n].count,sizeof before));}
     cleanup(c,directory);
 
     fixture(c,directory,sizeof directory,2,true);cJSON *primary=cJSON_Duplicate(cJSON_GetObjectItemCaseSensitive(saved(c,0),"stop_event"),true);
     mcu[0].blocked_mask=1u<<4;start(c,0);start(c,1);complete(c);
-    assert(strstr(lane(c,0)->message,"Disable timed out")&&!strcmp(lane(c,1)->phase,"complete")&&mcu[0].stops==1&&!mcu[1].stops);
-    assert(cJSON_Compare(primary,cJSON_GetObjectItemCaseSensitive(saved(c,0),"stop_event"),true));
-    assert(!strcmp(cJSON_GetObjectItemCaseSensitive(saved(c,0),"reason")->valuestring,"Original range-entry incident"));
-    assert(strstr(cJSON_GetObjectItemCaseSensitive(saved(c,0),"last_cleanup_error")->valuestring,"Disable timed out"));
+    CHECK(strstr(lane(c,0)->message,"Disable timed out")&&!strcmp(lane(c,1)->phase,"complete")&&mcu[0].stops==1&&!mcu[1].stops);
+    CHECK(cJSON_Compare(primary,cJSON_GetObjectItemCaseSensitive(saved(c,0),"stop_event"),true));
+    CHECK(!strcmp(cJSON_GetObjectItemCaseSensitive(saved(c,0),"reason")->valuestring,"Original range-entry incident"));
+    CHECK(strstr(cJSON_GetObjectItemCaseSensitive(saved(c,0),"last_cleanup_error")->valuestring,"Disable timed out"));
     cJSON_Delete(primary);cleanup(c,directory);
 
     fixture(c,directory,sizeof directory,3,true);failed_device=0;failed_joint=2;start(c,0);start(c,1);complete(c);
-    assert(lane(c,0)->op==OP_IDLE&&strstr(lane(c,0)->message,"not fully transmitted")&&mcu[0].stops==1&&!mcu[1].stops&&!strcmp(lane(c,1)->phase,"complete"));
-    assert(!strcmp(cJSON_GetObjectItemCaseSensitive(saved(c,0),"reason")->valuestring,"Original range-entry incident"));cleanup(c,directory);
+    CHECK(lane(c,0)->op==OP_IDLE&&strstr(lane(c,0)->message,"not fully transmitted")&&mcu[0].stops==1&&!mcu[1].stops&&!strcmp(lane(c,1)->phase,"complete"));
+    CHECK(!strcmp(cJSON_GetObjectItemCaseSensitive(saved(c,0),"reason")->valuestring,"Original range-entry incident"));cleanup(c,directory);
 
     fixture(c,directory,sizeof directory,4,false);start(c,0);start(c,1);++c->bus.devices[0].generation;tick(c,false,true);complete(c);
-    assert(strstr(lane(c,0)->message,"Adapter connection changed")&&!strcmp(lane(c,1)->phase,"complete"));
-    for(unsigned i=0;i<6;++i)assert(!mcu[0].count[i]);
+    CHECK(strstr(lane(c,0)->message,"Adapter connection changed")&&!strcmp(lane(c,1)->phase,"complete"));
+    for(unsigned i=0;i<6;++i)CHECK(!mcu[0].count[i]);
     cleanup(c,directory);
 
     fixture(c,directory,sizeof directory,5,false);mcu[0].delay[0]=2;start(c,0);start(c,1);
     cJSON *wrong=identity(c,0);cJSON_ReplaceItemInObjectCaseSensitive(wrong,"owner",cJSON_CreateString("wrong-owner"));
     cJSON_AddNumberToObject(wrong,"request_id",lane(c,0)->request_id);request(c,"/api/heartbeat",wrong,409);
     for(unsigned i=0;i<100&&controller_any_motion_active(c);++i)tick(c,false,true);
-    assert(strstr(lane(c,0)->message,"heartbeat expired")&&mcu[0].stops==1&&!mcu[1].stops&&!strcmp(lane(c,1)->phase,"complete"));cleanup(c,directory);
+    CHECK(strstr(lane(c,0)->message,"heartbeat expired")&&mcu[0].stops==1&&!mcu[1].stops&&!strcmp(lane(c,1)->phase,"complete"));cleanup(c,directory);
 
     fixture(c,directory,sizeof directory,6,false);start(c,0);start(c,1);tick(c,true,true);
     request(c,"/api/stop",cJSON_CreateObject(),200);unsigned before[2][6];memcpy(before[0],mcu[0].count,sizeof before[0]);memcpy(before[1],mcu[1].count,sizeof before[1]);
     for(unsigned i=0;i<10;++i)tick(c,false,false);
-    assert(mcu[0].stops==1&&mcu[1].stops==1&&!memcmp(before[0],mcu[0].count,sizeof before[0])&&!memcmp(before[1],mcu[1].count,sizeof before[1]));cleanup(c,directory);
+    CHECK(mcu[0].stops==1&&mcu[1].stops==1&&!memcmp(before[0],mcu[0].count,sizeof before[0])&&!memcmp(before[1],mcu[1].count,sizeof before[1]));cleanup(c,directory);
 
     fixture(c,directory,sizeof directory,7,false);mcu[0].freeze_low_mask=1u<<5;start(c,0);
     for(unsigned i=0;i<10;++i)tick(c,true,false);
-    assert(lane(c,0)->op==OP_DISABLE&&!lane(c,0)->disable_acknowledged[5]);
-    mcu[0].freeze_low_mask=0;complete(c);assert(!strcmp(lane(c,0)->phase,"complete")&&!mcu[0].stops);cleanup(c,directory);
+    CHECK(lane(c,0)->op==OP_DISABLE&&!lane(c,0)->disable_acknowledged[5]);
+    mcu[0].freeze_low_mask=0;complete(c);CHECK(!strcmp(lane(c,0)->phase,"complete")&&!mcu[0].stops);cleanup(c,directory);
     free(c);puts("PASS staged disable: per-driver paced OFF/ACK and bounded missing-ACK retries, fresh all-off settlement, independent lanes, timeout/TX failure/lease/generation/STOP isolation and original incident preservation; no enable/reset/mode/pose packets.");
 }

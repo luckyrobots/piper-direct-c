@@ -291,12 +291,20 @@ static bool teaching_status(const struct piper_sample *s)
         (piper_teach_playback(s->teach)&&s->arm_status==PIPER_ARM_STATUS_PLAYBACK)||
         (s->teach==PIPER_TEACH_PLAYBACK_PAUSED&&s->arm_status==PIPER_ARM_STATUS_PLAYBACK_PAUSED);
 }
+/* The first transport/link problem that blocks control, or NULL when ready. */
+static const char *transport_problem(const struct can_device *d)
+{
+    if (!d->present) return "USB adapter is missing.";
+    if (!d->up||!can_bus_transport_open(d)) return "CAN socket unavailable. Check interface state and bitrate.";
+    if (!d->stable) return "A unique USB adapter identity is required for control.";
+    if (!d->link_verified||d->bitrate!=1000000) return "CAN link must be verified at 1 Mbit/s before control.";
+    if (d->bus_state>=CAN_STATE_BUS_OFF||(d->control_flags&(CAN_CTRLMODE_LOOPBACK|CAN_CTRLMODE_LISTENONLY|CAN_CTRLMODE_FD))) return "CAN controller is bus-off or configured in an unsupported mode.";
+    return NULL;
+}
 static bool teaching_benign(const struct can_device *d,double now)
 {
     const struct piper_sample *s=&d->feedback.arm[0];
-    if (!d->present||!d->up||(!d->simulated&&d->fd<0)||!d->stable||!d->link_verified||d->bitrate!=1000000||
-        d->bus_state>=CAN_STATE_BUS_OFF||(d->control_flags&(CAN_CTRLMODE_LOOPBACK|CAN_CTRLMODE_LISTENONLY|CAN_CTRLMODE_FD))||
-        !piper_fresh(s,now)||s->error||!teaching_active(s)) return false;
+    if (transport_problem(d)||!piper_fresh(s,now)||s->error||!teaching_active(s)) return false;
     if (s->arm_status&&!teaching_status(s)) return false;
     if (d->feedback.foreign_seen&&now-d->feedback.foreign_at<2) return false;
     for (unsigned i=1;i<3;++i) if (d->feedback.arm[i].status_seen&&piper_recent(d->feedback.arm[i].status_at,now)) return false;
@@ -307,11 +315,7 @@ enum health_check { CHECK_CONTROL, CHECK_POWER, CHECK_RESET, CHECK_TEACH_RETURN 
 static const char *health(struct can_device *d,double now,enum health_check check)
 {
     if (!d) return "Select an arm.";
-    if (!d->present) return "USB adapter is missing.";
-    if (!d->up||(!d->simulated&&d->fd<0)) return "CAN socket unavailable. Check interface state and bitrate.";
-    if (!d->stable) return "A unique USB adapter identity is required for control.";
-    if (!d->link_verified||d->bitrate!=1000000) return "CAN link must be verified at 1 Mbit/s before control.";
-    if (d->bus_state>=CAN_STATE_BUS_OFF||(d->control_flags&(CAN_CTRLMODE_LOOPBACK|CAN_CTRLMODE_LISTENONLY|CAN_CTRLMODE_FD))) return "CAN controller is bus-off or configured in an unsupported mode.";
+    const char *transport=transport_problem(d); if (transport) return transport;
     struct piper_feedback *f=&d->feedback; struct piper_sample *s=&f->arm[0];
     if (!piper_fresh(s,now)) return "Waiting for fresh controller and all six joint readings.";
     for (unsigned i=1;i<3;++i) if (f->arm[i].status_seen&&piper_recent(f->arm[i].status_at,now)) return "Multiple arm address ranges detected; one standalone arm per adapter is required.";
@@ -439,7 +443,7 @@ static bool enabled(struct can_device *d,bool wanted,double after)
 }
 static bool measured_stationary(struct can_device *d,double now,double after)
 {
-    if (!d->stationary_since||now-d->stationary_since<stationary_dwell_s) return false;
+    if (can_bus_strict_still_for(d,now)<stationary_dwell_s) return false;
     for (unsigned i=0;i<6;++i) {
         struct piper_motor *m=&d->feedback.motor[i];
         if (!m->high_seen||m->high_at<=after||!piper_recent(m->high_at,now)||!isfinite(m->velocity)||fabs(m->velocity)>.01) return false;
@@ -448,11 +452,7 @@ static bool measured_stationary(struct can_device *d,double now,double after)
 }
 static bool position_control_stationary(struct can_device *d,double now)
 {
-    /* A strict qualified dwell also proves the pose. The fallback retains
-       that stronger evidence for callers that inject complete feedback in
-       offline fixtures; live ingestion always maintains both timers. */
-    double since=d->pose_stationary_since?d->pose_stationary_since:d->stationary_since;
-    return since&&now-since>=pose_dwell_s;
+    return can_bus_pose_still_for(d,now)>=pose_dwell_s;
 }
 static void forget_teaching_cycle(struct controller *c)
 {
@@ -545,7 +545,7 @@ static const char *teaching_return_guard(struct controller *c,struct can_device 
     /* Establish stillness before the first packet. During the bounded mode
        exchange, fresh zero/range feedback and the 0.5-degree initial-pose guard
        permit minor supported settling without restarting this timer. */
-    if (c->op!=OP_TEACH_RETURN&&(!d->stationary_since||now-d->stationary_since<stationary_dwell_s)) return "Keep the measured pose stationary for 0.4 seconds before teaching handoff.";
+    if (c->op!=OP_TEACH_RETURN&&can_bus_strict_still_for(d,now)<stationary_dwell_s) return "Keep the measured pose stationary for 0.4 seconds before teaching handoff.";
     return NULL;
 }
 /* A hardware button may preempt a leased move. Do not fight that button with a
@@ -846,7 +846,7 @@ static void cycle_leg(struct controller *c,struct can_device *d,double now)
 }
 static const char *start_query(struct controller *c,struct can_device *d,double now)
 {
-    if (!d||!d->present||!d->up||(!d->simulated&&d->fd<0)) return "CAN interface is unavailable.";
+    if (!d||!d->present||!d->up||!can_bus_transport_open(d)) return "CAN interface is unavailable.";
     struct can_frame f[2]={piper_firmware_query(),piper_gripper_config_query()};
     can_bus_invalidate_configuration(d,now);
     if (!can_bus_send(&c->bus,d,d->generation,f,2)) return "Information requests could not be queued.";
@@ -1132,7 +1132,7 @@ static cJSON *lane_action(struct controller *c,const char *route,const cJSON *bo
         if (!yes(body,"clear") || !yes(body,"supported")) return reply(status,400,"Confirm that it is safe to use the current robot state.");
         const char *why=health(d,now,CHECK_CONTROL); if (why) return reply(status,409,why);
         if (reset_pending(c,d->id)) return reply(status,409,"A reset is pending; verify completed reset recovery first.");
-        if ((!enabled(d,true,0)&&!enabled(d,false,0)) || !d->stationary_since || now-d->stationary_since<stationary_dwell_s)
+        if ((!enabled(d,true,0)&&!enabled(d,false,0)) || can_bus_strict_still_for(d,now)<stationary_dwell_s)
             return reply(status,409,"Wait for healthy, stationary feedback and a consistent motor power state.");
         if (!clear_latch(c,d->id)) return reply(status,500,"Recovery state could not be saved.");
         message(c,"monitor","Current robot state verified. No motor power or position command was sent.");
@@ -1145,7 +1145,7 @@ static cJSON *lane_action(struct controller *c,const char *route,const cJSON *bo
             bool reset_verification=!strcmp(action,"verify-reset");
             if (reset_verification&&!yes(body,"reset_completed")) return reply(status,409,"Confirm that the reset or power cycle has completed.");
             if (!reset_verification&&reset_pending(c,d->id)) return reply(status,409,"A controller reset is pending. Use Verify completed recovery after it finishes.");
-            if (!enabled(d,false,0)||health(d,now,CHECK_CONTROL)||!d->stationary_since||now-d->stationary_since<stationary_dwell_s)
+            if (!enabled(d,false,0)||health(d,now,CHECK_CONTROL)||can_bus_strict_still_for(d,now)<stationary_dwell_s)
                 return reply(status,409,"All six motors must report disabled, healthy and stationary before recovery can be cleared.");
             if (!clear_latch(c,d->id)) return reply(status,500,"Recovery state could not be saved.");
             message(c,"monitor","Recovery cleared: all six motors verified off, healthy and stationary. Enable motors when ready; no motor command was sent.");
@@ -1164,7 +1164,7 @@ static cJSON *lane_action(struct controller *c,const char *route,const cJSON *bo
                 return reply(status,409,"A reset is pending. Verify completed recovery, or request reset again only after a fresh stationary stop with all six motors off.");
             bool residual_teach=stopped_off&&s->teach==PIPER_TEACH_RECORDING;
             if (s->control>2||s->motion_mode>1||(!residual_teach&&!piper_teach_idle(s->teach))) return reply(status,409,"Reset is supported only for stopped/idle MoveJ or completed teaching states.");
-            if (!d->stationary_since||now-d->stationary_since<stationary_dwell_s) return reply(status,409,"Wait for a stationary arm before reset recovery.");
+            if (can_bus_strict_still_for(d,now)<stationary_dwell_s) return reply(status,409,"Wait for a stationary arm before reset recovery.");
         }
         bool reset=!strcmp(action,"reset");
         c->disable_keeps_recovery=blocked(c,d->id)||health(d,now,CHECK_CONTROL)!=NULL;
@@ -1189,7 +1189,7 @@ static cJSON *lane_action(struct controller *c,const char *route,const cJSON *bo
         /* The MCU's target-arrival bit can remain unset after a disabled arm
            settles away from its last target. Require measured stillness. */
         if (!strcmp(action,"enable")) {
-            if (!d->stationary_since||now-d->stationary_since<pose_dwell_s) return reply(status,409,"Wait for a stationary arm before changing motor power.");
+            if (can_bus_strict_still_for(d,now)<pose_dwell_s) return reply(status,409,"Wait for a stationary arm before changing motor power.");
         } else if (!position_control_stationary(d,now)) return reply(status,409,"Wait for a stable measured pose before beginning another action.");
         memcpy(c->target,d->feedback.arm[0].deg,sizeof c->target);
         for (unsigned i=0;i<6;++i) {
@@ -1539,7 +1539,7 @@ static void lane_tick(struct controller *c,double now)
         }
         bool fresh=enabled(d,false,c->sent_at);
         for (unsigned i=0;i<6;++i) fresh=fresh&&s->joint_at[i]>c->sent_at;
-        if (acknowledged&&fresh&&s->status_at>c->sent_at&&!s->error&&(s->arm_status==0||(c->op==OP_DISABLE&&c->disable_keeps_recovery))&&d->stationary_since&&now-d->stationary_since>=stationary_dwell_s) {
+        if (acknowledged&&fresh&&s->status_at>c->sent_at&&!s->error&&(s->arm_status==0||(c->op==OP_DISABLE&&c->disable_keeps_recovery))&&can_bus_strict_still_for(d,now)>=stationary_dwell_s) {
             if (!c->settled_at) c->settled_at=now;
             if (now-c->settled_at>=settle_hold_s) finish(c,d,c->op==OP_RESET?"Reset verified: motors disabled. Enable explicitly before motion.":c->disable_keeps_recovery?"All six motors verified disabled. Use Verify motors off to clear the previous recovery record.":"All six motors verified disabled. Ready to enable again.",c->op==OP_RESET||!c->disable_keeps_recovery);
         } else c->settled_at=0;
@@ -1917,8 +1917,8 @@ cJSON *controller_state(struct controller *c,const char *token)
         num(status,"teach_state",s->status_seen?s->teach:NAN);
         num(status,"joint_communication_fault_mask",s->status_seen?s->error&0x3f:NAN);
         num(status,"joint_angle_limit_fault_mask",s->status_seen?(s->error>>8)&0x3f:NAN);
-        num(status,"stationary_s",d->stationary_since?now-d->stationary_since:0);
-        num(status,"pose_stationary_s",d->pose_stationary_since?now-d->pose_stationary_since:0);
+        num(status,"stationary_s",can_bus_strict_still_for(d,now));
+        num(status,"pose_stationary_s",can_bus_pose_still_for(d,now));
         cJSON *teaching=cJSON_CreateObject();
         enum teaching_phase teach_phase=fresh?teaching_phase(s):TEACH_UNKNOWN;
         bool controller_stopped=fresh&&s->arm_status==1;

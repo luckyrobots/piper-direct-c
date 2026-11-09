@@ -1,5 +1,6 @@
 /* Pure fake Cando callbacks: no adapter enumeration, open, or Windows USB I/O. */
 #include "../src/canbus.c"
+#include "check.h"
 #include <assert.h>
 #include <stdio.h>
 static struct win_frame received[4];
@@ -8,31 +9,31 @@ static struct can_frame expected_frames[4];
 static size_t expected_count,expected_sent;
 static bool __stdcall fake_read(void *handle,struct win_frame *frame,uint32_t timeout)
 {
-    assert(handle==(void *)1&&timeout==0); ++reads;
+    CHECK(handle==(void *)1&&timeout==0); ++reads;
     if (next_frame==4) { SetLastError(ERROR_TIMEOUT); return false; }
     *frame=received[next_frame++]; return true;
 }
-static int __stdcall fake_error(void *handle) { assert(handle==(void *)1); return 15; }
-static uint32_t __stdcall fake_zero(void *handle) { assert(handle==(void *)1); return 0; }
+static int __stdcall fake_error(void *handle) { CHECK(handle==(void *)1); return 15; }
+static uint32_t __stdcall fake_zero(void *handle) { CHECK(handle==(void *)1); return 0; }
 static bool __stdcall fake_send(void *handle,struct win_frame *frame,fn_pump pump,void *context)
 {
-    assert(handle==(void *)1&&frame->echo==0&&frame->channel==0&&frame->flags==0&&frame->reserved==0);
-    assert(expected_sent<expected_count);
+    CHECK(handle==(void *)1&&frame->echo==0&&frame->channel==0&&frame->flags==0&&frame->reserved==0);
+    CHECK(expected_sent<expected_count);
     const struct can_frame *expected=&expected_frames[expected_sent++];
-    assert(frame->id==expected->can_id&&frame->len==expected->len&&!memcmp(frame->data,expected->data,8));
+    CHECK(frame->id==expected->can_id&&frame->len==expected->len&&!memcmp(frame->data,expected->data,8));
     ++sends;
-    assert(pump(context)); assert(next_frame==4); return true;
+    CHECK(pump(context)); CHECK(next_frame==4); return true;
 }
 static void expect_frames(const struct can_frame *frames,size_t count)
 {
-    assert(count<=4);expected_count=count;expected_sent=0;
+    CHECK(count<=4);expected_count=count;expected_sent=0;
     if (count) memcpy(expected_frames,frames,count*sizeof *frames);
 }
 static void rejected_batch(struct can_bus *bus,struct can_device *d,const struct can_frame *frames,size_t count)
 {
     unsigned previous_sends=sends;uint64_t previous_tx=d->tx;expect_frames(NULL,0);
-    assert(!can_bus_send(bus,d,d->generation,frames,count));
-    assert(sends==previous_sends&&d->tx==previous_tx&&expected_sent==0);
+    CHECK(!can_bus_send(bus,d,d->generation,frames,count));
+    CHECK(sends==previous_sends&&d->tx==previous_tx&&expected_sent==0);
 }
 int main(void)
 {
@@ -46,18 +47,18 @@ int main(void)
     received[3]=(struct win_frame){.echo=0xffffffffu,.id=0x2a1,.len=8,.data={1,0,1,0,0}};
     double before=piper_now(); struct can_frame frame=piper_mode(1);
     expect_frames(&frame,1);
-    assert(can_bus_send(&bus,d,7,&frame,1));
-    assert(sends==1&&reads==5&&d->local==1&&d->rx==1&&d->tx==1&&!d->feedback.foreign_seen);
-    assert(d->feedback.arm[0].control==1&&d->feedback.arm[0].status_at>=before);
+    CHECK(can_bus_send(&bus,d,7,&frame,1));
+    CHECK(sends==1&&reads==5&&d->local==1&&d->rx==1&&d->tx==1&&!d->feedback.foreign_seen);
+    CHECK(d->feedback.arm[0].control==1&&d->feedback.arm[0].status_at>=before);
     /* Keep the real common allowlist and the real windows_send wrapper. Only
        Cando callbacks are fake, so a rejected packet cannot hide behind a
        replacement can_bus_send as it did in the controller-only fixture. */
     strcpy(d->feedback.hardware,"H-V1.2-1");strcpy(d->feedback.version,"S-V1.9-0");
     const double target[6]={1.125,2.25,-3.375,4.5,-5.625,6.75};
-    struct can_frame pose[4];pose[0]=piper_mode(90);assert(piper_targets(target,pose+1));
+    struct can_frame pose[4];pose[0]=piper_mode(90);CHECK(piper_targets(target,pose+1));
     expect_frames(pose,4);uint64_t previous_tx=d->tx;unsigned previous_sends=sends;
-    assert(can_bus_send(&bus,d,7,pose,4));
-    assert(expected_sent==4&&sends==previous_sends+4&&d->tx==previous_tx+4);
+    CHECK(can_bus_send(&bus,d,7,pose,4));
+    CHECK(expected_sent==4&&sends==previous_sends+4&&d->tx==previous_tx+4);
     struct can_frame invalid[4];
     for (unsigned error=0;error<9;++error) {
         memcpy(invalid,pose,sizeof invalid);
