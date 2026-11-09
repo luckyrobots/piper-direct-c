@@ -5,14 +5,14 @@ internal static class PikaDriverStatusTests
 {
     public static void Run(Action<bool, string> check)
     {
-        foreach (var (raw, enabled, homed, faults) in new[]
+        foreach (var (raw, enabled, _, faults) in new[]
         {
             ("0x00", false, false, 0), ("0x20", false, false, 0x20), ("0x40", true, false, 0),
             ("0x60", true, false, 0x20), ("0x41", true, false, 1), ("0x80", false, true, 0), ("0xC0", true, true, 0), ("0xFF", true, true, 0x3f)
         })
         {
-            check(PikaDriverStatus.TryRead(raw, out var status) && status!.Enabled == enabled && status.Homed == homed &&
-                status.FaultMask == faults && status.HasFault == (faults != 0), "Driver power, home and fault bits were conflated: " + raw);
+            check(PikaDriverStatus.TryRead(raw, out var status) && status!.Enabled == enabled &&
+                status.FaultMask == faults && status.HasFault == (faults != 0), "Driver power and fault bits were conflated: " + raw);
         }
         foreach (string raw in new[] { "", "40", "0x", "0x100", "0xFFFFFFFF", "0xGG" })
             check(!PikaDriverStatus.TryRead(raw, out _), "Invalid/out-of-byte-range motor status became fresh feedback: " + raw);

@@ -50,13 +50,10 @@ internal static class PikaDisabledEvidenceTests
         // Exercise the actual service operation lock/shortcut on every OS. The
         // inert Process wrapper has no redirected stdin and never opens serial;
         // any attempted forward would fail this test. Detach it before disposal.
-        const BindingFlags fields = BindingFlags.Instance | BindingFlags.NonPublic;
         var service = new PikaProcessService("/dev/pika-fixture", "never-launched");
         using var current = Process.GetCurrentProcess();
-        void Set(string name, object? value) => typeof(PikaProcessService).GetField(name, fields)!.SetValue(service, value);
-        Set("process", current); Set("owner", owner); Set("connected", true); Set("sessionPowerRequested", true);
-        Set("motorRequestId", "verified-disable"); Set("motorRequestAcknowledged", true);
-        Set("state", Evidence()); Set("stateAt", Stopwatch.GetTimestamp());
+        service.AttachForTest(current, owner, PikaAgentPhase.Ready);
+        service.SetEvidenceForTest(PikaPowerEvidence.VerifiedDisabled, null, "verified-disable", Evidence().ToJsonString());
         try
         {
             var result = await service.ExecuteAsync("hold", JsonSerializer.SerializeToElement(new { owner }), default);
@@ -81,7 +78,7 @@ internal static class PikaDisabledEvidenceTests
         }
         finally
         {
-            Set("process", null); Set("owner", null); Set("connected", false); Set("sessionPowerRequested", false); Set("unresolvedOwner", null);
+            service.DetachForTest();
             await service.DisposeAsync();
         }
 
@@ -90,21 +87,19 @@ internal static class PikaDisabledEvidenceTests
         await using var fenced = new PikaProcessService("/dev/pika-fixture", "never-launched");
         using var previous = new Process();
         using var replacement = new Process();
-        var processField = typeof(PikaProcessService).GetField("process", fields)!;
-        var publish = typeof(PikaProcessService).GetMethod("PublishAgentMessage", fields)!;
         var requests = (ConcurrentDictionary<string, TaskCompletionSource<JsonElement>>)
-            typeof(PikaProcessService).GetField("pending", fields)!.GetValue(fenced)!;
+            typeof(PikaProcessService).GetField("pending", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(fenced)!;
         var request = new TaskCompletionSource<JsonElement>(TaskCreationOptions.RunContinuationsAsynchronously);
         requests["new"] = request;
         var oldReady = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var newReady = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        processField.SetValue(fenced, replacement);
+        fenced.AttachForTest(replacement, owner, PikaAgentPhase.Launching);
         try
         {
             bool Publish(Process process, TaskCompletionSource ready, string json)
             {
                 using var message = JsonDocument.Parse(json);
-                return (bool)publish.Invoke(fenced, [process, ready, message.RootElement])!;
+                return fenced.PublishAgentMessage(process, ready, message.RootElement);
             }
             check(!Publish(previous, oldReady, """{"type":"ready"}""") && !oldReady.Task.IsCompleted &&
                 !Publish(previous, oldReady, """{"type":"state","fresh":true,"age_s":0,"enabled":true}""") &&
@@ -116,6 +111,6 @@ internal static class PikaDisabledEvidenceTests
                 request.Task.IsCompletedSuccessfully && request.Task.Result.GetProperty("ok").GetBoolean(),
                 "Replacement agent readiness or acknowledgement was dropped");
         }
-        finally { processField.SetValue(fenced, null); }
+        finally { fenced.DetachForTest(); }
     }
 }

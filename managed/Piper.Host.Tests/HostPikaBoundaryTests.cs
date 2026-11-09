@@ -27,7 +27,7 @@ internal static class HostPikaBoundaryTests
             var context = new PiperRpcContext(controller, registry, false, owner, maintenance) { Clock = clock };
             var initial = ArmState();
             Check(initial["simulated"]?.GetValue<bool>() == true, "Host/Pika boundary fixture is not simulated.");
-            await registry.ExecuteAsync("configure", JsonSerializer.SerializeToElement(new { owner, device = first }), default);
+            await registry.ConfigureAsync(JsonSerializer.SerializeToElement(new { owner, device = first }), default, commit => commit());
             await registry.ExecuteAsync("connect", JsonSerializer.SerializeToElement(new { owner, pika_device = peer }), default);
 
             DateTimeOffset beforeSample = clock.Utc;

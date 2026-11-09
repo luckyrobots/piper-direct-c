@@ -1,5 +1,34 @@
 namespace LuckyRobots.Piper.Pika;
 
+public sealed record PikaFollowEvent(long SessionOrdinal, string Kind, double AgentTimeSeconds,
+    long LastInputSequence, double LastInputTimeSeconds, double InputAgeSeconds, string Reason);
+public sealed record PikaFollowObservation(double AgentTimeSeconds, double PositionRadians,
+    double SpeedRadiansPerSecond, bool Enabled, string MotorStatus);
+public sealed record PikaFollowRetirement(long SessionOrdinal, string Cause, string Reason, double AgentTimeSeconds,
+    long LastInputSequence, double LastInputTimeSeconds, double InputAgeSeconds, double? CommandOpeningMm,
+    double? MeasuredAngleRadians, bool? Enabled, IReadOnlyList<PikaFollowEvent> RecentEvents,
+    IReadOnlyList<PikaFollowObservation> RecentFeedback);
+public sealed record PikaFollowAudit(long SessionOrdinal, bool Active, double InputDeadlineSeconds,
+    double? MaximumInputIntervalSeconds, PikaFollowRetirement? LastRetirement,
+    IReadOnlyList<PikaFollowEvent> RecentEvents, IReadOnlyList<PikaFollowObservation> RecentFeedback);
+
+public sealed class PikaFollowRejectedException(string message, PikaFollowAudit audit) : InvalidOperationException(
+    !audit.Active && audit.LastRetirement is { } last && last.SessionOrdinal == audit.SessionOrdinal && !message.Contains("Previous stream ended:", StringComparison.Ordinal)
+        ? message + " Previous stream ended: " + last.Reason : message)
+{
+    public PikaFollowAudit Audit { get; } = audit;
+}
+
+// Pika-G follow session phase (agent control thread only):
+//   Idle | Holding | HoldFailed ──Start──▶ Following
+//   Following ──Update / paced Tick write──▶ Following
+//   Following ──Tick input expiry──▶ Hold(measured)
+//   any ──Hold: measured position written──▶ Holding
+//   any ──Hold: driver fault, no fresh measured angle, or write failure──▶ HoldFailed
+//   any ──Cancel, Tick feedback loss or write failure──▶ Idle
+// SessionId and OpeningMm are set only while Following.
+public enum PikaFollowPhase { Idle, Following, Holding, HoldFailed }
+
 /// <summary>A single replaceable opening target. This bounds command traffic, not physical jaw speed.
 /// All methods are called by the serial agent's one control thread.</summary>
 public sealed class PikaFollowSession
@@ -15,11 +44,12 @@ public sealed class PikaFollowSession
             throw new ArgumentOutOfRangeException(nameof(commandPeriodSeconds), "Command period must be 30–250 ms; it is not a physical speed limit.");
         this.writeAngle = writeAngle; ConfiguredCommandPeriodSeconds = commandPeriodSeconds;
     }
+    public PikaFollowPhase Phase { get; private set; }
     public string? SessionId { get; private set; }
     public long Sequence { get; private set; }
     public double? OpeningMm { get; private set; }
-    public bool Active => SessionId is not null;
-    public bool Holding { get; private set; }
+    public bool Active => Phase == PikaFollowPhase.Following;
+    public bool Holding => Phase == PikaFollowPhase.Holding;
     public string Message { get; private set; } = "No following session.";
     private double lastInput, lastWrite = double.NegativeInfinity, lastTime = double.NegativeInfinity;
     private long sessionOrdinal;
@@ -46,6 +76,8 @@ public sealed class PikaFollowSession
         while (events.Count > 16) events.Dequeue();
     }
 
+    // The single exit from Following: every other phase change goes through here
+    // to Idle, and Hold then moves on to Holding or HoldFailed.
     private void Retire(string cause, string reason, double now, double? angle = null, bool? enabled = null)
     {
         // Cleanup/Stop may call Hold repeatedly. Only an actually active stream
@@ -54,16 +86,17 @@ public sealed class PikaFollowSession
         if (Active)
             LastRetirement = new(sessionOrdinal, cause, reason, now, Sequence, lastInput, Math.Max(0, now - lastInput), OpeningMm, angle, enabled,
                 Array.AsReadOnly(events.ToArray()), Array.AsReadOnly(feedback.ToArray()));
-        SessionId = null; OpeningMm = null; Holding = false; Message = reason;
+        Phase = PikaFollowPhase.Idle; SessionId = null; OpeningMm = null; Message = reason;
     }
 
     public string Start(double now)
     {
         CheckTime(now);
         if (Active) throw new InvalidOperationException("Hold the active Pika session before starting another.");
+        Phase = PikaFollowPhase.Following;
         SessionId = Guid.NewGuid().ToString("D");
         sessionOrdinal++;
-        Sequence = 0; OpeningMm = null; Holding = false;
+        Sequence = 0; OpeningMm = null;
         lastInput = now; lastWrite = double.NegativeInfinity;
         maximumInputInterval = 0;
         Event("start", now);
@@ -77,7 +110,7 @@ public sealed class PikaFollowSession
         if (!Active || sessionId != SessionId) { Event("rejected-session", now); throw new InvalidOperationException("No matching active Pika following session."); }
         if (now - lastInput >= InputDeadlineSeconds) { Event("rejected-expired-input", now); throw new InvalidOperationException("Pika following input expired; hold and start a new session."); }
         if (sequence <= 0 || sequence <= Sequence) throw new InvalidOperationException("Discarded an old Pika following target.");
-        if (!double.IsFinite(openingMm) || openingMm is < 0 or > 90)
+        if (!PikaProtocol.ValidOpening(openingMm))
             throw new ArgumentOutOfRangeException(nameof(openingMm), "Opening target must be within 0–90 mm.");
         // There is no target queue. A faster producer replaces this one value.
         maximumInputInterval = Math.Max(maximumInputInterval, now - lastInput);
@@ -120,13 +153,14 @@ public sealed class PikaFollowSession
         double at = now ?? (double.IsFinite(lastTime) ? lastTime : 0);
         bool faulted = driverStatus?.HasFault == true;
         Retire(faulted ? "driver-fault" : cause, faulted ? driverStatus!.Text + "; measured holding was not verified." : reason, at, measuredAngle, enabled);
+        Phase = PikaFollowPhase.HoldFailed;
         Message = "Pika following cancelled; hold has not been written.";
         if (faulted) throw new InvalidOperationException(driverStatus!.Text + "; no hold target was sent, and pending targets were discarded.");
         if (measuredAngle is null || !PikaProtocol.ValidAngle(measuredAngle.Value))
             throw new InvalidOperationException("Fresh enabled Pika feedback is required to hold; pending targets were cancelled.");
         try { writeAngle(measuredAngle.Value); }
         catch { Event("hold-write-failed", at); throw; }
-        Holding = true; Message = reason;
+        Phase = PikaFollowPhase.Holding; Message = reason;
     }
 
     public void Cancel(string reason, double? now = null)

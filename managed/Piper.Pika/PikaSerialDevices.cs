@@ -47,7 +47,7 @@ public static class PikaSerialDevices
             {
                 string vendor = Path.Combine(usb.FullName, "idVendor"), product = Path.Combine(usb.FullName, "idProduct");
                 if (!File.Exists(vendor) || !File.Exists(product)) continue;
-                if (File.ReadAllText(vendor).Trim() != "1a86" || File.ReadAllText(product).Trim() != "7522") break;
+                if (!IsPikaUsb(vendor, product)) break;
                 string actual = Path.Combine(devRoot, Path.GetFileName(tty));
                 var aliases = new List<string> { actual };
                 foreach (string kind in new[] { "by-id", "by-path" })
@@ -67,6 +67,10 @@ public static class PikaSerialDevices
         }
         return result;
     }
+
+    /// <summary>True when the sysfs idVendor/idProduct files name the Pika CH340K.</summary>
+    public static bool IsPikaUsb(string vendorFile, string productFile) =>
+        File.ReadAllText(vendorFile).Trim() == PikaProtocol.UsbVendorId && File.ReadAllText(productFile).Trim() == PikaProtocol.UsbProductId;
 
     public static string ResolveLinux(string configured)
     {
