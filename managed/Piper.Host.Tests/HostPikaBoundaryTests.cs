@@ -9,7 +9,9 @@ internal static class HostPikaBoundaryTests
     internal static async Task Run()
     {
         const string first = "/dev/pika/by-host/11-4", peer = "/dev/pika/by-host/12-4", replacement = "/dev/pika/by-host/13-4";
-        const string alias = "/dev/ttyUSB5", distribution = "Ubuntu", arm = "simulation:one";
+        const string alias = "/dev/ttyUSB5", arm = "simulation:one";
+        // The platform's own distribution: a WSL name on Windows, native Linux (null) elsewhere.
+        string? distribution = OperatingSystem.IsWindows() ? "Ubuntu" : null;
         string owner = Guid.NewGuid().ToString();
         var directory = Directory.CreateTempSubdirectory("piper-host-pika-boundaries-");
         try
@@ -81,11 +83,17 @@ internal static class HostPikaBoundaryTests
             Check(accepted.Status == 200 && registry.Snapshot()["device"]?.GetValue<string>() == replacement &&
                 agents[replacement].Actions.Count == 0, "Idle configuration did not register without opening or writing to the gripper.");
             var moved = await Send("/api/pika/configure", new { owner, device = replacement, distribution = "Debian" });
-            Check(moved.Status == 200 && context.Control.PikaState(replacement, null)["distribution"]?.GetValue<string>() == "Debian" &&
-                context.Control.PikaState(replacement, distribution)["distribution"]?.GetValue<string>() == distribution,
-                "HTTP Pika state ignored the current registry distribution after configure.");
+            if (OperatingSystem.IsWindows())
+                Check(moved.Status == 200 && context.Control.PikaState(replacement, null)["distribution"]?.GetValue<string>() == "Debian" &&
+                    context.Control.PikaState(replacement, distribution)["distribution"]?.GetValue<string>() == distribution,
+                    "HTTP Pika state ignored the current registry distribution after configure.");
+            else
+                Check(moved.Status == 409 && moved.Error?.Contains("only on Windows", StringComparison.Ordinal) == true &&
+                    registry.DefaultAssignment == (replacement, null) && context.Control.PikaState(replacement, null)["transport"]?.GetValue<string>() == "linux-serial",
+                    "A WSL distribution was configured on a non-Windows host: " + moved.Error);
             _ = await context.Control.DiscoverPikaAsync(null, deadline.Token);
-            Check(discovery.Distributions[^1] == "Debian", "HTTP Pika inventory used the startup distribution after configure.");
+            Check(discovery.Distributions[^1] == (OperatingSystem.IsWindows() ? "Debian" : null),
+                "HTTP Pika inventory did not use the current registry distribution after configure.");
             Console.WriteLine("Host Pika boundaries passed: same-sample snapshot, source clock, idle commit, and independent STOP/peer writes.");
 
             JsonObject ArmState() => controller.SnapshotJson();

@@ -4,16 +4,19 @@ using LuckyRobots.Piper.Pika;
 
 internal static class PikaMultiDeviceTests
 {
+    // The platform's own distribution: a WSL name on Windows, native Linux (null) elsewhere.
+    private static readonly string? Distro = OperatingSystem.IsWindows() ? "Ubuntu" : null;
+
     public static async Task Run()
     {
         string a = "/dev/pika/by-host/11-4", b = "/dev/pika/by-host/15-4";
         string ownerA = Guid.NewGuid().ToString(), ownerB = Guid.NewGuid().ToString();
         var discovery = new Discovery(a, b);
         var agents = new Dictionary<string, Session>();
-        await using var registry = new PikaSessionRegistry(a, "unused", "Ubuntu", discovery: discovery,
+        await using var registry = new PikaSessionRegistry(a, "unused", Distro, discovery: discovery,
             factory: (device, distro) => agents[device + "@" + distro] = new Session(device, distro));
         Check(registry.Snapshots().Count == 0 && agents.Count == 0, "Snapshot must not open or register a serial agent.");
-        var inventory = await registry.DiscoverAsync("Ubuntu", default);
+        var inventory = await registry.DiscoverAsync(Distro, default);
         Check(inventory["devices"]!.AsArray().Count == 2 && agents.Count == 0, "Inventory opened an agent.");
         await registry.ExecuteAsync("connect", Input(a, ownerA), default);
         await registry.ExecuteAsync("connect", Input(b, ownerB), default);
@@ -21,7 +24,7 @@ internal static class PikaMultiDeviceTests
         await registry.ExecuteAsync("enable", Input(b, ownerB), default);
         await registry.ExecuteAsync("position", Input(a, ownerA, .25), default);
         await registry.ExecuteAsync("position", Input(b, ownerB, .75), default);
-        var first = agents[a + "@Ubuntu"]; var second = agents[b + "@Ubuntu"];
+        var first = agents[a + "@" + Distro]; var second = agents[b + "@" + Distro];
         Check(agents.Count == 2 && first.State["value"]!.GetValue<double>() == .25 && second.State["value"]!.GetValue<double>() == .75,
             "Two selected grippers shared a mutable serial target.");
         Check(registry.Snapshot()["device"]!.GetValue<string>() == a && registry.Snapshots().Count == 2,
@@ -43,17 +46,20 @@ internal static class PikaMultiDeviceTests
         // preventing the independently identified gripper from operating.
         first.State["connected"] = false; first.State["power_uncertain"] = true;
         await registry.ExecuteAsync("position", Input(b, ownerB, .4), default);
-        Check(registry.Snapshot(a, "Ubuntu")["power_uncertain"]!.GetValue<bool>() &&
-            registry.Snapshot(b, "Ubuntu")["value"]!.GetValue<double>() == .4, "One gripper failure erased evidence or blocked another.");
-        await Reject(() => registry.ExecuteAsync("connect", Input(a, ownerA, distribution: "Debian"), default),
+        Check(registry.Snapshot(a, Distro)["power_uncertain"]!.GetValue<bool>() &&
+            registry.Snapshot(b, Distro)["value"]!.GetValue<double>() == .4, "One gripper failure erased evidence or blocked another.");
+        // On Windows a second distribution is a second WSL route to the same
+        // physical gripper; on Linux the WSL name is refused at the boundary.
+        await Reject(() => registry.ExecuteAsync("connect", InputFor(a, ownerA, "Debian"), default),
             "The same physical Pika acquired a second distribution owner.");
+        Check(OperatingSystem.IsWindows() || agents.Count == 2, "A refused WSL distribution created a Pika agent.");
         await registry.ExecuteAsync("disable", Input(a, ownerA), default);
         await registry.ExecuteAsync("disconnect", Input(a, ownerA), default);
         Check(!first.State["connected"]!.GetValue<bool>() && second.State["connected"]!.GetValue<bool>() && second.State["enabled"]!.GetValue<bool>(),
             "Disconnecting the first gripper closed or disabled the second.");
         var projected = registry.Snapshots(); projected[0]!["owner"] = "changed-copy";
         Check(first.Owner != "changed-copy", "A client modified live owner bookkeeping through its snapshot.");
-        inventory = await registry.DiscoverAsync("Ubuntu", default);
+        inventory = await registry.DiscoverAsync(Distro, default);
         Check(inventory["devices"]![1]!["connected"]!.GetValue<bool>() &&
             inventory["devices"]![1]!["owner"]!.GetValue<string>() == ownerB, "Inventory omitted independent owner/connection state.");
         int writes = first.Actions.Count + second.Actions.Count;
@@ -68,14 +74,14 @@ internal static class PikaMultiDeviceTests
         string alias = "/dev/serial/by-id/usb-1a86_USB_Serial-if00-port0";
         var singleDiscovery = new Discovery(a);
         var aliasAgents = new Dictionary<string, Session>();
-        await using var legacy = new PikaSessionRegistry(alias, "unused", "Ubuntu", discovery: singleDiscovery,
+        await using var legacy = new PikaSessionRegistry(alias, "unused", Distro, discovery: singleDiscovery,
             factory: (path, distro) => aliasAgents[path] = new Session(path, distro));
         await legacy.ExecuteAsync("connect", JsonSerializer.SerializeToElement(new { owner = ownerA }), default);
         Check(legacy.Snapshot()["device"]!.GetValue<string>() == a && aliasAgents.ContainsKey(a), "Legacy alias was not bound to verified USB identity.");
         singleDiscovery.Devices = Discovery.Inventory(b, a); // ambiguous symlink now points to B
         await legacy.ExecuteAsync("heartbeat", JsonSerializer.SerializeToElement(new { owner = ownerA }), default);
         Check(aliasAgents.Count == 1 && aliasAgents[a].Actions.Last() == "heartbeat", "An existing alias silently changed grippers after USB reordering.");
-        await using var ambiguous = new PikaSessionRegistry(alias, "unused", "Ubuntu", discovery: discovery,
+        await using var ambiguous = new PikaSessionRegistry(alias, "unused", Distro, discovery: discovery,
             factory: (_, _) => throw new Exception("Ambiguous selection opened an agent."));
         await Reject(() => ambiguous.ExecuteAsync("connect", JsonSerializer.SerializeToElement(new { owner = ownerA }), default),
             "Two identical serial-number-free CH340s accepted an ambiguous by-id assignment.");
@@ -97,7 +103,7 @@ internal static class PikaMultiDeviceTests
             merged["devices"]![1]!["message"]!.GetValue<string>().Contains("administrator"),
             "Unshared second Pika was hidden, auto-opened or confused with a camera.");
         var stopAgents = new Dictionary<string, Session>();
-        await using var stopRegistry = new PikaSessionRegistry(a, "unused", "Ubuntu", discovery: discovery,
+        await using var stopRegistry = new PikaSessionRegistry(a, "unused", Distro, discovery: discovery,
             factory: (device, distro) => stopAgents[device] = new Session(device, distro));
         foreach (string path in new[] { a, b }) {
             await stopRegistry.ExecuteAsync("connect", Input(path, ownerA), default);
@@ -113,9 +119,9 @@ internal static class PikaMultiDeviceTests
         int actionsBefore = stopAgents.Values.Sum(s => s.Actions.Count);
         Check((await stopRegistry.HoldOwnedAsync(ownerB, default))["ok"]!.GetValue<bool>() && stopAgents.Values.Sum(s => s.Actions.Count) == actionsBefore,
             "Global hold changed another owner's grippers");
-        var uncertain = new Session(a, "Ubuntu") { UnresolvedOwner = ownerA };
-        var independent = new Session(b, "Ubuntu") { Owner = ownerA };
-        await using var uncertainRegistry = new PikaSessionRegistry(a, "unused", "Ubuntu", discovery: discovery,
+        var uncertain = new Session(a, Distro) { UnresolvedOwner = ownerA };
+        var independent = new Session(b, Distro) { Owner = ownerA };
+        await using var uncertainRegistry = new PikaSessionRegistry(a, "unused", Distro, discovery: discovery,
             factory: (path, _) => path == a ? uncertain : independent);
         foreach (string path in new[] { a, b })
             await uncertainRegistry.ConfigureAsync(JsonSerializer.SerializeToElement(new { owner = ownerA, pika_device = path, device = path }), default, Commit);
@@ -126,12 +132,12 @@ internal static class PikaMultiDeviceTests
             uncertain.Actions.Count == 0 && independent.Actions.SequenceEqual(["hold"]),
             "An unresolved owned gripper was silently omitted, or prevented another gripper from holding");
 
-        var connecting = new Session(a, "Ubuntu")
+        var connecting = new Session(a, Distro)
         {
             ConnectEntered = new(TaskCreationOptions.RunContinuationsAsynchronously),
             PendingConnect = new(TaskCreationOptions.RunContinuationsAsynchronously)
         };
-        await using var defaultRegistry = new PikaSessionRegistry(a, "unused", "Ubuntu", discovery: discovery, factory: (_, _) => connecting);
+        await using var defaultRegistry = new PikaSessionRegistry(a, "unused", Distro, discovery: discovery, factory: (_, _) => connecting);
         var connectingTask = defaultRegistry.ExecuteAsync("connect", JsonSerializer.SerializeToElement(new { owner = ownerA }), default);
         await connecting.ConnectEntered.Task.WaitAsync(TimeSpan.FromSeconds(2));
         var clearing = defaultRegistry.ConfigureAsync(JsonSerializer.SerializeToElement(new { owner = ownerA, device = "" }), default, Commit);
@@ -153,12 +159,27 @@ internal static class PikaMultiDeviceTests
 
         // Pika-C: an explicit null distribution is native Linux, never the default.
         var probe = new Discovery(a);
-        await using var routing = new PikaSessionRegistry(a, "unused", "Ubuntu", discovery: probe, factory: (path, distro) => new Session(path, distro));
+        var routed = new List<string?>();
+        await using var routing = new PikaSessionRegistry(a, "unused", Distro, discovery: probe,
+            factory: (path, distro) => { routed.Add(distro); return new Session(path, distro); });
         await routing.ExecuteAsync("devices", JsonSerializer.SerializeToElement(new { }), default);
-        Check(probe.Requested.SequenceEqual(new string?[] { "Ubuntu" }), "Device inventory without a distribution did not use the default");
+        Check(probe.Requested.SequenceEqual(new[] { Distro }), "Device inventory without a distribution did not use the default");
         await routing.ExecuteAsync("devices", JsonSerializer.SerializeToElement(new { pika_distribution = (string?)null }), default);
         Check(probe.Requested.Count == 2 && probe.Requested[1] is null,
             "An explicit native-Linux inventory request was turned into the default WSL distribution");
+        await routing.ExecuteAsync("connect", JsonSerializer.SerializeToElement(new { owner = ownerA, pika_device = a }), default);
+        var explicitNative = JsonSerializer.SerializeToElement(new { owner = ownerA, pika_device = a, pika_distribution = (string?)null });
+        if (OperatingSystem.IsWindows())
+            await Reject(() => routing.ExecuteAsync("heartbeat", explicitNative, default), "Native Windows serial was routed for an explicit null distribution");
+        else
+        {
+            // Native Linux: an absent distribution and an explicit null are one session key.
+            await routing.ExecuteAsync("heartbeat", explicitNative, default);
+            Check(routed.SequenceEqual(new string?[] { null }) && routing.Snapshots().Count == 1 &&
+                routing.Snapshot(a, null)["owner"]?.GetValue<string>() == ownerA,
+                "An explicit null distribution split the native Linux session from the default one");
+        }
+        await VerifyPlatformBoundary(routing, a, ownerA, routed);
         Check(PikaDistribution.ForCurrentPlatform(" ") is null && PikaDistribution.Normalize("") is null &&
             PikaDistribution.Same("ubuntu", "Ubuntu") && !PikaDistribution.Same(null, "Ubuntu") && PikaDistribution.Same("", null) &&
             PikaDistribution.ToKeyText(null) == "" && PikaDistribution.Transport(null) == "linux-serial" &&
@@ -171,8 +192,45 @@ internal static class PikaMultiDeviceTests
         { bool rejected = false; try { await operation(); } catch (Exception error) when (error is ArgumentException or InvalidOperationException) { rejected = true; } Check(rejected, message); }
     }
 
-    private static JsonElement Input(string path, string owner, double? value = null, string distribution = "Ubuntu") =>
+    private static JsonElement Input(string path, string owner, double? value = null) => InputFor(path, owner, Distro, value);
+
+    private static JsonElement InputFor(string path, string owner, string? distribution, double? value = null) =>
         JsonSerializer.SerializeToElement(new { owner, pika_device = path, pika_distribution = distribution, value, clear = true });
+
+    // The distribution boundary for the running OS: Windows refuses native
+    // Linux; every other OS refuses a WSL name before it can launch wsl.exe or
+    // split a session key. Neither creates an agent.
+    private static async Task VerifyPlatformBoundary(PikaSessionRegistry routing, string device, string owner, List<string?> routed)
+    {
+        int created = routed.Count;
+        if (OperatingSystem.IsWindows())
+        {
+            bool refused = false;
+            try { PikaProcessService.ValidateConfiguration(device, null); } catch (InvalidOperationException) { refused = true; }
+            Check(refused, "Native Windows WCH serial passed configuration validation");
+            return;
+        }
+        async Task<bool> RefusesWsl(Func<Task> operation)
+        {
+            try { await operation(); return false; }
+            catch (ArgumentException error) { return error.Message.Contains("only on Windows", StringComparison.Ordinal); }
+        }
+        Check(await RefusesWsl(() => { PikaProcessService.ValidateConfiguration(device, "Ubuntu"); return Task.CompletedTask; }) &&
+            await RefusesWsl(() => routing.ExecuteAsync("connect", InputFor("/dev/pika/by-host/16-4", owner, "Ubuntu"), default)) &&
+            await RefusesWsl(() => routing.ExecuteAsync("heartbeat", InputFor(device, owner, "Ubuntu"), default)) &&
+            await RefusesWsl(() => routing.ConfigureAsync(JsonSerializer.SerializeToElement(new { owner, device, distribution = "Ubuntu" }), default, commit => commit())) &&
+            await RefusesWsl(() => new PikaDeviceDiscovery("unused").DiscoverAsync("Ubuntu", default)),
+            "A WSL distribution was accepted on a non-Windows host");
+        Check(routed.Count == created && routing.Snapshots().Count == 1, "A refused WSL distribution created or split a Pika session");
+        Check(routing.Snapshot("/dev/pika/by-host/99-9", null)["transport"]?.GetValue<string>() == "linux-serial" &&
+            routing.Snapshot("/dev/pika/by-host/99-9", null)["configured"]?.GetValue<bool>() == true,
+            "An unregistered native gripper did not report the linux-serial transport");
+        if (OperatingSystem.IsLinux())
+        {
+            var native = await new PikaDeviceDiscovery("unused").DiscoverAsync(null, default);
+            Check(native["ok"]?.GetValue<bool>() == true && native["devices"] is JsonArray, "Native Linux sysfs discovery failed");
+        }
+    }
 
     private static void VerifySysfsFixture(string status)
     {
@@ -216,7 +274,7 @@ internal static class PikaMultiDeviceTests
         public List<string?> Requested { get; } = [];
         public static JsonObject Inventory(params string[] paths) => new() { ["ok"] = true,
             ["devices"] = new JsonArray(paths.Select((path, index) => (JsonNode)new JsonObject {
-                ["device"] = path, ["distribution"] = "Ubuntu", ["available"] = true,
+                ["device"] = path, ["distribution"] = Distro, ["available"] = true,
                 ["aliases"] = new JsonArray(index == 0 ? "/dev/serial/by-id/usb-1a86_USB_Serial-if00-port0" : "/dev/ttyUSB1") }).ToArray()) };
         public Task<JsonObject> DiscoverAsync(string? distribution, CancellationToken cancellation)
         {
