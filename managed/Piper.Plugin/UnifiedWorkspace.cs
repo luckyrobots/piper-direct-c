@@ -30,7 +30,7 @@ public sealed record RobotReadiness(string Label, string Action, bool Enabled, s
         if (device?["fresh"]?.GetValue<bool>() != true) return Step("Waiting for feedback", "Connecting…", "Reconnecting automatically; previous movement will not resume.");
         bool recoveryRequired = device["recovery_required"]?.GetValue<bool>() == true || device["reset_pending"]?.GetValue<bool>() == true;
         if (recoveryRequired && device["status"]?["arm_status"]?.GetValue<int>() == 1)
-            return Step("Stopped", "Recover robot", "Controller STOP is latched. Support the arm; use Disable, then the supported reset in Diagnostics. The interrupted target will not replay.", RobotPrimaryAction.OpenStoppedRecovery);
+            return Step("Stopped", "Recover robot", "Controller STOP is latched. Support the arm, then use Arm supported — recover on the Controls recovery card: it disables, resets once and verifies. The interrupted target will not replay.", RobotPrimaryAction.OpenStoppedRecovery);
         var teaching = TeachingState.Inspect(device);
         if (teaching.HandGuiding) return Step("Hand guiding", "Hand guiding active", "Move the arm to a clear position. Single-click its button again to finish.");
         if (teaching.Active) return Step("Onboard playback", "Playback active", "The physical controller owns this movement.");

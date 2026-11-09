@@ -71,8 +71,9 @@ internal static class UnifiedWorkspaceTests
                 stoppedTeaching.NextStep.Contains("reset", StringComparison.OrdinalIgnoreCase),
                 "Latched STOP was presented as healthy hand guiding/playback from its residual teach byte");
             Check(RobotReadiness.Inspect(device, false, true, false, false) is { Label: "Stopped", Action: "Recover robot", NextAction: RobotPrimaryAction.OpenStoppedRecovery } stopped &&
-                stopped.Detail.Contains("reset", StringComparison.OrdinalIgnoreCase),
-                "Residual teaching hid the recorded STOP recovery action");
+                stopped.Detail.Contains("reset", StringComparison.OrdinalIgnoreCase) && stopped.Detail.Contains("Arm supported — recover") &&
+                !stopped.Detail.Contains("Diagnostics"),
+                "Residual teaching hid the recorded STOP recovery action, or its guidance pointed at the verify-only Diagnostics action");
         }
         Check(RobotReadiness.Inspect(null, false, false, true, false) is { Action: "Stop following", Enabled: true }, "Feedback loss hid the active follower's immediate stop action");
 
