@@ -56,22 +56,22 @@ internal static class TelemetryPipelineTests
         pika["connected"] = true; pika["fresh"] = true; pika["age_s"] = .15;
         var pikaReceipt = new TelemetryReceipt(pikaState, "session-a", 4, ticks, 100);
         double pikaDeadline = SimulationFollowPolicy.MaximumGripperFeedbackAgeMilliseconds;
-        check(Math.Abs(pikaReceipt.PikaEvidenceAgeMilliseconds(ticks) - 250) < .001 && pikaReceipt.HasFreshPika(ticks, pikaDeadline),
+        check(Math.Abs(pikaReceipt.PikaEvidenceAgeMilliseconds(ticks) - 250) < .001 && pikaReceipt.HasFreshPika(pikaReceipt.State["pika"] as JsonObject, ticks, pikaDeadline),
             "Pika age did not include its source sample age and envelope delay at the 250ms boundary");
-        check(!pikaReceipt.HasFreshPika(At(1), pikaDeadline), "An aged Pika receipt renewed its 250ms evidence window");
+        check(!pikaReceipt.HasFreshPika(pikaReceipt.State["pika"] as JsonObject, At(1), pikaDeadline), "An aged Pika receipt renewed its 250ms evidence window");
         pika["age_s"] = .3;
-        check(!pikaReceipt.HasFreshPika(ticks, pikaDeadline), "A true Pika fresh flag hid a sample too old for physical following");
+        check(!pikaReceipt.HasFreshPika(pikaReceipt.State["pika"] as JsonObject, ticks, pikaDeadline), "A true Pika fresh flag hid a sample too old for physical following");
         foreach (JsonNode? invalidAge in new JsonNode?[] { null, JsonValue.Create(-.001), JsonValue.Create(double.NaN), JsonValue.Create(double.PositiveInfinity), JsonValue.Create("0.01") })
         {
             pika["age_s"] = invalidAge;
-            check(!pikaReceipt.HasFreshPika(ticks, pikaDeadline), "Missing or invalid Pika source age authorized following");
+            check(!pikaReceipt.HasFreshPika(pikaReceipt.State["pika"] as JsonObject, ticks, pikaDeadline), "Missing or invalid Pika source age authorized following");
         }
         pika["age_s"] = .001; pika["connected"] = false;
-        check(!pikaReceipt.HasFreshPika(ticks, pikaDeadline), "Disconnected Pika feedback authorized following");
+        check(!pikaReceipt.HasFreshPika(pikaReceipt.State["pika"] as JsonObject, ticks, pikaDeadline), "Disconnected Pika feedback authorized following");
         pika["connected"] = true; pika["fresh"] = false;
-        check(!pikaReceipt.HasFreshPika(ticks, pikaDeadline), "A false Pika fresh flag authorized following");
+        check(!pikaReceipt.HasFreshPika(pikaReceipt.State["pika"] as JsonObject, ticks, pikaDeadline), "A false Pika fresh flag authorized following");
         pika["fresh"] = true;
-        check(!(pikaReceipt with { Connected = false }).HasFreshPika(ticks, pikaDeadline), "A disconnected telemetry envelope authorized Pika following");
+        check(!(pikaReceipt with { Connected = false }).HasFreshPika(pikaReceipt.State["pika"] as JsonObject, ticks, pikaDeadline), "A disconnected telemetry envelope authorized Pika following");
         check(!Prepare(State(), 2, utc - 501_000, "host-utc", utc, ticks, out _), "A queued old frame was stamped fresh on arrival");
         check(ReferenceEquals(inbox.Latest, first), "Rejecting an aged frame replaced the last verified receipt");
         check(!Prepare(State(), 2, utc + 101_000, "host-utc", utc, ticks, out _), "An unbounded future source clock passed freshness checks");

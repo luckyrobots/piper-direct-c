@@ -341,7 +341,7 @@ public sealed partial class PipersPlugin
             {
                 var target = targets[lane.Profile.Id];
                 long sequence = Interlocked.Increment(ref lane.Sequence);
-                var timing = lane.Publications.Begin(sequence, Stopwatch.GetTimestamp(), 0);
+                var timing = lane.Publications.Begin(sequence, Stopwatch.GetTimestamp());
                 attempts.Add((lane, timing));
                 writes.Add(lane.Publications.Observe(timing, GroupArmCommand(group, lane, FollowArmAction.Update, new() { ["request_id"] = lane.ArmRequest, ["sequence"] = sequence,
                     ["degrees"] = JsonSerializer.SerializeToNode(target.JointDegrees) }), arm: true));

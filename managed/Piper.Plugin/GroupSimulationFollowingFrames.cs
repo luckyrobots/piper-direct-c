@@ -55,17 +55,8 @@ public sealed class GroupSimulationPhaseBarrier
     }
 }
 
-public static class GroupSimulationLaneTelemetry
+internal static class GroupSimulationLaneTelemetry
 {
-    public static TelemetryReceipt Project(TelemetryReceipt receipt, RobotProfile profile, long generation)
-    {
-        var (device, motion, pika) = Resolve(receipt, profile, generation);
-        var state = new JsonObject { ["token"] = receipt.BackendToken, ["selected"] = profile.CanDeviceId,
-            ["devices"] = new JsonArray(device.DeepClone()), ["motion"] = motion.DeepClone(), ["pika"] = pika.DeepClone(),
-            ["backend_process_id"] = receipt.State["backend_process_id"]?.DeepClone() };
-        return receipt with { State = state };
-    }
-
     internal static (JsonObject Device, JsonObject Motion, JsonObject Pika) Resolve(TelemetryReceipt receipt, RobotProfile profile, long generation)
     {
         var matches = receipt.State["devices"]?.AsArray().OfType<JsonObject>().Where(d => d["id"]?.GetValue<string>() == profile.CanDeviceId).ToArray();

@@ -21,7 +21,6 @@ public sealed record TelemetryReceipt(JsonObject State, string BackendToken, lon
     }
     public double PikaEvidenceAgeMilliseconds(long nowTicks) => PikaEvidenceAgeMilliseconds(State["pika"] as JsonObject, nowTicks);
     public double PikaEvidenceAgeMilliseconds(JsonObject? pika, long nowTicks) => AgeMilliseconds(nowTicks) + SampleAgeMilliseconds(pika);
-    public bool HasFreshPika(long nowTicks, double maximumAgeMilliseconds) => HasFreshPika(State["pika"] as JsonObject, nowTicks, maximumAgeMilliseconds);
     public bool HasFreshPika(JsonObject? pika, long nowTicks, double maximumAgeMilliseconds) => IsFresh(nowTicks) &&
         double.IsFinite(maximumAgeMilliseconds) && maximumAgeMilliseconds > 0 &&
         pika?["connected"]?.GetValue<bool>() == true && pika["fresh"]?.GetValue<bool>() == true &&

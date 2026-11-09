@@ -121,9 +121,6 @@ Check(twoProfiles.Bench == sharedBench && twoProfiles.SimulationCameras!["bench"
 twoProfiles = RobotProfileRouting.Activate(twoProfiles, "piper-1");
 Check(twoProfiles is { Speed: 42, Step: 3, Tolerance: .25, RobotId: "scene-robot-a", DepthSerial: "depth-a" }, "Return to robot did not restore its retained settings");
 Check(twoProfiles.SimulationCameras!["gripper"] == wristBinding && !RobotProfileRouting.Active(twoProfiles).SimulationCameras!.ContainsKey("bench"), "Shared bench was copied into robot settings");
-var reloadedBindings = RobotProfileRouting.RefreshCameraBindings(twoProfiles, "new-scene-session", ["bench-scene-camera", "wrist-a", "wrist-b"]);
-Check(reloadedBindings.SimulationCameras!["bench"].SceneId == "new-scene-session" && reloadedBindings.SimulationCameras["gripper"].SceneId == "new-scene-session" &&
-    reloadedBindings.Robots![1].SimulationCameras!["gripper"].SceneId == "new-scene-session", "Scene reload left an inactive robot or shared bench bound to the previous scene session");
 var roundTripProfiles = RobotProfileRouting.Normalize(System.Text.Json.JsonSerializer.Deserialize<Preferences>(System.Text.Json.JsonSerializer.Serialize(twoProfiles))!);
 Check(roundTripProfiles.Robots!.Length == 2 && roundTripProfiles.ActiveRobotId == "piper-1" && roundTripProfiles.Robots.Select(p => p.CameraSlot).Distinct().Count() == 2, "Profile persistence lost active identity or camera slots");
 var routedSnapshot = JsonNode.Parse("""{"selected":"can-a","devices":[{"id":"can-a","generation":1},{"id":"can-b","generation":2}]}""")!.AsObject();

@@ -78,15 +78,6 @@ public static class RobotProfileRouting
     public static string CanInventoryKey(JsonObject snapshot) => JsonSerializer.Serialize(snapshot["devices"]!.AsArray().OfType<JsonObject>()
         .Select(d => new { Id = d["id"]?.GetValue<string>(), Name = d["name"]?.GetValue<string>(), Present = d["present"]?.GetValue<bool>() == true }).OrderBy(d => d.Id, StringComparer.Ordinal));
 
-    public static Preferences RefreshCameraBindings(Preferences value, string sceneId, IEnumerable<string> cameraIds)
-    {
-        var available = cameraIds.ToHashSet(StringComparer.Ordinal);
-        Dictionary<string, SimulationCameraPreferences>? Refresh(Dictionary<string, SimulationCameraPreferences>? bindings) => bindings?.ToDictionary(pair => pair.Key,
-            pair => available.Contains(pair.Value.CameraId) ? pair.Value with { SceneId = sceneId } : pair.Value);
-        return value with { SimulationCameras = Refresh(value.SimulationCameras),
-            Robots = value.Robots?.Select(p => p with { SimulationCameras = Refresh(p.SimulationCameras) }).ToArray() };
-    }
-
     private static Dictionary<string, SimulationCameraPreferences> RobotCameras(Dictionary<string, SimulationCameraPreferences>? cameras) =>
         new((cameras ?? []).Where(p => p.Key != "bench"));
 

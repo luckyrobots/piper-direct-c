@@ -6,6 +6,10 @@ using LuckyRobots.Piper.Pika;
 
 internal static partial class SimulationFollowingTests
 {
+    private static string DiagnosticPath(Fixture fixture, object session, string profileId) => Path.Combine(
+        fixture.Get<LuckyEngine.PluginSdk.PluginContext>("engine").Start.SettingsDirectory, "diagnostics", "simulation-follow",
+        (string)session.GetType().GetField("PrepareId")!.GetValue(session)! + "-" + profileId + ".json");
+
     internal static async Task RunUnifiedFollowing(Action<bool, string> check)
     {
         const BindingFlags fields = BindingFlags.Instance | BindingFlags.NonPublic;
@@ -268,8 +272,9 @@ internal static partial class SimulationFollowingTests
             var lane = ((Array)session.GetType().GetField("Lanes")!.GetValue(session)!).GetValue(0)!;
             var diagnostic = (SimulationFollowDiagnostics)lane.GetType().GetField("Diagnostics")!.GetValue(lane)!;
             await diagnostic.Completion;
-            check(File.Exists(diagnostic.Pathname) && diagnostic.FirstReason.Length > 0 &&
-                !File.ReadAllText(diagnostic.Pathname).Contains("fixture-backend", StringComparison.Ordinal),
+            string diagnosticPath = DiagnosticPath(f, session, "piper-1");
+            check(File.Exists(diagnosticPath) && JsonNode.Parse(File.ReadAllText(diagnosticPath))!["firstFailure"]!["Reason"]!.GetValue<string>().Length > 0 &&
+                !File.ReadAllText(diagnosticPath).Contains("fixture-backend", StringComparison.Ordinal),
                 "The sole executor lost its scoped first-failure diagnostic or leaked its backend token: " + name);
             check(!f.Rpc.Requests.Any(r => r.Body["action"]?.GetValue<string>() is "disable" or "reset"),
                 "A failed source boundary reset the arm or removed holding power: " + name);
@@ -349,7 +354,7 @@ internal static partial class SimulationFollowingTests
             await Until(() => !f.GroupActive, "A negative arm/Pika ACK retained publication authority");
             var lane = ((Array)group.GetType().GetField("Lanes")!.GetValue(group)!).GetValue(0)!;
             var diagnostic = (SimulationFollowDiagnostics)lane.GetType().GetField("Diagnostics")!.GetValue(lane)!; await diagnostic.Completion;
-            var saved = JsonNode.Parse(await File.ReadAllTextAsync(diagnostic.Pathname))!["firstFailure"]!;
+            var saved = JsonNode.Parse(await File.ReadAllTextAsync(DiagnosticPath(f, group, "piper-1")))!["firstFailure"]!;
             check(saved["Hardware"]!["Pika"]!["FollowAudit"]!["LastRetirement"]!["Cause"]!.GetValue<string>() == "input-expired" &&
                 saved["Hardware"]!["Pika"]!["FollowAudit"]!["LastRetirement"]!["LastInputSequence"]!.GetValue<long>() == 12,
                 "An independent negative Pika ACK audit was overwritten by the arm failure or older telemetry");
