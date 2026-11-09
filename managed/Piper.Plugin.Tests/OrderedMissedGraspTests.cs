@@ -4,7 +4,7 @@ internal static class OrderedMissedGraspTests
 {
     public static void Run()
     {
-        var first = SimulationFollowSample.Read(SimulationFollowTests.Pose());
+        var first = SimulationFollowSample.Read(Fixtures.SimulationPose());
         var limits = Enumerable.Range(1, 6).Select(j => new EpisodeReplayJointLimit(j, -180, 180, 30, 20, true)).ToArray();
         double[] Joints(double q) => [q, 0, 0, 0, 0, 0];
         SimulationFollowHardware Real(double opening, double q = 0) => new("can-a", 7, true, true, true, Joints(q), limits, opening,

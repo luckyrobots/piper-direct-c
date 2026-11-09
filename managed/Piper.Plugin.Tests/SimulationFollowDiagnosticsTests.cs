@@ -5,7 +5,7 @@ internal static class SimulationFollowDiagnosticsTests
 {
     public static async Task Run()
     {
-        var first = SimulationFollowSample.Read(SimulationFollowTests.Pose());
+        var first = SimulationFollowSample.Read(Fixtures.SimulationPose());
         double[] target = [-4.722, 116.529, -43.67, -.38, -57.95, 0];
         double[] actual = target.ToArray(); actual[1] = 116.52;
         var limits = Enumerable.Range(1, 6).Select(j => new EpisodeReplayJointLimit(j, -180, 180, 30, 20, true)).ToArray();

@@ -29,7 +29,7 @@ internal static class GroupSimulationFollowingTests
             Reject(() => GroupSimulationFrames.Read(new JsonObject { ["frames"] = new JsonArray(broken) }, ["first", "second"]), "An invalid atomic group admitted a partial track set: " + failure);
         }
 
-        var initial = SimulationFollowSample.Read(SimulationFollowTests.Pose());
+        var initial = SimulationFollowSample.Read(Fixtures.SimulationPose());
         var limits = Enumerable.Range(1,6).Select(j => new EpisodeReplayJointLimit(j,-180,180,30,20,true)).ToArray();
         SimulationFollowHardware Hardware(string id, double[] pose, long sequence = 0) => new(id,7,true,true,true,pose,limits,20,new(id,7,77,sequence,pose));
         OrderedSimulationFrame Node(ulong cursor, double time, string phase, double joint) => new(cursor,(long)(time*1e9),time,

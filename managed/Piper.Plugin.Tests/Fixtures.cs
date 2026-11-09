@@ -50,4 +50,30 @@ internal static class Fixtures
         ["devices"] = new JsonArray(arm),
         ["pika"] = pika ?? new JsonObject { ["configured"] = false, ["fresh"] = false, ["connected"] = false }
     };
+
+    /// <summary>A playing, ready engine runtime pose for the fixture robot "robot-a":
+    /// six hinge joints, two gripper slides and their position actuators.</summary>
+    public static JsonObject SimulationPose(double time = 1, long sequence = 1, long elapsedMs = 0)
+    {
+        var joints = new JsonArray(); var actuators = new JsonArray();
+        double[] qpos = [0, .2, -.3, .1, .2, -.1, -.0370221912391186, .0370221912391186];
+        for (int i = 1; i <= 8; i++)
+        {
+            double min = i switch { 2 => 0, 7 => -.0470221912391186, 8 => .0020221912391186, _ => -Math.PI };
+            double max = i switch { 3 => 0, 7 => -.0020221912391186, 8 => .0470221912391186, _ => Math.PI };
+            joints.Add(new JsonObject { ["name"] = "joint" + i, ["type"] = i <= 6 ? "hinge" : "slide", ["unit"] = i <= 6 ? "rad" : "m",
+                ["position"] = qpos[i - 1], ["velocity"] = 0d, ["limited"] = true, ["min"] = min, ["max"] = max });
+            if (i > 7) continue;
+            actuators.Add(new JsonObject { ["name"] = i == 7 ? "gripper" : "joint" + i, ["control"] = qpos[i - 1], ["positionControl"] = true,
+                ["controlUnit"] = i <= 6 ? "rad" : "m", ["targetJoint"] = "joint" + i, ["transmission"] = "joint", ["limited"] = true, ["min"] = min, ["max"] = max,
+                ["gear"] = new JsonArray(1d, 0d, 0d, 0d, 0d, 0d), ["gain"] = new JsonArray(10d, 0d, 0d, 0d, 0d, 0d, 0d, 0d, 0d, 0d),
+                ["bias"] = new JsonArray(0d, -10d, -1d, 0d, 0d, 0d, 0d, 0d, 0d, 0d) });
+        }
+        return new JsonObject { ["mode"] = "play", ["ready"] = true, ["sourceSceneId"] = "source-a", ["sceneId"] = "run-a", ["runId"] = "run-a",
+            ["entityId"] = "robot-a", ["modelAssetId"] = "asset-a", ["modelRevision"] = "model-a", ["sequence"] = sequence,
+            ["capturedMonotonicNs"] = (10_000_000_000L + elapsedMs * 1_000_000L).ToString(),
+            ["simulationTimeNs"] = ((long)Math.Round(time * 1e9)).ToString(), ["capturedAtUnixMicroseconds"] = (1_000_000_000L + elapsedMs * 1000).ToString(),
+            ["clockDomain"] = "host-utc", ["monotonicClockDomain"] = "native-steady-clock", ["mujocoTimeSeconds"] = time, ["timeScale"] = .2,
+            ["joints"] = joints, ["actuators"] = actuators };
+    }
 }
