@@ -47,7 +47,7 @@ internal static class OrderedMissedGraspTests
             Finish(execution, ref now, 50, 0);
             Finish(execution, ref now, 50, 0);
             check(execution.Path.Drained && execution.CompletedCursor == 9 && execution.MissedGrasp && execution.ReturnedHome(Real(50), true, 0),
-                "A missed grasp did not drain every original source waypoint and verify generic50mm open/zero endpoint before ending");
+                "A missed grasp did not drain every original source waypoint and verify generic 50mm open/zero endpoint before ending");
             check(!execution.ReturnedHome(Real(50, .251), true, 0) && !execution.ReturnedHome(Real(47.9), true, 0) &&
                 !execution.ReturnedHome(Real(50), false, 0) && !execution.ReturnedHome(Real(50) with { GripperFresh = false }, true, 0),
                 "Returned-home reporting bypassed actual zero/open/stationary/fresh proof");
@@ -76,21 +76,21 @@ internal static class OrderedMissedGraspTests
 
         var guarded = new OrderedSimulationExecution(first, Real(80), 1); guarded.Path.Append(Cycle());
         double time = 0; Finish(guarded, ref time, 36, 0);
-        Reject(() => guarded.Step(time, Real(38.01), true, 0, 100 + time), "An empty-close reference loosened the existing2mm jaw continuity guard");
+        Reject(() => guarded.Step(time, Real(38.01), true, 0, 100 + time), "An empty-close reference loosened the existing 2mm jaw continuity guard");
         guarded = new(first, Real(80), 1); guarded.Path.Append(Cycle()); time = 0; Finish(guarded, ref time, 36, 0);
         Reject(() => guarded.Step(time, Real(36) with { NativeReference = Real(36, 6).NativeReference }, true, 0, 100 + time),
             "A missed grasp bypassed the native-reference arm tracking guard");
 
         // Once a miss is explicitly known, model contact may differ from the
-        // settled real reference by more than10mm. It is still the exact same
-        // jaw command, and actual deviation from the reference remains2mm.
+        // settled real reference by more than 10mm. It is still the exact same
+        // jaw command, and actual deviation from the reference remains 2mm.
         guarded = new(first, Real(80), 1);
         guarded.Path.Append(Cycle().Select(frame => frame.Cursor is 2 or 3 or 4 ? frame with { MeasuredOpeningMm = 55 } : frame).ToArray());
         time = 0; Finish(guarded, ref time, 36, 0); guarded.Step(time, Real(36, 1), true, 0, 100 + time);
         check(guarded.ActivePhase?.Kind == OrderedSimulationPhaseKind.Arm && guarded.PhysicalGraspMissed && guarded.ExpectedMeasuredOpeningMm == 36,
-            "A known empty real close stopped the original cycle because the simulated contact was more than10mm away");
+            "A known empty real close stopped the original cycle because the simulated contact was more than 10mm away");
         Reject(() => guarded.Step(time + .01, Real(38.01, 1), true, 0, 101 + time),
-            "Model-mismatch continuation removed the2mm actual empty-jaw continuity guard");
+            "Model-mismatch continuation removed the 2mm actual empty-jaw continuity guard");
         guarded = new(first, Real(80), 1);
         guarded.Path.Append(Cycle(true).Select(frame => frame.Cursor == 2 ? frame with { MeasuredOpeningMm = 59 }
             : frame.Cursor is 3 or 4 ? frame with { MeasuredOpeningMm = 36 } : frame).ToArray());
@@ -99,8 +99,8 @@ internal static class OrderedMissedGraspTests
             "An explicit simulated miss discarded intact qualified real contact merely because the simulated aperture collapsed");
 
         // Actual forced-miss run: source45.2 / command42.9 / real44.4.
-        // Contact needs strictly>2mm command separation. Every smaller gap
-        // down to the established1mm undershoot allowance is unconfirmed.
+        // Contact needs strictly > 2mm command separation. Every smaller gap
+        // down to the established 1mm undershoot allowance is unconfirmed.
         foreach (double gap in new[] { -1d, 0, 1, 1.5, 2, 2.000001 })
         {
             var gray = new OrderedSimulationExecution(first, Real(80), 1);
@@ -112,7 +112,7 @@ internal static class OrderedMissedGraspTests
             double now = 0, actual = 42.9 + gap; Finish(gray, ref now, actual, 0);
             check(gray.CompletedCursor == 2 && gray.PhysicalGraspMissed == (gap <= 2) &&
                 (gray.QualifiedContactOpeningMm is null) == (gap <= 2),
-                "The initial1–2mm contact gray band timed out or crossed the strictly>2mm contact threshold");
+                "The initial 1–2mm contact gray band timed out or crossed the strictly > 2mm contact threshold");
             if (gap == 1.5)
             {
                 Finish(gray, ref now, actual, 1); Finish(gray, ref now, 50, 1);
@@ -133,7 +133,7 @@ internal static class OrderedMissedGraspTests
             double end = outside.ActivePhase!.DurationSeconds;
             outside.Step(end + .001, Real(actual), true, 0, 2); outside.Step(end + .12, Real(actual), true, 0, 3);
             check(outside.CompletedCursor == 0 && !outside.PhysicalGraspMissed && outside.QualifiedContactOpeningMm is null,
-                "Initial gray-band handling accepted more than1mm undershoot or widened the5mm source contact window");
+                "Initial gray-band handling accepted more than 1mm undershoot or widened the 5mm source contact window");
             Reject(() => outside.Step(end + 15.01, Real(actual), true, 0, 4),
                 "An unexplained close outside both existing endpoint/contact bounds bypassed its deadline");
         }

@@ -34,7 +34,7 @@ internal static partial class SimulationFollowingTests
                 unsupported.SidebarStatus().Contains(name + ": Select position-velocity"),
                 "A selected robot's saved unsupported transport was silently ignored");
             await unsupported.Click("group.follow.toggle");
-            await WaitFor(() => unsupported.Get<string>("groupFollowFailure").Length > 0, "Unsupported transport click did not finish");
+            await WaitFor(() => unsupported.GroupSetupFailure().Length > 0, "Unsupported transport click did not finish");
             check(!unsupported.GroupActive && unsupported.SidebarStatus().Contains(name + ": Select position-velocity") &&
                 unsupported.Rpc.Requests.IsEmpty && !unsupported.EngineRequests.Any(r => r.Action == "arm-next-play"),
                 "Unsupported transport armed the engine, enabled experimental control or emitted a target");
@@ -71,7 +71,7 @@ internal static partial class SimulationFollowingTests
             refresh.SetGroupSceneEvidence(scenario == "missing cache" ? null : cached, current);
             check(!refresh.Preparation().Ready, "The cached scene did not exercise a refreshable blocker: " + scenario);
             await refresh.Click("group.follow.toggle");
-            await WaitFor(() => refresh.GroupPhase == GroupFollowPhase.Armed || refresh.Get<string>("groupFollowFailure").Length > 0,
+            await WaitFor(() => refresh.GroupPhase == GroupFollowPhase.Armed || refresh.GroupSetupFailure().Length > 0,
                 "Follow did not finish checking current scene evidence: " + scenario);
             check(refresh.EngineRequests.Any(r => r.Method == "scene.robots") && refresh.Rpc.Requests.IsEmpty && refresh.Mode == "edit",
                 "Scene refresh was skipped or sent a hardware command: " + scenario);
@@ -88,7 +88,7 @@ internal static partial class SimulationFollowingTests
             assignment.SetSecondSceneBinding(robotId, "");
             assignment.SetGroupSceneEvidence(null);
             await assignment.Click("group.follow.toggle");
-            await WaitFor(() => assignment.Get<string>("groupFollowFailure").Length > 0, "The static assignment failure did not finish");
+            await WaitFor(() => assignment.GroupSetupFailure().Length > 0, "The static assignment failure did not finish");
             string reason = robotId.Length == 0 ? "Assign this robot's simulation arm" : "Assign a different simulation arm";
             check(assignment.SidebarStatus().Contains("Second: " + reason) && !assignment.GroupActive && assignment.Rpc.Requests.IsEmpty &&
                 !assignment.EngineRequests.Any(r => r.Method == "scene.robots" || r.Action == "arm-next-play"),
@@ -132,7 +132,7 @@ internal static partial class SimulationFollowingTests
             check(blocked.SidebarStatus().Contains("First: Use Resume controls") && blocked.SidebarStatus().Contains("Pika gripper"),
                 "The sidebar claimed the selected group was ready while its first arm and Pika were not");
             await blocked.Click("group.follow.toggle");
-            await WaitFor(() => blocked.Get<string>("groupFollowFailure").Length > 0, "The public Follow event did not publish its setup failure");
+            await WaitFor(() => blocked.GroupSetupFailure().Length > 0, "The public Follow event did not publish its setup failure");
             check(!blocked.GroupActive && blocked.SidebarStatus().Contains("Follow not armed") && blocked.SidebarStatus().Contains("First: Use Resume controls") &&
                 blocked.SidebarStatus().Contains("Pika gripper") && blocked.Rpc.Requests.IsEmpty && !blocked.EngineRequests.Any(r => r.Action == "arm-next-play"),
                 "A public Follow click hid setup failure, armed an unready group or emitted a hardware command");
@@ -150,7 +150,7 @@ internal static partial class SimulationFollowingTests
             stopped.Snapshot["devices"]![1]!["status"]!["arm_status"] = 1;
             stopped.Snapshot["devices"]![1]!["recovery_required"] = true; stopped.Refresh();
             await stopped.Click("group.follow.toggle");
-            await WaitFor(() => stopped.Get<string>("groupFollowFailure").Length > 0, "The stopped partner's public Follow event did not finish");
+            await WaitFor(() => stopped.GroupSetupFailure().Length > 0, "The stopped partner's public Follow event did not finish");
             check(stopped.SidebarStatus().Contains("Second: Open recovery") && stopped.Rpc.Requests.IsEmpty &&
                 stopped.Snapshot["devices"]![1]!["recovery_required"]!.GetValue<bool>() &&
                 !stopped.EngineRequests.Any(r => r.Method == "scene.robots" || r.Action == "arm-next-play"),
@@ -192,10 +192,10 @@ internal static partial class SimulationFollowingTests
         async Task Until(Func<bool> test, string why)
         {
             long began = Stopwatch.GetTimestamp();
-            while (!test()) { if (Stopwatch.GetElapsedTime(began).TotalSeconds > 8) throw new InvalidOperationException(why + " / " + f.Get<string>("GroupFollowStatus")); await Task.Delay(10); }
+            while (!test()) { if (Stopwatch.GetElapsedTime(began).TotalSeconds > 8) throw new InvalidOperationException(why + " / " + f.Get<string>("groupFollowStatus")); await Task.Delay(10); }
         }
         await Until(() => f.GroupPhase == GroupFollowPhase.Following || !f.GroupActive, "The grouped preparation never activated");
-        check(f.GroupActive && f.Mode == "play", "The group did not activate one shared user-requested Play run: " + f.Get<string>("GroupFollowStatus"));
+        check(f.GroupActive && f.Mode == "play", "The group did not activate one shared user-requested Play run: " + f.Get<string>("groupFollowStatus"));
         check(f.Rpc.Requests.Where(r => r.Body["action"]?.GetValue<string>() == "follow-start").Select(r => r.Body["device_id"]!.GetValue<string>()).Order().SequenceEqual(new[] { "can-a", "can-b" }),
             "Both native device lanes were not independently admitted");
         check(f.Rpc.Requests.Where(r => r.Route == "/api/pika/follow-start").Select(r => r.Body["pika_device"]!.GetValue<string>()).Order().SequenceEqual(new[] { "/dev/pika-a", "/dev/pika-b" }) &&
@@ -253,7 +253,7 @@ internal static partial class SimulationFollowingTests
         while (expired.GroupActive)
         { if (Stopwatch.GetElapsedTime(started).TotalSeconds > 3) throw new InvalidOperationException("Repeated read deadlines kept an expired grouped source alive"); await Task.Delay(10); }
         check(expired.Get<string>("uiActionError").Contains("expired after 250 ms", StringComparison.Ordinal) && expired.Mode == "pause",
-            "Repeated grouped retries renewed the original source lease or hid its250ms expiry");
+            "Repeated grouped retries renewed the original source lease or hid its 250ms expiry");
         check(expired.Rpc.Requests.Where(r => r.Body["action"]?.GetValue<string>() == "hold").Select(r => r.Body["device_id"]!.GetValue<string>()).Distinct().Count() == 2 &&
             expired.Rpc.Requests.Count(r => r.Route == "/api/pika/hold") == 2,
             "Grouped source expiry did not independently hold all original arm and gripper lanes");
@@ -985,7 +985,13 @@ internal static partial class SimulationFollowingTests
             string wireId = WorkspaceEventScope.Wrap(Get<long>("workspaceViewEpoch"), "piper-1", id);
             return plugin.HandleEventAsync(new("fixture", wireId, "click", JsonSerializer.SerializeToElement(true)), CancellationToken.None);
         }
-        public void SetDetail(string detail) => Set("GroupFollowDetail", detail);
+        public void SetDetail(string detail) => Set("groupFollowDetail", detail);
+        public string GroupSetupFailure()
+        {
+            var outcome = Get<object>("groupFollowOutcome");
+            return outcome.GetType().GetProperty("Stage")!.GetValue(outcome)!.ToString() == "SetupFailed"
+                ? (string)outcome.GetType().GetProperty("Summary")!.GetValue(outcome)! : "";
+        }
         public void SetWorkspace(string page, bool calibration = false) { Set("workspacePage", page); Set("calibrationOpen", calibration); }
         public Task PublishMeasured() { Refresh(); return Invoke("PublishMeasuredScene", CancellationToken.None); }
         public async Task Gap(string method)

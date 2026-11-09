@@ -38,7 +38,7 @@ internal static partial class SimulationFollowingTests
             {
                 await f.Click("group.follow.toggle");
                 await Until(() => supportedRecovery ? f.Get<string>("message").StartsWith("Recovery is in progress", StringComparison.Ordinal) :
-                    f.Get<string>("groupFollowFailure").Length > 0, "A conflicting ordinary operation did not block group preparation");
+                    f.GroupSetupFailure().Length > 0, "A conflicting ordinary operation did not block group preparation");
                 check(!f.GroupActive && f.SidebarStatus().Contains(supportedRecovery ? "recovery" : "First", StringComparison.Ordinal) &&
                     !f.EngineRequests.Any(r => r.Action == "arm-next-play") && f.Rpc.Requests.IsEmpty,
                     "Follow armed alongside a tracked ordinary arm lease or supported recovery on an unchecked robot");
@@ -190,7 +190,7 @@ internal static partial class SimulationFollowingTests
                 "Single-participant arming entered Play or sent a target before user Play");
             f.RequestGroupPlay();
             await Until(() => f.GroupPhase == GroupFollowPhase.Following || !f.GroupActive, "One grouped participant did not start");
-            check(f.GroupActive && f.Mode == "play", "The shared executor rejected a single selected participant: " + f.Get<string>("GroupFollowStatus"));
+            check(f.GroupActive && f.Mode == "play", "The shared executor rejected a single selected participant: " + f.Get<string>("groupFollowStatus"));
             string can = selected == "piper-1" ? "can-a" : "can-b", pika = selected == "piper-1" ? "/dev/pika-a" : "/dev/pika-b";
             check(f.Rpc.Requests.Where(r => r.Body["action"]?.GetValue<string>() == "follow-start").All(r => r.Body["device_id"]?.GetValue<string>() == can) &&
                 f.Rpc.Requests.Where(r => r.Route == "/api/pika/follow-start").All(r => r.Body["pika_device"]?.GetValue<string>() == pika),
@@ -306,7 +306,7 @@ internal static partial class SimulationFollowingTests
             await f.Click("group.follow.toggle"); await Until(() => f.GroupArmedForPlay, "Missed-grasp fixture did not arm");
             f.RequestGroupPlay(); await Until(() => !f.GroupActive, "A missed grasp failed to complete release and home");
             var openings = f.Rpc.Requests.Where(r => r.Route == "/api/pika/follow-update").Select(r => r.Body["opening_mm"]!.GetValue<double>()).ToArray();
-            check(f.Get<string>("GroupFollowStatus").Contains("Grasp not confirmed") && !f.EngineRequests.Any(r => r.Action == "ack-episode") &&
+            check(f.Get<string>("groupFollowStatus").Contains("Grasp not confirmed") && !f.EngineRequests.Any(r => r.Action == "ack-episode") &&
                 openings.Contains(10) && openings.Last() == 20 && f.Mode == "pause" && f.Snapshot["devices"]![0]!["joints"]!.AsArray().All(j => j!["enabled"]!.GetValue<bool>()),
                 "Source/physical grasp failure skipped home, claimed success, or disabled the arm");
         }

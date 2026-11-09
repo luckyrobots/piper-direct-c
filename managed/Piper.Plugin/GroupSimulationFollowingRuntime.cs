@@ -39,8 +39,8 @@ public sealed partial class PipersPlugin
             foreach (var lane in group.Lanes) _ = GroupHardware(group, lane);
             await prepared.ArmAsync(ct);
             group.Advance(GroupFollowPhase.Armed);
-            GroupFollowStatus = $"Armed · {group.Lanes.Length} robot(s) · press Play";
-            GroupFollowDetail = "The editor is still in Edit mode. Your next Play pauses at its first frame, matches every selected robot and gripper, then starts the shared episode.";
+            groupFollowStatus = $"Armed · {group.Lanes.Length} robot(s) · press Play";
+            groupFollowDetail = "The editor is still in Edit mode. Your next Play pauses at its first frame, matches every selected robot and gripper, then starts the shared episode.";
             group.Armed.TrySetResult();
             group.Heartbeats = GroupHeartbeats(group, ct);
             while (true)
@@ -52,7 +52,7 @@ public sealed partial class PipersPlugin
             if (GroupStartConflict() is { } matchingConflict) throw new InvalidOperationException(matchingConflict);
             group.Advance(GroupFollowPhase.Matching);
             var raw = await prepared.PauseForMatchingAsync(ct);
-            GroupFollowStatus = "Matching all selected robots to the first frame";
+            groupFollowStatus = "Matching all selected robots to the first frame";
             await MatchGroupStart(group, raw, ct);
             raw = await prepared.ReadMatchingFrameAsync(ct);
             var starts = new (SimulationFollowSample Sample, SimulationFollowHardware Hardware)[group.Lanes.Length];
@@ -105,7 +105,7 @@ public sealed partial class PipersPlugin
                     group.RequireOrderedSourceLease();
                     if (!GroupScopeCurrent(group) || group.Publisher is not { IsCompleted: false }) throw;
                     // A lost reply consumes no frames and grants no new lease.
-                    GroupFollowStatus = "Simulation view delayed · retrying retained group frames";
+                    groupFollowStatus = "Simulation view delayed · retrying retained group frames";
                     continue;
                 }
                 var sample = SimulationFollowSample.Read(raw, group.Lanes[0].Robot.JointPrefix);
@@ -138,8 +138,8 @@ public sealed partial class PipersPlugin
                 await prepared.RetireAsync();
                 string heading = group.FirstFailure.Length > 0 ? "Following stopped\n" + group.FirstFailure :
                     group.EndReason.Length > 0 ? group.EndReason : "Following stopped";
-                GroupFollowStatus = heading;
-                Volatile.Write(ref groupRetirement, new GroupRetirement(heading, lanes));
+                groupFollowStatus = heading;
+                SetGroupOutcome(new(GroupFollowStage.Summary, new GroupRetirement(heading, lanes).Summary));
                 foreach (var lane in group.Lanes)
                     if (lane.Diagnostics is { } diagnostics)
                         try { await diagnostics.Completion.WaitAsync(TimeSpan.FromSeconds(1)); }
@@ -214,7 +214,7 @@ public sealed partial class PipersPlugin
     {
         if (GroupStartConflict() is { } conflict) throw new InvalidOperationException(conflict);
         group.Advance(GroupFollowPhase.Admitting);
-        GroupFollowStatus = "Starting selected followers · simulation remains paused";
+        groupFollowStatus = "Starting selected followers · simulation remains paused";
         foreach (var lane in group.Lanes)
         {
             var admitted = await GroupArmCommand(group, lane, FollowArmAction.Start, SimulationTrajectoryTransport.StartFields());
@@ -312,8 +312,8 @@ public sealed partial class PipersPlugin
                         }
                         catch (Exception error) { throw new InvalidOperationException(lane.Profile.Name + ": " + error.Message, error); }
                     }
-                    GroupFollowStatus = $"Following {group.Lanes.Length} robots · {group.Lanes.Select(l => l.Execution!.ActivePhase?.End.Phase).FirstOrDefault(p => p is not null) ?? "holding"}";
-                    GroupFollowDetail = "All selected arms share phase barriers. Faster arms hold their measured endpoint until their partners arrive; the next episode waits for every arm and gripper.";
+                    groupFollowStatus = $"Following {group.Lanes.Length} robots · {group.Lanes.Select(l => l.Execution!.ActivePhase?.End.Phase).FirstOrDefault(p => p is not null) ?? "holding"}";
+                    groupFollowDetail = "All selected arms share phase barriers. Faster arms hold their measured endpoint until their partners arrive; the next episode waits for every arm and gripper.";
                 }
                 await SendGroupTargets(group, targets, ct);
                 await cadence.WaitAfterPublication(group.Clock, ct);

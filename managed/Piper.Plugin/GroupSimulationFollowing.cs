@@ -119,13 +119,25 @@ public sealed partial class PipersPlugin
 
     private readonly TimeProvider followClock;
     private GroupSession? groupSimulation;
-    private GroupRetirement? groupRetirement;
+    /// <summary>Outer Follow lifecycle around a <see cref="GroupSession"/> (whose own phase is <see cref="GroupFollowPhase"/>).
+    /// <code>
+    ///   Idle/Summary/SetupFailed --arm--> Discovering --session installed--> Session --retired--> Summary
+    ///   Discovering --setup error or cancel--> SetupFailed / Idle;  any idle stage --selection change--> Idle
+    /// </code>
+    /// Session is derived from <c>groupSimulation</c>; the other stages are one immutable outcome,
+    /// so a setup failure and a retirement summary can no longer both be set.</summary>
+    private enum GroupFollowStage { Idle, Discovering, Session, Summary, SetupFailed }
+    private sealed record GroupFollowOutcome(GroupFollowStage Stage, string Summary = "");
+    private static readonly GroupFollowOutcome GroupFollowIdle = new(GroupFollowStage.Idle);
+    private GroupFollowOutcome groupFollowOutcome = GroupFollowIdle;
+    private GroupFollowStage GroupStage => GroupFollowActive ? GroupFollowStage.Session : Volatile.Read(ref groupFollowOutcome).Stage;
+    private void SetGroupOutcome(GroupFollowOutcome next) => Volatile.Write(ref groupFollowOutcome, next);
     private long groupInputEpoch;
     private long groupControlEpoch;
     private bool GroupFollowActive => Volatile.Read(ref groupSimulation) is not null;
     private bool SimulationFollowingActive => GroupFollowActive;
-    private string GroupFollowStatus = "Simulation only";
-    private string GroupFollowDetail = "Choose the robots that should follow, then arm Follow simulation. Playback begins only when you press the editor's Play button.";
+    private string groupFollowStatus = "Simulation only";
+    private string groupFollowDetail = "Choose the robots that should follow, then arm Follow simulation. Playback begins only when you press the editor's Play button.";
     private bool GroupFollowIncludes(string profileId) => Volatile.Read(ref groupSimulation)?.Lanes.Any(l => l.Profile.Id == profileId) == true;
     private bool GroupWaitingForUserPlay(GroupSession group) =>
         group.Phase is GroupFollowPhase.Arming or GroupFollowPhase.Armed && group.RunId.Length == 0 && GroupScopeCurrent(group);
@@ -152,7 +164,7 @@ public sealed partial class PipersPlugin
     {
         Interlocked.Increment(ref groupInputEpoch); // Also retires read-only discovery before a session exists.
         if (Volatile.Read(ref groupSimulation) is not { } group) return null;
-        GroupFollowStatus = reason;
+        groupFollowStatus = reason;
         group.BeginRetirement();
         return group;
     }
@@ -166,8 +178,7 @@ public sealed partial class PipersPlugin
         if (GroupFollowActive)
         { await StopGroupSimulationFollowing("Stopping all selected followers · holding", cancellation); return; }
         if (action == "cancel") return;
-        groupFollowFailure = "";
-        Volatile.Write(ref groupRetirement, null);
+        SetGroupOutcome(new(GroupFollowStage.Discovering));
         long inputEpoch = Interlocked.Read(ref groupInputEpoch);
         try
         {
@@ -220,7 +231,8 @@ public sealed partial class PipersPlugin
             _ = Task.Run(() => RunGroupSimulation(group));
             await group.Armed.Task.WaitAsync(cancellation);
         }
-        catch (OperationCanceledException) when (inputEpoch != Interlocked.Read(ref groupInputEpoch)) { }
+        catch (OperationCanceledException) when (inputEpoch != Interlocked.Read(ref groupInputEpoch))
+        { if (!GroupFollowActive && GroupStage == GroupFollowStage.Discovering) SetGroupOutcome(GroupFollowIdle); }
         catch (Exception error) when (!cancellation.IsCancellationRequested)
         {
             // This includes failures before a group exists. The sidebar must
@@ -228,9 +240,9 @@ public sealed partial class PipersPlugin
             string reason = error.Message;
             foreach (string secret in new[] { token, owner })
                 if (secret.Length > 0) reason = reason.Replace(secret, "[redacted]", StringComparison.Ordinal);
-            groupFollowFailure = "Follow not armed\n" + reason;
-            GroupFollowStatus = "Follow not armed";
-            GroupFollowDetail = reason;
+            SetGroupOutcome(new(GroupFollowStage.SetupFailed, "Follow not armed\n" + reason));
+            groupFollowStatus = "Follow not armed";
+            groupFollowDetail = reason;
             throw;
         }
     }

@@ -91,7 +91,7 @@ internal sealed class FollowLaneObservation
 
     private static double? ReadNumber(JsonNode? node) => node is JsonValue value && value.TryGetValue<double>(out double number) ? number : null;
 
-    private bool HasFreshArm(long now) => receipt.IsFresh(now) && armSamplesFresh && receipt.AgeMilliseconds(now) + armSampleAge <= 500;
+    private bool HasFreshArm(long now) => receipt.IsFresh(now) && armSamplesFresh && receipt.AgeMilliseconds(now) + armSampleAge <= TelemetryReceipt.MaximumAgeMilliseconds;
 
     public bool ArmStationary(long now) => armHealthy && armSettled && HasFreshArm(now);
 

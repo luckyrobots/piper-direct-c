@@ -8,9 +8,11 @@ namespace LuckyRobots.Piper.Plugin;
 public sealed record TelemetryReceipt(JsonObject State, string BackendToken, long Sequence,
     long ReceivedTicks, double SourceAgeMilliseconds, bool Connected = true)
 {
+    /// <summary>Controller evidence older than this never authorizes control.</summary>
+    public const double MaximumAgeMilliseconds = 500;
     public double AgeMilliseconds(long nowTicks) => SourceAgeMilliseconds +
         Math.Max(0, Stopwatch.GetElapsedTime(ReceivedTicks, nowTicks).TotalMilliseconds);
-    public bool IsFresh(long nowTicks) => Connected && nowTicks >= ReceivedTicks && AgeMilliseconds(nowTicks) <= 500;
+    public bool IsFresh(long nowTicks) => Connected && nowTicks >= ReceivedTicks && AgeMilliseconds(nowTicks) <= MaximumAgeMilliseconds;
     /// <summary>Source capture time on the receipt clock. Pass the frequency of the
     /// clock that stamped <see cref="ReceivedTicks"/> and the compared value.</summary>
     public double CapturedTicks(long timestampFrequency) => ReceivedTicks - SourceAgeMilliseconds * timestampFrequency / 1000;
@@ -30,7 +32,7 @@ public sealed record TelemetryReceipt(JsonObject State, string BackendToken, lon
         ? seconds * 1000 : double.PositiveInfinity;
     public bool HasFreshDevice(JsonObject device, long nowTicks) => IsFresh(nowTicks) && device["fresh"]?.GetValue<bool>() == true &&
         device["joints"] is JsonArray { Count: 6 } joints && joints.All(j => j?["fresh"]?.GetValue<bool>() == true) &&
-        DeviceEvidenceAgeMilliseconds(device, nowTicks) <= 500;
+        DeviceEvidenceAgeMilliseconds(device, nowTicks) <= MaximumAgeMilliseconds;
 }
 
 /// <summary>Single-reader publication, with no queue of old robot states.</summary>
@@ -50,8 +52,8 @@ public sealed class LatestTelemetry
         double age = (receivedUnixMicroseconds - (double)sourceUnixMicroseconds) / 1000;
         if (backend.Length == 0 || sequence <= 0 || sourceUnixMicroseconds <= 0 || clockDomain != "host-utc")
         { reason = "Controller feedback has no verified source clock/sequence; update the backend."; return false; }
-        if (!double.IsFinite(age) || age < -100 || age > 500)
-        { reason = "Controller feedback arrived outside its 500 ms freshness window."; return false; }
+        if (!double.IsFinite(age) || age < -100 || age > TelemetryReceipt.MaximumAgeMilliseconds)
+        { reason = $"Controller feedback arrived outside its {TelemetryReceipt.MaximumAgeMilliseconds:F0} ms freshness window."; return false; }
         if (streamBackend == backend && sequence <= streamSequence)
         { reason = "Discarded duplicate or out-of-order controller feedback."; return false; }
         receipt = new(state, backend, sequence, receivedTicks, Math.Max(0, age));
@@ -487,7 +489,7 @@ public sealed partial class PipersPlugin
             if (reply.TryGetProperty("applied", out var applied) && applied.GetBoolean())
             {
                 double age = receipt.DeviceEvidenceAgeMilliseconds(device, Stopwatch.GetTimestamp());
-                if (age > 500)
+                if (age > TelemetryReceipt.MaximumAgeMilliseconds)
                 {
                     PauseSceneFollowing(); sceneTrackingStatus = $"Scene view catching up · measured pose {age:F0} ms old"; return;
                 }

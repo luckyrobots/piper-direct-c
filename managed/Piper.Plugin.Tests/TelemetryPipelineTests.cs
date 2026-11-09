@@ -50,7 +50,7 @@ internal static class TelemetryPipelineTests
         ackDevice["status"]!["age_s"] = .45; ackDevice["joints"]![4]!["age_s"] = .45;
         check(ackReceipt.HasFreshDevice(ackDevice, ticks) && ackReceipt.IsFresh(At(300)), "Acknowledgement fixture did not isolate source-sample age from wrapper age");
         check(Math.Abs(ackReceipt.DeviceEvidenceAgeMilliseconds(ackDevice, At(300)) - 750) < .001 && !ackReceipt.HasFreshDevice(ackDevice, At(300)),
-            "A 450ms source sample plus300ms editor wait was accepted/stamped as a fresh acknowledgement");
+            "A 450ms source sample plus 300ms editor wait was accepted/stamped as a fresh acknowledgement");
         var pikaState = State();
         var pika = pikaState["pika"]!.AsObject();
         pika["connected"] = true; pika["fresh"] = true; pika["age_s"] = .15;

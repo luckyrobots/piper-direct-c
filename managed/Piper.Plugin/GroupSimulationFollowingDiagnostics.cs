@@ -26,9 +26,8 @@ public sealed partial class PipersPlugin
         if (ReferenceEquals(Volatile.Read(ref groupSimulation), group))
         {
             uiActionError = "Following stopped: " + reason;
-            GroupFollowStatus = "Following stopped · " + reason;
-            groupFollowFailure = "Following stopped\n" + reason;
-            GroupFollowDetail = "All selected targets are discarded. The simulation remains paused; restore feedback or fix the reported issue before arming again.";
+            groupFollowStatus = "Following stopped · " + reason;
+            groupFollowDetail = "All selected targets are discarded. The simulation remains paused; restore feedback or fix the reported issue before arming again.";
         }
         var receipt = telemetry.Latest;
         long now = Stopwatch.GetTimestamp();

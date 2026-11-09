@@ -54,11 +54,11 @@ internal static class OrderedContactLossTests
         check(value.Path.Drained && value.ReturnedHome(Real(80), true, 0), "A qualified physical drop did not finish the unchanged ordered release/home path");
 
         value = Qualified(out time); value.Step(time, Real(35), false, -.05, 4);
-        Reject(() => value.Step(time + .01, Real(37.01), false, 0, 5), "A reversal greater than2mm was treated as monotonic closing");
+        Reject(() => value.Step(time + .01, Real(37.01), false, 0, 5), "A reversal greater than 2mm was treated as monotonic closing");
         value = Qualified(out time);
-        Reject(() => value.Step(time, Real(40.01), false, 0, 4), "Opening away from contact beyond2mm entered the soft-loss path");
+        Reject(() => value.Step(time, Real(40.01), false, 0, 4), "Opening away from contact beyond 2mm entered the soft-loss path");
         value = Qualified(out time);
-        Reject(() => value.Step(time, Real(28.99), false, 0, 4), "A sample below the close endpoint minus1mm entered soft-loss qualification");
+        Reject(() => value.Step(time, Real(28.99), false, 0, 4), "A sample below the close endpoint minus 1mm entered soft-loss qualification");
         value = Qualified(out time);
         Reject(() => value.Step(time, Real(35), false, .03, 4), "Reported opening velocity was accepted as motion toward the close endpoint");
 
@@ -67,12 +67,12 @@ internal static class OrderedContactLossTests
         value.Step(time + .249, Real(30), false, 0, 4);
         check(value.QualifyingLostContact && !value.PhysicalGraspMissed && value.QualifiedContactOpeningMm == 38,
             "Repeated cached jaw feedback qualified lost contact without a second fresh observation");
-        Reject(() => value.Step(time + .251, Real(30), false, 0, 5), "The250ms loss-qualification deadline was renewed by repeated observations");
+        Reject(() => value.Step(time + .251, Real(30), false, 0, 5), "The 250ms loss-qualification deadline was renewed by repeated observations");
         value = Qualified(out time); value.Step(time, Real(35), false, -.05, 4);
         Reject(() => value.Step(time + .251, Real(35), false, 0, 5), "A partial close that never reached its endpoint became a soft miss");
         value = Qualified(out time); value.Step(time, Real(30), false, -.03, 4);
         value.Step(time + .04, Real(30), false, 0, 5); value.Step(time + .13, Real(30), false, 0, 6);
-        check(value.QualifyingLostContact && !value.PhysicalGraspMissed, "Moving jaws were included in the100ms settled endpoint dwell");
+        check(value.QualifyingLostContact && !value.PhysicalGraspMissed, "Moving jaws were included in the 100ms settled endpoint dwell");
         value.Step(time + .15, Real(30), false, 0, 7);
         check(value.PhysicalGraspMissed && !value.QualifyingLostContact, "The same bounded qualification could not finish after the jaw stopped moving");
 
@@ -107,12 +107,12 @@ internal static class OrderedContactLossTests
             value.Step(time + .11, Real(opening), false, 0, 5);
             check(value.PhysicalGraspMissed && !value.QualifyingLostContact && value.QualifiedContactOpeningMm is null &&
                 value.ExpectedMeasuredOpeningMm == opening && value.Target.OpeningMm == 30,
-                "The carry-loss1–2mm gray band could neither qualify contact nor finish as an unconfirmed trial");
+                "The carry-loss 1–2mm gray band could neither qualify contact nor finish as an unconfirmed trial");
         }
         value = Qualified(out time); value.Step(time, Real(32.0001), false, 0, 4);
         value.Step(time + .11, Real(32.0001), false, 0, 5);
-        check(!value.PhysicalGraspMissed && value.QualifyingLostContact, "Loss handling widened the existing2mm unconfirmed-contact threshold");
+        check(!value.PhysicalGraspMissed && value.QualifyingLostContact, "Loss handling widened the existing 2mm unconfirmed-contact threshold");
         Reject(() => value.Step(time + .251, Real(32.0001), false, 0, 6),
-            "The widened gray band renewed the bounded250ms carry-loss deadline");
+            "The widened gray band renewed the bounded 250ms carry-loss deadline");
     }
 }

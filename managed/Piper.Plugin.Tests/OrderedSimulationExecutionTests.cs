@@ -35,7 +35,7 @@ internal static class OrderedSimulationExecutionTests
         double lagTime = lagged.ActivePhase!.DurationSeconds;
         var advanced = lagged.Step(lagTime, hardware, true, 0, 2);
         check(advanced.JointDegrees[0] == 20 && hardware.JointDegrees[0] == 0 && lagged.CompletedCursor == 0,
-            "A planned path may lead measured joints by more than5deg while the actual controller reference is healthy; endpoint arrival must still wait");
+            "A planned path may lead measured joints by more than 5deg while the actual controller reference is healthy; endpoint arrival must still wait");
         Reject(() => lagged.Step(lagTime + .01, hardware with { JointDegrees = new[] { 6d, 0, 0, 0, 0, 0 } }, true, 0, 3),
             "Actual encoder divergence from the controller's transmitted reference must still stop queued following");
         Reject(() => new OrderedSimulationExecution(first, hardware, 1).Step(0, hardware with { NativeReference = null }, true, 0, 1),
@@ -97,14 +97,14 @@ internal static class OrderedSimulationExecutionTests
         { var raw = SimulationFollowTests.Pose(physics, seq, wall); raw["mode"] = mode; raw["timeScale"] = 1d; return SimulationFollowSample.Read(raw); }
         observe.Validate(Sample(1.02, 2, 20), 1_000_020, 20, false, false, "episode-a", false);
         observe.Validate(Sample(1.02, 3, 100), 1_000_100, 20, false, false, "episode-a", false);
-        Reject(() => observe.Validate(Sample(1.02, 4, 300), 1_000_300, 20, false, false, "episode-a", false), "Unchanged queued-source physics rebased its250ms stall anchor");
+        Reject(() => observe.Validate(Sample(1.02, 4, 300), 1_000_300, 20, false, false, "episode-a", false), "Unchanged queued-source physics rebased its 250ms stall anchor");
         observe = new(initial);
         observe.Validate(Sample(1.02, 2, 20, "pause"), 1_000_020, 20, true, false, "episode-a", false);
         observe.Validate(Sample(1.02, 3, 1000, "pause"), 1_001_000, 20, true, false, "episode-a", false);
         check(true, "An explicitly paused source could not hold while its ordered physical buffer drained");
         Reject(() => observe.Validate(Sample(1.02, 4, 1020, "pause"), 1_001_020, 20, false, false, "episode-a", false), "A manual source pause was treated as follower-owned backpressure");
-        Reject(() => observe.Validate(Sample(1.04, 4, 1020), 1_001_020, 151, false, false, "episode-a", false), "Queued following relaxed its150ms source request deadline");
-        Reject(() => observe.Validate(Sample(1.04, 4, 1020), 1_001_300, 20, false, false, "episode-a", false), "Queued following accepted a source envelope older than250ms");
+        Reject(() => observe.Validate(Sample(1.04, 4, 1020), 1_001_020, 151, false, false, "episode-a", false), "Queued following relaxed its 150ms source request deadline");
+        Reject(() => observe.Validate(Sample(1.04, 4, 1020), 1_001_300, 20, false, false, "episode-a", false), "Queued following accepted a source envelope older than 250ms");
         observe.Validate(Sample(1.04, 4, 1020), 1_001_020, 20, false, true, "episode-a", false);
         observe.Validate(Sample(1.04, 5, 2020), 1_002_020, 20, false, true, "episode-a", false);
         Reject(() => observe.Validate(Sample(0, 6, 2040), 1_002_040, 20, false, false, "episode-b", false), "A new episode reset before physical completion was accepted");

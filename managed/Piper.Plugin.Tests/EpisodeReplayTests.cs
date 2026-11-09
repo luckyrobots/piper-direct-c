@@ -104,10 +104,10 @@ internal static class EpisodeReplayTests
         var legacy = Read(Fixture(1));
         check(!legacy.HasPositionCommands && legacy.Samples[0].CommandedJointDegrees is null,
             "Legacy measured-only samples were promoted to executable commands");
-        Reject(() => EpisodeReplayPlanner.AssessJointTiming(legacy, limits), "Version1 measured-only export was treated as an actuator replay");
+        Reject(() => EpisodeReplayPlanner.AssessJointTiming(legacy, limits), "Version 1 measured-only export was treated as an actuator replay");
         var oldestLegacy = Fixture(1);
         oldestLegacy["nativeRecording"]!.AsObject().Remove("nativeOrdinalSource");
-        check(!Read(oldestLegacy).HasPositionCommands, "Earlier version1 files lost review support after provenance was introduced");
+        check(!Read(oldestLegacy).HasPositionCommands, "Earlier version 1 files lost review support after provenance was introduced");
         var invalidCapture = Fixture();
         invalidCapture["outcome"] = "invalid-capture: lost sample";
         Reject(() => Read(invalidCapture), "Replay accepted a capture explicitly exported as invalid");
@@ -160,7 +160,7 @@ internal static class EpisodeReplayTests
         {
             var bad = Fixture();
             bad["samples"]![1]!.AsObject().Remove(missing);
-            Reject(() => Read(bad), "Version2 silently substituted observations for missing " + missing);
+            Reject(() => Read(bad), "Version 2 silently substituted observations for missing " + missing);
         }
 
         var zUp = Fixture();

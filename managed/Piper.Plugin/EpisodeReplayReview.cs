@@ -140,8 +140,8 @@ public sealed partial class PipersPlugin
                 var artifact = await ReadReplayFile(replayPath, cancellation);
                 replayReview = new(artifact, ActiveProfile.Id);
                 replayStatus = artifact.HasPositionCommands
-                    ? "Version2 position commands loaded. Place the real tube at the saved start, then recheck the measured start pose."
-                    : "Version1 observations loaded for review only; physical replay requires a version2 command export.";
+                    ? "Version 2 position commands loaded. Place the real tube at the saved start, then recheck the measured start pose."
+                    : "Version 1 observations loaded for review only; physical replay requires a version 2 command export.";
             }
             catch (Exception error) when (error is IOException or UnauthorizedAccessException or ArgumentException or InvalidOperationException or NotSupportedException)
             {
@@ -194,7 +194,7 @@ public sealed partial class PipersPlugin
         var limits = EpisodeReplayReportedLimits.Read(joints);
         var timing = artifact.HasPositionCommands ? EpisodeReplayPlanner.AssessJointTiming(artifact, limits) : null;
         double requiredScale = timing?.RequiredTimeScale ?? 1;
-        replayTimingStatus = timing is null ? "Version1 has no position commands; physical timing cannot be assessed."
+        replayTimingStatus = timing is null ? "Version 1 has no position commands; physical timing cannot be assessed."
             : $"Last joint timing check: speed requires {timing.SpeedTimeScale:F3}×; sampled acceleration requires {timing.AccelerationTimeScale:F3}×. " +
               (requiredScale > 1 ? $"Replay needs at least {requiredScale:F3}× slower timing. No scaling applied. " : "Command intervals fit fresh reported joint caps. ") +
               "Gripper timing and instantaneous controller response are not certified; playback remains disabled.";
@@ -218,7 +218,7 @@ public sealed partial class PipersPlugin
             firstCommandMatches &= Math.Abs(artifact.Samples[0].CommandedGripperOpeningMm!.Value - artifact.Samples[0].GripperOpeningMm) <= 1;
         replayReview = review.Rechecked(new(expectedToken, deviceId, generation));
         replayStatus = "Last recheck: Edit context and reported joint ranges checked. " + (poseMatches ? "First pose matched within 0.5° / 1 mm. " : "First pose differed; align it separately. ") +
-            (!artifact.HasPositionCommands ? "Version1 is observations-only and cannot be replayed as actions. " : requiredScale > 1 ? $"Command speed/acceleration requires at least {requiredScale:F3}× slower playback; no scaling applied. " : "Command interval speed/acceleration fits reported joint limits. ") +
+            (!artifact.HasPositionCommands ? "Version 1 is observations-only and cannot be replayed as actions. " : requiredScale > 1 ? $"Command speed/acceleration requires at least {requiredScale:F3}× slower playback; no scaling applied. " : "Command interval speed/acceleration fits reported joint limits. ") +
             (!firstCommandMatches ? "The first command differs from the measured source start; physical planning is blocked at default tolerances. " : "") +
             "Physical playback remains unavailable; no commands sent.";
     }

@@ -154,7 +154,7 @@ public sealed partial class PipersPlugin
                     {
                         cancellation.ThrowIfCancellationRequested();
                         if (ReadOwned() is not { } current) return;
-                        if (current.Receipt.HasFreshPika(current.Gripper, System.Diagnostics.Stopwatch.GetTimestamp(), 500) &&
+                        if (current.Receipt.HasFreshPika(current.Gripper, System.Diagnostics.Stopwatch.GetTimestamp(), TelemetryReceipt.MaximumAgeMilliseconds) &&
                             current.Gripper["last_motor_request"]?.GetValue<string>() == request &&
                             Pika.PikaDisabledEvidence.Confirmed(current.Gripper, owner)) break;
                         await Task.Delay(25, cancellation);

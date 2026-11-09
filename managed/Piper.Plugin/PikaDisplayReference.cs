@@ -11,8 +11,10 @@ public sealed record PikaClosedDisplayReference(int Schema, string ProfileId, st
     double MotorAngle, DateTimeOffset ConfirmedAt)
 {
     public const double MaximumNominalOffsetMm = 5;
+    /// <summary>A closed-jaw encoder reading farther than this from zero is not a display offset.</summary>
+    public const double MaximumMotorAngleRad = .15;
     public bool Valid => Schema == 1 && !string.IsNullOrEmpty(ProfileId) && !string.IsNullOrEmpty(Device) &&
-        double.IsFinite(MotorAngle) && Math.Abs(MotorAngle) <= .15 &&
+        double.IsFinite(MotorAngle) && Math.Abs(MotorAngle) <= MaximumMotorAngleRad &&
         Math.Abs(PikaProtocol.Width(MotorAngle)) <= MaximumNominalOffsetMm;
 
     public bool Matches(string profile, string device, string? distribution, JsonObject? pika) => Valid &&

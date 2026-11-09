@@ -94,7 +94,7 @@ public sealed class OrderedSimulationExecution
             // An explicitly missed trial can have empty real jaws while the
             // simulation still has contact, or the reverse. Its settled,
             // unchanged physical jaw reference remains authoritative while
-            // finishing the original path. The stricter2mm continuity guard
+            // finishing the original path. The stricter 2mm continuity guard
             // below still detects any actual change from that reference.
             low = high = physicalReference;
         }
@@ -118,8 +118,8 @@ public sealed class OrderedSimulationExecution
         {
             if (unconfirmedClose)
             {
-                // The same>2mm separation required to qualify contact leaves
-                // every smaller gap unconfirmed, including1–2mm servo error.
+                // The same > 2mm separation required to qualify contact leaves
+                // every smaller gap unconfirmed, including 1–2mm servo error.
                 // Keep the existing source cycle to home without claiming a
                 // grasp or demanding an unreachable exact close endpoint.
                 PhysicalGraspMissed = true;
@@ -129,7 +129,7 @@ public sealed class OrderedSimulationExecution
             }
             else if (ClosingContact(phase))
             {
-                // A bounded5mm initial model-agreement window accommodates soft
+                // A bounded 5mm initial model-agreement window accommodates soft
                 // contact differences; both source and actual aperture must be
                 // strictly>command+2mm. Fresh settled samples still apply.
                 // Preserve actual aperture for this exact command;
@@ -170,7 +170,7 @@ public sealed class OrderedSimulationExecution
         if (resolvedCommand != contactLossCommand || Target.OpeningMm != contactLossCommand || qualifiedContactOpening is null)
             throw new InvalidOperationException("The jaw command changed before lost contact could be verified; following stopped.");
         if (now - contactLossBegan >= .250)
-            throw new InvalidOperationException("Pika did not settle at its unchanged close command within250ms after contact changed; following stopped.");
+            throw new InvalidOperationException("Pika did not settle at its unchanged close command within 250ms after contact changed; following stopped.");
         if (speed > .02 || opening > contactLossMinimum + 2 || opening < contactLossCommand - Pika.PikaProtocol.ArrivalToleranceMm)
             throw new InvalidOperationException("Pika reversed away from its close endpoint or exceeded that endpoint while checking lost contact; following stopped.");
         contactLossMinimum = Math.Min(contactLossMinimum, opening);
@@ -226,7 +226,8 @@ public sealed class OrderedSimulationObservation
     {
         double age = receivedAtUnixMilliseconds - sample.CapturedAtUnixMicroseconds / 1000d;
         if (!sample.BindsTo(first) || sample.SceneId != sample.RunId || sample.Mode is not ("play" or "pause") || sample.Mode == "pause" && !sourcePaused ||
-            !double.IsFinite(roundTripMilliseconds) || roundTripMilliseconds is < 0 or > 150 || age is < -50 or > 250 ||
+            !double.IsFinite(roundTripMilliseconds) || roundTripMilliseconds < 0 || roundTripMilliseconds > SimulationFollowPolicy.MaximumRequestMilliseconds ||
+            age < -SimulationFollowPolicy.MaximumSourceLeadMilliseconds || age > SimulationFollowPolicy.MaximumSourceAgeMilliseconds ||
             sample.Sequence <= sequence || sample.CapturedMonotonicNs <= captured || sample.TimeScale <= 0 || sample.TimeScale > 1.000001)
             throw new InvalidOperationException("The ordered simulation envelope is stale, paused manually, out of order or changed scope.");
         bool newEpisode = episodeId != episode;
@@ -234,7 +235,8 @@ public sealed class OrderedSimulationObservation
         if ((sample.SimulationTimeNs < scene || sample.SimTimeSeconds < physics) && !permittedReset)
             throw new InvalidOperationException("The ordered simulation clock reset without a completed episode acknowledgement.");
         if (sample.SimTimeSeconds != physics || permittedReset) lastProgressCapture = sample.CapturedMonotonicNs;
-        else if (!sourcePaused && !sourceComplete && sample.CapturedMonotonicNs - lastProgressCapture > 250_000_000L)
+        else if (!sourcePaused && !sourceComplete &&
+            sample.CapturedMonotonicNs - lastProgressCapture > SimulationFollowPolicy.MaximumSourceAgeMilliseconds * 1_000_000)
             throw new InvalidOperationException("Ordered source physics did not advance within 250 ms.");
         sequence = sample.Sequence; captured = sample.CapturedMonotonicNs; scene = sample.SimulationTimeNs; physics = sample.SimTimeSeconds; episode = episodeId;
     }
