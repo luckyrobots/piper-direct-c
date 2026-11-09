@@ -1,20 +1,20 @@
 # Run without elevation. This restarts the dashboard only; it sends no motor commands.
+# Omitted arguments come from WindowsDashboardDefaults.ps1, as for Start-WindowsDashboard.ps1.
 param(
-    [int]$Port=8765,
-    # Defaults to the saved data-windows-managed/pika-default.json distribution, then Ubuntu.
+    [int]$Port=0,
     [string]$Distribution=''
 )
 $ErrorActionPreference='Stop'
+. (Join-Path $PSScriptRoot 'WindowsDashboardDefaults.ps1')
 $repo=Split-Path $PSScriptRoot -Parent
-$uri="http://127.0.0.1:$Port"
 $publish=Join-Path $repo 'build\publish-windows'
 $log=Join-Path $repo 'data-windows-managed'
-if(!$Distribution) {
-    $pikaDefault=Join-Path $log 'pika-default.json'
-    if(Test-Path -LiteralPath $pikaDefault) { $Distribution=[string](Get-Content -LiteralPath $pikaDefault -Raw | ConvertFrom-Json).distribution }
-    if(!$Distribution) { $Distribution='Ubuntu' }
-}
-if($Distribution.Length -gt 128 -or $Distribution -match '["\x00-\x1f]'){throw 'Invalid WSL distribution.'}
+$defaults=Get-PiperDashboardDefaults $log
+if(!$PSBoundParameters.ContainsKey('Port')){$Port=$defaults.Port}
+if(!$PSBoundParameters.ContainsKey('Distribution')){$Distribution=$defaults.Distribution}
+if($Port -lt 1 -or $Port -gt 65535){throw 'Invalid dashboard port.'}
+if(!$Distribution -or $Distribution.Length -gt 128 -or $Distribution -match '["\x00-\x1f]'){throw 'Invalid WSL distribution.'}
+$uri="http://127.0.0.1:$Port"
 $state=Invoke-RestMethod "$uri/api/state" -TimeoutSec 5
 if ($state.motion.active) { throw 'Wait for the active robot action to finish before restarting.' }
 $listener=Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
