@@ -1,5 +1,5 @@
 #define _GNU_SOURCE
-#include "controller.h"
+#include "controller_internal.h"
 #include <assert.h>
 #include <math.h>
 #include <stdio.h>
@@ -64,7 +64,7 @@ static void fixture(struct controller *c,char directory[96])
     }
     __wrap_can_bus_receive(&c->bus,clock_now);
     c->obstruction_joint=1;
-    controller_stop(c,"Possible obstruction at J1: no measured progress for 0.5 seconds.");
+    controller_stop_obstruction(c,"Possible obstruction at J1: no measured progress for 0.5 seconds.");
     assert(blocked(c)&&stop_packets==1); stop_packets=0;
 }
 static void physical_cycle(struct controller *c)
@@ -114,13 +114,29 @@ int main(void)
         if (failure==2) d->feedback.motor[1].high_at=clock_now-1;
         if (failure==3) d->feedback.motor[2].enabled=false;
         if (failure==4) d->feedback.arm[0].deg[1]=-.2;
-        if (failure==5) cJSON_ReplaceItemInObject(record(&c),"reset_pending",cJSON_CreateTrue());
+        if (failure==5) cJSON_ReplaceItemInObject(record(&c),"state",cJSON_CreateString("reset_pending"));
         if (failure==6) { clock_now+=121; __wrap_can_bus_receive(&c.bus,clock_now); }
-        if (failure==7) cJSON_ReplaceItemInObject(record(&c),"reason",cJSON_CreateString("Operator stop."));
+        if (failure==7) cJSON_ReplaceItemInObject(record(&c),"kind",cJSON_CreateString("stop"));
         if (failure==8) cJSON_AddItemToObject(record(&c),"last_fault",cJSON_CreateObject());
         if (failure==9) strcpy(d->feedback.version,"S-V1.8-2");
         action(&c,"recover-at-pose",409); assert(blocked(&c)); close_fixture(&c,directory);
     }
+    /* B10: eligibility follows the persisted kind, so rewording a message
+       cannot break recovery. */
+    fixture(&c,directory); physical_cycle(&c);
+    cJSON_ReplaceItemInObject(record(&c),"reason",cJSON_CreateString("Reworded obstruction message."));
+    cJSON_ReplaceItemInObject(cJSON_GetObjectItem(record(&c),"stop_event"),"reason",cJSON_CreateString("Reworded."));
+    assert(!strcmp(cJSON_GetStringValue(cJSON_GetObjectItem(cJSON_GetObjectItem(record(&c),"stop_event"),"kind")),"obstruction"));
+    action(&c,"recover-at-pose",202); tick(&c,.025); tick(&c,.025); assert(c.op==OP_IDLE&&!blocked(&c)); close_fixture(&c,directory);
+    /* A record written before "kind" existed derives it once from its text. */
+    fixture(&c,directory); physical_cycle(&c);
+    cJSON_DeleteItemFromObject(record(&c),"kind"); cJSON_DeleteItemFromObject(record(&c),"state");
+    cJSON_DeleteItemFromObject(cJSON_GetObjectItem(record(&c),"stop_event"),"kind");
+    action(&c,"recover-at-pose",202); tick(&c,.025); tick(&c,.025); assert(c.op==OP_IDLE&&!blocked(&c)); close_fixture(&c,directory);
+    fixture(&c,directory); physical_cycle(&c);
+    cJSON_DeleteItemFromObject(record(&c),"kind"); cJSON_DeleteItemFromObject(record(&c),"state");
+    cJSON_ReplaceItemInObject(record(&c),"reason",cJSON_CreateString("Operator stop."));
+    action(&c,"recover-at-pose",409); close_fixture(&c,directory);
     /* New STOP and an intervening fault destroy previously observed proof. */
     fixture(&c,directory); physical_cycle(&c); c.bus.devices[0].feedback.motor[0].fault=1; tick(&c,.01);
     c.bus.devices[0].feedback.motor[0].fault=0; action(&c,"recover-at-pose",409); close_fixture(&c,directory);

@@ -79,17 +79,67 @@ static bool persist(struct controller *c)
     if (!ok) c->storage_failed=true;
     return ok;
 }
+/* Persistent recovery latch (C-C): one JSON record per device id.
+     "state": "clear" -> "latched"        an action intent, STOP or power cleanup
+              "clear"|"latched" -> "reset_pending"   reset requested, unverified
+              "latched"|"reset_pending" -> "clear"  only via clear_latch after a
+                                                     verified recovery
+     "kind":  why it is latched (intent, stop, obstruction, power, reset); empty
+              when clear. Recovery eligibility uses kind, never message text.
+     "stop_event_active": unacknowledged STOP evidence; it implies a latch.
+   A separate legacy motion-stops.json entry also blocks until acknowledged.
+   The "blocked"/"reset_pending" booleans are still written so an older build
+   reading this file stays blocked. Records written before "state"/"kind"
+   existed are normalized once from those booleans and reason strings. */
+#define RECORD_CLEAR "clear"
+#define RECORD_LATCHED "latched"
+#define RECORD_RESET_PENDING "reset_pending"
+#define KIND_INTENT "intent"
+#define KIND_STOP "stop"
+#define KIND_OBSTRUCTION "obstruction"
+#define KIND_POWER "power"
+#define KIND_RESET "reset"
+static const char intent_reason[]="Control action interrupted before verified completion";
+static const char obstruction_prefix[]="Possible obstruction at J";
+static bool record_state_valid(const char *state)
+{
+    return !strcmp(state,RECORD_CLEAR)||!strcmp(state,RECORD_LATCHED)||!strcmp(state,RECORD_RESET_PENDING);
+}
+/* Legacy derivation only: string matching is confined to records that predate
+   the explicit kind field. */
+static const char *legacy_kind(const cJSON *r)
+{
+    const char *reason=text_field(r,"reason");
+    if (!yes(r,"blocked")) return "";
+    if (yes(r,"reset_pending")) return KIND_RESET;
+    if (!strcmp(reason,intent_reason)) return KIND_INTENT;
+    if (!strncmp(reason,obstruction_prefix,sizeof obstruction_prefix-1)) return KIND_OBSTRUCTION;
+    if (!strcmp(reason,"Motors disabled; recovery verification required")) return KIND_POWER;
+    return KIND_STOP;
+}
+static void record_normalize(cJSON *r)
+{
+    if (!field(r,"state")) str(r,"state",!yes(r,"blocked")?RECORD_CLEAR:yes(r,"reset_pending")?RECORD_RESET_PENDING:RECORD_LATCHED);
+    if (!field(r,"kind")) str(r,"kind",legacy_kind(r));
+    cJSON *event=field(r,"stop_event");
+    if (cJSON_IsObject(event)&&!field(event,"kind"))
+        str(event,"kind",!strncmp(text_field(event,"reason"),obstruction_prefix,sizeof obstruction_prefix-1)?KIND_OBSTRUCTION:KIND_STOP);
+}
 static cJSON *record(struct controller *c,const char *id)
 {
     cJSON *records=field(c->saved,"devices"),*r=field(records,id);
     if (!r) { r=cJSON_CreateObject(); cJSON_AddItemToObject(records,id,r); }
+    record_normalize(r);
     return r;
 }
-static const char *active_incident_reason(struct controller *c,const char *id,const char *fallback)
+static bool record_is(const cJSON *r,const char *state) { return !strcmp(text_field(r,"state"),state); }
+/* The active incident's reason and kind, or the fallback when none is active. */
+static const char *active_incident(struct controller *c,const char *id,const char *fallback,const char **kind)
 {
-    cJSON *r=record(c,id);
-    const char *reason=text_field(field(r,"stop_event"),"reason");
-    return yes(r,"stop_event_active")&&*reason?reason:fallback;
+    cJSON *r=record(c,id),*event=field(r,"stop_event");
+    const char *reason=text_field(event,"reason");
+    if (!yes(r,"stop_event_active")||!*reason) return fallback;
+    *kind=text_field(event,"kind"); return reason;
 }
 static const cJSON *legacy_stop(struct controller *c,const char *id)
 {
@@ -98,25 +148,32 @@ static const cJSON *legacy_stop(struct controller *c,const char *id)
         if (!strcmp(text_field(item,"device_id"),id)) return item;
     return NULL;
 }
+static bool legacy_unacknowledged(struct controller *c,const char *id)
+{
+    const cJSON *old=legacy_stop(c,id);
+    return old&&strcmp(text_field(record(c,id),"legacy_ack"),text_field(old,"at"));
+}
 static bool blocked(struct controller *c,const char *id)
 {
-    cJSON *r=record(c,id); const cJSON *old=legacy_stop(c,id);
-    return yes(r,"blocked") || (old&&strcmp(text_field(r,"legacy_ack"),text_field(old,"at")));
+    return !record_is(record(c,id),RECORD_CLEAR)||legacy_unacknowledged(c,id);
 }
 static bool reset_pending(struct controller *c,const char *id)
 {
-    cJSON *r=record(c,id); const cJSON *old=legacy_stop(c,id);
-    return yes(r,"reset_pending")||(old&&strcmp(text_field(r,"legacy_ack"),text_field(old,"at"))&&!strcmp(text_field(old,"source"),"reset_intent"));
+    return record_is(record(c,id),RECORD_RESET_PENDING)||
+        (legacy_unacknowledged(c,id)&&!strcmp(text_field(legacy_stop(c,id),"source"),"reset_intent"));
 }
-static bool latch(struct controller *c,const char *id,const char *reason,bool pending)
+static bool latch(struct controller *c,const char *id,const char *reason,const char *kind,bool pending)
 {
-    cJSON *r=record(c,id); flag(r,"blocked",true); flag(r,"reset_pending",pending); str(r,"reason",reason);
+    cJSON *r=record(c,id);
+    str(r,"state",pending?RECORD_RESET_PENDING:RECORD_LATCHED); str(r,"kind",kind); str(r,"reason",reason);
+    flag(r,"blocked",true); flag(r,"reset_pending",pending);
     return persist(c);
 }
 static bool clear_latch(struct controller *c,const char *id)
 {
     cJSON *r=record(c,id); const cJSON *old=legacy_stop(c,id);
-    flag(r,"blocked",false); flag(r,"reset_pending",false); str(r,"reason","");
+    str(r,"state",RECORD_CLEAR); str(r,"kind",""); str(r,"reason","");
+    flag(r,"blocked",false); flag(r,"reset_pending",false);
     flag(r,"stop_event_active",false);
     if (old) str(r,"legacy_ack",text_field(old,"at"));
     return persist(c);
@@ -135,6 +192,19 @@ static void message(struct controller *c,const char *phase,const char *format,..
     snprintf(c->phase,sizeof c->phase,"%s",phase);
     va_list args; va_start(args,format); vsnprintf(c->message,sizeof c->message,format,args); va_end(args);
     fprintf(stderr,"%s: %s\n",phase,c->message);
+}
+/* The single exit from every lane operation. It retires the whole operation
+   sub-state, so a later STOP never records stale follow/trajectory flags (B9).
+   Lane identity, the last message/error, request identity, query state and
+   the teaching-cycle evidence are separate machines and are kept. */
+static void lane_go_idle(struct controller *c)
+{
+    c->op=OP_IDLE; c->owner[0]=0;
+    c->cycle_stage=0; c->teach_return_stage=0;
+    c->following=c->follow_committed=false; c->trajectory_follow=false;
+    c->range_followup=c->arrival_hold=false; c->synchronized_pose=false;
+    c->position_seed_pending=false; c->recovering_at_pose=false;
+    c->settled_at=c->final_sent_at=0;
 }
 static struct controller_lane *lane_for(struct controller *c,const char *id)
 {
@@ -336,11 +406,12 @@ static unsigned outside_range_count(const struct can_device *d)
     for (unsigned i=0;i<6;++i) if (joint_outside_range(d,i)) ++count;
     return count;
 }
-static const char *range_reason(struct controller *c,struct can_device *d)
+/* Read paths call this, so it writes only the caller's buffer, never c->error. */
+static const char *range_reason(const struct can_device *d,char *buffer,size_t size)
 {
     for (unsigned i=0;i<6;++i) if (joint_outside_range(d,i)) {
-        snprintf(c->error,sizeof c->error,"J%u reads %.3f degrees outside %.3f to %.3f. Move that joint inward or explicitly move all joints to zero; every CAN position command contains all six joints.",i+1,d->feedback.arm[0].deg[i],d->feedback.limit[i].min,d->feedback.limit[i].max);
-        return c->error;
+        snprintf(buffer,size,"J%u reads %.3f degrees outside %.3f to %.3f. Move that joint inward or explicitly move all joints to zero; every CAN position command contains all six joints.",i+1,d->feedback.arm[0].deg[i],d->feedback.limit[i].min,d->feedback.limit[i].max);
+        return buffer;
     }
     return "No range correction is required.";
 }
@@ -414,10 +485,9 @@ static bool recoverable_obstruction(struct controller *c,struct can_device *d)
 {
     cJSON *r=record(c,d->id),*event=field(r,"stop_event"),*transport=field(event,"transport");
     const cJSON *old=legacy_stop(c,d->id);
-    return yes(r,"blocked")&&yes(r,"stop_event_active")&&!reset_pending(c,d->id)&&
+    return record_is(r,RECORD_LATCHED)&&yes(r,"stop_event_active")&&!reset_pending(c,d->id)&&
         (!old||!strcmp(text_field(r,"legacy_ack"),text_field(old,"at")))&&
-        !strncmp(text_field(r,"reason"),"Possible obstruction at J",sizeof "Possible obstruction at J"-1)&&
-        !strncmp(text_field(event,"reason"),"Possible obstruction at J",sizeof "Possible obstruction at J"-1)&&
+        !strcmp(text_field(r,"kind"),KIND_OBSTRUCTION)&&!strcmp(text_field(event,"kind"),KIND_OBSTRUCTION)&&
         !field(r,"last_fault")&&!*d->problem&&!*text_field(transport,"failure")&&!*text_field(transport,"connection_error")&&
         cJSON_IsNumber(field(event,"error"))&&field(event,"error")->valuedouble==0&&
         cJSON_IsNumber(field(event,"arm_status"))&&field(event,"arm_status")->valuedouble==0;
@@ -491,12 +561,8 @@ static bool relinquish_to_teaching(struct controller *c,struct can_device *d,dou
        retiring the reset with reset_pending still latched. */
     if ((c->op==OP_RESET||c->op==OP_DISABLE)&&!teaching_status(&d->feedback.arm[0])) return false;
     cJSON *r=record(c,d->id);
-    bool own_intent=!strcmp(text_field(r,"reason"),"Control action interrupted before verified completion")&&
-        !yes(r,"stop_event_active")&&!reset_pending(c,d->id);
-    c->op=OP_IDLE; c->cycle_stage=0; c->owner[0]=0; c->following=c->follow_committed=false; c->range_followup=c->arrival_hold=false;
-    c->position_seed_pending=false;
-    c->teach_return_stage=0; c->trajectory_follow=false;
-    c->recovering_at_pose=false;
+    bool own_intent=!strcmp(text_field(r,"kind"),KIND_INTENT)&&!yes(r,"stop_event_active")&&!reset_pending(c,d->id);
+    lane_go_idle(c);
     if (own_intent&&!clear_latch(c,d->id)) message(c,"blocked","Teaching took over, but state storage failed; previous target discarded.");
     else message(c,"teaching","Onboard teaching took control. The previous movement and lease were discarded; measured scene tracking continues.");
     return true;
@@ -504,8 +570,7 @@ static bool relinquish_to_teaching(struct controller *c,struct can_device *d,dou
 static void abandon_teaching_return(struct controller *c,const char *reason)
 {
     bool modern=c->teach_return_stage>=3;
-    c->op=OP_IDLE; c->owner[0]=0; c->teach_return_stage=0; c->following=c->follow_committed=false; c->trajectory_follow=false;
-    c->recovering_at_pose=false;
+    lane_go_idle(c);
     message(c,"teaching","Return to CAN cancelled: %s %s",reason,modern?
         "Only the measured hold pose was requested; no reset, power change, homing or replay.":"No reset, power or position command was sent.");
 }
@@ -532,7 +597,8 @@ static bool send_pose(struct controller *c,struct can_device *d,const double tar
     c->pose_tx_at=piper_now();
     memcpy(c->pose_tx_millidegrees,encoded,sizeof encoded); return true;
 }
-void controller_stop(struct controller *c,const char *reason)
+/* kind is KIND_STOP or KIND_OBSTRUCTION and is persisted with the event. */
+static void lane_stop(struct controller *c,const char *kind,const char *reason)
 {
     forget_teaching_cycle(c); c->recovering_at_pose=false;
     c->stop_delivered=false;
@@ -544,7 +610,7 @@ void controller_stop(struct controller *c,const char *reason)
         if (!yes(r,"stop_event_active")) {
             cJSON_DeleteItemFromObjectCaseSensitive(r,"last_fault");
             cJSON *event=cJSON_CreateObject(), *joints=cJSON_CreateArray();
-            str(event,"reason",reason); num(event,"unix_time",(double)time(NULL));
+            str(event,"reason",reason); str(event,"kind",kind); num(event,"unix_time",(double)time(NULL));
             num(event,"joint",c->obstruction_joint); num(event,"threshold_s",.5); num(event,"tolerance_deg",c->tolerance);
             num(event,"request_id",c->request_id); num(event,"speed_deg_s",c->speed);
             flag(event,"following",c->following); flag(event,"finishing_target",c->follow_committed);
@@ -601,17 +667,18 @@ void controller_stop(struct controller *c,const char *reason)
            and reason while retaining the latest cleanup failure separately. */
         bool cleanup=c->op==OP_DISABLE&&yes(r,"stop_event_active");
         if(cleanup)str(r,"last_cleanup_error",reason);
-        latch(c,d->id,cleanup?active_incident_reason(c,d->id,reason):reason,reset_pending(c,d->id));
+        const char *latched_kind=kind,*latched=cleanup?active_incident(c,d->id,reason,&latched_kind):reason;
+        latch(c,d->id,latched,latched_kind,reset_pending(c,d->id));
     }
-    c->op=OP_IDLE; c->cycle_stage=0; c->owner[0]=0; c->query=false; c->range_followup=c->arrival_hold=false; c->trajectory_follow=false;
-    c->position_seed_pending=false;
+    lane_go_idle(c); c->query=false;
     c->stop_delivered=sent;
     message(c,"stopped","%s %s",reason,sent?"Controller STOP requested; holding torque may be lost.":"Stop delivery unavailable; physical stop may be needed.");
 }
+void controller_stop(struct controller *c,const char *reason) { lane_stop(c,KIND_STOP,reason); }
+void controller_stop_obstruction(struct controller *c,const char *reason) { lane_stop(c,KIND_OBSTRUCTION,reason); }
 static void finish(struct controller *c,struct can_device *d,const char *result,bool clear)
 {
-    c->op=OP_IDLE; c->cycle_stage=0; c->owner[0]=0; c->range_followup=c->arrival_hold=false; c->trajectory_follow=false;
-    c->position_seed_pending=false;
+    lane_go_idle(c);
     if (clear&&!clear_latch(c,d->id)) message(c,"blocked","Action completed, but state could not be saved. Motion remains blocked.");
     else message(c,"complete","%s",result);
 }
@@ -620,7 +687,7 @@ static void finish_teaching_return(struct controller *c,struct can_device *d)
     bool recovery=c->recovering_at_pose;
     c->teach_return_stage=0; c->recovering_at_pose=false; forget_teaching_cycle(c);
     if (recovery&&!clear_latch_transactional(c,d->id)) {
-        c->op=OP_IDLE; c->owner[0]=0;
+        lane_go_idle(c);
         message(c,"blocked","The measured hold is acknowledged, but recovery could not be saved. The obstruction remains latched; previous targets were discarded.");
         return;
     }
@@ -661,6 +728,9 @@ static bool controller_init_devices(struct controller *c,bool simulation,unsigne
         if (!cJSON_IsObject(saved_record)) return false;
         const char *keys[]={"blocked","reset_pending"};
         for (unsigned i=0;i<2;++i) if (field(saved_record,keys[i])&&!cJSON_IsBool(field(saved_record,keys[i]))) return false;
+        if (field(saved_record,"state")&&(!cJSON_IsString(field(saved_record,"state"))||!record_state_valid(text_field(saved_record,"state")))) return false;
+        if (field(saved_record,"kind")&&!cJSON_IsString(field(saved_record,"kind"))) return false;
+        record_normalize(saved_record);
     }
     if (!simulation&&*legacy) {
         c->profiles=read_json(legacy,"calibrations.json",&bad);
@@ -1101,12 +1171,13 @@ static cJSON *lane_action(struct controller *c,const char *route,const cJSON *bo
         }
         bool reset=!strcmp(action,"reset");
         c->disable_keeps_recovery=blocked(c,d->id)||health(d,now,false)!=NULL;
-        const char *intent=reset?"Reset pending verification":active_incident_reason(c,d->id,"Motors disabled; recovery verification required");
-        if (!latch(c,d->id,intent,reset||reset_pending(c,d->id))) return reply(status,500,"Could not persist the recovery record; no command sent.");
+        const char *kind=reset?KIND_RESET:KIND_POWER;
+        const char *intent=reset?"Reset pending verification":active_incident(c,d->id,"Motors disabled; recovery verification required",&kind);
+        if (!latch(c,d->id,intent,kind,reset||reset_pending(c,d->id))) return reply(status,500,"Could not persist the recovery record; no command sent.");
         begin(c,d,owner,reset?OP_RESET:OP_DISABLE,now); c->sent_at=now;
         struct can_frame f=piper_reset_frame();
         bool sent=!reset||can_bus_send(&c->bus,d,c->generation,&f,1);
-        if (!sent) { c->op=OP_IDLE; c->owner[0]=0; message(c,"blocked","Power/recovery request was not fully transmitted. Recovery remains required."); return reply(status,409,c->message); }
+        if (!sent) { lane_go_idle(c); message(c,"blocked","Power/recovery request was not fully transmitted. Recovery remains required."); return reply(status,409,c->message); }
         message(c,reset?"resetting":"disabling","Request queued; checking fresh disabled-motor feedback.");
     } else {
         const char *why=controller_blocker(c,d,now); if (why) return reply(status,409,why);
@@ -1197,7 +1268,7 @@ static cJSON *lane_action(struct controller *c,const char *route,const cJSON *bo
         double correction=range_distance(d);
         if ((op==OP_MOVE||op==OP_CYCLE)&&correction>0) {
             bool inward_joint=selected_joint>=0&&outside_range_count(d)==1&&joint_outside_range(d,(unsigned)selected_joint);
-            if (op!=OP_MOVE||(!zero_destination&&!inward_joint)) return reply(status,409,range_reason(c,d));
+            if (op!=OP_MOVE||(!zero_destination&&!inward_joint)) { char why[256]; return reply(status,409,range_reason(d,why,sizeof why)); }
             if (correction>3) return reply(status,409,"Range entry requires more than 3 degrees of correction. Inspect the physical pose and calibration before moving.");
             staged_range=true;
         }
@@ -1230,7 +1301,7 @@ static cJSON *lane_action(struct controller *c,const char *route,const cJSON *bo
             if (!piper_targets(c->target,admission+1)||!can_bus_batch_allowed(d,admission,4))
                 return reply(status,409,"The production CAN allowlist rejected the initial streamed-position transaction; no action or motor command was admitted.");
         }
-        if (!latch(c,d->id,"Control action interrupted before verified completion",false)) return reply(status,500,"Could not persist action intent; no command sent.");
+        if (!latch(c,d->id,intent_reason,KIND_INTENT,false)) return reply(status,500,"Could not persist action intent; no command sent.");
         begin(c,d,owner,op,now);
         c->position_seed_pending=(op==OP_MOVE||op==OP_ALIGN||op==OP_CYCLE)&&strcmp(action,"follow-start")!=0;
         c->streamed_position_mode=streamed;
@@ -1596,7 +1667,7 @@ static void lane_tick(struct controller *c,double now)
                     if (obstruction_stalled(&probe,now,s->deg[i],c->command[i],c->target[i],c->tolerance)) {
                         char reason[200]; c->obstruction_joint=i+1;
                         snprintf(reason,sizeof reason,"Possible obstruction at J%u: no measured progress for 0.5 seconds (actual %.3f, commanded %.3f, target %.3f degrees).",i+1,s->deg[i],c->command[i],c->target[i]);
-                        controller_stop(c,reason); return;
+                        controller_stop_obstruction(c,reason); return;
                     }
                 }
                 char reason[384]; snprintf(reason,sizeof reason,"%s Holding the verified measured pose; start a new follow session to continue.",c->error);
@@ -1644,7 +1715,7 @@ static void lane_tick(struct controller *c,double now)
             if (obstruction_stalled(&c->obstruction[i],now,s->deg[i],c->command[i],c->target[i],c->tolerance)) {
                 char reason[200]; c->obstruction_joint=i+1;
                 snprintf(reason,sizeof reason,"Possible obstruction at J%u: no measured progress for 0.5 seconds (actual %.3f, commanded %.3f, target %.3f degrees).",i+1,s->deg[i],c->command[i],c->target[i]);
-                controller_stop(c,reason); return;
+                controller_stop_obstruction(c,reason); return;
             }
         }
         if (!send_pose(c,d,c->command)) { controller_stop(c,"Joint command was not fully transmitted."); return; }
@@ -1825,6 +1896,7 @@ cJSON *controller_state(struct controller *c,const char *token)
         const char *why=in_action?"Control action in progress.":controller_blocker(c,d,now); str(j,"blocker",why?why:""); flag(j,"recovery_required",blocked(c,d->id)&&!in_action);
         double range_correction=range_distance(d);
         unsigned outside_count=outside_range_count(d);
+        char range_text[256];
         num(j,"range_entry_deg",range_correction);
         const char *range_blocker=why;
         if (!range_blocker&&c->query) range_blocker="Wait for the information query to complete.";
@@ -1839,7 +1911,7 @@ cJSON *controller_state(struct controller *c,const char *token)
         flag(range,"can_move_to_zero",!range_blocker&&isfinite(range_correction)&&range_correction<=3&&zero_legal);
         str(range,"reason",range_blocker?range_blocker:!isfinite(range_correction)?"Read current joint limits first.":range_correction>3?
             "Range entry requires more than 3 degrees of correction. Inspect the pose and calibration.":!zero_legal?"Zero is outside a reported joint command range.":
-            range_correction>0?range_reason(c,d):"");
+            range_correction>0?range_reason(d,range_text,sizeof range_text):"");
         put(j,"range_recovery",range);
         cJSON *r=record(c,d->id); str(j,"stop_reason",yes(r,"blocked")?text_field(r,"reason"):text_field(legacy_stop(c,d->id),"reason"));
         str(j,"last_cleanup_error",text_field(r,"last_cleanup_error"));
@@ -1907,7 +1979,7 @@ cJSON *controller_state(struct controller *c,const char *token)
             flag(joint,"can_move_inward",can_move&&(s->deg[i]<l->min||s->deg[i]>l->max));
             flag(joint,"can_move_negative",can_move&&s->deg[i]>l->min);
             flag(joint,"can_move_positive",can_move&&s->deg[i]<l->max);
-            str(joint,"motion_blocker",can_move?"":range_blocker?range_blocker:range_reason(c,d));
+            str(joint,"motion_blocker",can_move?"":range_blocker?range_blocker:range_reason(d,range_text,sizeof range_text));
             flag(joint,"limits_fresh",configuration_current(d,l->seen,l->at,now)); cJSON_AddItemToArray(joints,joint);
             num(joint,"limits_age_s",l->seen?now-l->at:NAN);
             struct piper_acceleration *a=&f->acceleration[i];

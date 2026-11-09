@@ -124,6 +124,14 @@ int main(void)
     }
     assert(c.op==OP_IDLE&&c.obstruction_joint==6);
     assert(piper_now()-started<.75);
+    /* B9: the STOP recorded the live session, then retired every follow flag,
+       so a later STOP cannot report a stale following session. */
+    cJSON *record=cJSON_GetObjectItem(cJSON_GetObjectItem(c.saved,"devices"),c.bus.devices[0].id);
+    assert(cJSON_IsTrue(cJSON_GetObjectItem(cJSON_GetObjectItem(record,"stop_event"),"following")));
+    assert(!c.following&&!c.follow_committed&&!c.trajectory_follow&&!c.synchronized_pose);
+    cJSON_ReplaceItemInObject(record,"stop_event_active",cJSON_CreateFalse());
+    controller_stop(&c,"Second stop after recovery.");
+    assert(cJSON_IsFalse(cJSON_GetObjectItem(cJSON_GetObjectItem(record,"stop_event"),"following")));
     cleanup(&c,third);
     puts("Following: final-target release/completion, cancel/expiry hold, owner/sequence/limits and obstruction across retargets passed.");
 }

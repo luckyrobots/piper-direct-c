@@ -28,10 +28,14 @@ static void run_case(double measured,const char *action,unsigned joint,double de
         d->feedback.acceleration[i]=(struct piper_acceleration){.seen=true,.max=5,.at=now};
     }
     d->stationary_since=now-1;
+    strcpy(c.error,"previous lane error");
     cJSON *state=controller_state(&c,"test");
     cJSON *device=cJSON_GetArrayItem(cJSON_GetObjectItem(state,"devices"),0);
     double correction=cJSON_GetObjectItem(device,"range_entry_deg")->valuedouble;
     assert((correction==0)==(fabs(measured)<=70.1));
+    /* B6: a state read reports the range reason but never overwrites the lane error. */
+    assert(!strcmp(c.error,"previous lane error"));
+    assert(!strcmp(cJSON_GetStringValue(cJSON_GetObjectItem(cJSON_GetObjectItem(device,"motion"),"error")),"previous lane error"));
     cJSON_Delete(state);
 
     cJSON *body=cJSON_CreateObject();

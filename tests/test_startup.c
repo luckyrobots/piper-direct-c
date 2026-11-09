@@ -123,9 +123,9 @@ int main(void)
     d->feedback.motor[0].enabled=true; action(&c,"verify-disabled",409); d->feedback.motor[0].enabled=false;
     d->stationary_since=piper_now(); action(&c,"verify-disabled",409); settle(&c);
     cJSON *r=cJSON_GetObjectItem(cJSON_GetObjectItem(c.saved,"devices"),d->id);
-    cJSON_ReplaceItemInObject(r,"reset_pending",cJSON_CreateBool(true));
+    cJSON_ReplaceItemInObject(r,"state",cJSON_CreateString("reset_pending"));
     action(&c,"verify-disabled",409);
-    cJSON_ReplaceItemInObject(r,"reset_pending",cJSON_CreateBool(false));
+    cJSON_ReplaceItemInObject(r,"state",cJSON_CreateString("latched"));
     action(&c,"verify-disabled",200); assert(!recovery(&c)); assert(d->tx==tx);
     d->feedback.arm[0].arm_status=5; d->feedback.arm[0].error=63;
     d->feedback.arm[0].status_at=piper_now();
