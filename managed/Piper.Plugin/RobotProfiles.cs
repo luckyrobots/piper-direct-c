@@ -290,7 +290,7 @@ public sealed partial class PipersPlugin
         // independent gripper session. All owned sessions keep heartbeating.
         if (link is not null) await engine.RequestAsync("robot.unsubscribe", cancellation: cancellation);
         CommandAuthority.Revoke();
-        teleoperating = false; followInput.End(); followRequest = 0;
+        StopViewportDrag();
         approved = linkCommandsEnabled = recoveryInProgress = false; ReleasePikaRole(); link = null; linkErrorDegrees = null;
         CancelHandGuideRecovery();
     }

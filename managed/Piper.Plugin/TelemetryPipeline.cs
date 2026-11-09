@@ -104,8 +104,7 @@ public sealed partial class PipersPlugin
         CurrentRecovery?.Cancel();
         CancelGroupSimulationFollowingInput(reason);
         teachingReturnGate.Invalidate();
-        teleoperating = false;
-        followRequest = 0; followInput.End();
+        StopViewportDrag();
         acknowledgedScenePose = null; linkErrorDegrees = null;
         if (clearLink) { link = null; recoveryInProgress = false; }
     }
@@ -116,9 +115,10 @@ public sealed partial class PipersPlugin
         // viewport-follow permission/gestures are discarded; ordinary controller
         // heartbeats and fresh measured joint controls remain independent.
         Interlocked.Increment(ref scenePermissionEpoch);
-        teleoperating = false; followInput.End();
-        if (CommandAuthority.Current.Lease is { } lease && lease.Request == followRequest) CommandAuthority.EndLease(lease);
-        followRequest = 0; linkCommandsEnabled = false;
+        long request = followRequest;
+        StopViewportDrag();
+        if (CommandAuthority.Current.Lease is { } lease && lease.Request == request) CommandAuthority.EndLease(lease);
+        linkCommandsEnabled = false;
         acknowledgedScenePose = null; linkErrorDegrees = null;
     }
 
@@ -172,9 +172,9 @@ public sealed partial class PipersPlugin
                 teachingSeen = true;
                 teachingDevice = linked.DeviceId; teachingGeneration = linked.Generation;
             }
-            approved = linkCommandsEnabled = teleoperating = false;
+            approved = linkCommandsEnabled = false;
+            StopViewportDrag();
             CommandAuthority.ClearTracked();
-            followRequest = 0; followInput.End();
         }
     }
 

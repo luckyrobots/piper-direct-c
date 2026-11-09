@@ -49,7 +49,7 @@ internal static class MeasuredTrackingTests
             check(f.Requests.Select(r => r.Method).SequenceEqual(new[] { "scene.robots", "robot.feedback", "robot.subscribe" }),
                 "Passive linking did not validate/apply/ack/subscribe in order during hand-guiding");
             check(f.Get<RobotLink?>("link") is { EntityId: "robot-a", DeviceId: "can-a", Generation: 7 } &&
-                !f.Get<bool>("approved") && !f.Get<bool>("linkCommandsEnabled") && !f.Get<bool>("teleoperating") && f.Authority.Current.Lease is null,
+                !f.Get<bool>("approved") && !f.Get<bool>("linkCommandsEnabled") && f.Get<ViewportDrag>("viewportDrag").Phase == ViewportDragPhase.Off && f.Authority.Current.Lease is null,
                 "Passive measured linking granted control, teleoperation or a previous motion lease");
             var feedback = f.Requests.Single(r => r.Method == "robot.feedback").Body;
             check(feedback["joints"]?["joint7"]?.GetValue<double>() is double jaw && Math.Abs(jaw + .047) < 1e-8,
@@ -121,8 +121,8 @@ internal static class MeasuredTrackingTests
         foreach (string active in new[] { "teleoperation", "follow", "motion" })
         {
             using var f = new Fixture(started: true);
-            if (active == "teleoperation") f.Set("teleoperating", true);
-            if (active == "follow") f.Set("followRequest", 7L);
+            if (active == "teleoperation") f.Set("viewportDrag", new ViewportDrag(ViewportDragPhase.Teleoperating));
+            if (active == "follow") f.Set("viewportDrag", new ViewportDrag(ViewportDragPhase.Following, Request: 7));
             if (active == "motion") f.Snapshot["motion"]!["active"] = true;
             f.Fresh(); await f.Restore();
             check(f.Requests.Count == 0 && f.Commands.CurrentCount == 1, "Passive discovery interfered with active " + active + " inputs");
