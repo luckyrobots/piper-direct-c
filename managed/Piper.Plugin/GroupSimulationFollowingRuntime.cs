@@ -239,8 +239,10 @@ public sealed partial class PipersPlugin
             bool all = true;
             for (int i = 0; i < group.Lanes.Length; i++)
             {
-                var lane = group.Lanes[i]; var arm = lane.Arm;
+                var lane = group.Lanes[i];
                 _ = LaneHardware(group, lane, observations[i]);
+                if (lane.Arm is not LaneArm.Following arm)
+                    throw new InvalidOperationException(lane.Profile.Name + ": native following admission has no valid request acknowledgement.");
                 all &= observations[i].AdmissionReady(owner, arm.FollowRequest, Interlocked.Read(ref lane.Sequence),
                     arm.AdmissionTicks, arm.AdmissionSequence, group.Clock.GetTimestamp());
             }
@@ -258,7 +260,7 @@ public sealed partial class PipersPlugin
             while (group.CanPrime && !ct.IsCancellationRequested)
             {
                 if (group.Clock.GetElapsedTime(began).TotalSeconds > PrimerTimeoutSeconds) throw new InvalidOperationException("Grouped first-frame admission timed out; no playback was started.");
-                await SendGroupTargets(group, group.Lanes.Where(l => l.Arm.Phase == LanePhase.Following).ToDictionary(l => l.Profile.Id,
+                await SendGroupTargets(group, group.Lanes.Where(l => l.Arm is LaneArm.Following).ToDictionary(l => l.Profile.Id,
                     l => new OrderedSimulationTarget(l.First!.CommandDegrees, l.First.CommandOpeningMm)), ct, priming: true);
                 await Task.Delay(TimeSpan.FromMilliseconds(30), group.Clock, ct);
             }
@@ -343,13 +345,17 @@ public sealed partial class PipersPlugin
             // Every lane is checked from one receipt before any write starts.
             var observations = ObserveGroup(group, telemetry.Latest);
             for (int i = 0; i < group.Lanes.Length; i++) _ = LaneHardware(group, group.Lanes[i], observations[i]);
+            // Every target lane must own an admitted follow request before any write starts.
+            var followRequests = group.Lanes.Where(l => targets.ContainsKey(l.Profile.Id)).ToDictionary(l => l.Profile.Id,
+                l => l.Arm is LaneArm.Following following ? following.FollowRequest
+                    : throw new InvalidOperationException(l.Profile.Name + ": follow admission is missing; no follower target was sent."));
             foreach (var lane in group.Lanes.Where(l => targets.ContainsKey(l.Profile.Id)))
             {
                 var target = targets[lane.Profile.Id];
                 long sequence = Interlocked.Increment(ref lane.Sequence);
                 var timing = lane.Publications.Begin(sequence, Stopwatch.GetTimestamp());
                 attempts.Add((lane, timing));
-                writes.Add(lane.Publications.Observe(timing, GroupCommand(group, lane, FollowChannel.Arm, FollowOp.Update, new() { ["request_id"] = lane.Arm.FollowRequest,
+                writes.Add(lane.Publications.Observe(timing, GroupCommand(group, lane, FollowChannel.Arm, FollowOp.Update, new() { ["request_id"] = followRequests[lane.Profile.Id],
                     ["sequence"] = sequence, ["degrees"] = JsonSerializer.SerializeToNode(target.JointDegrees) }, prevalidated: true), arm: true));
                 if (lane.Pika.Session is { Length: > 0 } pikaSession)
                     writes.Add(lane.Publications.Observe(timing, ObservePika(lane, GroupCommand(group, lane, FollowChannel.Pika, FollowOp.Update, new()
@@ -443,7 +449,7 @@ public sealed partial class PipersPlugin
         async Task<GroupReleaseEvidence> ReleaseArm(GroupLane lane)
         {
             var state = lane.Arm;
-            if (state.Phase == LanePhase.Untouched) return GroupReleaseEvidence.Untouched;
+            if (state is LaneArm.UntouchedArm) return GroupReleaseEvidence.Untouched;
             if (group.Backend != token) return GroupReleaseEvidence.Unverified;
             try
             {
