@@ -690,70 +690,63 @@ public sealed partial class PipersPlugin : ILuckyPlugin
 
     public async ValueTask DisposeAsync()
     {
-        var cameraRetirement = cameras.DisposeAsync();
+        var cameraRetirement = cameras.DisposeAsync().AsTask();
         passiveMeasuredTrackingStarted = false;
-        using (var groupTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(8)))
-        {
-            try { await StopGroupSimulationFollowing("Plugin closed · following stopped", groupTimeout.Token); }
-            catch (Exception error) { Trace.TraceWarning("Group following shutdown: {0}", error.Message); }
-        }
-        if (uiEvents is { } dispatch) await dispatch.DisposeAsync();
+        await Quietly(ct => StopGroupSimulationFollowing("Plugin closed · following stopped", ct), TimeSpan.FromSeconds(8), "Group following");
+        if (uiEvents is { } dispatch) await Quietly(dispatch.DisposeAsync().AsTask(), "UI actions");
         if (CurrentRecovery is { } recovery)
         {
             recovery.Cancel();
-            if (recovery.Worker is { } recoveryWorker)
-            {
-                try { await recoveryWorker.WaitAsync(TimeSpan.FromSeconds(5)); }
-                catch (Exception error) { Trace.TraceWarning("Recovery shutdown: {0}", error.Message); }
-            }
+            await Quietly(recovery.Worker?.WaitAsync(TimeSpan.FromSeconds(5)), "Recovery");
         }
-        {
-            await cameraDiscoveryShutdown.CancelAsync();
-            var discoveryWorkers = new[] { simulationCameraRefreshWorker, cameraDeviceDiscoveryWorker }.OfType<Task>().ToArray();
-            try { await Task.WhenAll(discoveryWorkers); }
-            catch (OperationCanceledException) { }
-            Interlocked.Exchange(ref pendingSimulationCameraDiscovery, null);
-            Interlocked.Exchange(ref pendingCameraDeviceInventory, null);
-            cameraDiscoveryShutdown.Dispose();
-        }
+        await cameraDiscoveryShutdown.CancelAsync();
+        await Quietly(Task.WhenAll(new[] { simulationCameraRefreshWorker, cameraDeviceDiscoveryWorker }.OfType<Task>()),
+            "Camera discovery", cameraDiscoveryShutdown.Token);
+        Interlocked.Exchange(ref pendingSimulationCameraDiscovery, null);
+        Interlocked.Exchange(ref pendingCameraDeviceInventory, null);
+        cameraDiscoveryShutdown.Dispose();
         using (var markerTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(1)))
         {
-            try { await StopHeightCheck(markerTimeout.Token); }
-            catch (Exception error) { Trace.TraceWarning("Height guide shutdown: {0}", error.Message); }
-            try { await ClearWizardHighlight(markerTimeout.Token); }
-            catch (Exception error) { Trace.TraceWarning("Calibration marker shutdown: {0}", error.Message); }
+            await Quietly(StopHeightCheck(markerTimeout.Token), "Height guide");
+            await Quietly(ClearWizardHighlight(markerTimeout.Token), "Calibration marker");
         }
-        {
-            pikaMonitorStopping = true;
-            await CancelPikaMonitorAttempt();
-            pikaMonitorCancellation?.Dispose();
-        }
-        using (var saveTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(1)))
-        {
-            try { await FinishPikaTeaching("Plugin closed", saveTimeout.Token); }
-            catch (Exception error) { Trace.TraceWarning("Pika teaching shutdown: {0}", error.Message); }
-        }
-        using (var releaseTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(1)))
-        {
-            try { await HoldFollowing(releaseTimeout.Token); }
-            catch (Exception error) { Trace.TraceWarning("Following shutdown: {0}", error.Message); }
-        }
+        pikaMonitorStopping = true;
+        await Quietly(CancelPikaMonitorAttempt(), "Pika monitor");
+        pikaMonitorCancellation?.Dispose();
+        await Quietly(ct => FinishPikaTeaching("Plugin closed", ct), TimeSpan.FromSeconds(1), "Pika teaching");
+        await Quietly(HoldFollowing, TimeSpan.FromSeconds(1), "Following");
         // Keep telemetry/heartbeats running until this session's Pika disable is
         // verified. Closing an external backend must not strand its old owner.
-        using (var pikaReleaseTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(3)))
-        {
-            try { await ReleaseOwnedPikas(pikaReleaseTimeout.Token); }
-            catch (Exception error) { Trace.TraceWarning("Pika shutdown release: {0}", error.Message); }
-        }
+        await Quietly(ReleaseOwnedPikas, TimeSpan.FromSeconds(3), "Pika release");
         await shutdown.CancelAsync();
-        if (wizardHighlightMaintenance is not null) { try { await wizardHighlightMaintenance; } catch (OperationCanceledException) { } }
-        if (heightMaintenance is not null) { try { await heightMaintenance; } catch (Exception error) { Trace.TraceWarning("Height guide maintenance shutdown: {0}", error.Message); } }
-        if (calibrationWorker is not null) { try { await calibrationWorker; } catch (OperationCanceledException) { } }
-        try { await cameraRetirement; }
-        catch (Exception error) { Trace.TraceWarning("Camera shutdown: {0}", error.Message); }
-        if (worker is not null) { try { await worker; } catch (OperationCanceledException) { } catch (RpcException error) when (error.StatusCode == StatusCode.Cancelled) { } }
+        await Quietly(wizardHighlightMaintenance, "Calibration marker maintenance");
+        await Quietly(heightMaintenance, "Height guide maintenance");
+        await Quietly(calibrationWorker, "Lens calibration");
+        await Quietly(cameraRetirement, "Camera");
+        await Quietly(worker, "Telemetry");
         await StopOwnedBackend();
         // An externally managed server keeps running; its existing lease expiry handles a lost client.
         channel.Dispose(); commands.Dispose(); shutdown.Dispose();
+    }
+
+    /// <summary>Awaits one shutdown step and logs its failure instead of aborting disposal.
+    /// Cancellation is silent once <paramref name="expected"/> (default: plugin shutdown)
+    /// has been requested; a step's own timeout is still logged.</summary>
+    private async Task Quietly(Task? task, string label, CancellationToken? expected = null)
+    {
+        if (task is null) return;
+        try { await task; }
+        catch (Exception error) when ((expected ?? shutdown.Token).IsCancellationRequested &&
+            error is OperationCanceledException or RpcException { StatusCode: StatusCode.Cancelled }) { }
+        catch (Exception error) { Trace.TraceWarning("{0} shutdown: {1}", label, error.Message); }
+    }
+
+    private async Task Quietly(Func<CancellationToken, Task> step, TimeSpan budget, string label)
+    {
+        using var timeout = new CancellationTokenSource(budget);
+        Task task;
+        try { task = step(timeout.Token); }
+        catch (Exception error) { task = Task.FromException(error); }
+        await Quietly(task, label);
     }
 }
