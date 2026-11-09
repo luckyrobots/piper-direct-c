@@ -11,7 +11,7 @@ using LuckyRobots.Piper.Plugin;
 
 internal static partial class SimulationFollowingTests
 {
-    public static async Task RunGroupFollow(Action<bool, string> check)
+    public static async Task RunGroupFollow()
     {
         static async Task WaitFor(Func<bool> condition, string description)
         {
@@ -30,17 +30,17 @@ internal static partial class SimulationFollowingTests
             unsupported.Snapshot["streamed_position_wire_validation_supported"] = true;
             foreach (var device in unsupported.Snapshot["devices"]!.AsArray()) device!["streamed_position_supported"] = true;
             unsupported.Refresh();
-            check(unsupported.Preparation().Issues.Any(i => i.ProfileId == profile && i.Code == "transport") &&
+            Check(unsupported.Preparation().Issues.Any(i => i.ProfileId == profile && i.Code == "transport") &&
                 unsupported.SidebarStatus().Contains(name + ": Select position-velocity"),
                 "A selected robot's saved unsupported transport was silently ignored");
             await unsupported.Click("group.follow.toggle");
             await WaitFor(() => unsupported.GroupSetupFailure().Length > 0, "Unsupported transport click did not finish");
-            check(!unsupported.GroupActive && unsupported.SidebarStatus().Contains(name + ": Select position-velocity") &&
+            Check(!unsupported.GroupActive && unsupported.SidebarStatus().Contains(name + ": Select position-velocity") &&
                 unsupported.Rpc.Requests.IsEmpty && !unsupported.EngineRequests.Any(r => r.Action == "arm-next-play"),
                 "Unsupported transport armed the engine, enabled experimental control or emitted a target");
             unsupported.SetProfileTransport(profile, SimulationTrajectoryTransport.PositionVelocity);
             await unsupported.Click("group.follow.toggle"); await WaitFor(() => unsupported.GroupArmedForPlay, "Explicit PV correction did not arm");
-            check(unsupported.Mode == "edit" && unsupported.Rpc.Requests.IsEmpty && unsupported.EngineRequests.Count(r => r.Action == "arm-next-play") == 1,
+            Check(unsupported.Mode == "edit" && unsupported.Rpc.Requests.IsEmpty && unsupported.EngineRequests.Count(r => r.Action == "arm-next-play") == 1,
                 "Restoring PV silently entered Play, sent a target or armed more than once");
         }
         foreach (string saved in new[] { "valid", "missing", "malformed", "other-profile", "other-device", "other-distribution" })
@@ -55,10 +55,10 @@ internal static partial class SimulationFollowingTests
             await reference.Click("group.follow.toggle"); await WaitFor(() => reference.GroupArmedForPlay, "Saved-reference fixture did not arm: " + saved);
             object lane = ((Array)reference.Get<object>("groupSimulation").GetType().GetField("Lanes")!.GetValue(reference.Get<object>("groupSimulation"))!).GetValue(0)!;
             var captured = (double?)lane.GetType().GetField("ClosedReference")!.GetValue(lane);
-            check(captured == (saved == "valid" ? -.0354 : null) && reference.Rpc.Requests.IsEmpty,
+            Check(captured == (saved == "valid" ? -.0354 : null) && reference.Rpc.Requests.IsEmpty,
                 "Inlined display-reference load changed missing/invalid fallback or exact profile/device/distribution matching: " + saved);
             await File.WriteAllTextAsync(path, "not-json");
-            check((double?)lane.GetType().GetField("ClosedReference")!.GetValue(lane) == captured,
+            Check((double?)lane.GetType().GetField("ClosedReference")!.GetValue(lane) == captured,
                 "An armed lane reread its captured display reference");
         }
         foreach (string scenario in new[] { "missing cache", "stale cache", "invalid current scene" })
@@ -69,17 +69,17 @@ internal static partial class SimulationFollowingTests
             cached["robots"]![0]!["joints"]!.AsArray().RemoveAt(8);
             if (scenario == "invalid current scene") current["robots"]![0]!["modelRevision"] = "";
             refresh.SetGroupSceneEvidence(scenario == "missing cache" ? null : cached, current);
-            check(!refresh.Preparation().Ready, "The cached scene did not exercise a refreshable blocker: " + scenario);
+            Check(!refresh.Preparation().Ready, "The cached scene did not exercise a refreshable blocker: " + scenario);
             await refresh.Click("group.follow.toggle");
             await WaitFor(() => refresh.GroupPhase == GroupFollowPhase.Armed || refresh.GroupSetupFailure().Length > 0,
                 "Follow did not finish checking current scene evidence: " + scenario);
-            check(refresh.EngineRequests.Any(r => r.Method == "scene.robots") && refresh.Rpc.Requests.IsEmpty && refresh.Mode == "edit",
+            Check(refresh.EngineRequests.Any(r => r.Method == "scene.robots") && refresh.Rpc.Requests.IsEmpty && refresh.Mode == "edit",
                 "Scene refresh was skipped or sent a hardware command: " + scenario);
             if (scenario == "invalid current scene")
-                check(!refresh.GroupActive && !refresh.EngineRequests.Any(r => r.Action == "arm-next-play") && refresh.SidebarStatus().Contains("model identity"),
+                Check(!refresh.GroupActive && !refresh.EngineRequests.Any(r => r.Action == "arm-next-play") && refresh.SidebarStatus().Contains("model identity"),
                     "Invalid current scene evidence passed the full arming gate");
             else
-                check(refresh.GroupActive && refresh.EngineRequests.Count(r => r.Action == "arm-next-play") == 1,
+                Check(refresh.GroupActive && refresh.EngineRequests.Count(r => r.Action == "arm-next-play") == 1,
                     "A valid current scene did not arm after refresh: " + scenario);
         }
         foreach (string robotId in new[] { "", "robot-a" })
@@ -90,7 +90,7 @@ internal static partial class SimulationFollowingTests
             await assignment.Click("group.follow.toggle");
             await WaitFor(() => assignment.GroupSetupFailure().Length > 0, "The static assignment failure did not finish");
             string reason = robotId.Length == 0 ? "Assign this robot's simulation arm" : "Assign a different simulation arm";
-            check(assignment.SidebarStatus().Contains("Second: " + reason) && !assignment.GroupActive && assignment.Rpc.Requests.IsEmpty &&
+            Check(assignment.SidebarStatus().Contains("Second: " + reason) && !assignment.GroupActive && assignment.Rpc.Requests.IsEmpty &&
                 !assignment.EngineRequests.Any(r => r.Method == "scene.robots" || r.Action == "arm-next-play"),
                 "A static scene assignment error was deferred to discovery");
         }
@@ -119,7 +119,7 @@ internal static partial class SimulationFollowingTests
         {
             await using var invalid = new Fixture(); invalid.ConfigureGroup(); change(invalid); invalid.Refresh();
             var report = invalid.Preparation();
-            check(!report.Ready && report.Issues.Any(i => i.ProfileId == "piper-2" && i.RobotName == "Second" && i.Code == code),
+            Check(!report.Ready && report.Issues.Any(i => i.ProfileId == "piper-2" && i.RobotName == "Second" && i.Code == code),
                 "Group preparation hid a nonselected robot's named " + code + " blocker");
         }
         await using (var blocked = new Fixture())
@@ -129,18 +129,18 @@ internal static partial class SimulationFollowingTests
             arm["status"]!["control"] = 2; arm["status"]!["teach_state"] = 2;
             blocked.Snapshot["pikas"]![0]!["enabled"] = false;
             blocked.Refresh();
-            check(blocked.SidebarStatus().Contains("First: Use Resume controls") && blocked.SidebarStatus().Contains("Pika gripper"),
+            Check(blocked.SidebarStatus().Contains("First: Use Resume controls") && blocked.SidebarStatus().Contains("Pika gripper"),
                 "The sidebar claimed the selected group was ready while its first arm and Pika were not");
             await blocked.Click("group.follow.toggle");
             await WaitFor(() => blocked.GroupSetupFailure().Length > 0, "The public Follow event did not publish its setup failure");
-            check(!blocked.GroupActive && blocked.SidebarStatus().Contains("Follow not armed") && blocked.SidebarStatus().Contains("First: Use Resume controls") &&
+            Check(!blocked.GroupActive && blocked.SidebarStatus().Contains("Follow not armed") && blocked.SidebarStatus().Contains("First: Use Resume controls") &&
                 blocked.SidebarStatus().Contains("Pika gripper") && blocked.Rpc.Requests.IsEmpty && !blocked.EngineRequests.Any(r => r.Action == "arm-next-play"),
                 "A public Follow click hid setup failure, armed an unready group or emitted a hardware command");
             arm["status"]!["control"] = 1; arm["status"]!["teach_state"] = 0; blocked.Snapshot["pikas"]![0]!["enabled"] = true; blocked.Refresh();
-            check(blocked.SidebarStatus().Contains("Follow not armed"), "Telemetry erased the retained setup error before an explicit retry");
+            Check(blocked.SidebarStatus().Contains("Follow not armed"), "Telemetry erased the retained setup error before an explicit retry");
             await blocked.Click("group.follow.toggle");
             await WaitFor(() => blocked.GroupPhase == GroupFollowPhase.Armed || blocked.EngineRequests.Any(r => r.Action == "arm-next-play"), "The ready retry never reached the engine arm latch");
-            check(blocked.GroupActive && blocked.Mode == "edit" && blocked.EngineRequests.Count(r => r.Action == "arm-next-play") == 1 && blocked.Rpc.Requests.IsEmpty,
+            Check(blocked.GroupActive && blocked.Mode == "edit" && blocked.EngineRequests.Count(r => r.Action == "arm-next-play") == 1 && blocked.Rpc.Requests.IsEmpty,
                 "Retrying a ready group failed to arm exactly once in Edit or retained a superseded setup failure");
         }
         await using (var stopped = new Fixture())
@@ -151,7 +151,7 @@ internal static partial class SimulationFollowingTests
             stopped.Snapshot["devices"]![1]!["recovery_required"] = true; stopped.Refresh();
             await stopped.Click("group.follow.toggle");
             await WaitFor(() => stopped.GroupSetupFailure().Length > 0, "The stopped partner's public Follow event did not finish");
-            check(stopped.SidebarStatus().Contains("Second: Open recovery") && stopped.Rpc.Requests.IsEmpty &&
+            Check(stopped.SidebarStatus().Contains("Second: Open recovery") && stopped.Rpc.Requests.IsEmpty &&
                 stopped.Snapshot["devices"]![1]!["recovery_required"]!.GetValue<bool>() &&
                 !stopped.EngineRequests.Any(r => r.Method == "scene.robots" || r.Action == "arm-next-play"),
                 "Follow admission cleared a recorded STOP or concealed the stopped partner");
@@ -162,7 +162,7 @@ internal static partial class SimulationFollowingTests
             idle.Snapshot["devices"]![0]!["status"]!["stationary_s"] = 0d;
             idle.Snapshot["devices"]![0]!["teaching"] = new JsonObject { ["can_return"] = false };
             idle.Refresh();
-            check(idle.Preparation().Ready && idle.SidebarFollowEnabled(), "Transient encoder stillness disabled the explicit global Follow action");
+            Check(idle.Preparation().Ready && idle.SidebarFollowEnabled(), "Transient encoder stillness disabled the explicit global Follow action");
         }
         await using (var armed = new Fixture())
         {
@@ -173,9 +173,9 @@ internal static partial class SimulationFollowingTests
             {
                 await armed.ClickSidebarGroupStop().WaitAsync(TimeSpan.FromSeconds(2));
                 await WaitFor(() => !armed.GroupActive, "An armed group did not retire outside the command gate");
-                check(!armed.GroupActive && armed.Commands.CurrentCount == 0 && armed.Mode == "edit",
+                Check(!armed.GroupActive && armed.Commands.CurrentCount == 0 && armed.Mode == "edit",
                     "The visible sidebar Stop waited for the command semaphore instead of retiring an armed group immediately");
-                check(armed.Rpc.Requests.IsEmpty && armed.EngineRequests.Count(r => r.Action == "arm-next-play") == 1 &&
+                Check(armed.Rpc.Requests.IsEmpty && armed.EngineRequests.Count(r => r.Action == "arm-next-play") == 1 &&
                     armed.EngineRequests.Any(r => r.Action == "cancel-start") &&
                     !armed.EngineRequests.Any(r => r.Action is "prepare-start" or "activate-start" or "mark-start-ready" or "pause"),
                     "Cancelling an armed group entered Play, prepared a runtime or emitted a physical target");
@@ -185,7 +185,7 @@ internal static partial class SimulationFollowingTests
         await using var f = new Fixture(); f.ConfigureGroup(); f.UseUiDispatcher();
         await f.Click("group.follow.toggle");
         await WaitFor(() => f.GroupActive && f.EngineRequests.Any(r => r.Action == "arm-next-play"), "The public Follow event never armed its ready group");
-        check(f.GroupActive && f.Mode == "edit" && f.Rpc.Requests.IsEmpty &&
+        Check(f.GroupActive && f.Mode == "edit" && f.Rpc.Requests.IsEmpty &&
             f.EngineRequests.Count(r => r.Action == "arm-next-play") == 1 && !f.EngineRequests.Any(r => r.Action == "prepare-start"),
             "The global arm button entered Play or moved hardware before the user pressed Play");
         f.RequestGroupPlay();
@@ -195,10 +195,10 @@ internal static partial class SimulationFollowingTests
             while (!test()) { if (Stopwatch.GetElapsedTime(began).TotalSeconds > 8) throw new InvalidOperationException(why + " / " + f.Get<string>("groupFollowStatus")); await Task.Delay(10); }
         }
         await Until(() => f.GroupPhase == GroupFollowPhase.Following || !f.GroupActive, "The grouped preparation never activated");
-        check(f.GroupActive && f.Mode == "play", "The group did not activate one shared user-requested Play run: " + f.Get<string>("groupFollowStatus"));
-        check(f.Rpc.Requests.Where(r => r.Body["action"]?.GetValue<string>() == "follow-start").Select(r => r.Body["device_id"]!.GetValue<string>()).Order().SequenceEqual(new[] { "can-a", "can-b" }),
+        Check(f.GroupActive && f.Mode == "play", "The group did not activate one shared user-requested Play run: " + f.Get<string>("groupFollowStatus"));
+        Check(f.Rpc.Requests.Where(r => r.Body["action"]?.GetValue<string>() == "follow-start").Select(r => r.Body["device_id"]!.GetValue<string>()).Order().SequenceEqual(new[] { "can-a", "can-b" }),
             "Both native device lanes were not independently admitted");
-        check(f.Rpc.Requests.Where(r => r.Route == "/api/pika/follow-start").Select(r => r.Body["pika_device"]!.GetValue<string>()).Order().SequenceEqual(new[] { "/dev/pika-a", "/dev/pika-b" }) &&
+        Check(f.Rpc.Requests.Where(r => r.Route == "/api/pika/follow-start").Select(r => r.Body["pika_device"]!.GetValue<string>()).Order().SequenceEqual(new[] { "/dev/pika-a", "/dev/pika-b" }) &&
             f.EngineRequests.Count(r => r.Action == "activate-start") == 1 && !f.Rpc.Requests.Any(r => r.Route == "/api/select"),
             "Grouped following redirected a gripper, switched native selection or activated Play twice");
         f.LoseNextOrderedReply = true;
@@ -206,36 +206,36 @@ internal static partial class SimulationFollowingTests
         int publications = f.Rpc.Requests.Count(r => r.Body["action"]?.GetValue<string>() == "follow-update");
         int reads = f.CompletedOrderedReads;
         await Task.Delay(80);
-        check(f.GroupActive &&
+        Check(f.GroupActive &&
             f.Rpc.Requests.Count(r => r.Body["action"]?.GetValue<string>() == "follow-update") > publications,
             "A delayed grouped read stopped independent lane publications before the retained lease expired");
         await Until(() => f.CompletedOrderedReads > reads || !f.GroupActive, "A lost grouped reply never recovered");
-        check(f.GroupActive && f.EngineRequests.Count(r => r.Method == "robot.runtime.frames" && r.Action != "start" &&
+        Check(f.GroupActive && f.EngineRequests.Count(r => r.Method == "robot.runtime.frames" && r.Action != "start" &&
             r.Body["afterFrameCursor"]?.GetValue<string>() == f.LostReplyCursor) >= 2 &&
             f.Rpc.Requests.Count(r => r.Body["action"]?.GetValue<string>() == "follow-start") == 2,
             "A150ms grouped read retry skipped its retained cursor, restarted admissions or retired healthy lanes");
         f.Snapshot["devices"]![1]!["status"]!["pose_stationary_s"] = 0d; f.TerminalFrame = true; f.Refresh();
         await Task.Delay(250);
-        check(!f.EngineRequests.Any(r => r.Action == "ack-episode"), "The shared episode advanced while the second physical arm was not settled");
+        Check(!f.EngineRequests.Any(r => r.Action == "ack-episode"), "The shared episode advanced while the second physical arm was not settled");
         await f.Click("profiles.select.piper-2");
         await WaitFor(() => f.Get<Preferences>("preferences").ActiveRobotId == "piper-2", "The public profile-selection event was not processed");
         int before = f.Rpc.Requests.Count(r => r.Body["action"]?.GetValue<string>() == "follow-update");
         await Until(() => f.Rpc.Requests.Count(r => r.Body["action"]?.GetValue<string>() == "follow-update") > before + 2, "Changing the viewed profile stopped group publication");
-        check(f.Rpc.Requests.Where(r => r.Body["action"]?.GetValue<string>() == "follow-update").TakeLast(8).Select(r => r.Body["device_id"]!.GetValue<string>()).Distinct().Count() == 2,
+        Check(f.Rpc.Requests.Where(r => r.Body["action"]?.GetValue<string>() == "follow-update").TakeLast(8).Select(r => r.Body["device_id"]!.GetValue<string>()).Distinct().Count() == 2,
             "Changing profile focus redirected both targets to the visible arm");
-        check(f.Get<Preferences>("preferences").ActiveRobotId == "piper-2" && f.GroupActive &&
+        Check(f.Get<Preferences>("preferences").ActiveRobotId == "piper-2" && f.GroupActive &&
             f.EngineRequests.Count(r => r.Action == "arm-next-play") == 1 && f.Rpc.Requests.Count(r => r.Body["action"]?.GetValue<string>() == "follow-start") == 2,
             "The public profile-selection event changed group ownership or restarted either physical follower");
         f.Snapshot["devices"]![1]!["status"]!["pose_stationary_s"] = 10d; f.Refresh();
         await Until(() => f.EngineRequests.Any(r => r.Action == "ack-episode"), "All-lane arrival never released its shared episode");
-        check(f.EngineRequests.Count(r => r.Action == "ack-episode") == 1, "The same whole episode was acknowledged separately per arm");
+        Check(f.EngineRequests.Count(r => r.Action == "ack-episode") == 1, "The same whole episode was acknowledged separately per arm");
         f.Rpc.HoldFailure = true;
         f.Snapshot["devices"]![1]!["generation"] = 9L; f.Refresh();
         await Until(() => !f.GroupActive, "A replacement CAN generation did not retire all group workers");
-        check(f.Mode == "pause" && f.Rpc.Requests.Any(r => r.Body["action"]?.GetValue<string>() == "hold" && r.Body["device_id"]?.GetValue<string>() == "can-a") &&
+        Check(f.Mode == "pause" && f.Rpc.Requests.Any(r => r.Body["action"]?.GetValue<string>() == "hold" && r.Body["device_id"]?.GetValue<string>() == "can-a") &&
             f.Rpc.Requests.Where(r => r.Route == "/api/pika/hold").Select(r => r.Body["pika_device"]!.GetValue<string>()).Distinct().Count() == 2,
             "One lane's failed arm hold suppressed independent partner/Pika holds or left simulation running");
-        check(!f.Rpc.Requests.Any(r => r.Body["action"]?.GetValue<string>() is "disable" or "reset" || r.Route is "/api/pika/disable" or "/api/pika/disconnect") &&
+        Check(!f.Rpc.Requests.Any(r => r.Body["action"]?.GetValue<string>() is "disable" or "reset" || r.Route is "/api/pika/disable" or "/api/pika/disconnect") &&
             f.Get<string>("uiActionError").Contains("CAN connection changed"), "Grouped cleanup removed power or lost the actual first generation-change failure");
 
         var expiryClock = new FollowTestClock();
@@ -252,13 +252,13 @@ internal static partial class SimulationFollowingTests
         started = Stopwatch.GetTimestamp();
         while (expired.GroupActive)
         { if (Stopwatch.GetElapsedTime(started).TotalSeconds > 3) throw new InvalidOperationException("Repeated read deadlines kept an expired grouped source alive"); await Task.Delay(10); }
-        check(expired.Get<string>("uiActionError").Contains("expired after 250 ms", StringComparison.Ordinal) && expired.Mode == "pause",
+        Check(expired.Get<string>("uiActionError").Contains("expired after 250 ms", StringComparison.Ordinal) && expired.Mode == "pause",
             "Repeated grouped retries renewed the original source lease or hid its 250ms expiry");
-        check(expired.Rpc.Requests.Where(r => r.Body["action"]?.GetValue<string>() == "hold").Select(r => r.Body["device_id"]!.GetValue<string>()).Distinct().Count() == 2 &&
+        Check(expired.Rpc.Requests.Where(r => r.Body["action"]?.GetValue<string>() == "hold").Select(r => r.Body["device_id"]!.GetValue<string>()).Distinct().Count() == 2 &&
             expired.Rpc.Requests.Count(r => r.Route == "/api/pika/hold") == 2,
             "Grouped source expiry did not independently hold all original arm and gripper lanes");
     }
-    internal static async Task RunTeachingResume(Action<bool, string> check)
+    internal static async Task RunTeachingResume()
     {
         await using (var f = new Fixture())
         {
@@ -267,20 +267,20 @@ internal static partial class SimulationFollowingTests
             for (int i = 0; i < 100 && f.Get<PipersPlugin.PrimaryActionState>("primaryAction").Phase != PrimaryActionPhase.ResumingControls; i++) { f.Refresh(); await Task.Delay(5); }
             string pending = f.Get<PipersPlugin.PrimaryActionState>("primaryAction").Status;
             for (int i = 0; i < 5; i++) { f.Refresh(); await Task.Delay(40); }
-            check(f.Get<PipersPlugin.PrimaryActionState>("primaryAction").Phase == PrimaryActionPhase.ResumingControls && f.Rpc.Requests.IsEmpty &&
+            Check(f.Get<PipersPlugin.PrimaryActionState>("primaryAction").Phase == PrimaryActionPhase.ResumingControls && f.Rpc.Requests.IsEmpty &&
                 f.Get<PipersPlugin.PrimaryActionState>("primaryAction").Status == pending && pending.Contains("Hold the arm still", StringComparison.Ordinal),
                 "A pending Resume flickered, exited early or issued a command before native stillness admission");
             var patch = f.PrimaryResumePatch();
-            check(patch["text"]?.GetValue<string>() == "Resuming controls…" && patch["enabled"]?.GetValue<bool>() == false,
+            Check(patch["text"]?.GetValue<string>() == "Resuming controls…" && patch["enabled"]?.GetValue<bool>() == false,
                 "Final unified patches overrode the stable pending Resume button");
             f.SetResumeEligible();
             await resume.WaitAsync(TimeSpan.FromSeconds(2));
             var request = f.Rpc.Requests.Single();
-            check(request.Route == "/api/command" && request.Body["action"]?.GetValue<string>() == "teach-return" &&
+            Check(request.Route == "/api/command" && request.Body["action"]?.GetValue<string>() == "teach-return" &&
                 request.Body["device_id"]?.GetValue<string>() == "can-a" && request.Body["generation"]?.GetValue<long>() == 7 &&
                 request.Body["same_pose_confirmed"]?.GetValue<bool>() == true,
                 "One explicit resume did not send exactly one pinned measured-pose handoff");
-            check(f.Get<bool>("approved") && f.Get<PipersPlugin.PrimaryActionState>("primaryAction").Phase == PrimaryActionPhase.Idle &&
+            Check(f.Get<bool>("approved") && f.Get<PipersPlugin.PrimaryActionState>("primaryAction").Phase == PrimaryActionPhase.Idle &&
                 f.Get<PipersPlugin.PrimaryActionState>("primaryAction").Status.StartsWith("Controls restored", StringComparison.Ordinal) && f.Mode == "edit",
                 "Successful resume failed its final approval/presentation or entered Play");
         }
@@ -290,15 +290,15 @@ internal static partial class SimulationFollowingTests
             f.Rpc.DelayedOperation = "heartbeat";
             Task resume = f.PrimaryResume();
             await f.Rpc.DelayedReached.Task.WaitAsync(TimeSpan.FromSeconds(2));
-            check(!resume.IsCompleted && !f.Get<bool>("approved") && f.Get<PipersPlugin.PrimaryActionState>("primaryAction").Phase == PrimaryActionPhase.ResumingControls,
+            Check(!resume.IsCompleted && !f.Get<bool>("approved") && f.Get<PipersPlugin.PrimaryActionState>("primaryAction").Phase == PrimaryActionPhase.ResumingControls,
                 "CAN mode alone completed Resume before the native handoff acknowledgement");
             var pendingMotion = f.Get<LatestTelemetry>("telemetry").Latest!.State["devices"]![0]!["motion"]!;
             f.CompleteResume();
             f.Rpc.ReleaseDelayed.TrySetResult();
-            check(pendingMotion["active"]?.GetValue<bool>() == true && pendingMotion["phase"]?.GetValue<string>() == "teaching-return",
+            Check(pendingMotion["active"]?.GetValue<bool>() == true && pendingMotion["phase"]?.GetValue<string>() == "teaching-return",
                 "Publishing the completion mutated an earlier active telemetry frame");
             await resume.WaitAsync(TimeSpan.FromSeconds(2));
-            check(f.Rpc.Requests.Count(r => r.Route == "/api/command") == 1 &&
+            Check(f.Rpc.Requests.Count(r => r.Route == "/api/command") == 1 &&
                 f.Rpc.Requests.Where(r => r.Route == "/api/heartbeat").All(r => r.Body["device_id"]?.GetValue<string>() == "can-a" &&
                     r.Body["generation"]?.GetValue<long>() == 7 && r.Body["request_id"]?.GetValue<long>() == 77),
                 "Resume retried admission or sent an unscoped handoff heartbeat");
@@ -311,7 +311,7 @@ internal static partial class SimulationFollowingTests
             f.InterruptResume(interruption);
             bool rejected = false;
             try { await resume.WaitAsync(TimeSpan.FromSeconds(2)); } catch (InvalidOperationException) { rejected = true; }
-            check(rejected && f.Rpc.Requests.IsEmpty && !f.Get<bool>("approved") &&
+            Check(rejected && f.Rpc.Requests.IsEmpty && !f.Get<bool>("approved") &&
                 f.Get<PipersPlugin.PrimaryActionState>("primaryAction").Phase == PrimaryActionPhase.Idle && f.Get<PipersPlugin.PrimaryActionState>("primaryAction").Status.StartsWith("Could not start:", StringComparison.Ordinal),
                 "A pending resume survived revocation, identity change, playback or a fault, or hid its failure");
         }
@@ -319,13 +319,13 @@ internal static partial class SimulationFollowingTests
         {
             f.ConfigureTeachingResume(completeImmediately: false); f.SetResumeEligible(); f.CompleteResumeOnHeartbeat();
             await f.PrimaryResume().WaitAsync(TimeSpan.FromSeconds(2));
-            check(f.Get<bool>("approved") && f.Rpc.Requests.Count(r => r.Route == "/api/command") == 1 &&
+            Check(f.Get<bool>("approved") && f.Rpc.Requests.Count(r => r.Route == "/api/command") == 1 &&
                 f.Rpc.Requests.Count(r => r.Route == "/api/heartbeat") == 1,
                 "A final heartbeat racing native completion falsely failed or retried a successful resume");
         }
     }
 
-    internal static async Task RunPrimaryWorkspaceAction(Action<bool, string> check)
+    internal static async Task RunPrimaryWorkspaceAction()
     {
         foreach (bool missingLink in new[] { false, true })
         {
@@ -336,9 +336,9 @@ internal static partial class SimulationFollowingTests
             await f.Navigate("controls");
             await f.Click("enable");
             _ = await WaitPrimary(f, "complete");
-            check(f.Get<RobotLink?>("link") is not null && f.Get<bool>("approved") && f.PrimaryActionName() == "Enabled",
+            Check(f.Get<RobotLink?>("link") is not null && f.Get<bool>("approved") && f.PrimaryActionName() == "Enabled",
                 "Primary Enable did not leave a ready linked robot after Settings navigation");
-            check(f.Session is null && !f.Ready && !f.PlayStarted && f.Mode == "edit" && !f.EngineRequests.Any(r => r.Method == "robot.runtime.control"),
+            Check(f.Session is null && !f.Ready && !f.PlayStarted && f.Mode == "edit" && !f.EngineRequests.Any(r => r.Method == "robot.runtime.control"),
                 "Primary Enable silently prepared a runtime or entered Play instead of waiting for the global group action");
         }
         await using (var blocked = new Fixture())
@@ -346,24 +346,24 @@ internal static partial class SimulationFollowingTests
             blocked.SetSpeed(0); blocked.UseUiDispatcher();
             await blocked.Click("enable");
             var receipt = await WaitPrimary(blocked, "complete");
-            check(receipt["stage"]?.GetValue<string>() == "complete" && receipt["failure"] is null &&
+            Check(receipt["stage"]?.GetValue<string>() == "complete" && receipt["failure"] is null &&
                 !receipt.ToJsonString().Contains("fixture-backend", StringComparison.Ordinal),
                 "Enable at zero selected speed did not complete its control-only lifecycle or leaked the backend token");
-            check(blocked.Session is null && !blocked.EngineRequests.Any(r => r.Action == "prepare-start") && blocked.Rpc.Requests.IsEmpty,
+            Check(blocked.Session is null && !blocked.EngineRequests.Any(r => r.Action == "prepare-start") && blocked.Rpc.Requests.IsEmpty,
                 "A blocked primary action prepared a runtime or sent a physical request");
         }
         await using (var gripperUnready = new Fixture())
         {
             gripperUnready.SetGripperUnready(); gripperUnready.UseUiDispatcher();
             await gripperUnready.Navigate("settings.robot"); await gripperUnready.Navigate("controls");
-            check(gripperUnready.Get<bool>("approved") && RobotPowerState.Inspect(gripperUnready.Snapshot["devices"]![0]!.AsObject()).AllEnabled &&
+            Check(gripperUnready.Get<bool>("approved") && RobotPowerState.Inspect(gripperUnready.Snapshot["devices"]![0]!.AsObject()).AllEnabled &&
                 gripperUnready.PrimaryActionName() == "Enable robot", "Unready-gripper fixture did not exercise the approved, powered arm's Enable label");
             await gripperUnready.Click("enable");
             _ = await WaitPrimary(gripperUnready, "complete");
-            check(gripperUnready.Rpc.Requests.Select(r => r.Route).SequenceEqual(["/api/pika/connect", "/api/pika/enable"]) &&
+            Check(gripperUnready.Rpc.Requests.Select(r => r.Route).SequenceEqual(["/api/pika/connect", "/api/pika/enable"]) &&
                 gripperUnready.Get<int>("pikaRole") == (int)PikaSessionRole.Owned && gripperUnready.PrimaryActionName() == "Enabled",
                 "Enable robot did not finish the assigned read-only/unready gripper connection");
-            check(gripperUnready.Session is null && !gripperUnready.Ready && !gripperUnready.PlayStarted && gripperUnready.Mode == "edit" &&
+            Check(gripperUnready.Session is null && !gripperUnready.Ready && !gripperUnready.PlayStarted && gripperUnready.Mode == "edit" &&
                 !gripperUnready.EngineRequests.Any(r => r.Method == "robot.runtime.control"),
                 "An Enable robot click silently toggled simulation following or started first-pose matching after gripper enable");
         }
@@ -373,7 +373,7 @@ internal static partial class SimulationFollowingTests
             confirmed.SetApproved(false); confirmed.UseUiDispatcher();
             await confirmed.Click("enable");
             var initial = await WaitPrimary(confirmed, "complete");
-            check(!confirmed.Get<bool>("approved") && confirmed.Session is null && confirmed.Rpc.Requests.IsEmpty,
+            Check(!confirmed.Get<bool>("approved") && confirmed.Session is null && confirmed.Rpc.Requests.IsEmpty,
                 "An unconfirmed Enable click acquired robot control or prepared following");
             if (failConfirmation)
             {
@@ -382,11 +382,11 @@ internal static partial class SimulationFollowingTests
             }
             await confirmed.Click("safety.accept");
             var result = await WaitPrimary(confirmed, failConfirmation ? "failed" : "complete", initial["id"]!.GetValue<string>());
-            check(confirmed.Get<PipersPlugin.PrimaryActionState>("primaryAction").Phase == PrimaryActionPhase.Idle && (failConfirmation
+            Check(confirmed.Get<PipersPlugin.PrimaryActionState>("primaryAction").Phase == PrimaryActionPhase.Idle && (failConfirmation
                 ? !confirmed.Get<bool>("approved") && confirmed.Get<PipersPlugin.PrimaryActionState>("primaryAction").Status.StartsWith("Could not start:", StringComparison.Ordinal) && result["failure"]!.GetValue<string>().Contains("hand guiding", StringComparison.OrdinalIgnoreCase)
                 : confirmed.Get<PipersPlugin.PrimaryActionState>("primaryAction").Status.Length == 0 && result["failure"] is null && confirmed.Get<string>("message").StartsWith("Ready ·", StringComparison.Ordinal)),
                 "Safety confirmation did not complete its shared progress/failure lifecycle");
-            check(confirmed.Session is null && !confirmed.EngineRequests.Any(r => r.Action == "prepare-start") && confirmed.Rpc.Requests.IsEmpty,
+            Check(confirmed.Session is null && !confirmed.EngineRequests.Any(r => r.Action == "prepare-start") && confirmed.Rpc.Requests.IsEmpty,
                 "Safety confirmation of an already enabled arm silently started following or sent a physical request");
         }
 

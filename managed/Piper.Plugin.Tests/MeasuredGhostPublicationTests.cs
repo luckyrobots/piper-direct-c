@@ -7,7 +7,7 @@ using LuckyRobots.Piper.Plugin;
 
 internal static class MeasuredGhostPublicationTests
 {
-    public static async Task Run(Action<bool, string> check)
+    public static async Task Run()
     {
         using (var fixture = new Fixture())
         {
@@ -24,24 +24,24 @@ internal static class MeasuredGhostPublicationTests
             fixture.Fresh(first: 11, second: 22);
             released.TrySetResult();
             await publishing;
-            check(fixture.Ghosts.Select(request => request["ghostId"]!.GetValue<string>()).SequenceEqual(new[] { "a", "b" }),
+            Check(fixture.Ghosts.Select(request => request["ghostId"]!.GetValue<string>()).SequenceEqual(new[] { "a", "b" }),
                 "Independent profiles sharing one physics root did not both publish measured ghosts");
-            check(Math.Abs(fixture.Ghosts[0]["joints"]!["joint1"]!.GetValue<double>() - 11 * Math.PI / 180) < 1e-10 &&
+            Check(Math.Abs(fixture.Ghosts[0]["joints"]!["joint1"]!.GetValue<double>() - 11 * Math.PI / 180) < 1e-10 &&
                 Math.Abs(fixture.Ghosts[1]["joints"]!["piper3_joint1"]!.GetValue<double>() - 22 * Math.PI / 180) < 1e-10,
                 "Runtime discovery reused an older physical pose instead of the newest same-identity evidence");
-            check(fixture.Ghosts.All(request => request["joints"]!.AsObject().Count == 8) &&
+            Check(fixture.Ghosts.All(request => request["joints"]!.AsObject().Count == 8) &&
                 fixture.Ghosts[0]["joints"]!.AsObject().All(joint => !joint.Key.StartsWith("piper3_", StringComparison.Ordinal)) &&
                 fixture.Ghosts[1]["joints"]!.AsObject().All(joint => joint.Key.StartsWith("piper3_", StringComparison.Ordinal)),
                 "A measured ghost borrowed the other arm's joints from the shared leader");
             await fixture.Publish();
-            check(fixture.Ghosts.Skip(2).Select(request => request["ghostId"]!.GetValue<string>()).SequenceEqual(new[] { "b", "a" }),
+            Check(fixture.Ghosts.Skip(2).Select(request => request["ghostId"]!.GetValue<string>()).SequenceEqual(new[] { "b", "a" }),
                 "Repeated ghost publication permanently prioritizes one profile");
         }
         using (var fixture = new Fixture())
         {
             fixture.AfterRead = count => count == 1 ? Task.FromException(new TimeoutException("Slow first profile")) : Task.CompletedTask;
             await fixture.Publish();
-            check(fixture.Ghosts.Count == 1 && fixture.Ghosts[0]["ghostId"]!.GetValue<string>() == "b",
+            Check(fixture.Ghosts.Count == 1 && fixture.Ghosts[0]["ghostId"]!.GetValue<string>() == "b",
                 "One unavailable robot suppressed another robot's healthy measured ghost");
         }
         foreach (string changed in new[] { "stale-pika", "generation", "backend", "profile", "hidden", "disposing" })
@@ -60,10 +60,10 @@ internal static class MeasuredGhostPublicationTests
                 return Task.CompletedTask;
             };
             await fixture.Publish();
-            check(fixture.Ghosts.All(request => request["ghostId"]!.GetValue<string>() != "a"),
+            Check(fixture.Ghosts.All(request => request["ghostId"]!.GetValue<string>() != "a"),
                 "Delayed runtime lookup published a ghost after changed " + changed + " evidence");
             if (changed is "stale-pika" or "generation" or "profile")
-                check(fixture.Ghosts.Count == 1 && fixture.Ghosts[0]["ghostId"]!.GetValue<string>() == "b",
+                Check(fixture.Ghosts.Count == 1 && fixture.Ghosts[0]["ghostId"]!.GetValue<string>() == "b",
                     "One robot's invalid " + changed + " evidence prevented the other measured ghost");
         }
     }

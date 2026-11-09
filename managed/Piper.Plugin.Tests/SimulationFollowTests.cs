@@ -3,19 +3,19 @@ using LuckyRobots.Piper.Plugin;
 
 internal static class SimulationFollowTests
 {
-    public static void Run(Action<bool, string> check)
+    public static void Run()
     {
         const long now = 1_000_000;
         var initial = SimulationFollowSample.Read(Pose());
         var hardware = Hardware(initial);
-        check(initial.CommandDegrees.Count == 6 && initial.MeasuredDegrees.Count == 6 && Math.Abs(initial.CommandOpeningMm - 20) < 1e-8,
+        Check(initial.CommandDegrees.Count == 6 && initial.MeasuredDegrees.Count == 6 && Math.Abs(initial.CommandOpeningMm - 20) < 1e-8,
             "Runtime follower did not read six position controls and the actual offset Pika slide mapping");
-        check(Math.Abs(initial.MeasuredOpeningMm - 20) < 1e-8 && initial.BindsTo(SimulationFollowSample.Read(Pose())), "Runtime measured gripper or identity binding differs");
-        check(initial.CommandDegrees is not double[] && initial.MeasuredDegrees is not double[], "Caller can mutate retained runtime target arrays");
+        Check(Math.Abs(initial.MeasuredOpeningMm - 20) < 1e-8 && initial.BindsTo(SimulationFollowSample.Read(Pose())), "Runtime measured gripper or identity binding differs");
+        Check(initial.CommandDegrees is not double[] && initial.MeasuredDegrees is not double[], "Caller can mutate retained runtime target arrays");
 
         var paused = Pose(); paused["mode"] = "pause";
         SimulationFollowPolicy.ValidateStart(SimulationFollowSample.Read(paused), initial.Identity, hardware, now, 20);
-        check(true, "Paused initial runtime pose cannot be checked before explicit resume");
+        Check(true, "Paused initial runtime pose cannot be checked before explicit resume");
 
         foreach (var invalid in new (string Name, Action<JsonObject> Change)[]
         {
@@ -91,10 +91,10 @@ internal static class SimulationFollowTests
         Reject(() => SimulationFollowPolicy.ValidateStart(SimulationFollowSample.Read(tooFast), initial.Identity, hardware, now, 20), "Follow started above 20% simulation speed");
         var nativeFloatScale = Pose(); nativeFloatScale["timeScale"] = (double).2f;
         SimulationFollowPolicy.ValidateStart(SimulationFollowSample.Read(nativeFloatScale), initial.Identity, hardware, now, 20);
-        check(true, "Native float time-scale round trip rejected the intended 20% setting");
+        Check(true, "Native float time-scale round trip rejected the intended 20% setting");
         var initialRuntime = Pose(time: 0); initialRuntime["mode"] = "pause";
         SimulationFollowPolicy.ValidateStart(SimulationFollowSample.Read(initialRuntime), initial.Identity, hardware, now, 20);
-        check(true, "Pause-on-play rejected its correct zero-time initial runtime snapshot");
+        Check(true, "Pause-on-play rejected its correct zero-time initial runtime snapshot");
         var edit = Pose(); edit["mode"] = "edit";
         Reject(() => SimulationFollowPolicy.ValidateStart(SimulationFollowSample.Read(edit), initial.Identity, hardware, now, 20), "Follow started from saved Edit model");
         var differentStart = hardware with { JointDegrees = hardware.JointDegrees.Select((v, i) => v + (i == 0 ? 2 : 0)).ToArray() };
@@ -103,12 +103,6 @@ internal static class SimulationFollowTests
             "A valid but mismatched start was admitted without matching the poses first");
         Reject(() => SimulationFollowPolicy.ValidateCandidate(initial, initial.Identity, hardware, now + 251, 20), "Match target validation accepted stale source data");
 
-        void Reject(Action action, string reason)
-        {
-            bool rejected = false;
-            try { action(); } catch (InvalidOperationException) { rejected = true; }
-            check(rejected, reason);
-        }
     }
 
     private static SimulationFollowHardware Hardware(SimulationFollowSample sample) => new("can-a", 7, true, true, true, sample.MeasuredDegrees,

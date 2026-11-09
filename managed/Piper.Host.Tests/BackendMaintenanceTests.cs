@@ -6,8 +6,6 @@ internal static class BackendMaintenanceTests
 {
     internal static async Task Run()
     {
-        int checks = 0;
-        void Check(bool condition, string message) { if (!condition) throw new Exception(message); ++checks; }
         const string owner = "11111111-1111-1111-1111-111111111111";
         var state = Arm(); var pikas = new JsonArray(Pika(owner));
         var restarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -158,7 +156,7 @@ internal static class BackendMaintenanceTests
         Check(BackendMaintenance.Check(Arm(), new JsonArray(new JsonObject {
             ["connected"] = false, ["power_requested"] = false, ["power_uncertain"] = false
         }), owner) is null, "Unused read-only gripper assignment blocked maintenance");
-        Console.WriteLine($"Passed {checks} hardware-free backend maintenance checks.");
+        Console.WriteLine($"Passed {Checks} hardware-free backend maintenance checks.");
     }
 
     private static JsonObject Arm() => new() {

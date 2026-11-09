@@ -7,7 +7,7 @@ using LuckyRobots.Piper.Plugin;
 
 internal static class CalibrationSheetUiTests
 {
-    public static async Task Run(Action<bool, string> check)
+    public static async Task Run()
     {
         const BindingFlags hidden = BindingFlags.Instance | BindingFlags.NonPublic;
         var plugin = new PipersPlugin();
@@ -86,42 +86,42 @@ internal static class CalibrationSheetUiTests
             string Fixed(string id) => WorkspaceEventScope.Wrap(page, "piper-1", id);
             async Task Patches() { Fresh(); await Invoke("Update", CancellationToken.None); }
             await Patches();
-            check(lastPatch![Wire("tool.confirm")]?["enabled"]?.GetValue<bool>() == false,
+            Check(lastPatch![Wire("tool.confirm")]?["enabled"]?.GetValue<bool>() == false,
                 "Jaw-tip confirmation was available before its marker was acknowledged");
             int beforeViews = views;
             await Click("tool.show");
-            check(Get<long>("workspaceViewEpoch") == page && Get<CalibrationWizardDraft>("calibrationWizard").Epoch == sheet && views == beforeViews,
+            Check(Get<long>("workspaceViewEpoch") == page && Get<CalibrationWizardDraft>("calibrationWizard").Epoch == sheet && views == beforeViews,
                 "Showing jaw tips rebuilt the calibration page or invalidated the next visible button ID");
-            check(Get<object>("wizardMarker") is MarkerState.Tool, "Showing jaw tips did not retain its confirmation scope");
+            Check(Get<object>("wizardMarker") is MarkerState.Tool, "Showing jaw tips did not retain its confirmation scope");
             await Invoke("MaintainWizardHighlight", CancellationToken.None);
-            check(Get<object>("wizardMarker") is MarkerState.Tool, "Background maintenance replaced the displayed jaw-tip marker");
+            Check(Get<object>("wizardMarker") is MarkerState.Tool, "Background maintenance replaced the displayed jaw-tip marker");
             await Click("tool.confirm");
-            check(Get<CalibrationWizardDraft>("calibrationWizard").Setup.JawTipsConfirmed,
+            Check(Get<CalibrationWizardDraft>("calibrationWizard").Setup.JawTipsConfirmed,
                 "The visible Marker matches jaw tips click was lost after Show jaw-tip marker");
             await Click("tool.show");
-            check(Get<CalibrationWizardDraft>("calibrationWizard").Setup.JawTipsConfirmed,
+            Check(Get<CalibrationWizardDraft>("calibrationWizard").Setup.JawTipsConfirmed,
                 "Showing an unchanged jaw-tip site silently revoked the user's existing confirmation");
             await Patches();
-            check(lastPatch![Fixed("sheet.row.status.3")]?["text"]?.GetValue<string>().Contains("overlaps P2") == true,
+            Check(lastPatch![Fixed("sheet.row.status.3")]?["text"]?.GetValue<string>().Contains("overlaps P2") == true,
                 "Duplicate P4/P2 measurements did not show a visible row error before capture");
             Get<CalibrationWizardDraft>("calibrationWizard").Answers["precision"] = "0";
             await Patches();
-            check(lastPatch![Fixed("sheet.next")]?["text"]?.GetValue<string>().Contains("accuracy cannot be 0") == true &&
+            Check(lastPatch![Fixed("sheet.next")]?["text"]?.GetValue<string>().Contains("accuracy cannot be 0") == true &&
                 lastPatch[Wire("capture.0")]?["enabled"]?.GetValue<bool>() == false,
                 "Invalid precision zero did not show its visible blocker and disable Capture P1");
             await Click("capture.0");
-            check(Get<CalibrationIdentity?>("calibrationIdentity") is null,
+            Check(Get<CalibrationIdentity?>("calibrationIdentity") is null,
                 "Invalid precision zero reached capture despite the visible capture gate");
             // Error feedback must retain the same page, so correcting an input
             // does not require the operator to discover fresh button IDs.
-            check(Get<long>("workspaceViewEpoch") == page, "A rejected capture rebuilt the page and invalidated visible controls");
+            Check(Get<long>("workspaceViewEpoch") == page, "A rejected capture rebuilt the page and invalidated visible controls");
             Get<CalibrationWizardDraft>("calibrationWizard").Answers["precision"] = "5";
             Set("calibrationWizard", Get<CalibrationWizardDraft>("calibrationWizard") with { Setup = Get<CalibrationWizardDraft>("calibrationWizard").Setup with { LeftProof = "stale-proof" } });
             await Patches();
-            check(lastPatch![Wire("tool.confirm")]?["enabled"]?.GetValue<bool>() == false &&
+            Check(lastPatch![Wire("tool.confirm")]?["enabled"]?.GetValue<bool>() == false &&
                 lastPatch[Fixed("sheet.setup")]?["text"]?.GetValue<string>().Contains("LEFT pending") == true,
                 "Stale desk-edge proof was presented as confirmed or permitted a dependent jaw-tip confirmation");
-            check(requests.All(method => method is "robot.read" or "robot.highlightToolSite" or "robot.highlightReference"),
+            Check(requests.All(method => method is "robot.read" or "robot.highlightToolSite" or "robot.highlightReference"),
                 "Passive calibration preview sent an engine motion or hardware operation");
         }
         finally

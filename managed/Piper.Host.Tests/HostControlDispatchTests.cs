@@ -94,16 +94,8 @@ internal static class HostControlDispatchTests
         async Task<ControlReply> Execute(string route, string json) => await grpc.ExecuteAsync(new ControlRequest { Route = route, Json = json },
             headers, deadline: DateTime.UtcNow.AddSeconds(3));
 
-        async Task UnsupportedGrpc(string route, string json)
-        {
-            try { _ = await Execute(route, json); }
-            catch (RpcException error) when (error.StatusCode == StatusCode.InvalidArgument && error.Status.Detail == "Unsupported control route.") { return; }
-            throw new InvalidOperationException("gRPC accepted HTTP-only or unsupported route " + route);
-        }
-
-        static void Check(bool value, string reason)
-        {
-            if (!value) throw new InvalidOperationException(reason);
-        }
+        Task UnsupportedGrpc(string route, string json) => RejectAsync<RpcException>(() => Execute(route, json),
+            "gRPC accepted HTTP-only or unsupported route " + route,
+            error => error.StatusCode == StatusCode.InvalidArgument && error.Status.Detail == "Unsupported control route.");
     }
 }

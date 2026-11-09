@@ -3,7 +3,7 @@ using LuckyRobots.Piper.Pika;
 
 internal static class PikaReadOnlyAdoptionTests
 {
-    public static async Task Run(Action<bool, string> check)
+    public static async Task Run()
     {
         string oldOwner = Guid.NewGuid().ToString(), newOwner = Guid.NewGuid().ToString();
         JsonElement Request(string owner, bool adopt = false) => JsonSerializer.SerializeToElement(new {
@@ -17,7 +17,7 @@ internal static class PikaReadOnlyAdoptionTests
             bool invalid = false;
             try { await unopened.ExecuteAsync("connect", JsonSerializer.SerializeToElement(new { owner = newOwner, read_only_adopt = "true" }), default); }
             catch (ArgumentException) { invalid = true; }
-            check(invalid && unopened.Snapshot()["owner"] is null && unopened.Snapshot()["read_only_adoptable"]?.GetValue<bool>() == false,
+            Check(invalid && unopened.Snapshot()["owner"] is null && unopened.Snapshot()["read_only_adoptable"]?.GetValue<bool>() == false,
                 "Unproven/malformed automatic adoption reached transport setup or changed ownership.");
         }
 
@@ -26,7 +26,7 @@ internal static class PikaReadOnlyAdoptionTests
             await live.ExecuteAsync("connect", Request(oldOwner), default);
             await live.ExecuteAsync("heartbeat", Request(oldOwner), default);
             await Reject(() => live.ExecuteAsync("connect", Request(newOwner, true), default));
-            check(live.Snapshot()["connected"]?.GetValue<bool>() == true && live.Snapshot()["owner"]?.GetValue<string>() == oldOwner,
+            Check(live.Snapshot()["connected"]?.GetValue<bool>() == true && live.Snapshot()["owner"]?.GetValue<string>() == oldOwner,
                 "A stale client decision stole a connected foreign monitor.");
         }
         await using (var expired = new PikaProcessService("/dev/pika-unpowered-monitor-die-fixture", Environment.ProcessPath!, directLaunch: true))
@@ -35,29 +35,29 @@ internal static class PikaReadOnlyAdoptionTests
             await expired.ExecuteAsync("heartbeat", Request(oldOwner), default);
             await WaitEnded(expired);
             var ended = expired.Snapshot();
-            check(ended["read_only_adoptable"]?.GetValue<bool>() == true && ended["configuration_blocked"]?.GetValue<bool>() == true &&
+            Check(ended["read_only_adoptable"]?.GetValue<bool>() == true && ended["configuration_blocked"]?.GetValue<bool>() == true &&
                 ended["owner"]?.GetValue<string>() == oldOwner && ended["power_requested"]?.GetValue<bool>() == false,
                 "A confirmed exited unpowered observer never advertised safe read-only adoption.");
             var reply = await expired.ExecuteAsync("connect", Request(newOwner, true), default);
             var adopted = expired.Snapshot();
-            check(reply["message"]?.GetValue<string>() == "Linux serial connected; reading only" &&
+            Check(reply["message"]?.GetValue<string>() == "Linux serial connected; reading only" &&
                 adopted["connected"]?.GetValue<bool>() == true && adopted["owner"]?.GetValue<string>() == newOwner &&
                 adopted["power_requested"]?.GetValue<bool>() == false && adopted["read_only_adoptable"]?.GetValue<bool>() == false,
                 "Read-only adoption reused old power/targets or failed to establish the new passive owner.");
             // A second automatic claimant must lose after the first claimant
             // has connected, even if it copied the old true capability bit.
             await Reject(() => expired.ExecuteAsync("connect", Request(oldOwner, true), default));
-            check(expired.Snapshot()["owner"]?.GetValue<string>() == newOwner, "Concurrent automatic adopters replaced a newly connected owner.");
+            Check(expired.Snapshot()["owner"]?.GetValue<string>() == newOwner, "Concurrent automatic adopters replaced a newly connected owner.");
         }
         await using (var poweredObserver = new PikaProcessService("/dev/pika-monitor-die-fixture", Environment.ProcessPath!, directLaunch: true))
         {
             await poweredObserver.ExecuteAsync("connect", Request(oldOwner), default);
             await poweredObserver.ExecuteAsync("heartbeat", Request(oldOwner), default);
             await WaitEnded(poweredObserver);
-            check(poweredObserver.Snapshot()["enabled"]?.GetValue<bool>() == true && poweredObserver.Snapshot()["read_only_adoptable"]?.GetValue<bool>() == false,
+            Check(poweredObserver.Snapshot()["enabled"]?.GetValue<bool>() == true && poweredObserver.Snapshot()["read_only_adoptable"]?.GetValue<bool>() == false,
                 "A last-known externally powered observer advertised unpowered adoption.");
             await Reject(() => poweredObserver.ExecuteAsync("connect", Request(newOwner, true), default));
-            check(poweredObserver.Snapshot()["owner"]?.GetValue<string>() == oldOwner, "Powered observer's ownership was discarded by automatic adoption.");
+            Check(poweredObserver.Snapshot()["owner"]?.GetValue<string>() == oldOwner, "Powered observer's ownership was discarded by automatic adoption.");
         }
         await using (var uncertain = new PikaProcessService("/dev/pika-fixture", Environment.ProcessPath!, directLaunch: true))
         {
@@ -66,7 +66,7 @@ internal static class PikaReadOnlyAdoptionTests
             await uncertain.ExecuteAsync("position", JsonSerializer.SerializeToElement(new { owner = oldOwner, value = .75 }), default);
             await WaitEnded(uncertain);
             await Reject(() => uncertain.ExecuteAsync("connect", Request(newOwner, true), default));
-            check(uncertain.Snapshot()["owner"]?.GetValue<string>() == oldOwner && uncertain.Snapshot()["power_uncertain"]?.GetValue<bool>() == true,
+            Check(uncertain.Snapshot()["owner"]?.GetValue<string>() == oldOwner && uncertain.Snapshot()["power_uncertain"]?.GetValue<bool>() == true,
                 "Automatic adoption erased an uncertain transmitted motor request.");
         }
 
@@ -75,7 +75,7 @@ internal static class PikaReadOnlyAdoptionTests
             bool rejected = false;
             try { await operation(); }
             catch (InvalidOperationException error) when (error.Message.StartsWith("Read-only adoption requires", StringComparison.Ordinal)) { rejected = true; }
-            check(rejected, "Automatic adoption was not rejected by private evidence before any session change.");
+            Check(rejected, "Automatic adoption was not rejected by private evidence before any session change.");
         }
     }
 

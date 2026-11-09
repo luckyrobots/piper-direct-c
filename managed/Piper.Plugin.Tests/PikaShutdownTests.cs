@@ -9,7 +9,7 @@ using LuckyRobots.Piper.Plugin;
 
 internal static class PikaShutdownTests
 {
-    public static async Task Run(Action<bool, string> check)
+    public static async Task Run()
     {
         const BindingFlags fields = BindingFlags.Instance | BindingFlags.NonPublic;
         const string backend = "shutdown-fixture";
@@ -53,18 +53,18 @@ internal static class PikaShutdownTests
         try
         {
             var admitted = requests.ToArray();
-            check(admitted.Count(r => r.Route == "/api/pika/disable") == 3 &&
+            Check(admitted.Count(r => r.Route == "/api/pika/disable") == 3 &&
                 admitted.Any(r => r.Route == "/api/pika/disable" && r.Device == linux && r.Distribution is null) &&
                 admitted.Any(r => r.Route == "/api/pika/disable" && r.Device == stalled && r.Distribution == "PeerWsl") &&
                 admitted.Any(r => r.Route == "/api/pika/disconnect" && r.Device == monitor && r.Distribution is null),
                 "A stalled device blocked independent shutdown requests or Linux null was routed through the active WSL profile");
-            check(!linuxDisconnected.Task.IsCompleted, "Cached disabled evidence from another motor request released the Linux gripper");
+            Check(!linuxDisconnected.Task.IsCompleted, "Cached disabled evidence from another motor request released the Linux gripper");
             grippers[0]["last_motor_request"] = linux + "-shutdown";
             grippers[3]["last_motor_request"] = transferred + "-shutdown";
             grippers[3]["owner"] = otherOwner;
             Publish(2);
             await linuxDisconnected.Task.WaitAsync(TimeSpan.FromSeconds(1));
-            check(!release.IsCompleted && requests.All(r => r.Owner == owner && r.Device != foreign) &&
+            Check(!release.IsCompleted && requests.All(r => r.Owner == owner && r.Device != foreign) &&
                 requests.Where(r => r.Route == "/api/pika/disconnect").Select(r => r.Device).Order().SequenceEqual(new[] { linux, monitor }),
                 "Shutdown skipped a causally verified Linux disconnect or disconnected a foreign or unverified gripper");
         }

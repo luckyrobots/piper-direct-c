@@ -10,20 +10,20 @@ using LuckyRobots.Piper.Plugin;
 
 internal static class MeasuredTrackingTests
 {
-    public static async Task Run(Action<bool, string> check)
+    public static async Task Run()
     {
         var assigned = new RobotProfile("piper-1", "Fixture", "can-a", RobotId: "robot-a");
-        check(MeasuredTrackingPolicy.Enabled(assigned), "Existing fully assigned profiles did not default to passive measured tracking");
-        check(!MeasuredTrackingPolicy.Enabled(assigned with { RobotId = "" }) && !MeasuredTrackingPolicy.Enabled(assigned with { CanDeviceId = "" }),
+        Check(MeasuredTrackingPolicy.Enabled(assigned), "Existing fully assigned profiles did not default to passive measured tracking");
+        Check(!MeasuredTrackingPolicy.Enabled(assigned with { RobotId = "" }) && !MeasuredTrackingPolicy.Enabled(assigned with { CanDeviceId = "" }),
             "Unassigned profiles opted into automatic robot selection");
-        check(!MeasuredTrackingPolicy.Enabled(assigned with { RememberMeasuredLink = false }), "Explicit Unlink was ignored");
+        Check(!MeasuredTrackingPolicy.Enabled(assigned with { RememberMeasuredLink = false }), "Explicit Unlink was ignored");
         var roundTrip = JsonSerializer.Deserialize<RobotProfile>(JsonSerializer.Serialize(assigned with { RememberMeasuredLink = false }))!;
-        check(roundTrip.RememberMeasuredLink == false, "Explicit Unlink did not survive preference serialization");
+        Check(roundTrip.RememberMeasuredLink == false, "Explicit Unlink did not survive preference serialization");
 
         using (var delayed = new Fixture(started: true) { RequestDelayMilliseconds = 250 })
         {
             await delayed.Restore();
-            check(delayed.Get<RobotLink?>("link") is not null && delayed.Requests.Count == 3,
+            Check(delayed.Get<RobotLink?>("link") is not null && delayed.Requests.Count == 3,
                 "A healthy three-RPC measured-link handshake shared one 400ms budget under editor load");
         }
         using (var retry = new Fixture(started: true))
@@ -33,49 +33,49 @@ internal static class MeasuredTrackingTests
             retry.Set("measuredTrackingSceneUnverified", true); retry.Set("measuredTrackingAttemptAt", 0L);
             retry.FailRequest = "robot.subscribe"; retry.Fresh();
             await retry.Restore();
-            check(ReferenceEquals(previous, retry.Get<RobotLink?>("link")) && !retry.Get<bool>("linkCommandsEnabled"),
+            Check(ReferenceEquals(previous, retry.Get<RobotLink?>("link")) && !retry.Get<bool>("linkCommandsEnabled"),
                 "A transient same-scene subscribe failure destroyed the verified measured binding or restored target permission");
         }
 
         using (var f = new Fixture())
         {
             await f.Restore();
-            check(f.Requests.Count == 0, "An unstarted fixture began passive background discovery");
+            Check(f.Requests.Count == 0, "An unstarted fixture began passive background discovery");
             f.Set("passiveMeasuredTrackingStarted", true);
             f.Snapshot["devices"]![0]!["status"]!["control"] = 2;
             f.Snapshot["devices"]![0]!["status"]!["teach_state"] = 1;
             f.Fresh();
             await f.Restore();
-            check(f.Requests.Select(r => r.Method).SequenceEqual(new[] { "scene.robots", "robot.feedback", "robot.subscribe" }),
+            Check(f.Requests.Select(r => r.Method).SequenceEqual(new[] { "scene.robots", "robot.feedback", "robot.subscribe" }),
                 "Passive linking did not validate/apply/ack/subscribe in order during hand-guiding");
-            check(f.Get<RobotLink?>("link") is { EntityId: "robot-a", DeviceId: "can-a", Generation: 7 } &&
+            Check(f.Get<RobotLink?>("link") is { EntityId: "robot-a", DeviceId: "can-a", Generation: 7 } &&
                 !f.Get<bool>("approved") && !f.Get<bool>("linkCommandsEnabled") && f.Get<ViewportDrag>("viewportDrag").Phase == ViewportDragPhase.Off && f.Authority.Current.Lease is null,
                 "Passive measured linking granted control, teleoperation or a previous motion lease");
             var feedback = f.Requests.Single(r => r.Method == "robot.feedback").Body;
-            check(feedback["joints"]?["joint7"]?.GetValue<double>() is double jaw && Math.Abs(jaw + .047) < 1e-8,
+            Check(feedback["joints"]?["joint7"]?.GetValue<double>() is double jaw && Math.Abs(jaw + .047) < 1e-8,
                 "Passive linking omitted the matching physical Pika's measured closed jaws");
             int before = f.Requests.Count;
             await f.Restore();
-            check(f.Requests.Count == before, "Automatic scene discovery ran more than once per second");
+            Check(f.Requests.Count == before, "Automatic scene discovery ran more than once per second");
             await f.DrainMonitor();
             f.Set("pikaMonitorAttemptAt", 0L);
             f.InvokeVoid("RetryLinkedPikaMonitor");
             await f.DrainMonitor();
-            check(f.Rpc.Routes.Count == 1 && f.Rpc.Routes.Single().Route == "/api/pika/connect" &&
+            Check(f.Rpc.Routes.Count == 1 && f.Rpc.Routes.Single().Route == "/api/pika/connect" &&
                 f.Rpc.Routes.Single().Body["take_over"]?.GetValue<bool>() == false,
                 "Automatic tracking sent a physical request beyond Pika's monitor-only connection");
-            check(f.Get<int>("pikaRole") == (int)PikaSessionRole.Monitoring, "Monitoring silently acquired gripper motor control");
+            Check(f.Get<int>("pikaRole") == (int)PikaSessionRole.Monitoring, "Monitoring silently acquired gripper motor control");
 
             f.Set("measuredTrackingAttemptAt", 0L); f.Fresh(); before = f.Requests.Count;
             await f.Restore();
-            check(f.Requests.Count == before, "A healthy measured link polled scene discovery while holding the input gate");
+            Check(f.Requests.Count == before, "A healthy measured link polled scene discovery while holding the input gate");
             f.SceneId = "scene-b"; f.Fresh(); f.Set("measuredTrackingAttemptAt", 0L);
             await f.Invoke("PublishMeasuredScene", CancellationToken.None);
-            check(f.Get<bool>("measuredTrackingSceneUnverified"), "A reloaded scene's rejected feedback did not request measured-link rediscovery");
+            Check(f.Get<bool>("measuredTrackingSceneUnverified"), "A reloaded scene's rejected feedback did not request measured-link rediscovery");
             await f.Restore();
-            check(f.Get<RobotLink?>("link")?.SceneId == "scene-b" && f.Requests.Count(r => r.Method == "robot.subscribe") == 2,
+            Check(f.Get<RobotLink?>("link")?.SceneId == "scene-b" && f.Requests.Count(r => r.Method == "robot.subscribe") == 2,
                 "Loading a different scene did not restore the exact assigned robot's measured link");
-            check(!f.Get<bool>("linkCommandsEnabled"), "Scene reload restored viewport target permission");
+            Check(!f.Get<bool>("linkCommandsEnabled"), "Scene reload restored viewport target permission");
         }
 
         foreach (string invalid in new[] { "selected", "stale", "missing", "offline", "generation" })
@@ -87,7 +87,7 @@ internal static class MeasuredTrackingTests
             if (invalid == "generation") f.Snapshot["devices"]![0]!["generation"] = 0L;
             if (invalid == "missing") f.SetPreferences(f.Profile with { RobotId = "unknown-robot" });
             f.Fresh(); await f.Restore();
-            check(f.Get<RobotLink?>("link") is null && !f.Requests.Any(r => r.Method is "robot.feedback" or "robot.subscribe") && f.Rpc.Routes.Count == 0,
+            Check(f.Get<RobotLink?>("link") is null && !f.Requests.Any(r => r.Method is "robot.feedback" or "robot.subscribe") && f.Rpc.Routes.Count == 0,
                 "An unknown, stale or incorrectly scoped assignment reached measured pose binding: " + invalid);
         }
 
@@ -106,9 +106,9 @@ internal static class MeasuredTrackingTests
                 f.Fresh();
             };
             await f.Restore();
-            check(f.Get<RobotLink?>("link") is null && !f.Get<bool>("approved") && !f.Get<bool>("linkCommandsEnabled") && f.Rpc.Routes.Count == 0,
+            Check(f.Get<RobotLink?>("link") is null && !f.Get<bool>("approved") && !f.Get<bool>("linkCommandsEnabled") && f.Rpc.Routes.Count == 0,
                 "A delayed " + awaitPoint + " acknowledgement survived changed " + changed + " scope");
-            if (awaitPoint != "robot.subscribe") check(!f.Requests.Any(r => r.Method == "robot.subscribe"), "Scope changed before subscribe but the stale robot was subscribed");
+            if (awaitPoint != "robot.subscribe") Check(!f.Requests.Any(r => r.Method == "robot.subscribe"), "Scope changed before subscribe but the stale robot was subscribed");
         }
 
         using (var f = new Fixture(started: true))
@@ -116,7 +116,7 @@ internal static class MeasuredTrackingTests
             await f.Commands.WaitAsync();
             try { await f.Restore().WaitAsync(TimeSpan.FromSeconds(1)); }
             finally { f.Commands.Release(); }
-            check(f.Requests.Count == 0, "Passive linking queued behind an active operator action");
+            Check(f.Requests.Count == 0, "Passive linking queued behind an active operator action");
         }
         foreach (string active in new[] { "teleoperation", "follow", "motion" })
         {
@@ -125,13 +125,13 @@ internal static class MeasuredTrackingTests
             if (active == "follow") f.Set("viewportDrag", new ViewportDrag(ViewportDragPhase.Following, Request: 7));
             if (active == "motion") f.Snapshot["motion"]!["active"] = true;
             f.Fresh(); await f.Restore();
-            check(f.Requests.Count == 0 && f.Commands.CurrentCount == 1, "Passive discovery interfered with active " + active + " inputs");
+            Check(f.Requests.Count == 0 && f.Commands.CurrentCount == 1, "Passive discovery interfered with active " + active + " inputs");
         }
         using (var f = new Fixture(started: true))
         {
             f.WrongAcknowledgement = true;
             await f.Restore();
-            check(f.Get<RobotLink?>("link") is null && !f.Requests.Any(r => r.Method == "robot.subscribe"),
+            Check(f.Get<RobotLink?>("link") is null && !f.Requests.Any(r => r.Method == "robot.subscribe"),
                 "A wrong scene/entity acknowledgement was promoted to a measured binding");
         }
         using (var f = new Fixture(started: true))
@@ -142,17 +142,17 @@ internal static class MeasuredTrackingTests
             f.Set("pikaRole", (int)PikaSessionRole.None); f.Set("pikaMonitorStopping", true);
             await f.LinkEvent();
             var saved = JsonSerializer.Deserialize<Preferences>(await File.ReadAllTextAsync(Path.Combine(f.Folder, "preferences.json")), PluginProtocol.Json)!;
-            check(RobotProfileRouting.Active(saved).RememberMeasuredLink == false && f.Get<RobotLink?>("link") is null,
+            Check(RobotProfileRouting.Active(saved).RememberMeasuredLink == false && f.Get<RobotLink?>("link") is null,
                 "Explicit Unlink did not persist passive tracking off for the active profile");
             f.Set("measuredTrackingAttemptAt", 0L); f.Fresh();
             int before = f.Requests.Count;
             await f.Restore();
-            check(f.Requests.Count == before, "A refresh immediately relinked after explicit Unlink");
+            Check(f.Requests.Count == before, "A refresh immediately relinked after explicit Unlink");
             await f.LinkEvent();
             saved = JsonSerializer.Deserialize<Preferences>(await File.ReadAllTextAsync(Path.Combine(f.Folder, "preferences.json")), PluginProtocol.Json)!;
-            check(RobotProfileRouting.Active(saved).RememberMeasuredLink == true && f.Get<RobotLink?>("link") is not null,
+            Check(RobotProfileRouting.Active(saved).RememberMeasuredLink == true && f.Get<RobotLink?>("link") is not null,
                 "Explicit Link did not persist automatic measured tracking back on");
-            check(f.Rpc.Routes.All(r => r.Route == "/api/pika/connect"), "Link/Unlink sent power, reset, target, configuration or teleoperation requests");
+            Check(f.Rpc.Routes.All(r => r.Route == "/api/pika/connect"), "Link/Unlink sent power, reset, target, configuration or teleoperation requests");
         }
     }
 

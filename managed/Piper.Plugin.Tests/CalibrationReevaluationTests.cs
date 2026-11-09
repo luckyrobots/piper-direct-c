@@ -9,11 +9,11 @@ internal static class CalibrationReevaluationTests
 {
     private const BindingFlags Hidden = BindingFlags.Instance | BindingFlags.NonPublic;
 
-    public static async Task Run(Action<bool, string> check)
+    public static async Task Run()
     {
-        await SuccessfulReevaluation(check);
-        await ReopenedSceneReevaluation(check, "new-model");
-        await ReopenedSceneReevaluation(check, "old-model");
+        await SuccessfulReevaluation();
+        await ReopenedSceneReevaluation("new-model");
+        await ReopenedSceneReevaluation("old-model");
         foreach (string unavailable in new[] { "unsupported-reason", "metric-reason" })
         {
             using var fixture = new Fixture { Failure = unavailable };
@@ -21,25 +21,25 @@ internal static class CalibrationReevaluationTests
             await fixture.Invoke("Render", CancellationToken.None);
             await fixture.Event("reevaluate");
             string displayed = fixture.Patches?["sheet.action.feedback"]?["text"]?.GetValue<string>() ?? "missing patch: " + fixture.Get<string>("wizardMessage");
-            check(displayed.Contains("fixture capability reason"),
+            Check(displayed.Contains("fixture capability reason"),
                 "The native calibration UI replaced the engine's actionable capability reason with a generic message: " + displayed);
-            check(File.ReadAllText(fixture.ReportPath) == before && fixture.Calls.SequenceEqual(["robot.read"]),
+            Check(File.ReadAllText(fixture.ReportPath) == before && fixture.Calls.SequenceEqual(["robot.read"]),
                 "An unsupported capability changed saved captures or attempted evaluation/movement");
         }
         foreach (string failure in new[] { "revision", "root", "joint", "dependency", "not-read-only", "connection", "read-changed", "unsupported", "scene-switch", "initial-root", "asset" })
         {
             using var fixture = new Fixture { Failure = failure };
             string before = File.ReadAllText(fixture.ReportPath);
-            await ExpectFailure(() => fixture.Reevaluate(), check, failure + " unexpectedly replaced a saved calibration");
-            check(File.ReadAllText(fixture.ReportPath) == before && fixture.Get<CalibrationIdentity>("calibrationIdentity") == fixture.Identity &&
+            await RejectAsync<InvalidOperationException>(() => fixture.Reevaluate(), failure + " unexpectedly replaced a saved calibration");
+            Check(File.ReadAllText(fixture.ReportPath) == before && fixture.Get<CalibrationIdentity>("calibrationIdentity") == fixture.Identity &&
                 fixture.Get<List<CalibrationSample>>("calibrationSamples").SequenceEqual(fixture.Originals),
                 failure + " left partial recomputed geometry or identity in the saved report");
-            check(fixture.Calls.All(c => c is "robot.read" or "robot.evaluate"), failure + " attempted to replay a saved pose into the live scene");
+            Check(fixture.Calls.All(c => c is "robot.read" or "robot.evaluate"), failure + " attempted to replay a saved pose into the live scene");
         }
         using (var wrongRobot = new Fixture("reopened-scene", entityId: "other-robot"))
         {
-            await ExpectFailure(() => wrongRobot.Reevaluate(), check, "A reopened scene rebound captures to a different entity UUID");
-            check(wrongRobot.Calls.Count == 0, "A different entity reached model evaluation before its identity was rejected");
+            await RejectAsync<InvalidOperationException>(() => wrongRobot.Reevaluate(), "A reopened scene rebound captures to a different entity UUID");
+            Check(wrongRobot.Calls.Count == 0, "A different entity reached model evaluation before its identity was rejected");
         }
         foreach (string blocked in new[] { "calibrationApplied", "calibrationPlacementUnverified", "sheetEditingRow", "stale", "motion" })
         {
@@ -49,88 +49,88 @@ internal static class CalibrationReevaluationTests
             else if (blocked == "sheetEditingRow") fixture.Set(blocked, 1);
             else if (blocked == "stale") fixture.State["devices"]![0]!["fresh"] = false;
             else fixture.State["motion"]!["active"] = true;
-            await ExpectFailure(() => fixture.Reevaluate(), check, blocked + " allowed re-evaluation");
-            check(fixture.Calls.Count == 0, blocked + " reached the editor before its local guard rejected re-evaluation");
+            await RejectAsync<InvalidOperationException>(() => fixture.Reevaluate(), blocked + " allowed re-evaluation");
+            Check(fixture.Calls.Count == 0, blocked + " reached the editor before its local guard rejected re-evaluation");
         }
     }
 
-    private static async Task ReopenedSceneReevaluation(Action<bool, string> check, string revision)
+    private static async Task ReopenedSceneReevaluation(string revision)
     {
         using var f = new Fixture("reopened-scene", revision);
         f.Set("acknowledgedScenePose", new JsonObject { ["pose"] = f.Pose() });
         await f.Invoke("Render", CancellationToken.None); await f.Invoke("Update", CancellationToken.None);
         string id = f.WidgetId(".sheet.reevaluate");
-        check(f.Patches?[id]?["enabled"]?.GetValue<bool>() == true && f.Patches[id]?["visible"]?.GetValue<bool>() == true,
+        Check(f.Patches?[id]?["enabled"]?.GetValue<bool>() == true && f.Patches[id]?["visible"]?.GetValue<bool>() == true,
             "A reopened scene hid the only explicit way to re-evaluate saved observations");
         await f.Event("reevaluate");
         var report = JsonSerializer.Deserialize<CalibrationReport>(File.ReadAllText(f.ReportPath), PluginProtocol.Json)!;
-        check(report.Identity == (f.Identity with { SceneId = "reopened-scene", ModelRevision = revision }) && report.Fit is null &&
+        Check(report.Identity == (f.Identity with { SceneId = "reopened-scene", ModelRevision = revision }) && report.Fit is null &&
             report.ModelReevaluation is { PreviousSceneId: "scene-a", SceneId: "reopened-scene" },
             "Explicit re-evaluation did not pin and audit the reopened scene while preserving the physical robot identity");
-        check(report.Samples.Where((s, i) => s.PoseFingerprint == f.Originals[i].PoseFingerprint && s.JointDegrees.SequenceEqual(f.Originals[i].JointDegrees) &&
+        Check(report.Samples.Where((s, i) => s.PoseFingerprint == f.Originals[i].PoseFingerprint && s.JointDegrees.SequenceEqual(f.Originals[i].JointDegrees) &&
             s.Measurement == f.Originals[i].Measurement && s.HostUnixMilliseconds == f.Originals[i].HostUnixMilliseconds).Count() == 5,
             "Scene-session rebinding rewrote physical capture evidence");
         var audit = JsonNode.Parse(File.ReadAllText(Path.Combine(f.Directory, "calibration", "piper-1", report.ModelReevaluation!.AuditFile)))!;
-        check(audit["previousSceneId"]!.GetValue<string>() == "scene-a" && audit["sceneId"]!.GetValue<string>() == "reopened-scene" &&
+        Check(audit["previousSceneId"]!.GetValue<string>() == "scene-a" && audit["sceneId"]!.GetValue<string>() == "reopened-scene" &&
             audit["previousReport"]!["identity"]!["sceneId"]!.GetValue<string>() == "scene-a", "Scene rebinding lost its original-scene provenance");
         var draft = f.Get<CalibrationWizardDraft>("calibrationWizard");
         draft.Answers["reevaluatedscene"] = "scene-a";
         f.Set("calibrationWizard", draft with { Setup = new("old-root", "old-proof", "old-proof", JawTipsConfirmed: true) });
         typeof(PipersPlugin).GetMethod("ReconcileReevaluatedWizard", Hidden)!.Invoke(f.Plugin, null);
         draft = f.Get<CalibrationWizardDraft>("calibrationWizard");
-        check(draft.Answers["reevaluatedscene"] == "reopened-scene" && draft.Setup == new SheetSetup(),
+        Check(draft.Answers["reevaluatedscene"] == "reopened-scene" && draft.Setup == new SheetSetup(),
             "An interrupted scene-only rebind restored confirmations from the old scene when the model revision was unchanged");
         foreach (string action in new[] { "left.show", "left.confirm", "back.show", "back.confirm", "tool.show", "tool.confirm", "surface", "fit" })
             await f.Event(action);
-        check(f.Get<CalibrationFit>("calibrationFit").CanApply && f.Patches![f.WidgetId(".sheet.apply")]!["enabled"]!.GetValue<bool>(),
+        Check(f.Get<CalibrationFit>("calibrationFit").CanApply && f.Patches![f.WidgetId(".sheet.apply")]!["enabled"]!.GetValue<bool>(),
             "A deliberately rebound scene could not reconfirm references and calculate normally");
     }
 
-    private static async Task SuccessfulReevaluation(Action<bool, string> check)
+    private static async Task SuccessfulReevaluation()
     {
         using var f = new Fixture();
         f.Set("acknowledgedScenePose", new JsonObject { ["pose"] = f.Pose() });
         await f.Invoke("Render", CancellationToken.None); await f.Invoke("Update", CancellationToken.None);
         string id = f.Widgets().Single(w => w["id"]!.GetValue<string>().EndsWith(".sheet.reevaluate", StringComparison.Ordinal))["id"]!.GetValue<string>();
-        check(f.Patches?[id]?["visible"]?.GetValue<bool>() == true && f.Patches[id]?["enabled"]?.GetValue<bool>() == true,
+        Check(f.Patches?[id]?["visible"]?.GetValue<bool>() == true && f.Patches[id]?["enabled"]?.GetValue<bool>() == true,
             "A corrected model did not expose the explicit re-evaluation action");
         await f.Plugin.HandleEventAsync(new("luckyrobots.pipers.controls", id, "click", JsonSerializer.SerializeToElement<object?>(null)), CancellationToken.None);
         var current = f.Get<List<CalibrationSample>>("calibrationSamples");
-        check(current.Count == 5 && current.Where((s, i) => s.SceneWorld != f.Originals[i].SceneWorld).Count() == 5,
+        Check(current.Count == 5 && current.Where((s, i) => s.SceneWorld != f.Originals[i].SceneWorld).Count() == 5,
             "The explicit UI action failed to recompute all five saved scene points");
         for (int i = 0; i < current.Count; i++)
         {
             var before = f.Originals[i]; var after = current[i];
-            check(after.JointDegrees.SequenceEqual(before.JointDegrees) && after.Measurement == before.Measurement && after.MeasuredWorld == before.MeasuredWorld &&
+            Check(after.JointDegrees.SequenceEqual(before.JointDegrees) && after.Measurement == before.Measurement && after.MeasuredWorld == before.MeasuredWorld &&
                 after.HostUnixMilliseconds == before.HostUnixMilliseconds && after.PoseFingerprint == before.PoseFingerprint && after.HeldOut == before.HeldOut,
                 "Re-evaluation rewrote physical evidence or the independent-check role for point " + i);
         }
         var report = JsonSerializer.Deserialize<CalibrationReport>(File.ReadAllText(f.ReportPath), PluginProtocol.Json)!;
-        check(report.Identity.ModelRevision == "new-model" && report.Fit is null && report.AppliedPlacement is null && !report.PlacementUnverified,
+        Check(report.Identity.ModelRevision == "new-model" && report.Fit is null && report.AppliedPlacement is null && !report.PlacementUnverified,
             "A corrected model kept an old fit, application permission or stale report identity");
-        check(report.ModelReevaluation is { PreviousModelRevision: "old-model", ModelRevision: "new-model" } &&
+        Check(report.ModelReevaluation is { PreviousModelRevision: "old-model", ModelRevision: "new-model" } &&
             report.ModelReevaluation.Evidence.Contains("original capture fingerprints"), "Recomputed scene data did not retain explicit derivation provenance");
         var audit = JsonNode.Parse(File.ReadAllText(Path.Combine(f.Directory, "calibration", "piper-1", report.ModelReevaluation!.AuditFile)))!;
-        check(audit["previousReport"]!["identity"]!["modelRevision"]!.GetValue<string>() == "old-model" && audit["evaluations"]!.AsArray().Count == 5 &&
+        Check(audit["previousReport"]!["identity"]!["modelRevision"]!.GetValue<string>() == "old-model" && audit["evaluations"]!.AsArray().Count == 5 &&
             audit["previousWizard"]!["operatorSaysTcpMatches"]!.GetValue<bool>(), "Re-evaluation audit omitted original report, physical-point confirmation or per-pose receipts");
         var draft = f.Get<CalibrationWizardDraft>("calibrationWizard");
-        check(draft.ModelRevision == "new-model" && draft.Setup == new SheetSetup() &&
+        Check(draft.ModelRevision == "new-model" && draft.Setup == new SheetSetup() &&
             !draft.Answers.ContainsKey("frame") && !draft.Answers.ContainsKey("sceneconfirmed"), "Old model visual confirmations survived re-evaluation");
-        check(draft.Answers["p1left"] == "600" && !f.Patches![f.WidgetId(".sheet.fit")]!["enabled"]!.GetValue<bool>(),
+        Check(draft.Answers["p1left"] == "600" && !f.Patches![f.WidgetId(".sheet.fit")]!["enabled"]!.GetValue<bool>(),
             "Re-evaluation lost ruler coordinates or enabled calculation before confirming the corrected references");
-        check(f.Calls.Count(c => c == "robot.evaluate") == 5 && f.Calls.All(c => c is "robot.read" or "robot.evaluate"),
+        Check(f.Calls.Count(c => c == "robot.evaluate") == 5 && f.Calls.All(c => c is "robot.read" or "robot.evaluate"),
             "Re-evaluation replayed saved angles into live pose, changed placement or attempted a robot command");
-        check(f.LiveJoint == 2.345 && f.Root.Same(CalibrationPlacement.At(new(.1, .75, -.2), 0)), "Re-evaluation changed the live fixture joint or base");
+        Check(f.LiveJoint == 2.345 && f.Root.Same(CalibrationPlacement.At(new(.1, .75, -.2), 0)), "Re-evaluation changed the live fixture joint or base");
 
         // Reconfirmation must be possible without starting over or altering the
         // saved tabletop/root. Exercise the same visible controls as the user.
         foreach (string action in new[] { "left.show", "left.confirm", "back.show", "back.confirm", "tool.show", "tool.confirm", "surface", "fit" })
             await f.Event(action);
-        check(f.Get<CalibrationWizardDraft>("calibrationWizard").Setup.Stage(f.Get<CalibrationWizardDraft>("calibrationWizard").Setup.BackProof) == SheetSetupStage.Ready &&
+        Check(f.Get<CalibrationWizardDraft>("calibrationWizard").Setup.Stage(f.Get<CalibrationWizardDraft>("calibrationWizard").Setup.BackProof) == SheetSetupStage.Ready &&
             f.Get<CalibrationWizardDraft>("calibrationWizard").Setup.SurfaceConfirmed &&
             f.Get<CalibrationFit>("calibrationFit").CanApply && f.Patches![f.WidgetId(".sheet.apply")]!["enabled"]!.GetValue<bool>(),
             "Re-evaluated saved captures became trapped behind confirmations that could not be completed");
-        check(f.Get<CalibrationDesk>("calibrationDesk").SurfaceY == .75 && f.Get<List<CalibrationSample>>("calibrationSamples").Count == 5 &&
+        Check(f.Get<CalibrationDesk>("calibrationDesk").SurfaceY == .75 && f.Get<List<CalibrationSample>>("calibrationSamples").Count == 5 &&
             f.Calls.All(c => c is "robot.read" or "robot.evaluate" or "robot.highlightReference" or "robot.highlightToolSite"),
             "Reconfirming the corrected model changed the fixed tabletop, recaptured poses or wrote placement");
 
@@ -138,14 +138,8 @@ internal static class CalibrationReevaluationTests
         f.Set("calibrationWizard", draft with { ModelRevision = "old-model", Setup = new("old-root", "old-proof", "old-proof", JawTipsConfirmed: true) });
         typeof(PipersPlugin).GetMethod("ReconcileReevaluatedWizard", Hidden)!.Invoke(f.Plugin, null);
         draft = f.Get<CalibrationWizardDraft>("calibrationWizard");
-        check(draft.ModelRevision == "new-model" && draft.Setup == new SheetSetup(),
+        Check(draft.ModelRevision == "new-model" && draft.Setup == new SheetSetup(),
             "A stale wizard draft restored the old model and approvals after the recomputed report committed");
-    }
-
-    private static async Task ExpectFailure(Func<Task> action, Action<bool, string> check, string message)
-    {
-        try { await action(); check(false, message); }
-        catch (InvalidOperationException) { check(true, message); }
     }
 
     private sealed class Fixture : IDisposable

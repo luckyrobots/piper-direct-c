@@ -10,7 +10,7 @@ using LuckyRobots.Piper.Plugin;
 
 internal static class TelemetryPipelineTests
 {
-    public static async Task Run(Action<bool, string> check)
+    public static async Task Run()
     {
         long utc = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() * 1000, ticks = Stopwatch.GetTimestamp();
         long At(double ms) => ticks + (long)(Stopwatch.Frequency * ms / 1000);
@@ -34,64 +34,64 @@ internal static class TelemetryPipelineTests
         var inbox = new LatestTelemetry();
         bool Prepare(JsonObject state, long sequence, long source, string clock, long now, long monotonic, out TelemetryReceipt? receipt) =>
             inbox.TryPrepare(state, sequence, source, clock, now, monotonic, out receipt, out _);
-        check(Prepare(State(), 1, utc - 100_000, "host-utc", utc, ticks, out var first), "Fresh source-stamped telemetry was rejected");
+        Check(Prepare(State(), 1, utc - 100_000, "host-utc", utc, ticks, out var first), "Fresh source-stamped telemetry was rejected");
         inbox.Publish(first!);
-        check(first!.IsFresh(At(400)) && !first.IsFresh(At(401)), "Source age plus receipt age did not enforce the unchanged 500 ms window");
+        Check(first!.IsFresh(At(400)) && !first.IsFresh(At(401)), "Source age plus receipt age did not enforce the unchanged 500 ms window");
         var agedDevice = State()["devices"]![0]!.AsObject();
-        check(first.HasFreshDevice(agedDevice, At(300)), "Valid device sample age plus transport age was rejected");
+        Check(first.HasFreshDevice(agedDevice, At(300)), "Valid device sample age plus transport age was rejected");
         agedDevice["joints"]![2]!["age_s"] = .25;
-        check(!first.HasFreshDevice(agedDevice, At(300)), "Fresh-at-source joint flags hid a sample older than 500 ms after transport delay");
+        Check(!first.HasFreshDevice(agedDevice, At(300)), "Fresh-at-source joint flags hid a sample older than 500 ms after transport delay");
         agedDevice["joints"]![2]!["age_s"] = .005; agedDevice["status"]!["age_s"] = .25;
-        check(!first.HasFreshDevice(agedDevice, At(300)), "Fresh-at-source status hid accumulated transport delay");
+        Check(!first.HasFreshDevice(agedDevice, At(300)), "Fresh-at-source status hid accumulated transport delay");
         agedDevice["status"]!["age_s"] = double.NaN;
-        check(!first.HasFreshDevice(agedDevice, ticks), "An invalid sample age passed command freshness");
+        Check(!first.HasFreshDevice(agedDevice, ticks), "An invalid sample age passed command freshness");
         var ackReceipt = new TelemetryReceipt(State(), "session-a", 3, ticks, 0);
         var ackDevice = State()["devices"]![0]!.AsObject();
         ackDevice["status"]!["age_s"] = .45; ackDevice["joints"]![4]!["age_s"] = .45;
-        check(ackReceipt.HasFreshDevice(ackDevice, ticks) && ackReceipt.IsFresh(At(300)), "Acknowledgement fixture did not isolate source-sample age from wrapper age");
-        check(Math.Abs(ackReceipt.DeviceEvidenceAgeMilliseconds(ackDevice, At(300)) - 750) < .001 && !ackReceipt.HasFreshDevice(ackDevice, At(300)),
+        Check(ackReceipt.HasFreshDevice(ackDevice, ticks) && ackReceipt.IsFresh(At(300)), "Acknowledgement fixture did not isolate source-sample age from wrapper age");
+        Check(Math.Abs(ackReceipt.DeviceEvidenceAgeMilliseconds(ackDevice, At(300)) - 750) < .001 && !ackReceipt.HasFreshDevice(ackDevice, At(300)),
             "A 450ms source sample plus 300ms editor wait was accepted/stamped as a fresh acknowledgement");
         var pikaState = State();
         var pika = pikaState["pika"]!.AsObject();
         pika["connected"] = true; pika["fresh"] = true; pika["age_s"] = .15;
         var pikaReceipt = new TelemetryReceipt(pikaState, "session-a", 4, ticks, 100);
         double pikaDeadline = SimulationFollowPolicy.MaximumGripperFeedbackAgeMilliseconds;
-        check(Math.Abs(pikaReceipt.PikaEvidenceAgeMilliseconds(ticks) - 250) < .001 && pikaReceipt.HasFreshPika(pikaReceipt.State["pika"] as JsonObject, ticks, pikaDeadline),
+        Check(Math.Abs(pikaReceipt.PikaEvidenceAgeMilliseconds(ticks) - 250) < .001 && pikaReceipt.HasFreshPika(pikaReceipt.State["pika"] as JsonObject, ticks, pikaDeadline),
             "Pika age did not include its source sample age and envelope delay at the 250ms boundary");
-        check(!pikaReceipt.HasFreshPika(pikaReceipt.State["pika"] as JsonObject, At(1), pikaDeadline), "An aged Pika receipt renewed its 250ms evidence window");
+        Check(!pikaReceipt.HasFreshPika(pikaReceipt.State["pika"] as JsonObject, At(1), pikaDeadline), "An aged Pika receipt renewed its 250ms evidence window");
         pika["age_s"] = .3;
-        check(!pikaReceipt.HasFreshPika(pikaReceipt.State["pika"] as JsonObject, ticks, pikaDeadline), "A true Pika fresh flag hid a sample too old for physical following");
+        Check(!pikaReceipt.HasFreshPika(pikaReceipt.State["pika"] as JsonObject, ticks, pikaDeadline), "A true Pika fresh flag hid a sample too old for physical following");
         foreach (JsonNode? invalidAge in new JsonNode?[] { null, JsonValue.Create(-.001), JsonValue.Create(double.NaN), JsonValue.Create(double.PositiveInfinity), JsonValue.Create("0.01") })
         {
             pika["age_s"] = invalidAge;
-            check(!pikaReceipt.HasFreshPika(pikaReceipt.State["pika"] as JsonObject, ticks, pikaDeadline), "Missing or invalid Pika source age authorized following");
+            Check(!pikaReceipt.HasFreshPika(pikaReceipt.State["pika"] as JsonObject, ticks, pikaDeadline), "Missing or invalid Pika source age authorized following");
         }
         pika["age_s"] = .001; pika["connected"] = false;
-        check(!pikaReceipt.HasFreshPika(pikaReceipt.State["pika"] as JsonObject, ticks, pikaDeadline), "Disconnected Pika feedback authorized following");
+        Check(!pikaReceipt.HasFreshPika(pikaReceipt.State["pika"] as JsonObject, ticks, pikaDeadline), "Disconnected Pika feedback authorized following");
         pika["connected"] = true; pika["fresh"] = false;
-        check(!pikaReceipt.HasFreshPika(pikaReceipt.State["pika"] as JsonObject, ticks, pikaDeadline), "A false Pika fresh flag authorized following");
+        Check(!pikaReceipt.HasFreshPika(pikaReceipt.State["pika"] as JsonObject, ticks, pikaDeadline), "A false Pika fresh flag authorized following");
         pika["fresh"] = true;
-        check(!(pikaReceipt with { Connected = false }).HasFreshPika(pikaReceipt.State["pika"] as JsonObject, ticks, pikaDeadline), "A disconnected telemetry envelope authorized Pika following");
-        check(!Prepare(State(), 2, utc - 501_000, "host-utc", utc, ticks, out _), "A queued old frame was stamped fresh on arrival");
-        check(ReferenceEquals(inbox.Latest, first), "Rejecting an aged frame replaced the last verified receipt");
-        check(!Prepare(State(), 2, utc + 101_000, "host-utc", utc, ticks, out _), "An unbounded future source clock passed freshness checks");
-        check(!Prepare(State(), 2, utc, "unknown", utc, ticks, out _), "Unverified source clock passed freshness checks");
-        check(!Prepare(State(), 0, utc, "host-utc", utc, ticks, out _), "A missing sequence passed freshness checks");
-        check(!Prepare(State(), 1, utc, "host-utc", utc, ticks, out _), "Duplicate sequence replaced current feedback");
-        check(!Prepare(State(), 0, utc, "host-utc", utc, ticks, out _), "A reversed sequence replaced current feedback");
-        check(Prepare(State("session-b"), 1, utc, "host-utc", utc, ticks, out var restarted), "A new backend could not establish a fresh sequence");
+        Check(!(pikaReceipt with { Connected = false }).HasFreshPika(pikaReceipt.State["pika"] as JsonObject, ticks, pikaDeadline), "A disconnected telemetry envelope authorized Pika following");
+        Check(!Prepare(State(), 2, utc - 501_000, "host-utc", utc, ticks, out _), "A queued old frame was stamped fresh on arrival");
+        Check(ReferenceEquals(inbox.Latest, first), "Rejecting an aged frame replaced the last verified receipt");
+        Check(!Prepare(State(), 2, utc + 101_000, "host-utc", utc, ticks, out _), "An unbounded future source clock passed freshness checks");
+        Check(!Prepare(State(), 2, utc, "unknown", utc, ticks, out _), "Unverified source clock passed freshness checks");
+        Check(!Prepare(State(), 0, utc, "host-utc", utc, ticks, out _), "A missing sequence passed freshness checks");
+        Check(!Prepare(State(), 1, utc, "host-utc", utc, ticks, out _), "Duplicate sequence replaced current feedback");
+        Check(!Prepare(State(), 0, utc, "host-utc", utc, ticks, out _), "A reversed sequence replaced current feedback");
+        Check(Prepare(State("session-b"), 1, utc, "host-utc", utc, ticks, out var restarted), "A new backend could not establish a fresh sequence");
         inbox.Publish(restarted!); inbox.Disconnect();
-        check(inbox.Latest?.IsFresh(ticks) == false, "An interrupted stream retained command freshness");
-        check(Prepare(State("session-b"), 10000, utc, "host-utc", utc, ticks, out var highSequence), "High same-stream sequence was rejected");
+        Check(inbox.Latest?.IsFresh(ticks) == false, "An interrupted stream retained command freshness");
+        Check(Prepare(State("session-b"), 10000, utc, "host-utc", utc, ticks, out var highSequence), "High same-stream sequence was rejected");
         inbox.Publish(highSequence!); inbox.Disconnect(); inbox.BeginStream();
-        check(inbox.Latest?.IsFresh(ticks) == false, "Beginning a stream renewed an old disconnected receipt");
-        check(!Prepare(State("session-b"), 1, utc - 600_000, "host-utc", utc, ticks, out _), "New stream epoch bypassed source-age validation");
-        check(Prepare(State("session-b"), 1, utc, "host-utc", utc, ticks, out var reconnected), "Same-backend stream reconnect waited for the old sequence count");
+        Check(inbox.Latest?.IsFresh(ticks) == false, "Beginning a stream renewed an old disconnected receipt");
+        Check(!Prepare(State("session-b"), 1, utc - 600_000, "host-utc", utc, ticks, out _), "New stream epoch bypassed source-age validation");
+        Check(Prepare(State("session-b"), 1, utc, "host-utc", utc, ticks, out var reconnected), "Same-backend stream reconnect waited for the old sequence count");
         inbox.Publish(reconnected!);
-        check(!Prepare(State("session-b"), 1, utc, "host-utc", utc, ticks, out _), "A duplicate in the reconnected stream was accepted");
-        check(TelemetryScope.Read(State(), "can-a") != TelemetryScope.Read(State(generation: 8), "can-a"), "CAN reconnection inherited old identity scope");
-        check(TelemetryScope.Read(State(), "can-a") != TelemetryScope.Read(State("session-b"), "can-a"), "Backend restart inherited old identity scope");
-        check(TelemetryScope.Read(State(), "can-b") is null, "A foreign CAN selection was accepted as the assigned robot");
+        Check(!Prepare(State("session-b"), 1, utc, "host-utc", utc, ticks, out _), "A duplicate in the reconnected stream was accepted");
+        Check(TelemetryScope.Read(State(), "can-a") != TelemetryScope.Read(State(generation: 8), "can-a"), "CAN reconnection inherited old identity scope");
+        Check(TelemetryScope.Read(State(), "can-a") != TelemetryScope.Read(State("session-b"), "can-a"), "Backend restart inherited old identity scope");
+        Check(TelemetryScope.Read(State(), "can-b") is null, "A foreign CAN selection was accepted as the assigned robot");
 
         // Exercise the real four-loop plugin with an in-memory gRPC stream and a
         // deliberately slow fake editor. No socket, camera, CAN or Pika is opened.
@@ -160,11 +160,11 @@ internal static class TelemetryPipelineTests
         {
             await Until(() => Volatile.Read(ref sceneRequests) >= 2 && rpc.Heartbeats >= 3, "Slow rendering blocked ingestion or independent heartbeats");
             var current = Get<LatestTelemetry>("telemetry").Latest!;
-            check(current.IsFresh(Stopwatch.GetTimestamp()) && current.Sequence >= 5, "Slow editor requests stopped fresh state consumption");
-            check(rpc.Heartbeats >= 3, "Slow editor requests stopped controller heartbeats");
-            check(ReferenceEquals(Get<RobotLink?>("link"), binding), "A rendering timeout destroyed a healthy same-scope scene binding");
-            check(Get<JsonObject?>("state") is not null && Get<string>("token") == "session-a", "A rendering timeout was classified as controller disconnection");
-            check(!Get<bool>("linkCommandsEnabled"), "A failed scene acknowledgement automatically armed viewport targets");
+            Check(current.IsFresh(Stopwatch.GetTimestamp()) && current.Sequence >= 5, "Slow editor requests stopped fresh state consumption");
+            Check(rpc.Heartbeats >= 3, "Slow editor requests stopped controller heartbeats");
+            Check(ReferenceEquals(Get<RobotLink?>("link"), binding), "A rendering timeout destroyed a healthy same-scope scene binding");
+            Check(Get<JsonObject?>("state") is not null && Get<string>("token") == "session-a", "A rendering timeout was classified as controller disconnection");
+            Check(!Get<bool>("linkCommandsEnabled"), "A failed scene acknowledgement automatically armed viewport targets");
             int beforeModeChange = Volatile.Read(ref sceneRequests);
             Volatile.Write(ref editorMode, 1);
             await Until(() => Volatile.Read(ref sceneRequests) > beforeModeChange && Get<string>("sceneTrackingStatus").StartsWith("Measured scene update deferred", StringComparison.Ordinal),
@@ -173,30 +173,30 @@ internal static class TelemetryPipelineTests
             authority.TryAcknowledge(authority.Epoch, commandScope, 7);
             int beforeGhost = Volatile.Read(ref sceneRequests);
             await Until(() => Volatile.Read(ref sceneRequests) > beforeGhost && Get<string>("sceneTrackingStatus").StartsWith("Leader target + measured ghost", StringComparison.Ordinal), "Native leader/ghost feedback was not recognized");
-            check(Get<ViewportDrag>("viewportDrag").Phase != ViewportDragPhase.Off && Get<bool>("linkCommandsEnabled") && Get<ViewportDrag>("viewportDrag") is { Phase: ViewportDragPhase.Following, Request: 7 } && authority.Current.Lease?.Request == 7,
+            Check(Get<ViewportDrag>("viewportDrag").Phase != ViewportDragPhase.Off && Get<bool>("linkCommandsEnabled") && Get<ViewportDrag>("viewportDrag") is { Phase: ViewportDragPhase.Following, Request: 7 } && authority.Current.Lease?.Request == 7,
                 "Expected native applied:false leader/ghost feedback stopped a valid drag or finishing target");
-            check(Get<JsonObject?>("acknowledgedScenePose") is null,
+            Check(Get<JsonObject?>("acknowledgedScenePose") is null,
                 "Leader/ghost feedback was incorrectly promoted to a calibration pose acknowledgement");
             Volatile.Write(ref editorMode, 2);
             await Until(() => Get<ViewportDrag>("viewportDrag").Phase == ViewportDragPhase.Off, "A remote teleoperation stop did not pause local following");
-            check(!Get<bool>("linkCommandsEnabled") && Get<ViewportDrag>("viewportDrag").Phase != ViewportDragPhase.Following && authority.Current.Lease is null,
+            Check(!Get<bool>("linkCommandsEnabled") && Get<ViewportDrag>("viewportDrag").Phase != ViewportDragPhase.Following && authority.Current.Lease is null,
                 "Unexpected remote editor deferral kept viewport targets armed");
             await feeding.CancelAsync(); await producer;
             await Until(() => !Get<bool>("approved") && authority.Current.Lease is null, "Real telemetry loss did not disarm commands/deadlines", 1500);
-            check(!Get<LatestTelemetry>("telemetry").Latest!.IsFresh(Stopwatch.GetTimestamp()), "Genuine telemetry loss remained fresh");
-            check(ReferenceEquals(Get<RobotLink?>("link"), binding), "A genuine gap discarded a same-identity read-only binding instead of pausing it");
+            Check(!Get<LatestTelemetry>("telemetry").Latest!.IsFresh(Stopwatch.GetTimestamp()), "Genuine telemetry loss remained fresh");
+            Check(ReferenceEquals(Get<RobotLink?>("link"), binding), "A genuine gap discarded a same-identity read-only binding instead of pausing it");
             Feed();
             await Until(() => Get<LatestTelemetry>("telemetry").Latest!.IsFresh(Stopwatch.GetTimestamp()), "Same-scope fresh telemetry did not resume reading");
-            check(!Get<bool>("approved") && !Get<bool>("linkCommandsEnabled"), "Fresh telemetry silently rearmed old target permission");
+            Check(!Get<bool>("approved") && !Get<bool>("linkCommandsEnabled"), "Fresh telemetry silently rearmed old target permission");
             currentGeneration = 8; Feed();
             await Until(() => Get<RobotLink?>("link") is null, "A new CAN generation inherited the previous physical scene binding");
-            check(!Get<bool>("approved"), "CAN generation change retained target permission");
+            Check(!Get<bool>("approved"), "CAN generation change retained target permission");
             var rebound = new RobotLink("fixture-scene", "fixture-robot", model, State(generation: 8)["devices"]![0]!.AsObject());
             Set("link", rebound); Set("linkBackendToken", "session-a"); Set("approved", true);
             currentToken = "session-b"; Feed();
             await Until(() => Get<RobotLink?>("link") is null && Get<string>("token") == "session-b", "Backend session change inherited old link/authorization");
-            check(!Get<bool>("approved"), "Backend session change retained target permission");
-            check(rpc.Routes.All(route => route == "/api/heartbeat"), "Telemetry/render recovery issued a power, target, reset or configuration action");
+            Check(!Get<bool>("approved"), "Backend session change retained target permission");
+            Check(rpc.Routes.All(route => route == "/api/heartbeat"), "Telemetry/render recovery issued a power, target, reset or configuration action");
 
             // A response to an action prepared before telemetry loss must not
             // recreate the discarded lease after fresh feedback returns.
@@ -210,7 +210,7 @@ internal static class TelemetryPipelineTests
             rpc.DelayedCommand.SetResult(new ControlReply { Status = 202, Json = "{\"request_id\":99,\"message\":\"accepted\"}" });
             bool discarded = false;
             try { await pending; } catch (InvalidOperationException) { discarded = true; }
-            check(discarded && authority.Current is { Lease: null, LastCommand: null },
+            Check(discarded && authority.Current is { Lease: null, LastCommand: null },
                 "A delayed old acknowledgement renewed its discarded operation after telemetry loss");
             int sentBefore = rpc.Routes.Count;
             long previousPermission = authority.Epoch - 1;
@@ -219,7 +219,7 @@ internal static class TelemetryPipelineTests
                     CommandPurpose.TeachingReturn, null, previousPermission, null])!;
             discarded = false;
             try { await pending; } catch (InvalidOperationException) { discarded = true; }
-            check(discarded && rpc.Routes.Count == sentBefore,
+            Check(discarded && rpc.Routes.Count == sentBefore,
                 "A teaching return prepared before a reader-side disarm reached the command transport");
         }
         finally
@@ -241,7 +241,7 @@ internal static class TelemetryPipelineTests
             try
             {
                 await recoveryCancelled.Task.WaitAsync(TimeSpan.FromSeconds(2));
-                check(!disposal.IsCompleted && !shutdown.IsCancellationRequested,
+                Check(!disposal.IsCompleted && !shutdown.IsCancellationRequested,
                     "Plugin shutdown advanced before the active recovery worker drained");
             }
             finally
@@ -249,9 +249,9 @@ internal static class TelemetryPipelineTests
                 recoveryFinished.TrySetResult();
                 await disposal;
             }
-            check(shutdown.IsCancellationRequested, "Disposal did not finish shutdown after recovery drained");
+            Check(shutdown.IsCancellationRequested, "Disposal did not finish shutdown after recovery drained");
         }
-        await PikaShutdownTests.Run(check);
+        await PikaShutdownTests.Run();
     }
 
     private sealed class FakeCalls(ChannelReader<StateFrame> frames) : CallInvoker

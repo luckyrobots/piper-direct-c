@@ -3,7 +3,7 @@ using LuckyRobots.Piper.Plugin;
 
 internal static class PikaTeachingWorkspaceTests
 {
-    public static void Run(Action<bool, string> check)
+    public static void Run()
     {
         const BindingFlags flags = BindingFlags.Instance | BindingFlags.NonPublic;
         var plugin = new PipersPlugin();
@@ -30,45 +30,45 @@ internal static class PikaTeachingWorkspaceTests
         try
         {
             Set("preferences", RobotProfileRouting.Normalize(new(Robots: [a, b], ActiveRobotId: a.Id)));
-            check(!Visible(), "A fresh profile displayed unrelated teaching work.");
+            Check(!Visible(), "A fresh profile displayed unrelated teaching work.");
             Teach("DisableRequest", "free-A");
             Teach("Status", "A remains deliberately free");
-            check(Visible(), "A completed arm-teach session hid its free-jaw recovery controls.");
+            Check(Visible(), "A completed arm-teach session hid its free-jaw recovery controls.");
             Teach("Unsaved", report);
             Teach("Path", "A/prior-report.json");
             Teach("ConfirmationIdentity", "pending-A-confirmation");
             Invoke("StorePikaTeachingWorkspace", a);
             Invoke("RestorePikaTeachingWorkspace", b);
-            check(Taught<string>("DisableRequest") == "" && Taught<string>("Path") == "" &&
+            Check(Taught<string>("DisableRequest") == "" && Taught<string>("Path") == "" &&
                 Taught<PikaTeachingReport?>("Unsaved") is null && !Visible(),
                 "Second-profile enable inherited the first gripper's free-jaw request, save or display state.");
-            check(Taught<string?>("ConfirmationIdentity") is null,
+            Check(Taught<string?>("ConfirmationIdentity") is null,
                 "A pending motor-release gesture survived a profile switch.");
 
             Teach("DisableRequest", "free-B");
             Teach("Status", "B remains deliberately free");
             Invoke("StorePikaTeachingWorkspace", b);
             Invoke("RestorePikaTeachingWorkspace", a with { Name = "First renamed" });
-            check(Taught<string>("DisableRequest") == "free-A" && Taught<string>("Path") == "A/prior-report.json" &&
+            Check(Taught<string>("DisableRequest") == "free-A" && Taught<string>("Path") == "A/prior-report.json" &&
                 Taught<string>("Status") == "A remains deliberately free" && Visible(),
                 "Returning to the exact first assignment lost its resume provenance or saved status.");
-            check(Taught<PikaTeachingReport>("Unsaved").Identity == identity &&
+            Check(Taught<PikaTeachingReport>("Unsaved").Identity == identity &&
                 Taught<PikaTeachingReport>("Unsaved").DisabledMotorRequestId == "free-A",
                 "An unsaved report was relabelled as another arm/Pika/backend session.");
             Invoke("StorePikaTeachingWorkspace", a);
             foreach (var reassigned in new[] { a with { CanDeviceId = "CAN-other" }, a with { PikaDevice = "/dev/pika/by-host/20-1" }, a with { Id = "new-profile" } })
             {
                 Invoke("RestorePikaTeachingWorkspace", reassigned);
-                check(Taught<string>("DisableRequest") == "" && Taught<PikaTeachingReport?>("Unsaved") is null,
+                Check(Taught<string>("DisableRequest") == "" && Taught<PikaTeachingReport?>("Unsaved") is null,
                     "A changed hardware/profile assignment inherited old motor-release authority.");
             }
             if (OperatingSystem.IsWindows())
             {
                 Invoke("RestorePikaTeachingWorkspace", a with { WslDistribution = "Debian" });
-                check(Taught<string>("DisableRequest") == "", "Another WSL distribution inherited a release nonce.");
+                Check(Taught<string>("DisableRequest") == "", "Another WSL distribution inherited a release nonce.");
             }
             Invoke("RestorePikaTeachingWorkspace", b);
-            check(Taught<string>("DisableRequest") == "free-B" && Taught<string>("Status") == "B remains deliberately free",
+            Check(Taught<string>("DisableRequest") == "free-B" && Taught<string>("Status") == "B remains deliberately free",
                 "Restoring first-profile state overwrote the independent second-profile state.");
 
             // Actual profile switching awaits this task before stashing any
@@ -76,14 +76,14 @@ internal static class PikaTeachingWorkspaceTests
             // cannot write A's completion into B's fields.
             var save = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             Teach("SaveWorker", save.Task);
-            check(Visible(), "An outstanding teaching save became invisible.");
+            Check(Visible(), "An outstanding teaching save became invisible.");
             Reject("StorePikaTeachingWorkspace", b);
             Reject("RestorePikaTeachingWorkspace", a);
-            check(Taught<string>("DisableRequest") == "free-B", "Rejected pending-save switch mutated current provenance.");
+            Check(Taught<string>("DisableRequest") == "free-B", "Rejected pending-save switch mutated current provenance.");
             save.SetResult();
             Invoke("StorePikaTeachingWorkspace", b);
             Invoke("RestorePikaTeachingWorkspace", a);
-            check(Taught<Task?>("SaveWorker") is null && Taught<string>("DisableRequest") == "free-A",
+            Check(Taught<Task?>("SaveWorker") is null && Taught<string>("DisableRequest") == "free-A",
                 "An old completed save worker was attached to the restored profile.");
 
             Teach("Transition", true);
@@ -92,7 +92,7 @@ internal static class PikaTeachingWorkspaceTests
             Teach("Recorder", new PikaTeachingRecorder(identity, "free-A", null, 1000, DateTimeOffset.UnixEpoch));
             Reject("StorePikaTeachingWorkspace", a); Reject("RestorePikaTeachingWorkspace", b);
             Teach("Recorder", null);
-            check(Taught<PikaTeachingReport>("Unsaved").Identity == identity,
+            Check(Taught<PikaTeachingReport>("Unsaved").Identity == identity,
                 "Transition/active-recorder rejection erased the unsaved first-profile artifact.");
         }
         finally { ((IDisposable)typeof(PipersPlugin).GetField("channel", flags)!.GetValue(plugin)!).Dispose(); }
@@ -102,7 +102,7 @@ internal static class PikaTeachingWorkspaceTests
             bool rejected = false;
             try { Invoke(method, profile); }
             catch (TargetInvocationException error) when (error.InnerException is InvalidOperationException) { rejected = true; }
-            check(rejected, "A pending teaching operation allowed profile state to be swapped: " + method);
+            Check(rejected, "A pending teaching operation allowed profile state to be swapped: " + method);
         }
     }
 }

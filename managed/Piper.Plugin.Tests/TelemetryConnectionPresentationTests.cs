@@ -8,7 +8,7 @@ using LuckyRobots.Piper.Plugin;
 
 internal static class TelemetryConnectionPresentationTests
 {
-    public static async Task RunNavigation(Action<bool, string> check)
+    public static async Task RunNavigation()
     {
         const BindingFlags flags = BindingFlags.Instance | BindingFlags.NonPublic;
         var plugin = new PipersPlugin();
@@ -19,8 +19,8 @@ internal static class TelemetryConnectionPresentationTests
         UiEvent Input(string id) => new("fixture", WorkspaceEventScope.Wrap(0, "piper-2", id), "click", JsonSerializer.SerializeToElement(true));
         bool Permission(UiEvent input) => PipersPlugin.ControlEventNeedsPermission(plugin.UnscopePublishedWorkspaceEvent(input.WidgetId));
         UiEvent navigation = Input("profiles.select.piper-1"), target = Input("joint.6.plus");
-        check(!Permission(navigation) && Permission(target), "Profile navigation inherited the stale arm's movement-permission epoch or joint targets lost their guard");
-        check(Permission(Input("profiles.can")) && Permission(Input("profiles.pika")), "Navigation exception also exempted hardware assignment changes");
+        Check(!Permission(navigation) && Permission(target), "Profile navigation inherited the stale arm's movement-permission epoch or joint targets lost their guard");
+        Check(Permission(Input("profiles.can")) && Permission(Input("profiles.pika")), "Navigation exception also exempted hardware assignment changes");
         var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var navigated = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -45,42 +45,42 @@ internal static class TelemetryConnectionPresentationTests
                 if (Stopwatch.GetElapsedTime(began).TotalSeconds > 2) throw new InvalidOperationException("Stale queued target was not retired");
                 await Task.Delay(5);
             }
-            check(executed.SequenceEqual([navigation.WidgetId]) && discarded.SequenceEqual([target.WidgetId]),
+            Check(executed.SequenceEqual([navigation.WidgetId]) && discarded.SequenceEqual([target.WidgetId]),
                 "CAN feedback loss discarded robot navigation or allowed an old queued movement to execute");
-            check(!Get<bool>("approved") && plugin.CommandAuthority.Current is { Lease: null, Epoch: 1 },
+            Check(!Get<bool>("approved") && plugin.CommandAuthority.Current is { Lease: null, Epoch: 1 },
                 "Navigation eligibility restored power approval, an old lease or movement permission");
         }
         ((IDisposable)Get<object>("channel")).Dispose(); Get<SemaphoreSlim>("commands").Dispose(); Get<CancellationTokenSource>("shutdown").Dispose();
     }
 
-    public static void Run(Action<bool, string> check)
+    public static void Run()
     {
         using var fixture = new Fixture();
         fixture.Observe();
-        check(fixture.Message.StartsWith("Connected", StringComparison.Ordinal) && fixture.Error.Length == 0,
+        Check(fixture.Message.StartsWith("Connected", StringComparison.Ordinal) && fixture.Error.Length == 0,
             "Fresh selected-device feedback retained the previous stream-ended footer");
         fixture.ResetMessage(); fixture.Stale = true;
         fixture.Device["connection_error"] = "Windows USB-CAN send failed (transport 14, WinUSB 121).";
         fixture.Observe();
-        check(fixture.Message.Contains("WinUSB 121", StringComparison.Ordinal) && fixture.Error.Contains("Piper 2", StringComparison.Ordinal) &&
+        Check(fixture.Message.Contains("WinUSB 121", StringComparison.Ordinal) && fixture.Error.Contains("Piper 2", StringComparison.Ordinal) &&
             fixture.Error.Contains("WinUSB 121", StringComparison.Ordinal) && fixture.Error.Contains("Reconnect only this adapter’s USB cable", StringComparison.Ordinal) &&
             fixture.Error.Contains("leave robot power and CAN connected", StringComparison.Ordinal),
             "Stale CAN feedback was called connected or hid its specific USB-only recovery instruction and native transport failure");
         fixture.Device["connection_error"] = ""; fixture.Observe();
-        check(!fixture.Error.Contains("Reconnect only", StringComparison.Ordinal), "Ordinary stale feedback incorrectly told the user to unplug a USB adapter");
+        Check(!fixture.Error.Contains("Reconnect only", StringComparison.Ordinal), "Ordinary stale feedback incorrectly told the user to unplug a USB adapter");
         fixture.Stale = false; fixture.Device["connection_error"] = ""; fixture.Observe();
-        check(fixture.Message.StartsWith("Connected", StringComparison.Ordinal) && fixture.Error.Length == 0,
+        Check(fixture.Message.StartsWith("Connected", StringComparison.Ordinal) && fixture.Error.Length == 0,
             "Recovered CAN feedback did not clear exactly its own connection error");
         fixture.ResetMessage(); fixture.Error = "Recovery refused: keep the arm supported."; fixture.Observe();
-        check(fixture.Message.StartsWith("Connected", StringComparison.Ordinal) && fixture.Error == "Recovery refused: keep the arm supported.",
+        Check(fixture.Message.StartsWith("Connected", StringComparison.Ordinal) && fixture.Error == "Recovery refused: keep the arm supported.",
             "Connection recovery erased an unrelated user-action or recovery failure");
         fixture.Error = ""; fixture.ResetMessage(); fixture.State["selected"] = "can-other"; fixture.Observe();
-        check(!fixture.Message.StartsWith("Connected", StringComparison.Ordinal) && fixture.Error.Contains("not active", StringComparison.Ordinal),
+        Check(!fixture.Message.StartsWith("Connected", StringComparison.Ordinal) && fixture.Error.Contains("not active", StringComparison.Ordinal),
             "Fresh feedback from another selected CAN adapter healed the assigned robot's connection presentation");
         fixture.State["selected"] = "can-b"; fixture.ResetMessage(); fixture.Error = ""; fixture.Observe(sourceAgeMilliseconds: 600);
-        check(fixture.Message.StartsWith("Controller telemetry interrupted", StringComparison.Ordinal), "An old telemetry envelope healed the stream-ended footer");
+        Check(fixture.Message.StartsWith("Controller telemetry interrupted", StringComparison.Ordinal), "An old telemetry envelope healed the stream-ended footer");
         fixture.Observe(backend: "different-backend");
-        check(fixture.Message.StartsWith("Controller telemetry interrupted", StringComparison.Ordinal) && fixture.Permission == 0,
+        Check(fixture.Message.StartsWith("Controller telemetry interrupted", StringComparison.Ordinal) && fixture.Permission == 0,
             "A different backend's receipt healed the old connection or presentation changed control permission");
     }
 

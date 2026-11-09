@@ -10,13 +10,13 @@ using LuckyRobots.Piper.Plugin;
 
 internal static class RecoveryHomeUiTests
 {
-    public static async Task Run(Action<bool, string> check)
+    public static async Task Run()
     {
-        await RunRenderedRecovery(check, cancelMove: false);
-        await RunRenderedRecovery(check, cancelMove: true);
+        await RunRenderedRecovery(cancelMove: false);
+        await RunRenderedRecovery(cancelMove: true);
     }
 
-    private static async Task RunRenderedRecovery(Action<bool, string> check, bool cancelMove)
+    private static async Task RunRenderedRecovery(bool cancelMove)
     {
         const BindingFlags fields = BindingFlags.Instance | BindingFlags.NonPublic;
         string root = Path.Combine(Path.GetTempPath(), "piper-recovery-home-ui-" + Guid.NewGuid().ToString("N"));
@@ -67,7 +67,7 @@ internal static class RecoveryHomeUiTests
             string card = Walk(rendered!).Single(node => node["id"]!.GetValue<string>().EndsWith(".workspace.incident", StringComparison.Ordinal))["id"]!.GetValue<string>();
             string button = Walk(rendered!).Single(node => node["id"]!.GetValue<string>().EndsWith(".recovery.home", StringComparison.Ordinal))["id"]!.GetValue<string>();
             string cancel = Walk(rendered!).Single(node => node["id"]!.GetValue<string>().EndsWith(".recovery.guide.cancel", StringComparison.Ordinal))["id"]!.GetValue<string>();
-            check(patches?[card]?["visible"]?.GetValue<bool>() == true && patches[button]?["enabled"]?.GetValue<bool>() == true,
+            Check(patches?[card]?["visible"]?.GetValue<bool>() == true && patches[button]?["enabled"]?.GetValue<bool>() == true,
                 "The published recovery card did not expose its real recover-to-zero action");
             pump = Task.Run(async () => { while (!pumping.IsCancellationRequested) { Publish(); await Task.Delay(5, pumping.Token); } });
             await plugin.HandleEventAsync(new("fixture", button, "click",
@@ -89,19 +89,19 @@ internal static class RecoveryHomeUiTests
                 await plugin.HandleEventAsync(new("fixture", cancel, "click", JsonSerializer.SerializeToElement(true)), CancellationToken.None);
             }
             await recoveryWorker.WaitAsync(TimeSpan.FromSeconds(4));
-            check(calls.Actions.SequenceEqual(["enable", "move-to-zero"]),
+            Check(calls.Actions.SequenceEqual(["enable", "move-to-zero"]),
                 "The single real UI-actor healthy/all-off recovery event cancelled itself, reset unnecessarily or failed to finish: " + plugin.message);
-            check(errors.IsEmpty && plugin.recoveryOperation is null && plugin.approved == !cancelMove,
+            Check(errors.IsEmpty && plugin.recoveryOperation is null && plugin.approved == !cancelMove,
                 "Retired UI recovery published incorrect approval");
             if (cancelMove)
-                check(calls.ScopedStopRequest == 12 && plugin.CommandAuthority.Current.Lease is null,
+                Check(calls.ScopedStopRequest == 12 && plugin.CommandAuthority.Current.Lease is null,
                     "Cancel failed to stop the exact active zero request or kept its old heartbeat lease");
             var report = JsonNode.Parse(await File.ReadAllTextAsync(Path.Combine(root, "recovery", "piper-1", "last-recovery-to-zero.json")))!;
-            check(report["stage"]!.GetValue<string>().StartsWith(cancelMove ? "Recovery to zero cancelled" : "Recovery complete") &&
+            Check(report["stage"]!.GetValue<string>().StartsWith(cancelMove ? "Recovery to zero cancelled" : "Recovery complete") &&
                 report["automaticResume"]?.GetValue<bool>() == false &&
                 report["goal"]?.GetValue<string>() == "all-joints-zero" && !report.ToJsonString().Contains("home-ui-fixture"),
                 "Recovery did not durably save its completed zero goal without a reusable backend token or resume intent");
-            check(calls.AllCommandsScoped && calls.SpeedPercents.All(s => s == 10),
+            Check(calls.AllCommandsScoped && calls.SpeedPercents.All(s => s == 10),
                 "Recovery UI sent unscoped motor commands or inherited the user's faster motion speed");
         }
         finally

@@ -5,7 +5,7 @@ internal static class EpisodeReplayTests
 {
     internal static EpisodeReplayArtifact ValidArtifact() => EpisodeReplayReader.Parse(Fixture().ToJsonString());
 
-    public static async Task RunFiles(Action<bool, string> check)
+    public static async Task RunFiles()
     {
         string directory = Path.Combine(Path.GetTempPath(), "piper-replay-files-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(directory);
@@ -14,19 +14,19 @@ internal static class EpisodeReplayTests
         {
             await File.WriteAllTextAsync(file, Fixture().ToJsonString());
             var loaded = await PipersPlugin.ReadReplayFile(file, CancellationToken.None);
-            check(loaded.ArtifactId == "episode-a" && loaded.Samples.Count == 2 && loaded.TubeStart.LeftMm == 700,
+            Check(loaded.ArtifactId == "episode-a" && loaded.Samples.Count == 2 && loaded.TubeStart.LeftMm == 700,
                 "Native replay preparation could not load the versioned export and object placement");
             await File.WriteAllTextAsync(file, Fixture().ToJsonString().Replace(EpisodeReplayReader.Kind, "lucky.piper.episode-start", StringComparison.Ordinal));
             bool rejected = false;
             try { await PipersPlugin.ReadReplayFile(file, CancellationToken.None); }
             catch (InvalidOperationException) { rejected = true; }
-            check(rejected, "Replay preparation accepted an unfinished start manifest");
+            Check(rejected, "Replay preparation accepted an unfinished start manifest");
             using (var oversized = new FileStream(file, FileMode.Open, FileAccess.Write))
                 oversized.SetLength(EpisodeReplayReader.MaximumBytes + 1L);
             rejected = false;
             try { await PipersPlugin.ReadReplayFile(file, CancellationToken.None); }
             catch (InvalidOperationException) { rejected = true; }
-            check(rejected, "Replay preparation loaded a file beyond the bounded JSON input size");
+            Check(rejected, "Replay preparation loaded a file beyond the bounded JSON input size");
         }
         finally
         {
@@ -35,23 +35,17 @@ internal static class EpisodeReplayTests
         }
     }
 
-    public static void Run(Action<bool, string> check)
+    public static void Run()
     {
-        void Reject(Action action, string description)
-        {
-            try { action(); }
-            catch (InvalidOperationException) { check(true, description); return; }
-            check(false, description);
-        }
         EpisodeReplayArtifact Read(JsonObject value) => EpisodeReplayReader.Parse(value.ToJsonString());
         var artifact = Read(Fixture());
         var repeatedSync = Fixture();
         repeatedSync["samples"]![1]!["syncIndex"] = 12;
-        check(Read(repeatedSync).Samples[1].SyncIndex == 12 && artifact.NominalCaptureHz == 50,
+        Check(Read(repeatedSync).Samples[1].SyncIndex == 12 && artifact.NominalCaptureHz == 50,
             "50Hz Validation samples were incorrectly restricted to unique 10Hz sync-point indices");
-        check(artifact.Samples[0].JointDegrees[5] == 60 && artifact.Samples[1].JointDegrees[0] == 20,
+        Check(artifact.Samples[0].JointDegrees[5] == 60 && artifact.Samples[1].JointDegrees[0] == 20,
             "Replay reader converted explicit degree samples to radians or changed their order");
-        check(artifact.TubeStart.LeftMm == 700 && Math.Abs(artifact.TubeStart.WorldPositionMetres.Z + .15) < 1e-9 &&
+        Check(artifact.TubeStart.LeftMm == 700 && Math.Abs(artifact.TubeStart.WorldPositionMetres.Z + .15) < 1e-9 &&
             Math.Abs(artifact.TubeStart.WorldPositionMetres.Y - .8465) < 1e-9 && artifact.TubeDimensions.MassSource == "estimated" &&
             artifact.Audit.Seed == 15093 && artifact.NativeRecording.EpisodeOrdinal is null,
             "Replay lost initial object placement, tabletop-relative height or mass provenance");
@@ -94,7 +88,7 @@ internal static class EpisodeReplayTests
         var review = new ReplayReview(artifact, "profile-a");
         var scope = new ReplayCheckScope("backend-a", "can-a", 7);
         var confirmed = review.Confirmed(scope);
-        check(confirmed is { TubeConfirmed: true } && confirmed.Observe("profile-a", scope).TubeConfirmed &&
+        Check(confirmed is { TubeConfirmed: true } && confirmed.Observe("profile-a", scope).TubeConfirmed &&
             !confirmed.Observe("profile-b", scope).TubeConfirmed && !confirmed.Observe("profile-a", scope with { Generation = 8 }).TubeConfirmed &&
             !confirmed.Observe("profile-a", null).TubeConfirmed && confirmed.Rechecked(scope).TubeConfirmed &&
             !confirmed.Rechecked(scope with { Device = "can-b" }).TubeConfirmed && confirmed.Loaded() is { TubeConfirmed: false, Scope: null } &&
@@ -102,12 +96,12 @@ internal static class EpisodeReplayTests
             "Tube placement survived a profile or connection change, or a recheck invented a placement confirmation");
         var limits = Limits();
         var legacy = Read(Fixture(1));
-        check(!legacy.HasPositionCommands && legacy.Samples[0].CommandedJointDegrees is null,
+        Check(!legacy.HasPositionCommands && legacy.Samples[0].CommandedJointDegrees is null,
             "Legacy measured-only samples were promoted to executable commands");
         Reject(() => EpisodeReplayPlanner.AssessJointTiming(legacy, limits), "Version 1 measured-only export was treated as an actuator replay");
         var oldestLegacy = Fixture(1);
         oldestLegacy["nativeRecording"]!.AsObject().Remove("nativeOrdinalSource");
-        check(!Read(oldestLegacy).HasPositionCommands, "Earlier version 1 files lost review support after provenance was introduced");
+        Check(!Read(oldestLegacy).HasPositionCommands, "Earlier version 1 files lost review support after provenance was introduced");
         var invalidCapture = Fixture();
         invalidCapture["outcome"] = "invalid-capture: lost sample";
         Reject(() => Read(invalidCapture), "Replay accepted a capture explicitly exported as invalid");
@@ -132,11 +126,11 @@ internal static class EpisodeReplayTests
         var reversing = Read(reversingJson);
         var accelerationLimits = limits.Select(limit => limit with { MaximumDegreesPerSecondSquared = 5 }).ToArray();
         var timing = EpisodeReplayPlanner.AssessJointTiming(reversing, accelerationLimits);
-        check(timing.SpeedTimeScale == 1 && Math.Abs(timing.AccelerationTimeScale - 2) < 1e-12 && timing.RequiredTimeScale == 2,
+        Check(timing.SpeedTimeScale == 1 && Math.Abs(timing.AccelerationTimeScale - 2) < 1e-12 && timing.RequiredTimeScale == 2,
             "Low-velocity direction reversal bypassed the acceleration cap or omitted square-root time scaling");
         reversingJson["samples"]![2]!["timeSeconds"] = 3;
         var irregularTiming = EpisodeReplayPlanner.AssessJointTiming(Read(reversingJson), accelerationLimits.Select(limit => limit with { MaximumDegreesPerSecondSquared = 2.5 }).ToArray());
-        check(Math.Abs(irregularTiming.AccelerationTimeScale - 2) < 1e-12,
+        Check(Math.Abs(irregularTiming.AccelerationTimeScale - 2) < 1e-12,
             "Acceleration used nominal sample indices instead of midpoint spacing for irregular timestamps");
 
         var reported = new JsonArray(limits.Select(limit => (JsonNode)new JsonObject
@@ -146,7 +140,7 @@ internal static class EpisodeReplayTests
             ["max_acceleration_rad_s2"] = .5, ["limits_fresh"] = true, ["acceleration_fresh"] = true
         }).ToArray());
         var readLimits = EpisodeReplayReportedLimits.Read(reported);
-        check(readLimits.All(limit => limit.AccelerationFresh && Math.Abs(limit.MaximumDegreesPerSecondSquared - .5 * 180 / Math.PI) < 1e-12),
+        Check(readLimits.All(limit => limit.AccelerationFresh && Math.Abs(limit.MaximumDegreesPerSecondSquared - .5 * 180 / Math.PI) < 1e-12),
             "Replay UI did not preserve the backend's reported rad/s² acceleration units");
         foreach (string key in new[] { "acceleration_fresh", "max_acceleration_rad_s2" })
         {
@@ -165,7 +159,7 @@ internal static class EpisodeReplayTests
 
         var zUp = Fixture();
         zUp["tubeStart"]!["worldQuaternionXyzw"] = new JsonArray(-.6830127018922193, .1830127018922193, .1830127018922193, .6830127018922193);
-        check(Math.Abs(Read(zUp).TubeStart.YawDeg - 30) < 1e-9, "Native Z-up tube yaw was interpreted as an engine Y-up Euler yaw");
+        Check(Math.Abs(Read(zUp).TubeStart.YawDeg - 30) < 1e-9, "Native Z-up tube yaw was interpreted as an engine Y-up Euler yaw");
     }
 
     private static JsonObject Fixture(int version = 2)

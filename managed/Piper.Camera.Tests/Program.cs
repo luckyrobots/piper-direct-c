@@ -3,14 +3,8 @@ using LuckyRobots.Piper.Camera;
 using OpenCvSharp;
 using Intel.RealSense;
 
-int checks = 0;
-void Check(bool condition, string message) { if (!condition) throw new Exception(message); checks++; }
-void Reject(Action action, string expected)
-{
-    try { action(); }
-    catch (InvalidDataException error) when (error.Message.Contains(expected, StringComparison.Ordinal)) { checks++; return; }
-    throw new Exception("Expected rejection: " + expected);
-}
+void RejectInvalidData(Action action, string expected) =>
+    Reject<InvalidDataException>(action, "Expected rejection: " + expected, error => error.Message.Contains(expected, StringComparison.Ordinal));
 Cv2.SetNumThreads(2);
 Check(VideoDeviceLocation.InstanceId(@"\\?\usb#vid_1bcf&pid_2cd1&mi_00#8&1bd18552&0&0000#{guid}\global") ==
     @"USB\vid_1bcf&pid_2cd1&mi_00\8&1bd18552&0&0000", "Camera interface identity did not match the Windows device-tree node");
@@ -60,14 +54,14 @@ try
     var metadata = new JsonObject { ["width"] = 640, ["height"] = 400, ["columns"] = 7, ["rows"] = 5, ["squareMetres"] = .02, ["device"] = "synthetic" };
     void WriteMetadata() => File.WriteAllText(Path.Combine(scratch, "session.json"), metadata.ToJsonString());
     WriteMetadata();
-    Reject(() => FisheyeCalibration.Solve(scratch), "Only 0 usable boards");
+    RejectInvalidData(() => FisheyeCalibration.Solve(scratch), "Only 0 usable boards");
     metadata["squareMetres"] = -1;
     WriteMetadata();
-    Reject(() => FisheyeCalibration.Solve(scratch), "Invalid board session");
+    RejectInvalidData(() => FisheyeCalibration.Solve(scratch), "Invalid board session");
     metadata["squareMetres"] = .02;
     WriteMetadata();
     using (var wrongSize = new Mat(20, 30, MatType.CV_8UC1, Scalar.White)) Cv2.ImWrite(Path.Combine(scratch, "frame-00000000.jpg"), wrongSize);
-    Reject(() => FisheyeCalibration.Solve(scratch), "same camera resolution");
+    RejectInvalidData(() => FisheyeCalibration.Solve(scratch), "same camera resolution");
     File.Delete(Path.Combine(scratch, "frame-00000000.jpg"));
     // All images contain a detectable board, but repeated poses must not pass.
     using (var narrow = new Mat(400, 640, MatType.CV_8UC1, Scalar.All(200)))
@@ -75,7 +69,7 @@ try
         for (int y = 0; y < 6; y++) for (int x = 0; x < 8; x++) Cv2.Rectangle(narrow, new Rect(200 + 20 * x, 130 + 20 * y, 20, 20), (x + y) % 2 == 0 ? Scalar.Black : Scalar.White, -1);
         for (int i = 0; i < 20; i++) Cv2.ImWrite(Path.Combine(scratch, $"frame-{i:D8}.jpg"), narrow);
     }
-    Reject(() => FisheyeCalibration.Solve(scratch), "coverage is too narrow");
+    RejectInvalidData(() => FisheyeCalibration.Solve(scratch), "coverage is too narrow");
     if (args.Length > 0)
     {
         // Optional end-to-end fixture: analytically rendered fisheye boards with
@@ -89,4 +83,4 @@ try
     }
 }
 finally { Directory.Delete(scratch, true); }
-Console.WriteLine($"Passed {checks} camera runtime, depth and calibration checks. No camera or robot was opened.");
+Console.WriteLine($"Passed {Checks} camera runtime, depth and calibration checks. No camera or robot was opened.");
