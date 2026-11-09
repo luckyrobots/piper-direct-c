@@ -147,6 +147,14 @@ public sealed partial class PipersPlugin : ILuckyPlugin
         return result;
     }
 
+    /// <summary>Removes session tokens and owner ids before text reaches the panel or a diagnostic file.</summary>
+    internal static string RedactSecrets(string text, params string[] secrets)
+    {
+        foreach (string secret in secrets)
+            if (secret.Length > 0) text = text.Replace(secret, "[redacted]", StringComparison.Ordinal);
+        return text;
+    }
+
     private static void Materialize(JsonNode? node)
     {
         // JsonNode lazily builds child dictionaries. Finish that work on the

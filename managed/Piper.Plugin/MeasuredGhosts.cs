@@ -36,16 +36,22 @@ public sealed partial class PipersPlugin
         return saved?.Matches(profile.Id, profile.PikaDevice, distribution, pika) == true ? saved.MotorAngle : null;
     }
 
+    /// <summary>Asks the host once for ghost support, at most every 5 s while unknown.</summary>
+    private async Task ProbeMeasuredGhostCapability(CancellationToken cancellation)
+    {
+        if (measuredGhostSupported is not null ||
+            measuredGhostCapabilityAttempt != 0 && Stopwatch.GetElapsedTime(measuredGhostCapabilityAttempt).TotalSeconds < 5) return;
+        measuredGhostCapabilityAttempt = Stopwatch.GetTimestamp();
+        var info = await engine.RequestAsync("host.info", cancellation: cancellation);
+        measuredGhostSupported = info.TryGetProperty("robotFeedbackGhostSupported", out var supported) && supported.GetBoolean();
+        ghostVisibilitySupported = info.TryGetProperty("robotGhostVisibilitySupported", out var visibility) && visibility.GetBoolean();
+    }
+
     private async Task SetMeasuredGhostVisibility(bool visible, CancellationToken cancellation)
     {
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellation);
         timeout.CancelAfter(500);
-        if (measuredGhostSupported is null)
-        {
-            var info = await engine.RequestAsync("host.info", cancellation: timeout.Token);
-            measuredGhostSupported = info.TryGetProperty("robotFeedbackGhostSupported", out var supported) && supported.GetBoolean();
-            ghostVisibilitySupported = info.TryGetProperty("robotGhostVisibilitySupported", out var visibility) && visibility.GetBoolean();
-        }
+        await ProbeMeasuredGhostCapability(timeout.Token);
         if (ghostVisibilitySupported)
             await engine.RequestAsync("robot.ghost.visibility", new JsonObject { ["visible"] = visible }, timeout.Token);
         // Older hosts expire an unpublished overlay naturally. No visibility
@@ -112,13 +118,10 @@ public sealed partial class PipersPlugin
                 ghostDisplayReferences.Remove(obsolete);
             if (measuredGhostSupported is null)
             {
-                if (measuredGhostCapabilityAttempt != 0 && Stopwatch.GetElapsedTime(measuredGhostCapabilityAttempt).TotalSeconds < 5) return;
-                measuredGhostCapabilityAttempt = Stopwatch.GetTimestamp();
                 using var discovery = CancellationTokenSource.CreateLinkedTokenSource(cancellation);
                 discovery.CancelAfter(400);
-                var info = await engine.RequestAsync("host.info", cancellation: discovery.Token);
-                measuredGhostSupported = info.TryGetProperty("robotFeedbackGhostSupported", out var supported) && supported.GetBoolean();
-                ghostVisibilitySupported = info.TryGetProperty("robotGhostVisibilitySupported", out var visibility) && visibility.GetBoolean();
+                await ProbeMeasuredGhostCapability(discovery.Token);
+                if (measuredGhostSupported is null) return;
             }
             if (publishedGhostVisibility != preferences.ShowMeasuredGhosts)
                 await SetMeasuredGhostVisibility(preferences.ShowMeasuredGhosts, cancellation);

@@ -237,9 +237,7 @@ public sealed partial class PipersPlugin
         {
             // This includes failures before a group exists. The sidebar must
             // retain the actionable setup cause instead of claiming it is ready.
-            string reason = error.Message;
-            foreach (string secret in new[] { token, owner })
-                if (secret.Length > 0) reason = reason.Replace(secret, "[redacted]", StringComparison.Ordinal);
+            string reason = RedactSecrets(error.Message, token, owner);
             groupFollowFailure = "Follow not armed\n" + reason;
             GroupFollowStatus = "Follow not armed";
             GroupFollowDetail = reason;
