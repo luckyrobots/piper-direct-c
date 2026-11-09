@@ -607,7 +607,7 @@ public sealed partial class PipersPlugin : ILuckyPlugin
         if (switchingProfile) return "Changing robot assignment; wait for measured feedback.";
         if (!ManualPikaControlAllowed(device))
             return "Restore robot controls before sending a gripper target. STOP and recovery retire manual arm and gripper targets.";
-        if (!PikaMatchesProfile(ActiveProfile, pika)) return "The Pika serial assignment does not match this robot.";
+        if (!ProfilePikaRouting.Matches(ActiveProfile, pika)) return "The Pika serial assignment does not match this robot.";
         if (!pikaOwned || pika!["owner"]?.GetValue<string>() != owner || pika["armed"]?.GetValue<bool>() != true)
             return "Pika is monitoring only. Use Enable robot before commanding its opening.";
         if (pika["fresh"]?.GetValue<bool>() != true) return "Waiting for fresh gripper feedback before changing its opening.";

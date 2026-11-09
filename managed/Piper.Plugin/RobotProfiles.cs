@@ -344,9 +344,7 @@ public sealed partial class PipersPlugin
         finally { switchingProfile = false; }
     }
 
-    private bool PikaMatchesProfile() => PikaMatchesProfile(ActiveProfile, state?["pika"] as JsonObject);
-
-    private static bool PikaMatchesProfile(RobotProfile profile, JsonObject? pika) => ProfilePikaRouting.Matches(profile, pika);
+    private bool PikaMatchesProfile() => ProfilePikaRouting.Matches(ActiveProfile, state?["pika"] as JsonObject);
 
     private async Task ConfigureProfilePika(string expectedToken, CancellationToken cancellation)
     {

@@ -79,7 +79,7 @@ public sealed partial class PipersPlugin
         if (d["recovery_required"]?.GetValue<bool>() == true || d["reset_pending"]?.GetValue<bool>() == true || teaching.BlocksTargets ||
             !RobotPowerState.Inspect(d).AllEnabled || !string.IsNullOrEmpty(d["blocker"]?.GetValue<string>())) return;
         var pika = receipt.State["pika"] as JsonObject;
-        bool monitoring = PikaMatchesProfile(profile, pika) && pika?["owner"]?.GetValue<string>() == owner;
+        bool monitoring = ProfilePikaRouting.Matches(profile, pika) && pika?["owner"]?.GetValue<string>() == owner;
         bool owns = monitoring && pika?["armed"]?.GetValue<bool>() == true;
         CommandAuthority.TryRestoreApproval(permission.Epoch, profile.Id, saved, () =>
         {
