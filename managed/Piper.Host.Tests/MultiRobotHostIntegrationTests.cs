@@ -75,7 +75,7 @@ internal static class MultiRobotHostIntegrationTests
             {
                 var denied = await Send("/api/select", Identity("simulation:2"), grpc, foreign);
                 if (denied.Status != 409 || denied.Body["error"]?.GetValue<string>() != LuckyRobots.Piper.SessionOwnerGuard.Denied ||
-                    (grpc ? denied.Body.ContainsKey("ok") : denied.Body["ok"]?.GetValue<bool>() != false))
+                    denied.Body["ok"]?.GetValue<bool>() != false)
                     throw new Exception("A foreign caller acquired a lane or an adapter changed its owner-error response");
             }
             if (!JsonNode.DeepEquals((await Read())["selected"], state["selected"])) throw new Exception("Denied owner changed the selected lane");

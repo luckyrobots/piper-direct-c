@@ -11,7 +11,7 @@ bool simulated = args.Contains("--simulate");
 string Option(string name, string fallback) { int i = Array.IndexOf(args, name); return i < 0 ? fallback : i+1 < args.Length ? args[i+1] : throw new ArgumentException($"Missing {name}"); }
 if (!int.TryParse(Option("--sim-robots", "1"), out int simulatedRobotCount) || simulatedRobotCount is < 1 or > 16 || !simulated && simulatedRobotCount != 1)
     throw new ArgumentException("--sim-robots requires --simulate and a count from 1 to 16");
-if (!int.TryParse(Option("--port", "8765"), out int port) || port < 1024 || port > 65535) throw new ArgumentException("Invalid port");
+if (!int.TryParse(Option("--port", HostEndpoints.DefaultHttpPort.ToString()), out int port) || port is < HostEndpoints.MinimumPort or > HostEndpoints.MaximumPort) throw new ArgumentException("Invalid port");
 string web = Path.GetFullPath(Option("--web-root", Path.Combine(AppContext.BaseDirectory, "web")));
 string directory = Path.GetFullPath(Option("--state-dir", Path.Combine(AppContext.BaseDirectory, simulated ? "data-sim" : "data")));
 string sessionOwner = Option("--session-owner", "");
@@ -36,14 +36,14 @@ if (!double.TryParse(Option("--pika-command-period-ms", "30"), System.Globalizat
 await using var pika = new PikaSessionRegistry(pikaDevice,
     Option("--pika-agent", Path.Combine(AppContext.BaseDirectory, "pika-agent", "Piper.Pika.Agent")), pikaDistribution, pikaCommandPeriodMs / 1000);
 var builder = WebApplication.CreateBuilder(new WebApplicationOptions { Args = [], ContentRootPath = AppContext.BaseDirectory });
-if (!int.TryParse(Option("--grpc-port", (port + 1).ToString()), out int grpcPort) || grpcPort < 1024 || grpcPort > 65535 || grpcPort == port) throw new ArgumentException("Invalid gRPC port");
+if (!int.TryParse(Option("--grpc-port", (port + 1).ToString()), out int grpcPort) || grpcPort is < HostEndpoints.MinimumPort or > HostEndpoints.MaximumPort || grpcPort == port) throw new ArgumentException("Invalid gRPC port");
 BackendMaintenance? maintenance = null;
 builder.Services.AddSingleton(provider => new PiperRpcContext(controller, pika, simulated, sessionOwner,
     maintenance ?? throw new InvalidOperationException("Backend maintenance was not initialized.")));
-builder.Services.AddGrpc(options => { options.MaxReceiveMessageSize = 32768; options.MaxSendMessageSize = 1024 * 1024; });
-builder.WebHost.ConfigureKestrel(k => { k.Listen(IPAddress.Loopback, port); k.Listen(IPAddress.Loopback, grpcPort, endpoint => endpoint.Protocols = HttpProtocols.Http2); k.Limits.MaxRequestBodySize = 32768; });
+builder.Services.AddGrpc(options => { options.MaxReceiveMessageSize = HostEndpoints.MaxRequestBytes; options.MaxSendMessageSize = HostEndpoints.MaxGrpcSendBytes; });
+builder.WebHost.ConfigureKestrel(k => { k.Listen(IPAddress.Loopback, port); k.Listen(IPAddress.Loopback, grpcPort, endpoint => endpoint.Protocols = HttpProtocols.Http2); k.Limits.MaxRequestBodySize = HostEndpoints.MaxRequestBytes; });
 var app = builder.Build();
-maintenance = new BackendMaintenance(() => JsonNode.Parse(controller.Snapshot())!.AsObject(), () => pika.Snapshots(),
+maintenance = new BackendMaintenance(controller.SnapshotJson, () => pika.Snapshots(),
     () => { Environment.ExitCode = BackendMaintenance.RestartExitCode; app.Lifetime.StopApplication(); },
     Environment.ProcessId, supervisorPid, supervisorPid.HasValue ? supervisorIdentity : null,
     pluginOwner: sessionOwner.Length > 0 ? sessionOwner : null);
@@ -55,7 +55,7 @@ app.MapWhen(context => context.Connection.LocalPort == grpcPort, grpc => {
 var assets = new Dictionary<string,(string File,string Type)> {
     ["/"]=("index.html","text/html; charset=utf-8"), ["/app.js"]=("app.js","text/javascript; charset=utf-8"),
     ["/pika.mjs"]=("pika.mjs","text/javascript; charset=utf-8"), ["/pika_remote.mjs"]=("pika_remote.mjs","text/javascript; charset=utf-8"), ["/bench.mjs"]=("bench.mjs","text/javascript; charset=utf-8"), ["/style.css"]=("style.css","text/css; charset=utf-8"),
-    ["/api/openapi.json"]=("openapi.json","application/json")
+    [HostRoutes.OpenApi]=("openapi.json","application/json")
 };
 foreach (var asset in assets.Values) if (!File.Exists(Path.Combine(web,asset.File))) throw new FileNotFoundException($"Missing shared dashboard asset {asset.File}");
 app.Run(async context => {
@@ -64,31 +64,25 @@ app.Run(async context => {
     response.Headers["Referrer-Policy"]="no-referrer";
     response.Headers.ContentSecurityPolicy="default-src 'self'; style-src 'self'; script-src 'self'; connect-src 'self'; img-src 'self' data: blob:; media-src 'self' blob:; frame-ancestors 'none'; base-uri 'none'; form-action 'none'";
     async Task Error(int status,string message) { response.StatusCode=status; await response.WriteAsJsonAsync(new {ok=false,error=message}); }
+    async Task Reply(HostControlResult result) {
+        response.StatusCode=result.Status; response.ContentType="application/json; charset=utf-8";
+        await response.WriteAsync(result.ToJson());
+    }
     string host=request.Host.Value??"";
-    string[] hosts=[$"127.0.0.1:{port}",$"localhost:{port}"];
+    string[] hosts=HostEndpoints.LoopbackHosts(port);
     if (!hosts.Contains(host,StringComparer.OrdinalIgnoreCase) || request.Headers.Origin.Count>1 ||
         (request.Headers.Origin.Count==1 && !hosts.Any(h=>request.Headers.Origin==$"http://{h}")) || request.Headers["Sec-Fetch-Site"]=="cross-site") { await Error(403,"Only this local dashboard origin is permitted"); return; }
     string route=request.Path.Value??"/";
+    string? Query(string key) => request.Query.TryGetValue(key, out var value) ? value.ToString() : null;
     try {
         if (HttpMethods.IsGet(request.Method)) {
-            if (route=="/api/state") {
-                var state = control.ReadState(OperatingSystem.IsWindows() ? "dotnet-windows" : "dotnet-linux");
-                state["camera"]=new JsonObject { ["configured"]=false,["running"]=false,["fresh"]=false,["error"]="Use local browser camera selection",["name"]="Local USB camera",["sequence"]=0 };
-                await response.WriteAsJsonAsync(state); return;
+            if (route==HostRoutes.State) {
+                await response.WriteAsJsonAsync(control.ReadState(OperatingSystem.IsWindows() ? "dotnet-windows" : "dotnet-linux")); return;
             }
-            if (route=="/api/pika/state") {
-                var selected = request.Query.TryGetValue("pika_device", out var selectedDevice)
-                    ? pika.Snapshot(selectedDevice.ToString(), request.Query.TryGetValue("pika_distribution", out var selectedDistribution) ? selectedDistribution.ToString() : pikaDistribution, true)
-                    : pika.Snapshot(includeRawEvidence: true);
-                await response.WriteAsJsonAsync(selected); return;
+            if (route==HostRoutes.PikaState) {
+                await response.WriteAsJsonAsync(control.PikaState(Query("pika_device"), Query("pika_distribution"))); return;
             }
-            if (route=="/api/pika/devices") {
-                if (simulated) { await response.WriteAsJsonAsync(HostControlDispatcher.EmptySimulatedInventory); return; }
-                try { await response.WriteAsJsonAsync(await pika.DiscoverAsync(request.Query.TryGetValue("distribution", out var inventoryDistribution) ? inventoryDistribution.ToString() : pikaDistribution, context.RequestAborted)); }
-                catch (Exception e) when (HostControlDispatcher.IsControlOperationError(e)) { await Error(409,e.Message); }
-                return;
-            }
-            if (route=="/api/camera/frame") { await Error(409,"Use local browser camera preview"); return; }
+            if (route==HostRoutes.PikaDevices) { await Reply(await control.DiscoverPikaAsync(Query("distribution"), context.RequestAborted)); return; }
             if (assets.TryGetValue(route,out var asset)) { response.ContentType=asset.Type; await response.SendFileAsync(Path.Combine(web,asset.File)); return; }
             await Error(404,"Not found"); return;
         }
@@ -96,43 +90,14 @@ app.Run(async context => {
         if (request.ContentType is not ("application/json" or "application/json; charset=utf-8")) { await Error(400,"Use application/json"); return; }
         using var reader=new StreamReader(request.Body,Encoding.UTF8,false,1024,true);
         string body=await reader.ReadToEndAsync(context.RequestAborted);
-        if (Encoding.UTF8.GetByteCount(body)>16384) { await Error(413,"Request too large"); return; }
-        if (body.Contains("\\u",StringComparison.Ordinal)||body.Contains('\0')) { await Error(400,"Unicode escapes and NUL are unsupported in control requests"); return; }
-        using var json=JsonDocument.Parse(body,new JsonDocumentOptions {MaxDepth=32});
-        if (json.RootElement.ValueKind!=JsonValueKind.Object||!ControlJson.HasUniqueKeys(json.RootElement)) { await Error(400,"Expected one JSON object with unique keys"); return; }
-        using var admission = control.Admit(route, json.RootElement, HostControlTransport.Http);
-        if (admission.Error is { } denied) { await Error(409, denied); return; }
-        if (admission.Restart is { } restarting)
-        {
-            response.StatusCode = restarting.Ok ? 202 : 409;
-            await response.WriteAsJsonAsync(restarting); return;
-        }
-        if (admission.Shutdown) {
-            response.OnCompleted(() => { maintenance.CommitShutdown(app.Lifetime.StopApplication); return Task.CompletedTask; });
+        if (!ControlJson.TryParse(body, out var parsed, out var rejected)) { await Error(rejected.Status, rejected.Message); return; }
+        using var json = parsed;
+        using var admission = control.Admit(route, json.RootElement);
+        if (admission.Shutdown is { } shutdown) {
+            response.OnCompleted(() => { shutdown(app.Lifetime.StopApplication); return Task.CompletedTask; });
             await response.WriteAsJsonAsync(new {ok=true,message="Closing USB transports before shutdown"}); return;
         }
-        if (route=="/api/camera") {
-            if (!json.RootElement.TryGetProperty("enabled",out var enabled)||enabled.ValueKind is not (JsonValueKind.True or JsonValueKind.False)) { await Error(400,"enabled must be true or false"); return; }
-            if (enabled.GetBoolean()) { await Error(409,"Use local browser camera preview"); return; }
-            await response.WriteAsJsonAsync(new {running=false}); return;
-        }
-        var result = await control.ExecuteAsync(route, body, json.RootElement, HostControlTransport.Http, context.RequestAborted);
-        response.StatusCode = result.Status;
-        if (result.PikaAudit is { } audit)
-            await response.WriteAsJsonAsync(new { error = result.Error, pika_follow_audit = audit });
-        else if (result.Error is { } error)
-            await Error(result.Status, error);
-        else if (result.RawJson is { } raw)
-        {
-            response.ContentType = "application/json";
-            await response.WriteAsync(raw);
-        }
-        else if (result.Payload is JsonObject gripper)
-        {
-            try { await response.WriteAsJsonAsync(gripper); }
-            catch (Exception e) when (HostControlDispatcher.IsControlOperationError(e)) { await Error(409, e.Message); }
-        }
-        else await response.WriteAsJsonAsync(result.Payload);
+        await Reply(admission.Reply ?? await control.ExecuteAsync(route, body, json.RootElement, context.RequestAborted));
     }
     catch (JsonException) { await Error(400,"Invalid JSON body"); }
     catch (BadHttpRequestException e) { await Error(e.StatusCode,e.Message); }

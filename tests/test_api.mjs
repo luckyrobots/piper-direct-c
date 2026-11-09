@@ -52,12 +52,14 @@ async function query() { await post('/api/query', {}, 202); await until(() => !s
 try {
   await launch();
   assert.equal(state.simulated, true); assert.equal(state.devices.length, 1); assert.equal(selected().tx_frames, 0);
-  assert.equal(state.camera.configured, false); assert.equal(state.camera.running, false);
-  assert.equal((await fetch(base + '/api/camera/frame')).status, 409);
-  await post('/api/camera', { enabled: true }, 403, { 'X-Piper-Token': 'wrong' });
-  await post('/api/camera', { enabled: true }, 409); // Simulation cannot open a real webcam.
-  await post('/api/camera', { enabled: 'yes' }, 400);
-  await post('/api/camera', { enabled: false });
+  if (!state.backend?.startsWith('dotnet-')) { // The bench webcam is served only by the C server.
+    assert.equal(state.camera.configured, false); assert.equal(state.camera.running, false);
+    assert.equal((await fetch(base + '/api/camera/frame')).status, 409);
+    await post('/api/camera', { enabled: true }, 403, { 'X-Piper-Token': 'wrong' });
+    await post('/api/camera', { enabled: true }, 409); // Simulation cannot open a real webcam.
+    await post('/api/camera', { enabled: 'yes' }, 400);
+    await post('/api/camera', { enabled: false });
+  }
   await refresh(); assert.equal(selected().tx_frames, 0);
   assert.equal((await fetch(base + '/')).status, 200);
   const pikaAsset = await fetch(base + '/pika.mjs');

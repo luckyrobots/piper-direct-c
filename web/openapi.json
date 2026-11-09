@@ -3,7 +3,7 @@
   "info": {
     "title": "PiPer Direct C position-control API",
     "version": "1.0.0",
-    "description": "Loopback-only C/SocketCAN controller. No Python or robot SDK. Read /api/state for the per-process token, stable selected device_id and current connection generation. Every POST requires X-Piper-Token and application/json. Accepted actions are asynchronous: poll state and renew the matching owner/request_id lease every 200 ms. Lease expires at 800 ms. Commands never resume automatically after reconnect or restart. A single-joint command sends a six-angle MoveJ pose, holding other joints at their initial measured positions. This API does not bypass the onboard MCU or expose raw torque/MIT/calibration/firmware writes. State includes controller teach_state, fault masks, persisted last_fault and per-joint max_acceleration_rad_s2/acceleration_fresh/acceleration_age_s. New motion and enable require valid angle, speed and acceleration limits read on this connection. Static configuration remains valid while the connection is uninterrupted; there is no periodic refresh or 60-second expiry. USB/CAN reconnection, a robot status-stream gap or an explicit information query invalidates the cache. Live position, motor and fault feedback still use the normal short freshness checks. Acceleration limits must be finite, greater than zero and at most 5 rad/s\u00b2. Queries are read-only and preserve unresolved recovery locks. The limits_fresh, acceleration_fresh and gripper configuration_fresh fields mean valid for this connection; their age fields report elapsed time without imposing an expiry. Missing optional standard CAN gripper settings do not block the arm or Pika."
+    "description": "Loopback-only Piper arm controller, served by two backends that share this native control core and dashboard: the C server (SocketCAN) and the managed .NET host (Windows or Linux), which adds a gRPC port, independent Pika gripper sessions and maintenance routes. No Python or robot SDK. Each path's x-piper-backend names the backends that serve it: c, managed or both. Read /api/state for the per-process token, stable selected device_id and current connection generation. Every POST requires X-Piper-Token and application/json. Accepted actions are asynchronous: poll state and renew the matching owner/request_id lease every 200 ms. Lease expires at 800 ms. Commands never resume automatically after reconnect or restart. A single-joint command sends a six-angle MoveJ pose, holding other joints at their initial measured positions. This API does not bypass the onboard MCU or expose raw torque/MIT/calibration/firmware writes. State includes controller teach_state, fault masks, persisted last_fault and per-joint max_acceleration_rad_s2/acceleration_fresh/acceleration_age_s. New motion and enable require valid angle, speed and acceleration limits read on this connection. Static configuration remains valid while the connection is uninterrupted; there is no periodic refresh or 60-second expiry. USB/CAN reconnection, a robot status-stream gap or an explicit information query invalidates the cache. Live position, motor and fault feedback still use the normal short freshness checks. Acceleration limits must be finite, greater than zero and at most 5 rad/s\u00b2. Queries are read-only and preserve unresolved recovery locks. The limits_fresh, acceleration_fresh and gripper configuration_fresh fields mean valid for this connection; their age fields report elapsed time without imposing an expiry. Missing optional standard CAN gripper settings do not block the arm or Pika."
   },
   "servers": [
     {
@@ -19,7 +19,7 @@
     "/api/camera": {
       "post": {
         "summary": "Start or stop the configured local bench webcam",
-        "description": "Independent of robot motion. Simulation never opens a real webcam. No microphone or recording.",
+        "description": "Independent of robot motion. Simulation never opens a real webcam. No microphone or recording. Served only by the C server; the managed host uses local browser camera selection and has no camera routes.",
         "requestBody": {
           "required": true,
           "content": {
@@ -49,7 +49,8 @@
             "description": "Camera unavailable or not configured"
           }
         }
-      }
+      },
+      "x-piper-backend": "c"
     },
     "/api/camera/frame": {
       "get": {
@@ -69,8 +70,10 @@
           "409": {
             "description": "No fresh frame"
           }
-        }
-      }
+        },
+        "description": "Served only by the C server; the managed host uses local browser camera selection and has no camera routes."
+      },
+      "x-piper-backend": "c"
     },
     "/api/state": {
       "get": {
@@ -88,7 +91,8 @@
             }
           }
         }
-      }
+      },
+      "x-piper-backend": "both"
     },
     "/api/select": {
       "post": {
@@ -122,7 +126,8 @@
             "description": "Action active"
           }
         }
-      }
+      },
+      "x-piper-backend": "both"
     },
     "/api/query": {
       "post": {
@@ -139,7 +144,8 @@
             "description": "Unavailable, busy or stale selection"
           }
         }
-      }
+      },
+      "x-piper-backend": "both"
     },
     "/api/reconnect": {
       "post": {
@@ -163,7 +169,8 @@
             "description": "Action active"
           }
         }
-      }
+      },
+      "x-piper-backend": "both"
     },
     "/api/command": {
       "post": {
@@ -237,7 +244,8 @@
             "description": "Persistent intent could not be saved; no action started"
           }
         }
-      }
+      },
+      "x-piper-backend": "both"
     },
     "/api/heartbeat": {
       "post": {
@@ -273,7 +281,8 @@
             "description": "No matching active lease or already expired"
           }
         }
-      }
+      },
+      "x-piper-backend": "both"
     },
     "/api/stop": {
       "post": {
@@ -286,8 +295,14 @@
               "schema": {
                 "type": "object",
                 "properties": {
-                  "device_id": { "type": "string" },
-                  "generation": { "type": "integer", "minimum": 1, "maximum": 4294967295 }
+                  "device_id": {
+                    "type": "string"
+                  },
+                  "generation": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 4294967295
+                  }
                 }
               }
             }
@@ -299,6 +314,351 @@
           },
           "409": {
             "description": "Adapter identity, optional generation or automatic-stop action no longer matches"
+          }
+        }
+      },
+      "x-piper-backend": "both"
+    },
+    "/api/stop/coordinated": {
+      "x-piper-backend": "managed",
+      "post": {
+        "summary": "Stop arms and hold Pika grippers as two independent attempts",
+        "description": "Runs the arm STOP and the Pika hold concurrently, each with its own bounded attempt; a failure, timeout or block in one never suppresses the other. Admitted during maintenance like /api/stop. With a non-empty device_id the STOP is scoped to that arm and pika_device is required. Without it every arm is stopped and every Pika owned by owner is held; generation and request_id are rejected there.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "owner": {
+                    "type": "string",
+                    "description": "Dashboard client ID. A session-owned managed host requires its plugin owner."
+                  },
+                  "device_id": {
+                    "type": "string",
+                    "description": "Empty or omitted stops all arms"
+                  },
+                  "generation": {
+                    "type": "integer",
+                    "minimum": 1
+                  },
+                  "request_id": {
+                    "type": "integer",
+                    "minimum": 1
+                  },
+                  "pika_device": {
+                    "type": "string",
+                    "description": "Linux Pika device identity, e.g. /dev/pika/by-host/1-2"
+                  },
+                  "pika_distribution": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "description": "WSL distribution; null means native Linux serial. Omitted means the current assignment."
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Both channels acknowledged",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoordinatedStop"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "At least one channel is unverified; read both results",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoordinatedStop"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/shutdown": {
+      "x-piper-backend": "managed",
+      "post": {
+        "summary": "Close USB transports and exit the managed host",
+        "description": "HTTP only. Freezes new controls (STOP stays available), requires idle arms and Pika grippers, replies, then rechecks before exiting. A failed recheck cancels the shutdown and is reported in state.backend_restart.last_failure.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "owner": {
+                    "type": "string",
+                    "description": "Dashboard client ID. A session-owned managed host requires its plugin owner."
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Shutdown accepted; the process exits after this response"
+          },
+          "409": {
+            "description": "A control request, arm motion, query or gripper movement is active, or maintenance is already in progress"
+          }
+        }
+      }
+    },
+    "/api/maintenance/restart": {
+      "x-piper-backend": "managed",
+      "post": {
+        "summary": "Restart a supervised or plugin-owned managed host in monitoring mode",
+        "description": "Requires the exact backend_process_id and backend_instance_id from state, the current owner, and release_grippers=true because restart releases Pika holding torque. Arm power is unchanged and STOP/recovery stays latched. The host freezes new controls, verifies idle stationary hardware, replies 202, rechecks after the response drains and exits with code 75. No target is replayed.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "owner",
+                  "backend_process_id",
+                  "backend_instance_id",
+                  "release_grippers"
+                ],
+                "properties": {
+                  "owner": {
+                    "type": "string",
+                    "description": "Dashboard client ID. A session-owned managed host requires its plugin owner."
+                  },
+                  "backend_process_id": {
+                    "type": "integer"
+                  },
+                  "backend_instance_id": {
+                    "type": "string"
+                  },
+                  "release_grippers": {
+                    "const": true
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Restart accepted"
+          },
+          "409": {
+            "description": "Unsupported, stale identity, missing acknowledgement, or hardware not idle"
+          }
+        }
+      }
+    },
+    "/api/pika/state": {
+      "x-piper-backend": "managed",
+      "get": {
+        "summary": "Read one Pika session snapshot with raw evidence",
+        "security": [],
+        "parameters": [
+          {
+            "name": "pika_device",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "description": "Omitted means the assigned default gripper"
+          },
+          {
+            "name": "pika_distribution",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "description": "Omitted means the current assignment"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Session snapshot; an unregistered device reports connected=false"
+          }
+        }
+      }
+    },
+    "/api/pika/devices": {
+      "x-piper-backend": "managed",
+      "get": {
+        "summary": "List attached Pika grippers without opening them",
+        "responses": {
+          "200": {
+            "description": "Inventory; empty in simulation"
+          },
+          "409": {
+            "description": "Discovery failed"
+          }
+        },
+        "security": [],
+        "parameters": [
+          {
+            "name": "distribution",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "description": "Omitted means the current assignment"
+          }
+        ]
+      },
+      "post": {
+        "summary": "List attached Pika grippers without opening them",
+        "responses": {
+          "200": {
+            "description": "Inventory; empty in simulation"
+          },
+          "409": {
+            "description": "Discovery failed"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "pika_distribution": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "description": "WSL distribution; null means native Linux serial. Omitted means the current assignment."
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/pika/{action}": {
+      "x-piper-backend": "managed",
+      "post": {
+        "summary": "Configure, connect or command one Pika gripper session",
+        "description": "Each physical gripper has its own session; selecting an arm never changes another gripper. configure registers an assignment without opening the port and is refused while an arm moves. Motor actions require the owner that connected. In simulation every action except devices is rejected with 409.",
+        "parameters": [
+          {
+            "name": "action",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "configure",
+                "connect",
+                "disconnect",
+                "heartbeat",
+                "enable",
+                "disable",
+                "position",
+                "hold",
+                "resume-hold",
+                "follow-start",
+                "follow-update"
+              ]
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "owner"
+                ],
+                "properties": {
+                  "owner": {
+                    "type": "string",
+                    "description": "Dashboard client ID. A session-owned managed host requires its plugin owner."
+                  },
+                  "pika_device": {
+                    "type": "string",
+                    "description": "Linux Pika device identity, e.g. /dev/pika/by-host/1-2"
+                  },
+                  "pika_distribution": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "description": "WSL distribution; null means native Linux serial. Omitted means the current assignment."
+                  },
+                  "device": {
+                    "type": "string",
+                    "description": "configure: the new assignment; empty clears it"
+                  },
+                  "distribution": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "description": "configure: the new distribution"
+                  },
+                  "value": {
+                    "type": "number",
+                    "description": "position: target opening"
+                  },
+                  "clear": {
+                    "type": "boolean"
+                  },
+                  "take_over": {
+                    "type": "boolean"
+                  },
+                  "read_only_adopt": {
+                    "type": "boolean"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Action result"
+          },
+          "400": {
+            "description": "Invalid input"
+          },
+          "409": {
+            "description": "Ownership, power evidence, assignment or transport prerequisite failed"
+          }
+        }
+      }
+    },
+    "/api/openapi.json": {
+      "x-piper-backend": "both",
+      "get": {
+        "summary": "Read this API description",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "OpenAPI 3.1 document",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
           }
         }
       }
@@ -358,7 +718,7 @@
             "properties": {
               "action": {
                 "type": "string",
-                "description": "teach-return explicitly returns completed physical teaching to CAN. Qualified H-V1.2-1 with S-V1.8-5 through S-V1.8-9 or S-V1.9-0/1 firmware uses a frozen measured-pose hold: confirm button_off, same_pose_confirmed, supported and clear. Fresh healthy joint/motor encoders, current configuration, all six motors already enabled and a stationary pose are required. Three measured position packets seed the hold, then a fresh receive observation precedes CAN MoveJ plus the same six measured angles at 1% speed; completion requires fresh same-pose status, joint and motor acknowledgement. Other supported firmware requires zero_pose_confirmed, all joints within 1 degree of zero and within limits, then acknowledged standby/CAN mode packets. recover-at-pose uses only the qualified measured-pose path to clear a saved software obstruction after the backend observes a new physical hand-guiding-to-off cycle on this device/generation within 120 seconds. Reset-pending, real fault/transport evidence, stale feedback, out-of-range pose or missing cycle reject without transmission. The incident stays latched until the hold is acknowledged and saved. Neither action resets, changes motor power, homes or replays an old target. Both return 202/request_id and require the normal control heartbeat during the bounded handoff. Connection/lease/mode changes cancel; unexpected movement requests protective STOP. device.teaching exposes can_return/return_reason and can_recover_at_pose/recover_at_pose_reason.",
+                "description": "teach-return explicitly returns completed physical teaching to CAN. Qualified H-V1.2-1 with S-V1.8-5 through S-V1.8-9 or S-V1.9-0/1 firmware uses a frozen measured-pose hold: confirm button_off, same_pose_confirmed, supported and clear. Fresh healthy joint/motor encoders, current configuration, all six motors already enabled and a stationary pose are required. Three measured position packets seed the hold, then a fresh receive observation precedes CAN MoveJ plus the same six measured angles at 1% speed; completion requires fresh same-pose status, joint and motor acknowledgement. Other supported firmware requires zero_pose_confirmed, all joints within 1 degree of zero and within limits, then acknowledged standby/CAN mode packets. recover-at-pose uses only the qualified measured-pose path to clear a saved software obstruction after the backend observes a new physical hand-guiding-to-off cycle on this device/generation within 120 seconds. Reset-pending, real fault/transport evidence, stale feedback, out-of-range pose or missing cycle reject without transmission. The incident stays latched until the hold is acknowledged and saved. Neither action resets, changes motor power, homes or replays an old target. Both return 202/request_id and require the normal control heartbeat during the bounded handoff. Connection/lease/mode changes cancel; unexpected movement requests protective STOP. device.teaching exposes can_return/return_reason and can_recover_at_pose/recover_at_pose_reason. verify-current requires clear=true and supported=true; it clears the recovery record without CAN transmission only when the drivers are healthy, stationary and in one consistent power state, and never clears a pending reset. move-to-zero moves all six joints to 0 degrees under the normal move checks. follow-start opens a leased following session at fresh measurements without replaying any target. follow-update sends the latest six-angle target with an increasing sequence and the session request_id; input older than 250 ms holds the measured pose. follow-commit moves to its final target, and follow-end holds the measured pose with motors enabled.",
                 "enum": [
                   "enable",
                   "disable",
@@ -374,7 +734,13 @@
                   "verify-disabled",
                   "cycle",
                   "teach-return",
-                  "recover-at-pose"
+                  "recover-at-pose",
+                  "verify-current",
+                  "move-to-zero",
+                  "follow-start",
+                  "follow-update",
+                  "follow-commit",
+                  "follow-end"
                 ]
               },
               "owner": {
@@ -600,6 +966,31 @@
                 }
               }
             }
+          }
+        }
+      },
+      "CoordinatedStop": {
+        "type": "object",
+        "properties": {
+          "ok": {
+            "type": "boolean"
+          },
+          "arm": {
+            "$ref": "#/components/schemas/StopChannel"
+          },
+          "pika": {
+            "$ref": "#/components/schemas/StopChannel"
+          }
+        }
+      },
+      "StopChannel": {
+        "type": "object",
+        "properties": {
+          "ok": {
+            "type": "boolean"
+          },
+          "message": {
+            "type": "string"
           }
         }
       }
