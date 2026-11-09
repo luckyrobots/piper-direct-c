@@ -19,6 +19,8 @@ internal static class ControllerEndpoint
 
 public static class BackendGuards
 {
+    private static readonly TimeSpan PortProbeTimeout = TimeSpan.FromMilliseconds(500);
+
     public static bool IsOwned(JsonNode snapshot, int processId, string? sessionToken) =>
         snapshot["backend_process_id"]?.GetValue<int>() == processId &&
         !string.IsNullOrEmpty(snapshot["token"]?.GetValue<string>()) &&
@@ -28,7 +30,7 @@ public static class BackendGuards
     {
         using var client = new TcpClient();
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellation);
-        deadline.CancelAfter(TimeSpan.FromMilliseconds(500));
+        deadline.CancelAfter(PortProbeTimeout);
         try { await client.ConnectAsync("127.0.0.1", port, deadline.Token); return true; }
         catch (SocketException) { return false; }
         catch (OperationCanceledException) when (!cancellation.IsCancellationRequested) { return false; }

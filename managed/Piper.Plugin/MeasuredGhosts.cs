@@ -13,6 +13,7 @@ public sealed partial class PipersPlugin
     internal GhostCapabilities? ghostCapabilities;
     private long ghostCapabilityAttempt;
     private const double GhostProbeBackoffSeconds = 5;
+    private const int GhostVisibilityTimeoutMilliseconds = 500;
     internal bool? publishedGhostVisibility;
     private readonly Dictionary<PikaDisplayReferenceKey, PikaClosedDisplayReference?> ghostDisplayReferences = new();
 
@@ -47,7 +48,7 @@ public sealed partial class PipersPlugin
         // Unknown and backing off: leave publishedGhostVisibility unset so it is retried.
         if (await ProbeGhostCapabilities(cancellation) is not { } capabilities) return;
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellation);
-        timeout.CancelAfter(500);
+        timeout.CancelAfter(GhostVisibilityTimeoutMilliseconds);
         if (capabilities.Visibility)
             await engine.RequestAsync("robot.ghost.visibility", new JsonObject { ["visible"] = visible }, timeout.Token);
         // Older hosts expire an unpublished overlay naturally. No visibility

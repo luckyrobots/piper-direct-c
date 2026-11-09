@@ -128,7 +128,8 @@ public sealed partial class PipersPlugin
         RequireCalibrationIdle();
         var identity = HeightContext();
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellation);
-        deadline.CancelAfter(TimeSpan.FromMilliseconds(500));
+        // A capture slower than the freshness window is rejected anyway.
+        deadline.CancelAfter(TimeSpan.FromMilliseconds(TelemetryReceipt.MaximumAgeMilliseconds));
         var capture = await ReadCalibrationPose(identity, calibrationApplied, handGuiding: false, deadline.Token);
         if (!heightCheckActive || identity != HeightContext()) throw new InvalidOperationException("The robot changed while measuring. Check another pose.");
         heightFrozen = new(identity, calibrationDesk, capture, DateTimeOffset.UtcNow, Path.GetFileName(calibrationPath));
