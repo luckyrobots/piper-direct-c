@@ -64,18 +64,18 @@ static void run_case(double measured,const char *action,unsigned joint,double de
     CHECK(status==expected);
     cJSON_Delete(reply); cJSON_Delete(body);
     if (expected==202) {
-        if (LANE(&c)->range_followup) {
+        if ((LANE(&c)->stage==STAGE_ALIGN_FOLLOWUP)) {
             CHECK(LANE(&c)->op==OP_ALIGN && LANE(&c)->speed_percent==1);
             if (!strcmp(action,"pose")||!strcmp(action,"move-to-zero"))
                 for (unsigned i=0;i<6;++i) CHECK(LANE(&c)->range_followup_target[i]==0);
         } else if (!strcmp(action,"pose")) {
-            CHECK(LANE(&c)->synchronized_pose);
+            CHECK((LANE(&c)->stage==STAGE_MOVE_SYNCHRONIZED));
             for (unsigned i=0;i<6;++i) CHECK(LANE(&c)->target[i]==0);
         } else if (joint!=5) CHECK(LANE(&c)->target[4]==copysign(70,measured));
         else if (!strcmp(action,"jog")) CHECK(fabs(LANE(&c)->target[4]-(copysign(70,measured)+degrees))<1e-9);
         now=LANE(&c)->started;
         for (unsigned tick=0;tick<500&&LANE(&c)->op!=OP_IDLE;++tick) {
-            bool seed=LANE(&c)->position_seed_pending;
+            bool seed=(LANE(&c)->pose_phase==POSE_SEEDING);
             now+=.03; LANE(&c)->heartbeat=now; controller_tick(&c,now);
             /* Only the one-shot unchanged measured hold may preserve the
                admitted boundary overrun. Every moving target remains legal. */

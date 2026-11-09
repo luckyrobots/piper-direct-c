@@ -123,7 +123,7 @@ int main(void)
        so a later STOP cannot report a stale following session. */
     cJSON *record=cJSON_GetObjectItem(cJSON_GetObjectItem(c.saved,"devices"),c.bus.devices[0].id);
     CHECK(cJSON_IsTrue(cJSON_GetObjectItem(cJSON_GetObjectItem(record,"stop_event"),"following")));
-    CHECK(LANE(&c)->follow!=FOLLOW_LIVE&&LANE(&c)->follow!=FOLLOW_COMMITTED&&!LANE(&c)->trajectory_follow&&!LANE(&c)->synchronized_pose);
+    CHECK(LANE(&c)->follow!=FOLLOW_LIVE&&LANE(&c)->follow!=FOLLOW_COMMITTED&&!(LANE(&c)->stage==STAGE_MOVE_TRAJECTORY)&&!(LANE(&c)->stage==STAGE_MOVE_SYNCHRONIZED));
     cJSON_ReplaceItemInObject(record,"stop_event_active",cJSON_CreateFalse());
     controller_stop(&c,"Second stop after recovery.");
     CHECK(cJSON_IsFalse(cJSON_GetObjectItem(cJSON_GetObjectItem(record,"stop_event"),"following")));

@@ -6,19 +6,31 @@
 
 /* Lane operation machine (C-A). op is the top-level phase and stage refines it:
      OP_IDLE --admission--> ENABLE | DISABLE | RESET | GRIPPER | MOVE | ALIGN | CYCLE | TEACH_RETURN
-     ALIGN with range_followup --verified range entry--> MOVE
+     ALIGN:  STAGE_NONE (range entry only), or
+             STAGE_ALIGN_FOLLOWUP --verified range entry--> MOVE + STAGE_MOVE_SYNCHRONIZED
+     MOVE:   STAGE_NONE (lead-limited ramp, or position following),
+             STAGE_MOVE_SYNCHRONIZED (all joints interpolated along one leg),
+             STAGE_MOVE_TRAJECTORY (bounded trajectory following, FOLLOW_LIVE only)
      CYCLE:  STAGE_CYCLE_RAISING -> STAGE_CYCLE_UPRIGHT -> STAGE_CYCLE_RETURNING -> IDLE
              (hold during CYCLE -> MOVE with STAGE_NONE)
      TEACH_RETURN, legacy:   STAGE_TEACH_STANDBY -> STAGE_TEACH_CAN -> IDLE
      TEACH_RETURN, seamless: STAGE_TEACH_SEEDED -> STAGE_TEACH_MODE -> IDLE
      MOVE follow:  FOLLOW_LIVE --follow-commit--> FOLLOW_COMMITTED; otherwise FOLLOW_NONE
-   Every exit to OP_IDLE goes through lane_go_idle(), and lane_check() asserts
-   that stage, follow and the remaining mode flags agree with op. */
+   The position-controlled ops (MOVE, ALIGN, CYCLE) also carry pose_phase:
+     POSE_SEEDING --frozen pose seed sent--> POSE_TRACKING
+     POSE_TRACKING --MCU busy inside tolerance--> POSE_ARRIVAL_HOLD (MOVE, ALIGN)
+     POSE_ARRIVAL_HOLD --hold or new leg--> POSE_TRACKING
+   Every other op has POSE_NONE. recovering_at_pose is payload of a seamless
+   TEACH_RETURN (recover-at-pose), not a phase.
+   Every exit to OP_IDLE goes through lane_go_idle(). lane_check() verifies the
+   combinations these enums cannot express and stops the lane if one breaks. */
 enum operation { OP_IDLE, OP_ENABLE, OP_MOVE, OP_ALIGN, OP_CYCLE, OP_GRIPPER, OP_DISABLE, OP_RESET, OP_TEACH_RETURN };
 enum lane_stage {
     STAGE_NONE, STAGE_CYCLE_RAISING, STAGE_CYCLE_UPRIGHT, STAGE_CYCLE_RETURNING,
-    STAGE_TEACH_STANDBY, STAGE_TEACH_CAN, STAGE_TEACH_SEEDED, STAGE_TEACH_MODE
+    STAGE_TEACH_STANDBY, STAGE_TEACH_CAN, STAGE_TEACH_SEEDED, STAGE_TEACH_MODE,
+    STAGE_ALIGN_FOLLOWUP, STAGE_MOVE_SYNCHRONIZED, STAGE_MOVE_TRAJECTORY
 };
+enum pose_phase { POSE_NONE, POSE_SEEDING, POSE_TRACKING, POSE_ARRIVAL_HOLD };
 enum follow_phase { FOLLOW_NONE, FOLLOW_LIVE, FOLLOW_COMMITTED };
 /* Teach-cycle evidence (C-D), volatile and bound to one connection generation:
      NONE -> SEEN        fresh, benign hand-guiding (teach 1, status 11)

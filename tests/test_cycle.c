@@ -87,7 +87,7 @@ int main(void)
     setup(&f); CHECK(request(&f,"cycle")==202); reach_stage(&f,2);
     f.c.bus.devices[0].feedback.limit[1].min=60; tick(&f,true);
     CHECK(LANE(&f.c)->op==OP_IDLE&&strstr(LANE(&f.c)->message,"return pose")); cleanup(&f);
-    setup(&f); CHECK(request(&f,"pose")==202&&LANE(&f.c)->synchronized_pose);
+    setup(&f); CHECK(request(&f,"pose")==202&&(LANE(&f.c)->stage==STAGE_MOVE_SYNCHRONIZED));
     while (LANE(&f.c)->op!=OP_IDLE) {
         tick(&f,true);
         double fraction=(LANE(&f.c)->command[1]-original[1])/10;
@@ -97,8 +97,25 @@ int main(void)
     }
     CHECK(!strcmp(LANE(&f.c)->phase,"complete")); cleanup(&f);
     setup(&f); CHECK(request(&f,"pose")==202);
-    CHECK(request(&f,"hold")==202&&!LANE(&f.c)->synchronized_pose);
+    CHECK(request(&f,"hold")==202&&!(LANE(&f.c)->stage==STAGE_MOVE_SYNCHRONIZED));
     for (unsigned i=0;i<100&&LANE(&f.c)->op!=OP_IDLE;++i) tick(&f,true);
     CHECK(LANE(&f.c)->op==OP_IDLE&&!strcmp(LANE(&f.c)->phase,"complete")); cleanup(&f);
+    /* A broken C-A invariant on a live lane fails safe after a tick: STOP,
+       a latched record, and the process keeps running. */
+    setup(&f); CHECK(request(&f,"cycle")==202);
+    LANE(&f.c)->stage=STAGE_MOVE_SYNCHRONIZED; /* not a CYCLE stage */
+    tick(&f,true);
+    CHECK(LANE(&f.c)->op==OP_IDLE&&!strcmp(LANE(&f.c)->phase,"stopped")&&strstr(LANE(&f.c)->message,"inconsistent")&&LANE(&f.c)->stop_delivered);
+    CHECK(!strcmp(cJSON_GetStringValue(cJSON_GetObjectItem(cJSON_GetObjectItem(cJSON_GetObjectItem(f.c.saved,"devices"),f.c.bus.devices[0].id),"state")),"latched"));
+    cleanup(&f);
+    /* After an action, the reply reports the failure instead of its result. */
+    setup(&f); LANE(&f.c)->pose_phase=POSE_ARRIVAL_HOLD; /* idle lane */
+    {
+        struct can_device *d=&f.c.bus.devices[0]; cJSON *j=cJSON_CreateObject(); int status;
+        cJSON_AddStringToObject(j,"device_id",d->id); cJSON_AddNumberToObject(j,"generation",d->generation);
+        cJSON *r=controller_action(&f.c,"/api/heartbeat",j,&status); cJSON_Delete(r); cJSON_Delete(j);
+        CHECK(status==500&&LANE(&f.c)->pose_phase==POSE_NONE&&!strcmp(LANE(&f.c)->phase,"stopped"));
+    }
+    cleanup(&f);
     puts("Cycle passed: full upright/pause/return, captured pose, fixed axes, bounded synchronized steps, Stop in all phases, Hold, lease loss, invalid presets/start/return limits.");
 }

@@ -55,7 +55,7 @@ int main(void)
     unsigned long long tx_before=c.bus.devices[0].tx;
     cJSON *streamed=request(&c,"follow-start",true); cJSON_AddStringToObject(streamed,"trajectory_transport","streamed-position");
     action(&c,streamed,409); CHECK(LANE(&c)->op==OP_IDLE&&c.bus.devices[0].tx==tx_before);
-    action(&c,request(&c,"follow-start",true),202); CHECK(LANE(&c)->trajectory_follow&&LANE(&c)->follow==FOLLOW_LIVE);
+    action(&c,request(&c,"follow-start",true),202); CHECK((LANE(&c)->stage==STAGE_MOVE_TRAJECTORY)&&LANE(&c)->follow==FOLLOW_LIVE);
     cJSON *update=request(&c,"follow-update",false);
     cJSON_AddNumberToObject(update,"sequence",1); double goal[6]={8,-8,8,-8,8,-8};
     cJSON_AddItemToObject(update,"degrees",cJSON_CreateDoubleArray(goal,6)); action(&c,update,202);
@@ -70,7 +70,7 @@ int main(void)
         if (n==540) for (unsigned i=0;i<6;++i) LANE(&c)->target[i]=.07;
         now=tick(&c,now,dt);
         if (LANE(&c)->op!=OP_MOVE) fprintf(stderr,"tick %u: %s\n",n,LANE(&c)->message);
-        CHECK(LANE(&c)->op==OP_MOVE&&LANE(&c)->trajectory_follow);
+        CHECK(LANE(&c)->op==OP_MOVE&&(LANE(&c)->stage==STAGE_MOVE_TRAJECTORY));
         double actual_dt=LANE(&c)->trajectory_previous_dt,midpoint=previous_dt>0?(previous_dt+actual_dt)/2:actual_dt;
         for (unsigned i=0;i<6;++i) {
             double velocity=(LANE(&c)->command[i]-before[i])/actual_dt;
@@ -88,7 +88,7 @@ int main(void)
     CHECK(cJSON_IsTrue(cJSON_GetObjectItem(motion,"trajectory_follow")));
     CHECK(cJSON_GetArraySize(cJSON_GetObjectItem(motion,"reference_velocity_deg_s"))==6); cJSON_Delete(state);
     test_clock=LANE(&c)->follow_updated+.251; controller_tick(&c,test_clock);
-    CHECK(LANE(&c)->op==OP_IDLE&&!LANE(&c)->trajectory_follow&&c.bus.sim_enabled==63&&strstr(LANE(&c)->message,"expired"));
+    CHECK(LANE(&c)->op==OP_IDLE&&!(LANE(&c)->stage==STAGE_MOVE_TRAJECTORY)&&c.bus.sim_enabled==63&&strstr(LANE(&c)->message,"expired"));
     cleanup(&c,directory);
 
     char boundary[]="/tmp/piper-trajectory-boundary-XXXXXX"; setup(&c,boundary);
@@ -97,7 +97,7 @@ int main(void)
         for (unsigned i=0;i<6;++i) LANE(&c)->target[i]=n<500?12:-12;
         now=tick(&c,now,.025);
         if (LANE(&c)->op!=OP_MOVE) fprintf(stderr,"boundary tick %u: J6 cmd %.9f vel %.9f actual %.9f\n",n,LANE(&c)->command[5],LANE(&c)->trajectory_velocity[5],c.bus.devices[0].feedback.arm[0].deg[5]);
-        CHECK(LANE(&c)->op==OP_MOVE&&LANE(&c)->trajectory_follow);
+        CHECK(LANE(&c)->op==OP_MOVE&&(LANE(&c)->stage==STAGE_MOVE_TRAJECTORY));
         for (unsigned i=0;i<6;++i) CHECK(LANE(&c)->command[i]>=-12&&LANE(&c)->command[i]<=12);
     }
     for (unsigned i=0;i<6;++i) CHECK(fabs(LANE(&c)->command[i]+12)<.003);
@@ -107,11 +107,11 @@ int main(void)
     action(&c,request(&c,"follow-start",true),202);
     LANE(&c)->target[0]=5; now=tick(&c,LANE(&c)->last_tick,.025);
     c.bus.devices[0].feedback.acceleration[0].max=.2;
-    tick(&c,now,.025); CHECK(LANE(&c)->op==OP_IDLE&&!LANE(&c)->trajectory_follow&&strstr(LANE(&c)->message,"limits changed")); cleanup(&c,changed);
+    tick(&c,now,.025); CHECK(LANE(&c)->op==OP_IDLE&&!(LANE(&c)->stage==STAGE_MOVE_TRAJECTORY)&&strstr(LANE(&c)->message,"limits changed")); cleanup(&c,changed);
 
     char stale[]="/tmp/piper-trajectory-stale-XXXXXX"; setup(&c,stale);
     action(&c,request(&c,"follow-start",true),202); c.bus.devices[0].feedback.acceleration[3].seen=false;
-    tick(&c,LANE(&c)->last_tick,.025); CHECK(LANE(&c)->op==OP_IDLE&&!LANE(&c)->trajectory_follow&&strstr(LANE(&c)->message,"limits changed")); cleanup(&c,stale);
+    tick(&c,LANE(&c)->last_tick,.025); CHECK(LANE(&c)->op==OP_IDLE&&!(LANE(&c)->stage==STAGE_MOVE_TRAJECTORY)&&strstr(LANE(&c)->message,"limits changed")); cleanup(&c,stale);
 
     char range[]="/tmp/piper-trajectory-range-XXXXXX"; setup(&c,range);
     c.bus.devices[0].feedback.arm[0].deg[0]=-12.05;
@@ -123,18 +123,18 @@ int main(void)
     c.bus.devices[0].feedback.acceleration[0].max=.5;
     cJSON *bad=request(&c,"follow-start",false); cJSON_AddStringToObject(bad,"trajectory","yes"); action(&c,bad,400);
     action(&c,request(&c,"pose",true),400); CHECK(LANE(&c)->op==OP_IDLE);
-    action(&c,request(&c,"follow-start",false),202); CHECK(!LANE(&c)->trajectory_follow); cleanup(&c,invalid);
+    action(&c,request(&c,"follow-start",false),202); CHECK(!(LANE(&c)->stage==STAGE_MOVE_TRAJECTORY)); cleanup(&c,invalid);
 
     char fault[]="/tmp/piper-trajectory-fault-XXXXXX"; setup(&c,fault);
     action(&c,request(&c,"follow-start",true),202); LANE(&c)->target[0]=4;
     now=tick(&c,LANE(&c)->last_tick,.025); c.bus.devices[0].feedback.arm[0].arm_status=1;
-    tick(&c,now,.025); CHECK(LANE(&c)->op==OP_IDLE&&!LANE(&c)->trajectory_follow); cleanup(&c,fault);
+    tick(&c,now,.025); CHECK(LANE(&c)->op==OP_IDLE&&!(LANE(&c)->stage==STAGE_MOVE_TRAJECTORY)); cleanup(&c,fault);
 
     char delayed[]="/tmp/piper-trajectory-delayed-XXXXXX"; setup(&c,delayed);
     action(&c,request(&c,"follow-start",true),202); LANE(&c)->target[0]=4;
     now=tick(&c,LANE(&c)->last_tick,.025); uint64_t before_hold=c.bus.devices[0].tx;
     now=tick(&c,now,.053);
-    CHECK(LANE(&c)->op==OP_IDLE&&!LANE(&c)->trajectory_follow&&strstr(LANE(&c)->message,"tick exceeded")&&!strcmp(LANE(&c)->phase,"complete")&&c.bus.sim_enabled==63);
+    CHECK(LANE(&c)->op==OP_IDLE&&!(LANE(&c)->stage==STAGE_MOVE_TRAJECTORY)&&strstr(LANE(&c)->message,"tick exceeded")&&!strcmp(LANE(&c)->phase,"complete")&&c.bus.sim_enabled==63);
     CHECK(c.bus.devices[0].tx-before_hold<=4); /* At most one complete measured hold; no delayed trajectory replay. */
     for (unsigned i=0;i<6;++i) CHECK(LANE(&c)->target[i]==c.bus.devices[0].feedback.arm[0].deg[i]);
     state=controller_state(&c,"test"); cJSON *device=cJSON_GetArrayItem(cJSON_GetObjectItem(state,"devices"),0);
@@ -150,6 +150,6 @@ int main(void)
     for (unsigned n=0;n<100&&LANE(&c)->op!=OP_IDLE;++n) {
         c.bus.sim_target[0]=0; now=tick(&c,now,.025);
     }
-    CHECK(LANE(&c)->op==OP_IDLE&&!LANE(&c)->trajectory_follow); cleanup(&c,lead);
+    CHECK(LANE(&c)->op==OP_IDLE&&!(LANE(&c)->stage==STAGE_MOVE_TRAJECTORY)); cleanup(&c,lead);
     puts("Trajectory following: six encoded-reference speed/acceleration caps, reversal, variable dt, expiry hold, limits/fault cancellation and legacy isolation passed.");
 }

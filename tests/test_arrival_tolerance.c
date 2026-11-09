@@ -22,13 +22,13 @@ void __wrap_can_bus_receive(struct can_bus *bus,double now)
     __real_can_bus_receive(bus,now);
     if (injection==NONE) return;
     struct can_device *d=&bus->devices[0];
-    d->feedback.arm[0].motion_status=injection==HOLD_ACK_IDLE&&LANE(subject)->arrival_hold?0:1;
-    if (injection==NONSTATIONARY||(injection==HOLD_UNSTABLE&&LANE(subject)->arrival_hold)) fixture_still(d,now);
-    if (injection==VELOCITY||(injection==HOLD_UNSTABLE&&LANE(subject)->arrival_hold)) d->feedback.motor[0].velocity=.02;
+    d->feedback.arm[0].motion_status=injection==HOLD_ACK_IDLE&&(LANE(subject)->pose_phase==POSE_ARRIVAL_HOLD)?0:1;
+    if (injection==NONSTATIONARY||(injection==HOLD_UNSTABLE&&(LANE(subject)->pose_phase==POSE_ARRIVAL_HOLD))) fixture_still(d,now);
+    if (injection==VELOCITY||(injection==HOLD_UNSTABLE&&(LANE(subject)->pose_phase==POSE_ARRIVAL_HOLD))) d->feedback.motor[0].velocity=.02;
     if (injection==PRETARGET_VELOCITY) d->feedback.motor[0].high_at=LANE(subject)->started;
-    if (injection==STALE||(injection==HOLD_STALE&&LANE(subject)->arrival_hold)) d->feedback.arm[0].joint_at[2]=now-.6;
+    if (injection==STALE||(injection==HOLD_STALE&&(LANE(subject)->pose_phase==POSE_ARRIVAL_HOLD))) d->feedback.arm[0].joint_at[2]=now-.6;
     if (injection==FAULT) d->feedback.motor[1].fault=1;
-    if (injection==HOLD_FROZEN_TIMES&&LANE(subject)->arrival_hold) {
+    if (injection==HOLD_FROZEN_TIMES&&(LANE(subject)->pose_phase==POSE_ARRIVAL_HOLD)) {
         if (!post_hold_timestamp) post_hold_timestamp=now;
         d->feedback.arm[0].status_at=post_hold_timestamp;
         for (unsigned i=0;i<6;++i) { d->feedback.arm[0].joint_at[i]=post_hold_timestamp; d->feedback.motor[i].high_at=post_hold_timestamp; }
@@ -75,8 +75,8 @@ static void cleanup(struct fixture *f)
 static void reach_hold(struct fixture *f)
 {
     setup(f,10,.167); injection=BUSY;
-    for (unsigned i=0;i<60&&!LANE(&f->c)->arrival_hold;++i) tick(f);
-    CHECK(LANE(&f->c)->arrival_hold&&LANE(&f->c)->op==OP_MOVE&&stops==0);
+    for (unsigned i=0;i<60&&!(LANE(&f->c)->pose_phase==POSE_ARRIVAL_HOLD);++i) tick(f);
+    CHECK((LANE(&f->c)->pose_phase==POSE_ARRIVAL_HOLD)&&LANE(&f->c)->op==OP_MOVE&&stops==0);
 }
 int main(void)
 {
@@ -85,9 +85,9 @@ int main(void)
         setup(&f,10,.167); injection=variant?HOLD_ACK_IDLE:BUSY;
         double start=f.now; bool saw_hold=false;
         for (unsigned i=0;i<100&&LANE(&f.c)->op!=OP_IDLE;++i) {
-            tick(&f); if (LANE(&f.c)->arrival_hold) saw_hold=true;
+            tick(&f); if ((LANE(&f.c)->pose_phase==POSE_ARRIVAL_HOLD)) saw_hold=true;
             CHECK(stops==0&&power==0);
-            if (LANE(&f.c)->arrival_hold) CHECK(LANE(&f.c)->command[5]==0&&f.c.bus.sim_target[5]==0);
+            if ((LANE(&f.c)->pose_phase==POSE_ARRIVAL_HOLD)) CHECK(LANE(&f.c)->command[5]==0&&f.c.bus.sim_target[5]==0);
         }
         CHECK(saw_hold&&LANE(&f.c)->op==OP_IDLE&&!strcmp(LANE(&f.c)->phase,"complete"));
         CHECK(f.now-start>=.8&&f.now-start<2 && f.c.bus.sim_enabled==63);
@@ -97,18 +97,18 @@ int main(void)
     for (unsigned variant=0;variant<3;++variant) {
         setup(&f,variant==2?.1:10,.167); injection=variant==0?NONSTATIONARY:variant==1?VELOCITY:BUSY;
         for (unsigned i=0;i<60;++i) tick(&f);
-        CHECK(LANE(&f.c)->op==OP_MOVE&&!LANE(&f.c)->arrival_hold&&stops==0&&power==0);
+        CHECK(LANE(&f.c)->op==OP_MOVE&&!(LANE(&f.c)->pose_phase==POSE_ARRIVAL_HOLD)&&stops==0&&power==0);
         if (variant==2) CHECK(fabs(LANE(&f.c)->command[5]-LANE(&f.c)->target[5])>.0005); /* Not final, despite being inside tolerance. */
         cleanup(&f);
     }
     setup(&f,100,.01); injection=PRETARGET_VELOCITY;
     for (unsigned i=0;i<19;++i) tick(&f);
-    CHECK(LANE(&f.c)->op==OP_MOVE&&!LANE(&f.c)->arrival_hold&&stops==0); /* Recent but pre-target velocity is not arrival evidence. */
+    CHECK(LANE(&f.c)->op==OP_MOVE&&!(LANE(&f.c)->pose_phase==POSE_ARRIVAL_HOLD)&&stops==0); /* Recent but pre-target velocity is not arrival evidence. */
     cleanup(&f);
     for (unsigned variant=0;variant<5;++variant) {
         setup(&f,10,.167); injection=variant==0?STALE:variant==1?FAULT:variant==2?HOLD_STALE:variant==3?HOLD_UNSTABLE:HOLD_FROZEN_TIMES;
         bool saw_hold=false;
-        for (unsigned i=0;i<160&&LANE(&f.c)->op!=OP_IDLE;++i) { tick(&f); if (LANE(&f.c)->arrival_hold) saw_hold=true; }
+        for (unsigned i=0;i<160&&LANE(&f.c)->op!=OP_IDLE;++i) { tick(&f); if ((LANE(&f.c)->pose_phase==POSE_ARRIVAL_HOLD)) saw_hold=true; }
         CHECK(LANE(&f.c)->op==OP_IDLE&&!strcmp(LANE(&f.c)->phase,"stopped")&&stops==1&&power==0);
         CHECK((variant>=2)==saw_hold);
         if (variant==3) CHECK(strstr(LANE(&f.c)->message,"within two seconds"));
@@ -125,10 +125,10 @@ int main(void)
         if (variant==2) LANE(&f.c)->heartbeat=f.now-1;
         if (variant==3) { d->feedback.arm[0].control=2; d->feedback.arm[0].teach=1; d->feedback.arm[0].arm_status=11; }
         f.now+=.025; controller_tick(&f.c,f.now);
-        CHECK(LANE(&f.c)->op==OP_IDLE&&!LANE(&f.c)->arrival_hold);
+        CHECK(LANE(&f.c)->op==OP_IDLE&&!(LANE(&f.c)->pose_phase==POSE_ARRIVAL_HOLD));
         uint64_t tx=d->tx;
         for (unsigned i=0;i<20;++i) { f.now+=.025; controller_tick(&f.c,f.now); }
-        CHECK(LANE(&f.c)->op==OP_IDLE&&!LANE(&f.c)->arrival_hold&&d->tx==tx);
+        CHECK(LANE(&f.c)->op==OP_IDLE&&!(LANE(&f.c)->pose_phase==POSE_ARRIVAL_HOLD)&&d->tx==tx);
         cleanup(&f);
     }
     reach_hold(&f);
@@ -141,7 +141,7 @@ int main(void)
     cJSON_AddStringToObject(hold,"owner","arrival-tolerance-regression"); cJSON_AddStringToObject(hold,"action","hold");
     cJSON_AddNumberToObject(hold,"request_id",LANE(&f.c)->request_id);
     int status; cJSON *reply=controller_action(&f.c,"/api/command",hold,&status);
-    CHECK(status==202&&LANE(&f.c)->op==OP_MOVE&&!LANE(&f.c)->arrival_hold&&stops==0&&LANE(&f.c)->target[5]==0);
+    CHECK(status==202&&LANE(&f.c)->op==OP_MOVE&&!(LANE(&f.c)->pose_phase==POSE_ARRIVAL_HOLD)&&stops==0&&LANE(&f.c)->target[5]==0);
     cJSON_Delete(reply); cJSON_Delete(hold); cleanup(&f);
     puts("Arrival tolerance passed: latched MCU busy completes only after final fresh stationary/velocity checks and a verified measured hold; moving/nonfinal/stale/fault/unstable cases reject and 500ms obstruction remains active.");
 }
