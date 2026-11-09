@@ -146,7 +146,7 @@ string? HandleCommand(string action, string id, JsonElement command)
                 throw new InvalidOperationException("Fresh enabled feedback, live client and an idle gripper are required");
             double angle = command.GetProperty("value").GetDouble(), width = PikaProtocol.Width(angle);
             if (!PikaProtocol.ValidAngle(angle) || !PikaProtocol.ValidOpening(width))
-                throw new InvalidOperationException("Opening target must be within 0–90 mm");
+                throw new InvalidOperationException($"Opening target must be within {PikaProtocol.MinimumOpeningMm:0}–{PikaProtocol.MaximumOpeningMm:0} mm");
             following.Cancel("Ordinary Pika position command.", Now());
             powerFeedback = null;
             Write(PikaCommand.Position, angle); targetAngle = angle; lastTargetAt = Now(); targetWidth = width; stepAt = Now();

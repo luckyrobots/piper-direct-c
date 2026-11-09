@@ -398,7 +398,7 @@ public sealed class PikaProcessService : IPikaSession
             if (!input.TryGetProperty("follow_session", out var session) || session.ValueKind != JsonValueKind.String ||
                 !input.TryGetProperty("sequence", out var sequence) || sequence.ValueKind != JsonValueKind.Number || !sequence.TryGetInt64(out long nextSequence) || nextSequence <= 0 ||
                 !input.TryGetProperty("opening_mm", out var opening) || opening.ValueKind != JsonValueKind.Number || !opening.TryGetDouble(out double nextOpening) || !PikaProtocol.ValidOpening(nextOpening))
-                throw new ArgumentException("Pika follow-update needs its session, a positive integer sequence and an opening within 0–90 mm.");
+                throw new ArgumentException($"Pika follow-update needs its session, a positive integer sequence and an opening within {PikaProtocol.MinimumOpeningMm:0}–{PikaProtocol.MaximumOpeningMm:0} mm.");
             command["follow_session"] = session.GetString();
             command["sequence"] = nextSequence;
             command["opening_mm"] = nextOpening;

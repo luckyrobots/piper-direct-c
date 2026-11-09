@@ -111,7 +111,7 @@ public sealed class PikaFollowSession
         if (now - lastInput >= InputDeadlineSeconds) { Event("rejected-expired-input", now); throw new InvalidOperationException("Pika following input expired; hold and start a new session."); }
         if (sequence <= 0 || sequence <= Sequence) throw new InvalidOperationException("Discarded an old Pika following target.");
         if (!PikaProtocol.ValidOpening(openingMm))
-            throw new ArgumentOutOfRangeException(nameof(openingMm), "Opening target must be within 0–90 mm.");
+            throw new ArgumentOutOfRangeException(nameof(openingMm), $"Opening target must be within {PikaProtocol.MinimumOpeningMm:0}–{PikaProtocol.MaximumOpeningMm:0} mm.");
         // There is no target queue. A faster producer replaces this one value.
         maximumInputInterval = Math.Max(maximumInputInterval, now - lastInput);
         OpeningMm = openingMm; Sequence = sequence; lastInput = now;
