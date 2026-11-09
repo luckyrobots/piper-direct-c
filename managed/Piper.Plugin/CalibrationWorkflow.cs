@@ -76,13 +76,29 @@ public sealed partial class PipersPlugin
             calibrationIdentity?.ModelAssetId ?? "", calibrationIdentity?.ModelRevision ?? "");
     }
 
+    private async Task<JsonObject> ReadRobotPose(string sceneId, string entityId, CancellationToken cancellation)
+    {
+        var reply = await engine.RequestAsync("robot.read", new JsonObject { ["sceneId"] = sceneId, ["entityId"] = entityId }, cancellation);
+        return JsonNode.Parse(reply.GetRawText())!.AsObject();
+    }
+
+    // Reads the linked robot's pose and requires that the link did not change
+    // during the read and that the reply is a metric pose for its scene entity.
+    private async Task<(RobotLink Link, JsonObject Pose)> ReadMetricPose(string unlinked, string unavailable, CancellationToken cancellation)
+    {
+        var current = link ?? throw new InvalidOperationException(unlinked);
+        var pose = await ReadRobotPose(current.SceneId, current.EntityId, cancellation);
+        if (!ReferenceEquals(link, current) || !CalibrationPose.IsMetric(pose, current.SceneId, current.EntityId))
+            throw new InvalidOperationException(unavailable);
+        return (current, pose);
+    }
+
     private async Task<CalibrationCapture> ReadCalibrationPose(CalibrationIdentity identity, CalibrationPlacement? expectedPlacement, bool handGuiding, CancellationToken cancellation)
     {
         var before = (JsonObject)Device().DeepClone();
         if (CurrentCalibrationIdentity() != identity) throw new InvalidOperationException("Calibration connection changed. Start a new calibration.");
         long start = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-        var reply = await engine.RequestAsync("robot.read", new JsonObject { ["sceneId"] = identity.SceneId, ["entityId"] = identity.RobotId }, cancellation);
-        var pose = JsonNode.Parse(reply.GetRawText())!.AsObject();
+        var pose = await ReadRobotPose(identity.SceneId, identity.RobotId, cancellation);
         var after = Device();
         if (before["joints"]!.AsArray().Zip(after["joints"]!.AsArray()).Any(p => Math.Abs(p.First!["actual_deg"]!.GetValue<double>() - p.Second!["actual_deg"]!.GetValue<double>()) > .05))
             throw new InvalidOperationException("The arm moved during scene measurement. Hold the same point still and capture again.");
@@ -140,8 +156,7 @@ public sealed partial class PipersPlugin
         var session = calibrationIdentity ?? throw new InvalidOperationException("Start a calibration while stationary in physical hand-guiding mode first.");
         if (action == "inspect")
         {
-            var response = await engine.RequestAsync("robot.read", new JsonObject { ["sceneId"] = session.SceneId, ["entityId"] = session.RobotId }, cancellation);
-            var pose = JsonNode.Parse(response.GetRawText())!.AsObject();
+            var pose = await ReadRobotPose(session.SceneId, session.RobotId, cancellation);
             if (ActiveProfile.Id != session.ProfileId || preferences.RobotId != session.RobotId || pose["sceneId"]?.GetValue<string>() != session.SceneId || pose["entityId"]?.GetValue<string>() != session.RobotId ||
                 pose["modelAssetId"]?.GetValue<string>() != session.ModelAssetId || pose["modelRevision"]?.GetValue<string>() != session.ModelRevision)
                 throw new InvalidOperationException("The selected robot changed while checking placement; no scene write was sent.");

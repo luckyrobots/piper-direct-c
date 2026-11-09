@@ -5,6 +5,48 @@ using System.Text.Json.Serialization;
 
 namespace LuckyRobots.Piper.Plugin;
 
+/// <summary>The feedback health every calibration and height-check read requires.</summary>
+public static class DeviceHealth
+{
+    /// <summary>Fresh device, no controller error, and six fresh joints without a driver fault.</summary>
+    public static bool IsHealthy(JsonObject? device) => device?["fresh"]?.GetValue<bool>() == true && device["status"]?["error"]?.GetValue<int>() == 0 &&
+        device["joints"] is JsonArray { Count: 6 } joints && joints.All(j => j?["fresh"]?.GetValue<bool>() == true && j["fault"]?.GetValue<int>() == 0);
+}
+
+/// <summary>Checks shared by every read of the engine's robot.read pose reply.</summary>
+public static class CalibrationPose
+{
+    /// <summary>The pose is for this scene entity, in engine-world Y-up metres.</summary>
+    public static bool IsMetric(JsonObject pose, string sceneId, string entityId) =>
+        pose["sceneId"]?.GetValue<string>() == sceneId && pose["entityId"]?.GetValue<string>() == entityId &&
+        pose["metricPlacementSupported"]?.GetValue<bool>() == true && pose["metricFrame"]?.GetValue<string>() == "engine-world-y-up";
+
+    /// <summary>Requires the scene's six arm joints to echo the measured angles within 0.01 degrees.</summary>
+    public static void RequireJointsEcho(JsonObject pose, double[] measuredDegrees, string missing, string mismatch)
+    {
+        if (measuredDegrees.Length != 6 || measuredDegrees.Any(x => !double.IsFinite(x)) || pose["joints"] is not JsonArray sceneJoints)
+            throw new InvalidOperationException(missing);
+        for (int i = 0; i < 6; i++)
+        {
+            var matches = sceneJoints.Where(j => j?["name"]?.GetValue<string>() == "joint" + (i + 1)).ToArray();
+            if (matches.Length != 1 || matches[0]?["unit"]?.GetValue<string>() != "rad" ||
+                matches[0]?["position"]?.GetValue<double>() is not double angle || !double.IsFinite(angle) || Math.Abs(angle * 180 / Math.PI - measuredDegrees[i]) > .01)
+                throw new InvalidOperationException(mismatch);
+        }
+    }
+
+    /// <summary>Reads the one metric tool site with this exact name.</summary>
+    public static CalibrationPoint ReadToolSite(JsonObject pose, string siteName, string ambiguous, string nonFinite)
+    {
+        var sites = pose["toolSites"]?.AsArray().Where(s => s?["name"]?.GetValue<string>() == siteName).ToArray() ?? [];
+        if (sites.Length != 1 || sites[0]?["unit"]?.GetValue<string>() != "m" || sites[0]?["position"] is not JsonArray { Count: 3 } xyz)
+            throw new InvalidOperationException(ambiguous);
+        var tool = new CalibrationPoint(xyz[0]!.GetValue<double>(), xyz[1]!.GetValue<double>(), xyz[2]!.GetValue<double>());
+        if (!tool.Finite) throw new InvalidOperationException(nonFinite);
+        return tool;
+    }
+}
+
 public sealed record CalibrationIdentity(string ProfileId, string DeviceId, long Generation, string BackendSessionFingerprint, string SceneId, string RobotId, string ModelAssetId = "", string ModelRevision = "");
 public sealed record CalibrationCapture(CalibrationPoint ToolWorld, CalibrationPlacement Placement, double[] JointDegrees, string PoseFingerprint, string ModelAssetId, string ModelRevision)
 {
@@ -16,9 +58,7 @@ public sealed record CalibrationCapture(CalibrationPoint ToolWorld, CalibrationP
             throw new InvalidOperationException("Robot/profile/backend identity changed. Start a new calibration; old measurements cannot authorize a new connection.");
         bool handGuiding = TeachingState.Inspect(device).HandGuiding;
         int armStatus = device["status"]?["arm_status"]?.GetValue<int>() ?? -1;
-        if (device["fresh"]?.GetValue<bool>() != true || device["status"]?["error"]?.GetValue<int>() != 0 ||
-            armStatus != 0 && !(armStatus == 11 && handGuiding) || device["joints"] is not JsonArray { Count: 6 } joints ||
-            joints.Any(j => j?["fresh"]?.GetValue<bool>() != true || j["fault"]?.GetValue<int>() != 0))
+        if (!DeviceHealth.IsHealthy(device) || armStatus != 0 && !(armStatus == 11 && handGuiding))
             throw new InvalidOperationException("Calibration requires healthy, fresh six-joint feedback and a healthy controller status.");
         if (device["status"]?["stationary_s"]?.GetValue<double>() is not >= .4 || requireHandGuiding && !handGuiding)
             throw new InvalidOperationException("Use the physical teach button (solid green), guide the contact point by hand and hold still for 0.4 seconds. The wizard sends no motion command.");
@@ -27,15 +67,13 @@ public sealed record CalibrationCapture(CalibrationPoint ToolWorld, CalibrationP
     public static CalibrationCapture Read(CalibrationIdentity expected, CalibrationIdentity current, CalibrationDesk desk,
         CalibrationPlacement? expectedPlacement, JsonObject device, JsonObject pose, long requestStartedMs, long nowMs, bool requireHandGuiding = true)
     {
+        // ValidateLive covers the identity, device generation and feedback health.
         ValidateLive(expected, current, device, requireHandGuiding);
-        if (expected != current || device["id"]?.GetValue<string>() != expected.DeviceId || device["generation"]?.GetValue<long>() != expected.Generation ||
-            pose["sceneId"]?.GetValue<string>() != expected.SceneId || pose["entityId"]?.GetValue<string>() != expected.RobotId)
+        if (pose["sceneId"]?.GetValue<string>() != expected.SceneId || pose["entityId"]?.GetValue<string>() != expected.RobotId)
             throw new InvalidOperationException("Robot/profile/backend/scene identity changed. Start a new calibration; old measurements cannot authorize a new connection.");
-        if (nowMs < requestStartedMs || nowMs - requestStartedMs > 500 || device["fresh"]?.GetValue<bool>() != true ||
-            device["status"]?["error"]?.GetValue<int>() != 0 || device["joints"] is not JsonArray { Count: 6 } joints ||
-            joints.Any(j => j?["fresh"]?.GetValue<bool>() != true || j["fault"]?.GetValue<int>() != 0))
+        if (nowMs < requestStartedMs || nowMs - requestStartedMs > 500)
             throw new InvalidOperationException("Capture needs healthy, fresh arm and scene feedback within 500 ms. Hold still and try again.");
-        if (pose["metricPlacementSupported"]?.GetValue<bool>() != true || pose["metricFrame"]?.GetValue<string>() != "engine-world-y-up" ||
+        if (!CalibrationPose.IsMetric(pose, expected.SceneId, expected.RobotId) ||
             pose["modelAssetId"]?.GetValue<string>() is not { Length: > 0 } modelAssetId || pose["modelRevision"]?.GetValue<string>() is not { Length: > 0 } modelRevision)
             throw new InvalidOperationException("This model has no supported engine-world metric placement/FK contract. " + (pose["metricPlacementReason"]?.GetValue<string>() ?? "Update the engine and use a flat, unparented, unit-scale robot model."));
         if (expected.ModelAssetId.Length > 0 && expected.ModelAssetId != modelAssetId || expected.ModelRevision.Length > 0 && expected.ModelRevision != modelRevision)
@@ -43,21 +81,12 @@ public sealed record CalibrationCapture(CalibrationPoint ToolWorld, CalibrationP
         var placement = CalibrationPlacement.Read(pose["rootPlacement"]);
         if (expectedPlacement is not null && !expectedPlacement.Same(placement))
             throw new InvalidOperationException("The scene base placement changed after calibration started. Undo it or start a new calibration before adding/applying points.");
-        double[] measured = joints.Select(j => j!["actual_deg"]!.GetValue<double>()).ToArray();
-        if (measured.Any(x => !double.IsFinite(x)) || pose["joints"] is not JsonArray sceneJoints)
-            throw new InvalidOperationException("Six finite measured and simulated joint readings are required.");
-        for (int i = 0; i < 6; i++)
-        {
-            var matches = sceneJoints.Where(j => j?["name"]?.GetValue<string>() == "joint" + (i + 1)).ToArray();
-            if (matches.Length != 1 || matches[0]?["unit"]?.GetValue<string>() != "rad" ||
-                matches[0]?["position"]?.GetValue<double>() is not double angle || !double.IsFinite(angle) || Math.Abs(angle * 180 / Math.PI - measured[i]) > .01)
-                throw new InvalidOperationException("The simulated joints have not acknowledged the stationary measured pose. Wait, then Capture again.");
-        }
-        var sites = pose["toolSites"]?.AsArray().Where(s => s?["name"]?.GetValue<string>() == desk.ToolPoint).ToArray() ?? [];
-        if (sites.Length != 1 || sites[0]?["unit"]?.GetValue<string>() != "m" || sites[0]?["position"] is not JsonArray { Count: 3 } xyz)
-            throw new InvalidOperationException("The model must expose exactly one named metric tool site '" + desk.ToolPoint + "'. Verify the TCP/model instead of guessing a fingertip or camera origin.");
-        var tool = new CalibrationPoint(xyz[0]!.GetValue<double>(), xyz[1]!.GetValue<double>(), xyz[2]!.GetValue<double>());
-        if (!tool.Finite) throw new InvalidOperationException("The named tool site has no finite world position.");
+        double[] measured = device["joints"]!.AsArray().Select(j => j!["actual_deg"]!.GetValue<double>()).ToArray();
+        CalibrationPose.RequireJointsEcho(pose, measured, "Six finite measured and simulated joint readings are required.",
+            "The simulated joints have not acknowledged the stationary measured pose. Wait, then Capture again.");
+        var tool = CalibrationPose.ReadToolSite(pose, desk.ToolPoint,
+            "The model must expose exactly one named metric tool site '" + desk.ToolPoint + "'. Verify the TCP/model instead of guessing a fingertip or camera origin.",
+            "The named tool site has no finite world position.");
         return new(tool, placement, measured, Fingerprint(pose.ToJsonString()), modelAssetId, modelRevision);
     }
 }

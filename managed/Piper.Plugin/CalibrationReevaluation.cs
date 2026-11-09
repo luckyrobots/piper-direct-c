@@ -45,8 +45,7 @@ public sealed partial class PipersPlugin
     {
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellation);
         deadline.CancelAfter(TimeSpan.FromSeconds(2));
-        var response = await engine.RequestAsync("robot.read", new JsonObject { ["sceneId"] = saved.SceneId, ["entityId"] = saved.RobotId }, deadline.Token);
-        return JsonNode.Parse(response.GetRawText())!.AsObject();
+        return await ReadRobotPose(saved.SceneId, saved.RobotId, deadline.Token);
     }
 
     private void InvalidateReevaluationSetup(string revision)

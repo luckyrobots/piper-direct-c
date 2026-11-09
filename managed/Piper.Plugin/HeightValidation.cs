@@ -43,33 +43,16 @@ public static class HeightValidation
             throw new InvalidOperationException("Confirm the model's jaw-tip midpoint before checking its height.");
         if (!FreshAge(ageMilliseconds, 0) ||
             device["id"]?.GetValue<string>() != expected.DeviceId || device["generation"]?.GetValue<long>() != expected.Generation ||
-            device["fresh"]?.GetValue<bool>() != true || device["status"]?["error"]?.GetValue<int>() != 0 ||
-            device["status"]?["arm_status"]?.GetValue<int>() is not (0 or 11) ||
-            device["joints"] is not JsonArray { Count: 6 } measured ||
-            measured.Any(j => j?["fresh"]?.GetValue<bool>() != true || j?["fault"]?.GetValue<int>() != 0))
+            !DeviceHealth.IsHealthy(device) || device["status"]?["arm_status"]?.GetValue<int>() is not (0 or 11))
             throw new InvalidOperationException("Waiting for fresh, healthy robot feedback.");
-        if (pose["sceneId"]?.GetValue<string>() != expected.SceneId || pose["entityId"]?.GetValue<string>() != expected.RobotId ||
-            pose["modelAssetId"]?.GetValue<string>() != expected.ModelAssetId || pose["modelRevision"]?.GetValue<string>() != expected.ModelRevision ||
-            pose["metricPlacementSupported"]?.GetValue<bool>() != true || pose["metricFrame"]?.GetValue<string>() != "engine-world-y-up")
+        if (!CalibrationPose.IsMetric(pose, expected.SceneId, expected.RobotId) ||
+            pose["modelAssetId"]?.GetValue<string>() != expected.ModelAssetId || pose["modelRevision"]?.GetValue<string>() != expected.ModelRevision)
             throw new InvalidOperationException("Waiting for the matching calibrated scene model.");
         var root = CalibrationPlacement.Read(pose["rootPlacement"]);
         if (!root.Same(expectedPlacement)) throw new InvalidOperationException("The scene base moved after calibration. Check its saved placement first.");
-        var angles = measured.Select(j => j?["actual_deg"]?.GetValue<double>() ?? double.NaN).ToArray();
-        if (angles.Any(a => !double.IsFinite(a)) || pose["joints"] is not JsonArray sceneJoints)
-            throw new InvalidOperationException("Waiting for six measured and simulated joint angles.");
-        for (int i = 0; i < 6; i++)
-        {
-            var matches = sceneJoints.Where(j => j?["name"]?.GetValue<string>() == "joint" + (i + 1)).ToArray();
-            if (matches.Length != 1 || matches[0]?["unit"]?.GetValue<string>() != "rad" ||
-                matches[0]?["position"]?.GetValue<double>() is not double angle || !double.IsFinite(angle) ||
-                Math.Abs(angle * 180 / Math.PI - angles[i]) > .01)
-                throw new InvalidOperationException("Waiting for the simulation to follow the measured joints.");
-        }
-        var sites = pose["toolSites"]?.AsArray().Where(s => s?["name"]?.GetValue<string>() == desk.ToolPoint).ToArray() ?? [];
-        if (sites.Length != 1 || sites[0]?["unit"]?.GetValue<string>() != "m" || sites[0]?["position"] is not JsonArray { Count: 3 } xyz)
-            throw new InvalidOperationException("The current model must expose exactly one metric jaw-tip midpoint.");
-        var tool = new CalibrationPoint(xyz[0]!.GetValue<double>(), xyz[1]!.GetValue<double>(), xyz[2]!.GetValue<double>());
-        if (!tool.Finite) throw new InvalidOperationException("The model's jaw-tip position is invalid.");
+        var angles = device["joints"]!.AsArray().Select(j => j?["actual_deg"]?.GetValue<double>() ?? double.NaN).ToArray();
+        CalibrationPose.RequireJointsEcho(pose, angles, "Waiting for six measured and simulated joint angles.", "Waiting for the simulation to follow the measured joints.");
+        var tool = CalibrationPose.ReadToolSite(pose, desk.ToolPoint, "The current model must expose exactly one metric jaw-tip midpoint.", "The model's jaw-tip position is invalid.");
         return new(tool, root, angles, CalibrationCapture.Fingerprint(pose.ToJsonString()), expected.ModelAssetId, expected.ModelRevision);
     }
 
@@ -107,14 +90,12 @@ public static class HeightValidation
 
     public static bool SameHeldPose(HeightObservation frozen, CalibrationIdentity identity, JsonObject device)
     {
-        if (frozen.Identity != identity || device["fresh"]?.GetValue<bool>() != true ||
+        if (frozen.Identity != identity || !DeviceHealth.IsHealthy(device) ||
             device["id"]?.GetValue<string>() != identity.DeviceId || device["generation"]?.GetValue<long>() != identity.Generation ||
-            device["status"]?["stationary_s"]?.GetValue<double>() is not >= .4 || device["status"]?["error"]?.GetValue<int>() != 0 ||
-            device["status"]?["arm_status"]?.GetValue<int>() is not (0 or 11) ||
-            device["joints"] is not JsonArray { Count: 6 } joints) return false;
+            device["status"]?["stationary_s"]?.GetValue<double>() is not >= .4 || device["status"]?["arm_status"]?.GetValue<int>() is not (0 or 11)) return false;
+        var joints = device["joints"]!.AsArray();
         for (int i = 0; i < 6; i++)
-            if (joints[i]?["fresh"]?.GetValue<bool>() != true || joints[i]?["fault"]?.GetValue<int>() != 0 ||
-                joints[i]?["actual_deg"]?.GetValue<double>() is not double angle || !double.IsFinite(angle) || Math.Abs(angle - frozen.Capture.JointDegrees[i]) > .1)
+            if (joints[i]?["actual_deg"]?.GetValue<double>() is not double angle || !double.IsFinite(angle) || Math.Abs(angle - frozen.Capture.JointDegrees[i]) > .1)
                 return false;
         return true;
     }

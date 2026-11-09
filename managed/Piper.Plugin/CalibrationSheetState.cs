@@ -79,8 +79,7 @@ public sealed partial class PipersPlugin
         if (device is null || device["fresh"]?.GetValue<bool>() != true) return "Waiting for fresh robot feedback. Keep the robot connected.";
         if (!TeachingState.Inspect(device).HandGuiding) return "Single-click the physical teach button for solid green, then move the arm by hand to this cross.";
         if (device["status"]?["stationary_s"]?.GetValue<double>() is not >= .4) return "Touch the cross and hold the arm still for 0.4 seconds.";
-        if (device["status"]?["error"]?.GetValue<int>() != 0 || device["status"]?["arm_status"]?.GetValue<int>() is not (0 or 11) ||
-            device["joints"] is not JsonArray { Count: 6 } joints || joints.Any(j => j?["fresh"]?.GetValue<bool>() != true || j?["fault"]?.GetValue<int>() != 0))
+        if (!DeviceHealth.IsHealthy(device) || device["status"]?["arm_status"]?.GetValue<int>() is not (0 or 11))
             return "Robot feedback reports a controller/joint problem. Review Robot controls before capturing.";
         if (state?["motion"]?["active"]?.GetValue<bool>() == true || followRequest != 0) return "Finish the current movement before capturing.";
         return "";

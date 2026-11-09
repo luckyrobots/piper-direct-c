@@ -13,16 +13,14 @@ public sealed partial class PipersPlugin
     // Reading a visual reference must not fabricate any physical confirmation.
     private async Task<CalibrationPlacement> ReadSheetReference(CancellationToken cancellation)
     {
-        var current = link ?? throw new InvalidOperationException("Link the scene robot first.");
+        if (link is null) throw new InvalidOperationException("Link the scene robot first.");
         var identity = CurrentCalibrationIdentity();
         _ = Device(identity.DeviceId, identity.Generation);
-        var reply = await engine.RequestAsync("robot.read", new JsonObject { ["sceneId"] = current.SceneId, ["entityId"] = current.EntityId }, cancellation);
-        var pose = JsonNode.Parse(reply.GetRawText())!.AsObject();
-        if (!ReferenceEquals(link, current) || identity != CurrentCalibrationIdentity() ||
-            pose["sceneId"]?.GetValue<string>() != current.SceneId || pose["entityId"]?.GetValue<string>() != current.EntityId ||
-            pose["metricPlacementSupported"]?.GetValue<bool>() != true || pose["metricFrame"]?.GetValue<string>() != "engine-world-y-up" ||
+        const string loading = "Wait for the matching metric scene model to load.";
+        var (_, pose) = await ReadMetricPose("Link the scene robot first.", loading, cancellation);
+        if (identity != CurrentCalibrationIdentity() ||
             pose["modelAssetId"]?.GetValue<string>() is not { Length: > 0 } asset || pose["modelRevision"]?.GetValue<string>() is not { Length: > 0 } revision)
-            throw new InvalidOperationException("Wait for the matching metric scene model to load.");
+            throw new InvalidOperationException(loading);
         _ = Device(identity.DeviceId, identity.Generation);
         var root = CalibrationPlacement.Read(pose["rootPlacement"]);
         bool changed = Wizard.ModelAssetId != asset || Wizard.ModelRevision != revision;

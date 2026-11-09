@@ -131,36 +131,28 @@ public sealed partial class PipersPlugin
 
     private async Task ShowWizardModelPoint(CancellationToken cancellation)
     {
-        var current = link ?? throw new InvalidOperationException("Link this robot before inspecting a model point.");
         string name = Wizard.Answers.GetValueOrDefault("tool", "").Trim();
-        var reply = await engine.RequestAsync("robot.read", new JsonObject { ["sceneId"] = current.SceneId, ["entityId"] = current.EntityId }, cancellation);
-        var pose = JsonNode.Parse(reply.GetRawText())!.AsObject();
+        const string unavailable = "The current model does not expose one exact named metric site. Select/fix the correct model point before continuing.";
+        var (_, pose) = await ReadMetricPose("Link this robot before inspecting a model point.", unavailable, cancellation);
         wizardDiscoveredSites = pose["toolSites"]?.AsArray().Select(s => s?["name"]?.GetValue<string>() ?? "").Where(s => s.Length > 0).ToArray() ?? [];
-        var sites = pose["toolSites"]?.AsArray().Where(s => s?["name"]?.GetValue<string>() == name).ToArray() ?? [];
-        if (!ReferenceEquals(link, current) || pose["sceneId"]?.GetValue<string>() != current.SceneId || pose["entityId"]?.GetValue<string>() != current.EntityId ||
-            pose["metricPlacementSupported"]?.GetValue<bool>() != true || pose["metricFrame"]?.GetValue<string>() != "engine-world-y-up" ||
-            sites.Length != 1 || sites[0]?["unit"]?.GetValue<string>() != "m" || sites[0]?["position"] is not JsonArray { Count: 3 } xyz ||
-            xyz.Any(v => v is null || !double.IsFinite(v.GetValue<double>())) || pose["modelAssetId"]?.GetValue<string>() is not { Length: > 0 } asset || pose["modelRevision"]?.GetValue<string>() is not { Length: > 0 } revision)
-            throw new InvalidOperationException("The current model does not expose one exact named metric site. Select/fix the correct model point before continuing.");
+        var site = CalibrationPose.ReadToolSite(pose, name, unavailable, unavailable);
+        if (pose["modelAssetId"]?.GetValue<string>() is not { Length: > 0 } asset || pose["modelRevision"]?.GetValue<string>() is not { Length: > 0 } revision)
+            throw new InvalidOperationException(unavailable);
         bool samePoint = Wizard.ModelAssetId == asset && Wizard.ModelRevision == revision &&
             (wizardHighlightScope is null || wizardHighlightScope.SiteName == name);
         calibrationWizard = Wizard with { ModelAssetId = asset, ModelRevision = revision, OperatorSaysTcpMatches = samePoint && Wizard.OperatorSaysTcpMatches };
         _ = CalibrationPlacement.Read(pose["rootPlacement"]);
-        var coordinates = sites[0]!["position"]!.AsArray().Select(v => v!.GetValue<double>() * 1000).ToArray();
         wizardModelPoint = "Look for the marker between the simulated jaw tips, then compare it with the real jaw-tip midpoint.";
-        wizardModelPointDetails = $"Marker coordinates ({coordinates[0]:F1}, {coordinates[1]:F1}, {coordinates[2]:F1}) mm. Site '{name}' world coordinates {sites[0]!["position"]!.ToJsonString()} m; compiled model {asset}, revision {revision}. The marker identifies a model point only. Continue records the operator's comparison, not independent physical calibration.";
+        wizardModelPointDetails = $"Marker coordinates ({site.X * 1000:F1}, {site.Y * 1000:F1}, {site.Z * 1000:F1}) mm. Site '{name}' world coordinates {site.Json().ToJsonString()} m; compiled model {asset}, revision {revision}. The marker identifies a model point only. Continue records the operator's comparison, not independent physical calibration.";
         await ShowWizardHighlight(cancellation);
     }
 
     private async Task<CalibrationPlacement> ReadWizardMetricRoot(CancellationToken cancellation)
     {
-        var current = link ?? throw new InvalidOperationException("Link this robot before using its scene root as a reference.");
-        var reply = await engine.RequestAsync("robot.read", new JsonObject { ["sceneId"] = current.SceneId, ["entityId"] = current.EntityId }, cancellation);
-        var pose = JsonNode.Parse(reply.GetRawText())!.AsObject();
-        if (!ReferenceEquals(link, current) || pose["sceneId"]?.GetValue<string>() != current.SceneId || pose["entityId"]?.GetValue<string>() != current.EntityId ||
-            pose["metricPlacementSupported"]?.GetValue<bool>() != true || pose["metricFrame"]?.GetValue<string>() != "engine-world-y-up" ||
-            pose["modelAssetId"]?.GetValue<string>() != Wizard.ModelAssetId || pose["modelRevision"]?.GetValue<string>() != Wizard.ModelRevision)
-            throw new InvalidOperationException("The model/reference changed. Read and compare the named model point again before confirming a scene surface.");
+        const string changed = "The model/reference changed. Read and compare the named model point again before confirming a scene surface.";
+        var (_, pose) = await ReadMetricPose("Link this robot before using its scene root as a reference.", changed, cancellation);
+        if (pose["modelAssetId"]?.GetValue<string>() != Wizard.ModelAssetId || pose["modelRevision"]?.GetValue<string>() != Wizard.ModelRevision)
+            throw new InvalidOperationException(changed);
         return CalibrationPlacement.Read(pose["rootPlacement"]);
     }
     private async Task CaptureWizardPoint(CancellationToken cancellation)
