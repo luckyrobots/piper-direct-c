@@ -51,19 +51,34 @@ internal sealed class HostControlDispatcher(ControllerService controller, PikaSe
     internal HostControlAdmission Admit(string route, JsonElement input, HostControlTransport transport)
     {
         if (!SessionOwnerGuard.Allows(sessionOwner, route, input)) return new(Error: SessionOwnerGuard.Denied);
-        if (route == BackendMaintenance.RestartRoute)
+        try
         {
-            var restart = maintenance.Prepare(input);
-            if (restart.Ok) maintenance.Commit();
-            return new(Restart: restart);
+            if (route == BackendMaintenance.RestartRoute)
+            {
+                var restart = maintenance.Prepare(input);
+                if (restart.Ok) maintenance.Commit();
+                return new(Restart: restart);
+            }
+            if (transport == HostControlTransport.Http && route == "/api/shutdown")
+                return maintenance.PrepareShutdown() is { } error ? new(Error: error) : new(Shutdown: true);
         }
-        if (transport == HostControlTransport.Http && route == "/api/shutdown")
-            return maintenance.PrepareShutdown() is { } error ? new(Error: error) : new(Shutdown: true);
+        // The exit checks read controller state; both transports reject alike.
+        catch (Exception error) when (IsControlOperationError(error)) { return new(Error: error.Message); }
         return maintenance.TryEnterControl(route, out var lease, out var denied)
             ? new(Lease: lease) : new(Error: denied);
     }
 
     internal async Task<HostControlResult> ExecuteAsync(string route, string body, JsonElement input,
+        HostControlTransport transport, CancellationToken cancellation)
+    {
+        // One mapping for both transports: a controller-operation failure is a
+        // 409 whether it came from the native core or from a Pika session.
+        try { return await DispatchAsync(route, body, input, transport, cancellation); }
+        catch (PikaFollowRejectedException error) { return new(409, Error: error.Message, PikaAudit: error.Audit); }
+        catch (Exception error) when (IsControlOperationError(error)) { return new(409, Error: error.Message); }
+    }
+
+    private async Task<HostControlResult> DispatchAsync(string route, string body, JsonElement input,
         HostControlTransport transport, CancellationToken cancellation)
     {
         if (route == CoordinatedStopRequest.Route)
@@ -83,21 +98,16 @@ internal sealed class HostControlDispatcher(ControllerService controller, PikaSe
             if (grpc && route == "/api/pika/devices") return new(200, EmptySimulatedInventory);
             return new(409, Error: "Pika hardware is disabled in simulation");
         }
-        try
+        if (route == "/api/pika/configure")
         {
-            if (route == "/api/pika/configure")
-            {
-                string activeMessage = grpc ? "Finish the active arm movement before changing Pika assignment" :
-                    "Finish active arm movements before changing Pika assignment";
-                if (ControllerActivity.AnyMotion(JsonNode.Parse(controller.Snapshot())))
-                    return new(409, Error: activeMessage);
-                return new(200, await pika.ConfigureAsync(input, cancellation,
-                    commit => controller.CommitWhenArmIdle(commit, activeMessage, cancellation)));
-            }
-            return new(200, await pika.ExecuteAsync(route[10..], input, cancellation));
+            string activeMessage = grpc ? "Finish the active arm movement before changing Pika assignment" :
+                "Finish active arm movements before changing Pika assignment";
+            if (ControllerActivity.AnyMotion(JsonNode.Parse(controller.Snapshot())))
+                return new(409, Error: activeMessage);
+            return new(200, await pika.ConfigureAsync(input, cancellation,
+                commit => controller.CommitWhenArmIdle(commit, activeMessage, cancellation)));
         }
-        catch (PikaFollowRejectedException error) { return new(409, Error: error.Message, PikaAudit: error.Audit); }
-        catch (Exception error) when (IsControlOperationError(error)) { return new(409, Error: error.Message); }
+        return new(200, await pika.ExecuteAsync(route[10..], input, cancellation));
     }
 
     internal static bool IsControlOperationError(Exception error) =>

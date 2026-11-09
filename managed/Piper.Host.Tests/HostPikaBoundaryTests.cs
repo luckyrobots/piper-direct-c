@@ -123,6 +123,26 @@ internal static class HostPikaBoundaryTests
             }
         }
         finally { directory.Delete(recursive: true); }
+        await ControllerFailureIsConflict();
+    }
+
+    // B23: a controller-operation exception maps to 409 in the dispatcher,
+    // which HTTP and gRPC share; HTTP previously reported it as 500.
+    private static async Task ControllerFailureIsConflict()
+    {
+        var directory = Directory.CreateTempSubdirectory("piper-host-disposed-");
+        try
+        {
+            var controller = new ControllerService(simulated: true, directory.FullName);
+            await using var registry = new PikaSessionRegistry("", "never-launched");
+            var maintenance = new BackendMaintenance(() => new JsonObject(), () => [], () => { }, Environment.ProcessId);
+            var context = new PiperRpcContext(controller, registry, false, "", maintenance);
+            controller.Dispose();
+            var input = JsonSerializer.SerializeToElement(new { action = "hold" });
+            var result = await context.Control.ExecuteAsync("/api/command", input.GetRawText(), input, HostControlTransport.Http, default);
+            Check(result.Status == 409 && result.Error is { Length: > 0 }, "A disposed controller was not a 409 control error.");
+        }
+        finally { directory.Delete(recursive: true); }
     }
 
     private static void Check(bool condition, string failure)

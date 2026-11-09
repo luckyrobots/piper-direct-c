@@ -85,10 +85,6 @@ public sealed class PiperGrpcService(PiperRpcContext state, IHostApplicationLife
             return new ControlReply { Status = result.Status, Json = reply };
         }
         catch (JsonException error) { throw new RpcException(new Status(StatusCode.InvalidArgument, error.Message)); }
-        catch (Exception error) when (HostControlDispatcher.IsControlOperationError(error))
-        {
-            return new ControlReply { Status = 409, Json = JsonSerializer.Serialize(new { error = error.Message }) };
-        }
     }
 
 }
