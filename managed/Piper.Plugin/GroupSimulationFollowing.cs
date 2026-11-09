@@ -9,7 +9,7 @@ internal enum GroupFollowPhase { Arming, Armed, Matching, Admitting, Activating,
 
 public sealed partial class PipersPlugin
 {
-    private sealed class GroupLane(RobotProfile profile, RobotLink robot, FollowControlApproval approval, double? reference,
+    internal sealed class GroupLane(RobotProfile profile, RobotLink robot, FollowControlApproval approval, double? reference,
         FollowLaneTelemetry feedback, FollowLaneController controller)
     {
         public readonly RobotProfile Profile = profile;
@@ -51,21 +51,21 @@ public sealed partial class PipersPlugin
     /// </code>
     /// A pose request and a follow request are separate fields; only the current
     /// one is heartbeated and held at retirement.</summary>
-    private enum LanePhase { Untouched, Touched, Matching, Matched, Following }
+    internal enum LanePhase { Untouched, Touched, Matching, Matched, Following }
 
-    private sealed record LaneArm(LanePhase Phase, long MatchRequest = 0, long FollowRequest = 0, long AdmissionTicks = 0, long AdmissionSequence = 0)
+    internal sealed record LaneArm(LanePhase Phase, long MatchRequest = 0, long FollowRequest = 0, long AdmissionTicks = 0, long AdmissionSequence = 0)
     {
         public static readonly LaneArm Untouched = new(LanePhase.Untouched), Touched = new(LanePhase.Touched), MatchedPose = new(LanePhase.Matched);
         public long CurrentRequest => Phase switch { LanePhase.Matching => MatchRequest, LanePhase.Following => FollowRequest, _ => 0 };
     }
 
     /// <summary>A Pika session exists only on a touched channel.</summary>
-    private sealed record LanePika(bool Touched, string Session = "")
+    internal sealed record LanePika(bool Touched, string Session = "")
     {
         public static readonly LanePika Untouched = new(false), TouchedOnly = new(true);
     }
 
-    private sealed class GroupSession(string backend, string sceneId, string entityId, string asset, string revision, GroupLane[] lanes, long inputEpoch,
+    internal sealed class GroupSession(string backend, string sceneId, string entityId, string asset, string revision, GroupLane[] lanes, long inputEpoch,
         TimeProvider clock)
     {
         public readonly string Backend = backend, Scene = sceneId, Entity = entityId, Asset = asset, Revision = revision;
@@ -150,7 +150,7 @@ public sealed partial class PipersPlugin
     }
 
     private readonly TimeProvider followClock;
-    private GroupSession? groupSimulation;
+    internal GroupSession? groupSimulation;
     /// <summary>Outer Follow lifecycle around a <see cref="GroupSession"/> (whose own phase is <see cref="GroupFollowPhase"/>).
     /// <code>
     ///   Idle/Summary/SetupFailed --arm--> Discovering --session installed--> Session --retired--> Summary
@@ -158,18 +158,18 @@ public sealed partial class PipersPlugin
     /// </code>
     /// Session is derived from <c>groupSimulation</c>; the other stages are one immutable outcome,
     /// so a setup failure and a retirement summary can no longer both be set.</summary>
-    private enum GroupFollowStage { Idle, Discovering, Session, Summary, SetupFailed }
-    private sealed record GroupFollowOutcome(GroupFollowStage Stage, string Summary = "");
+    internal enum GroupFollowStage { Idle, Discovering, Session, Summary, SetupFailed }
+    internal sealed record GroupFollowOutcome(GroupFollowStage Stage, string Summary = "");
     private static readonly GroupFollowOutcome GroupFollowIdle = new(GroupFollowStage.Idle);
-    private GroupFollowOutcome groupFollowOutcome = GroupFollowIdle;
+    internal GroupFollowOutcome groupFollowOutcome = GroupFollowIdle;
     private GroupFollowStage GroupStage => GroupFollowActive ? GroupFollowStage.Session : Volatile.Read(ref groupFollowOutcome).Stage;
     private void SetGroupOutcome(GroupFollowOutcome next) => Volatile.Write(ref groupFollowOutcome, next);
-    private long groupInputEpoch;
-    private long groupControlEpoch;
+    internal long groupInputEpoch;
+    internal long groupControlEpoch;
     private bool GroupFollowActive => Volatile.Read(ref groupSimulation) is not null;
     private bool SimulationFollowingActive => GroupFollowActive;
-    private string groupFollowStatus = "Simulation only";
-    private string groupFollowDetail = "Choose the robots that should follow, then arm Follow simulation. Playback begins only when you press the editor's Play button.";
+    internal string groupFollowStatus = "Simulation only";
+    internal string groupFollowDetail = "Choose the robots that should follow, then arm Follow simulation. Playback begins only when you press the editor's Play button.";
     private bool GroupFollowIncludes(string profileId) => Volatile.Read(ref groupSimulation)?.Lanes.Any(l => l.Profile.Id == profileId) == true;
     private bool GroupWaitingForUserPlay(GroupSession group) =>
         group.Phase is GroupFollowPhase.Arming or GroupFollowPhase.Armed && group.RunId.Length == 0 && GroupScopeCurrent(group);
@@ -201,10 +201,10 @@ public sealed partial class PipersPlugin
         return group;
     }
 
-    private Task StopGroupSimulationFollowing(string reason, CancellationToken cancellation) =>
+    internal Task StopGroupSimulationFollowing(string reason, CancellationToken cancellation) =>
         CancelGroupSimulationFollowingInput(reason)?.Retired.Task.WaitAsync(cancellation) ?? Task.CompletedTask;
 
-    private async Task GroupFollowEvent(string action, CancellationToken cancellation)
+    internal async Task GroupFollowEvent(string action, CancellationToken cancellation)
     {
         if (action is not ("toggle" or "cancel")) throw new InvalidOperationException("Unknown grouped follow action.");
         if (GroupFollowActive)

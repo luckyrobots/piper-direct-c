@@ -41,13 +41,13 @@ internal static class EmergencyStopTests
                     break;
                 case "generation":
                     const string backend = "fake-backend-session";
-                    var telemetry = fixture.Get<LatestTelemetry>("telemetry");
+                    var telemetry = fixture.Plugin.telemetry;
                     var first = telemetry.Latest!;
                     var next = first.State.DeepClone().AsObject();
                     next["devices"]![0]!["generation"] = 2L;
                     var replacementReceipt = first with { State = next, Sequence = 2 };
-                    fixture.Set("telemetryScope", new TelemetryScope(backend, "can-one", 1));
-                    fixture.InvokeSync("ApplyIncomingScope", replacementReceipt);
+                    fixture.Plugin.telemetryScope = new TelemetryScope(backend, "can-one", 1);
+                    fixture.Plugin.ApplyIncomingScope(replacementReceipt);
                     fixture.Plugin.state = next;
                     telemetry.Publish(replacementReceipt);
                     break;
@@ -100,23 +100,23 @@ internal static class EmergencyStopTests
         using (var fixture = new Fixture())
         {
             const string backend = "fake-backend-session";
-            var telemetry = fixture.Get<LatestTelemetry>("telemetry");
+            var telemetry = fixture.Plugin.telemetry;
             var first = telemetry.Latest!;
             var profile = RobotProfileRouting.Active(fixture.Plugin.preferences);
-            fixture.Set("telemetryScope", new TelemetryScope(backend, "can-one", 1));
+            fixture.Plugin.telemetryScope = new TelemetryScope(backend, "can-one", 1);
             fixture.Authority.TrySaveApproval(fixture.Authority.Epoch, profile.Id,
                 new(backend, "can-one", 1, profile.RobotId, profile.RobotJointPrefix, profile.PikaDevice, profile.WslDistribution));
             fixture.Plugin.approved = true;
             var next = first.State.DeepClone().AsObject();
             next["devices"]![0]!["generation"] = 2L;
             var replacementReceipt = first with { State = next, Sequence = 2 };
-            fixture.InvokeSync("ApplyIncomingScope", replacementReceipt);
-            fixture.InvokeSync("RestoreControlApproval");
+            fixture.Plugin.ApplyIncomingScope(replacementReceipt);
+            fixture.Plugin.RestoreControlApproval();
             Check(telemetry.Latest?.Connected == false && !fixture.Plugin.approved,
                 "Old measured evidence restored approval between scope revocation and telemetry publication");
             fixture.Plugin.state = next;
             telemetry.Publish(replacementReceipt);
-            fixture.InvokeSync("RestoreControlApproval");
+            fixture.Plugin.RestoreControlApproval();
             Check(!fixture.Plugin.approved && fixture.Authority.Current.Approvals.Count == 0,
                 "The replacement CAN generation inherited the old approval");
         }
@@ -234,14 +234,14 @@ internal static class EmergencyStopTests
             try
             {
                 await fixture.Rpc.ConnectReached.Task.WaitAsync(TimeSpan.FromSeconds(2));
-                var telemetry = fixture.Get<LatestTelemetry>("telemetry");
+                var telemetry = fixture.Plugin.telemetry;
                 var receipt = telemetry.Latest!;
                 var changed = receipt.State.DeepClone().AsObject();
                 var status = changed["devices"]![0]!["status"]!;
                 if (change == "physical STOP") status["arm_status"] = 1;
                 else status["teach_state"] = 1;
                 var newReceipt = receipt with { State = changed, Sequence = 2 };
-                fixture.InvokeSync("ApplyIncomingScope", newReceipt);
+                fixture.Plugin.ApplyIncomingScope(newReceipt);
                 telemetry.Publish(newReceipt);
                 fixture.Plugin.state = changed;
                 fixture.Rpc.ConnectReply.TrySetResult(new ControlReply { Status = 200, Json = "{\"ok\":true}" });
@@ -254,7 +254,7 @@ internal static class EmergencyStopTests
         }
         using (var fixture = new Fixture())
         {
-            var telemetry = fixture.Get<LatestTelemetry>("telemetry");
+            var telemetry = fixture.Plugin.telemetry;
             var receipt = telemetry.Latest!;
             var snapshot = receipt.State.DeepClone().AsObject();
             var gripper = snapshot["pika"]!.AsObject();
@@ -281,16 +281,11 @@ internal static class EmergencyStopTests
 
     private sealed class Fixture : IDisposable
     {
-        private const BindingFlags Fields = BindingFlags.Instance | BindingFlags.NonPublic;
         private readonly PipersPlugin plugin = new();
         public PipersPlugin Plugin => plugin;
         public FakeCalls Rpc { get; } = new();
         public RobotCommandAuthority Authority => plugin.CommandAuthority;
         public SemaphoreSlim Commands => plugin.commands;
-        public T Get<T>(string field) => (T)typeof(PipersPlugin).GetField(field, Fields)!.GetValue(plugin)!;
-        public void Set(string field, object? value) => typeof(PipersPlugin).GetField(field, Fields)!.SetValue(plugin, value);
-        public Task Invoke(string method, params object?[] arguments) => (Task)typeof(PipersPlugin).GetMethod(method, Fields)!.Invoke(plugin, arguments)!;
-        public void InvokeSync(string method, params object?[] arguments) => typeof(PipersPlugin).GetMethod(method, Fields)!.Invoke(plugin, arguments);
         public Task Event(string wire, CancellationToken cancellation) => plugin.HandleEventAsync(new("fixture", wire, "click", JsonSerializer.SerializeToElement(true)), cancellation);
 
         public Fixture()
@@ -321,8 +316,8 @@ internal static class EmergencyStopTests
                 }
             };
             plugin.state = snapshot;
-            Get<LatestTelemetry>("telemetry").Publish(new(snapshot, "fake-backend-session", 1, Stopwatch.GetTimestamp(), 0));
-            var context = (PluginContext)Activator.CreateInstance(typeof(PluginContext), Fields, null,
+            plugin.telemetry.Publish(new(snapshot, "fake-backend-session", 1, Stopwatch.GetTimestamp(), 0));
+            var context = (PluginContext)Activator.CreateInstance(typeof(PluginContext), BindingFlags.Instance | BindingFlags.NonPublic, null,
                 [new PluginStart("fixture", Path.Combine(Path.GetTempPath(), "piper-emergency-" + Guid.NewGuid().ToString("N")), Path.GetTempPath()),
                     (Func<object, CancellationToken, Task>)((_, _) => Task.CompletedTask),
                     (Func<string, JsonObject, CancellationToken, Task<JsonElement>>)((_, _, _) => Task.FromResult(JsonSerializer.SerializeToElement(new { applied = false })))], null)!;
@@ -333,7 +328,7 @@ internal static class EmergencyStopTests
         {
             // StartAsync is never called: no workers or cameras exist. Dispose
             // only the inert channel/gate, without invoking shutdown commands.
-            ((IDisposable)typeof(PipersPlugin).GetField("channel", Fields)!.GetValue(plugin)!).Dispose();
+            plugin.channel.Dispose();
             Commands.Dispose();
         }
     }

@@ -10,15 +10,15 @@ public sealed record CalibrationPreferences(CalibrationDesk Desk, CalibrationMea
 
 public sealed partial class PipersPlugin
 {
-    private bool calibrationPlacementUnverified, calibrationArchiveConfirmation;
-    private string calibrationProfile = "";
-    private string calibrationPath = "";
-    private CalibrationDesk calibrationDesk = new();
+    internal bool calibrationPlacementUnverified, calibrationArchiveConfirmation;
+    internal string calibrationProfile = "";
+    internal string calibrationPath = "";
+    internal CalibrationDesk calibrationDesk = new();
     private CalibrationMeasurement calibrationMeasurement = new();
-    private CalibrationIdentity? calibrationIdentity;
-    private CalibrationPlacement? calibrationOriginal, calibrationApplied;
-    private CalibrationFit? calibrationFit;
-    private readonly List<CalibrationSample> calibrationSamples = [];
+    internal CalibrationIdentity? calibrationIdentity;
+    internal CalibrationPlacement? calibrationOriginal, calibrationApplied;
+    internal CalibrationFit? calibrationFit;
+    internal readonly List<CalibrationSample> calibrationSamples = [];
     private string RobotCalibrationDirectory => Path.Combine(engine.Start.SettingsDirectory, "calibration", ActiveProfile.Id);
     private static string CalibrationNumber(double value) => value.ToString("0.###", CultureInfo.InvariantCulture);
 

@@ -113,17 +113,13 @@ internal static class WorkspaceViewTests
         // The real renderer/event handler is exercised without StartAsync: no
         // background workers, sockets, camera captures or device commands run.
         var plugin = new PipersPlugin();
-        const BindingFlags flags = BindingFlags.Instance | BindingFlags.NonPublic;
-        void Set(string name, object? value) => typeof(PipersPlugin).GetField(name, flags)!.SetValue(plugin, value);
-        T Get<T>(string name) => (T)typeof(PipersPlugin).GetField(name, flags)!.GetValue(plugin)!;
-        Task Invoke(string name, params object[] args) => (Task)typeof(PipersPlugin).GetMethod(name, flags)!.Invoke(plugin, args)!;
         string folder = Path.Combine(Path.GetTempPath(), "piper-workspace-view-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(folder);
         var prefs = RobotProfileRouting.Normalize(new Preferences(Robots: [new("piper-1", "Fixture", "can-a")], ActiveRobotId: "piper-1"));
-        plugin.preferences = prefs; Set("calibrationProfile", "piper-1");
+        plugin.preferences = prefs; plugin.calibrationProfile = "piper-1";
         JsonObject? rendered = null, patched = null;
         var engineRequests = new List<(string Method, JsonObject Arguments)>();
-        var context = (PluginContext)Activator.CreateInstance(typeof(PluginContext), flags, null,
+        var context = (PluginContext)Activator.CreateInstance(typeof(PluginContext), BindingFlags.Instance | BindingFlags.NonPublic, null,
             [new PluginStart("fixture", folder, folder),
                 (Func<object, CancellationToken, Task>)((message, _) =>
                 {
@@ -204,7 +200,7 @@ internal static class WorkspaceViewTests
                 device["status"]!["teach_state"] = sample.Teach;
                 var snapshot = new JsonObject { ["token"] = "header-fixture", ["selected"] = "can-a", ["devices"] = new JsonArray(device) };
                 plugin.state = snapshot; plugin.token = "header-fixture"; plugin.approved = sample.Approved;
-                Get<LatestTelemetry>("telemetry").Publish(new(snapshot, "header-fixture", ++headerSequence, Stopwatch.GetTimestamp(), 0));
+                plugin.telemetry.Publish(new(snapshot, "header-fixture", ++headerSequence, Stopwatch.GetTimestamp(), 0));
                 await CheckView("controls");
                 Check(HeaderPatch("workspace.power")["text"]?.GetValue<string>() == sample.Power &&
                     HeaderPatch("enable")["text"]?.GetValue<string>() == sample.Button &&
@@ -216,10 +212,10 @@ internal static class WorkspaceViewTests
                         HeaderPatch("workspace.power")["hint"]?.GetValue<string>()?.Contains("All six motors report enabled", StringComparison.Ordinal) == true,
                         "Teaching hid the distinction between powered motors and blocked plugin controls");
             }
-            plugin.preferences = prefs; Set("link", null); plugin.SetPikaRole(PikaSessionRole.None);
+            plugin.preferences = prefs; plugin.link = null; plugin.SetPikaRole(PikaSessionRole.None);
             // A real disconnect invalidates the receipt while leaving its last
             // complete snapshot available to the settings projection.
-            Get<LatestTelemetry>("telemetry").Disconnect(); plugin.approved = false;
+            plugin.telemetry.Disconnect(); plugin.approved = false;
             foreach (string category in new[] { "robot", "diagnostics" }) await CheckView("settings", category);
             var bench = WorkspaceNavigation.Initial.Navigate("calibration");
             var enlarged = bench.Navigate("camera.gripper");
@@ -229,8 +225,8 @@ internal static class WorkspaceViewTests
                 "Workspace navigation lost the calibration page, a camera's return page, or accepted an unreachable settings category");
             plugin.Navigation = WorkspaceNavigation.Calibration;
             string? heightBlocker = null;
-            try { typeof(PipersPlugin).GetMethod("HeightContext", flags)!.Invoke(plugin, null); }
-            catch (TargetInvocationException error) { heightBlocker = error.InnerException?.Message; }
+            try { plugin.HeightContext(); }
+            catch (InvalidOperationException error) { heightBlocker = error.Message; }
             Check(heightBlocker is not null && !heightBlocker.Contains("Open Calibration", StringComparison.Ordinal),
                 "The jaw-height check remained unreachable from the bench calibration page");
             foreach (string camera in new[] { "bench", "depth", "gripper" })
@@ -239,29 +235,26 @@ internal static class WorkspaceViewTests
                 await CheckView("camera", camera: camera);
             }
 
-            Set("cameraStreamDetailsOpen", true);
-            Set("simulationCameras", CameraInventory("source-a", "camera-a", "camera-b"));
+            plugin.cameraStreamDetailsOpen = true;
+            plugin.simulationCameras = CameraInventory("source-a", "camera-a", "camera-b");
             await CheckView("settings", "cameras");
             string selector = WidgetId("camera.bench.simselect");
-            Set("simulationCameras", CameraInventory("source-a", "camera-b", "camera-a"));
+            plugin.simulationCameras = CameraInventory("source-a", "camera-b", "camera-a");
             await Click(selector, 1);
             Check(plugin.preferences.SimulationCameras?.GetValueOrDefault("bench") is { CameraId: "camera-a", SceneId: "source-a" },
                 "A reordered camera inventory routed a rendered selection to the wrong camera");
-            Set("simulationCameras", CameraInventory("source-a", "camera-b"));
+            plugin.simulationCameras = CameraInventory("source-a", "camera-b");
             await Click(selector, 1);
             Check(plugin.preferences.SimulationCameras?.GetValueOrDefault("bench")?.CameraId == "camera-a" &&
                 plugin.uiActionError.Contains("Simulation cameras changed", StringComparison.Ordinal),
                 "A removed camera selection silently rebound the bench preview");
-            Set("simulationCameras", CameraInventory("source-b", "camera-a", "camera-b"));
+            plugin.simulationCameras = CameraInventory("source-b", "camera-a", "camera-b");
             await Click(selector, 0);
             Check(plugin.preferences.SimulationCameras?.GetValueOrDefault("bench")?.SceneId == "source-a",
                 "An Automatic selection from an old scene changed the new scene's binding");
 
-            var groupType = typeof(PipersPlugin).GetNestedType("GroupSession", BindingFlags.NonPublic)!;
-            var lanes = Array.CreateInstance(groupType.GetField("Lanes")!.FieldType.GetElementType()!, 0);
-            var group = Activator.CreateInstance(groupType, flags | BindingFlags.Public, null,
-                [plugin.token, "source-a", "robot-a", "asset-a", "revision-a", lanes, Get<long>("groupInputEpoch"), TimeProvider.System], null)!;
-            Set("groupSimulation", group);
+            plugin.groupSimulation = new PipersPlugin.GroupSession(plugin.token, "source-a", "robot-a", "asset-a", "revision-a", [],
+                plugin.groupInputEpoch, TimeProvider.System);
             try
             {
                 await CheckView("settings", "cameras");
@@ -275,9 +268,9 @@ internal static class WorkspaceViewTests
                 Check(plugin.Navigation.Page == WorkspacePage.Controls && plugin.workspaceViewEpoch > before,
                     "The old page became unclickable after rejected Bench navigation");
             }
-            finally { Set("groupSimulation", null); }
+            finally { plugin.groupSimulation = null; }
             await CheckView("recording");
-            Set("replayReview", new ReplayReview(EpisodeReplayTests.ValidArtifact(), "piper-1"));
+            plugin.replayReview = new ReplayReview(EpisodeReplayTests.ValidArtifact(), "piper-1");
             await CheckView("replay");
             var replayStart = Walk(rendered!).Single(n => n["id"]?.GetValue<string>()?.EndsWith(".replay.start", StringComparison.Ordinal) == true);
             Check(replayStart["enabled"]?.GetValue<bool>() == false && replayStart["hint"]?.GetValue<string>() == EpisodeReplayAvailability.Reason,
@@ -287,26 +280,26 @@ internal static class WorkspaceViewTests
                 "Replay review hid the requirement for fresh reported acceleration caps");
             foreach (CalibrationWizardStep step in Enum.GetValues<CalibrationWizardStep>())
             {
-                Set("wizardProfile", "piper-1");
-                Set("calibrationWizard", CalibrationWizardFlow.New("piper-1") with { Step = step });
-                Set("calibrationArchiveConfirmation", step == CalibrationWizardStep.InspectSaved);
+                plugin.wizardProfile = "piper-1";
+                plugin.calibrationWizard = CalibrationWizardFlow.New("piper-1") with { Step = step };
+                plugin.calibrationArchiveConfirmation = step == CalibrationWizardStep.InspectSaved;
                 await CheckView("settings", "bench");
             }
 
             // Exercise the actual edit/save/reload path without starting any
             // hardware, camera, backend or editor workers.
             var savedDraft = CalibrationWizardFlow.New("piper-1", 77);
-            Set("calibrationWizard", savedDraft);
-            await Invoke("WizardEvent", "77.sheet.field.p0back", JsonSerializer.SerializeToElement("200"), CancellationToken.None);
-            await Invoke("WizardEvent", "77.sheet.field.p0left", JsonSerializer.SerializeToElement("697"), CancellationToken.None);
+            plugin.calibrationWizard = savedDraft;
+            await plugin.WizardEvent("77.sheet.field.p0back", JsonSerializer.SerializeToElement("200"), CancellationToken.None);
+            await plugin.WizardEvent("77.sheet.field.p0left", JsonSerializer.SerializeToElement("697"), CancellationToken.None);
             var freshPlugin = new PipersPlugin();
-            typeof(PipersPlugin).GetField("preferences", flags)!.SetValue(freshPlugin, prefs);
-            typeof(PipersPlugin).GetField("engine", flags)!.SetValue(freshPlugin, context);
-            typeof(PipersPlugin).GetMethod("LoadWizard", flags)!.Invoke(freshPlugin, null);
-            var restoredDraft = (CalibrationWizardDraft)typeof(PipersPlugin).GetField("calibrationWizard", flags)!.GetValue(freshPlugin)!;
+            freshPlugin.preferences = prefs;
+            freshPlugin.engine = context;
+            freshPlugin.LoadWizard();
+            var restoredDraft = freshPlugin.calibrationWizard!;
             Check(restoredDraft.Answers["p0back"] == "200" && restoredDraft.Answers["p0left"] == "697", "Real calibration field events did not survive a fresh plugin session");
-            Check(Get<string>("sheetSaveStatus").StartsWith("Saved locally", StringComparison.Ordinal), "Successful disk save was not reported to the user");
-            ((Grpc.Net.Client.GrpcChannel)typeof(PipersPlugin).GetField("channel", flags)!.GetValue(freshPlugin)!).Dispose();
+            Check(plugin.sheetSaveStatus.StartsWith("Saved locally", StringComparison.Ordinal), "Successful disk save was not reported to the user");
+            freshPlugin.channel.Dispose();
 
             // Browsing settings ends a viewport gesture, preserves a healthy
             // approval and never replays an earlier target on return.
@@ -331,18 +324,18 @@ internal static class WorkspaceViewTests
                 if (request.Route == "/api/command") state["motion"]!["active"] = false;
             });
             plugin.client = new PiperControl.PiperControlClient(calls); plugin.state = state; plugin.token = "fixture-session";
-            Get<LatestTelemetry>("telemetry").Publish(new(state, "fixture-session", 1, Stopwatch.GetTimestamp(), 0));
-            plugin.Navigation = WorkspaceNavigation.Initial; plugin.approved = true; Set("linkCommandsEnabled", true);
-            plugin.teachingOwnership = TeachingOwnership.ObservedAfterApproval; Set("viewportDrag", new ViewportDrag(ViewportDragPhase.Following, Request: 7));
+            plugin.telemetry.Publish(new(state, "fixture-session", 1, Stopwatch.GetTimestamp(), 0));
+            plugin.Navigation = WorkspaceNavigation.Initial; plugin.approved = true; plugin.linkCommandsEnabled = true;
+            plugin.teachingOwnership = TeachingOwnership.ObservedAfterApproval; plugin.viewportDrag = new ViewportDrag(ViewportDragPhase.Following, Request: 7);
             plugin.CommandAuthority.TryAcknowledge(plugin.CommandAuthority.Epoch, new("piper-1", "fixture-session", binding.DeviceId, binding.Generation), 7);
-            Set("link", binding); Set("linkBackendToken", "fixture-session");
+            plugin.link = binding; plugin.linkBackendToken = "fixture-session";
             long previousPermission = plugin.CommandAuthority.Epoch;
             await plugin.WorkspaceEvent("settings.robot", CancellationToken.None);
             Check(calls.Requests.Count == 1 && calls.Requests[0].Route == "/api/command" &&
                 JsonNode.Parse(calls.Requests[0].Json)?["action"]?.GetValue<string>() == "follow-end", "Leaving Controls replayed a target or failed to end its gesture");
-            Check(plugin.approved && plugin.teachingOwnership == TeachingOwnership.ObservedAfterApproval && Get<bool>("linkCommandsEnabled") && Get<ViewportDrag>("viewportDrag").Phase == ViewportDragPhase.Off,
+            Check(plugin.approved && plugin.teachingOwnership == TeachingOwnership.ObservedAfterApproval && plugin.linkCommandsEnabled && plugin.viewportDrag.Phase == ViewportDragPhase.Off,
                 "Browsing settings revoked readiness or retained a live viewport gesture");
-            Check(ReferenceEquals(Get<RobotLink>("link"), binding) && plugin.CommandAuthority.Epoch == previousPermission,
+            Check(ReferenceEquals(plugin.link, binding) && plugin.CommandAuthority.Epoch == previousPermission,
                 "Browsing settings dropped the measured binding or revoked healthy idle approval");
             Check(engineRequests.Any(r => r.Method == "robot.teleoperate" && r.Arguments["enabled"]?.GetValue<bool>() == false),
                 "Navigation left the native viewport teleoperation tool enabled");
@@ -350,7 +343,7 @@ internal static class WorkspaceViewTests
             await plugin.HandleEventAsync(new("luckyrobots.pipers.controls", "engine.robot.target", "commit", JsonSerializer.SerializeToElement(new { })), CancellationToken.None);
             Check(calls.Requests.Count == previousCalls && plugin.approved, "A native target bypassed the off-Controls policy or viewing settings cleared approval");
             await plugin.WorkspaceEvent("controls", CancellationToken.None);
-            Check(plugin.approved && Get<bool>("linkCommandsEnabled") && calls.Requests.Count == previousCalls,
+            Check(plugin.approved && plugin.linkCommandsEnabled && calls.Requests.Count == previousCalls,
                 "Returning to Controls revoked readiness or replayed a previous target");
             await plugin.WorkspaceEvent("replay", CancellationToken.None);
             long replayEpoch = plugin.workspaceViewEpoch;

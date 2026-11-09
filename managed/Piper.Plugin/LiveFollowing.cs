@@ -20,7 +20,7 @@ public sealed partial class PipersPlugin
 {
     private readonly FollowInputGate followInput = new();
     // One state field, written only by the transitions below; readers use the projections.
-    private ViewportDrag viewportDrag = ViewportDrag.Off;
+    internal ViewportDrag viewportDrag = ViewportDrag.Off;
     private ViewportDrag Drag => Volatile.Read(ref viewportDrag);
     private bool teleoperating => Drag.Phase != ViewportDragPhase.Off;
     private long followRequest => Drag is { Phase: ViewportDragPhase.Following } drag ? drag.Request : 0;

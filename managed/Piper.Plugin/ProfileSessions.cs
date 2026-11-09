@@ -59,7 +59,7 @@ public sealed partial class PipersPlugin
 
     private void ForgetControlApproval() => CommandAuthority.ForgetApproval(ActiveProfile.Id);
 
-    private void RestoreControlApproval()
+    internal void RestoreControlApproval()
     {
         var permission = CommandAuthority.Current;
         var profile = ActiveProfile;
@@ -115,7 +115,7 @@ public sealed partial class PipersPlugin
         } while (await timer.WaitForNextTickAsync(cancellation));
     }
 
-    private async Task ReleaseOwnedPikas(CancellationToken cancellation)
+    internal async Task ReleaseOwnedPikas(CancellationToken cancellation)
     {
         var receipt = telemetry.Latest;
         if (receipt is null || receipt.BackendToken != token) return;

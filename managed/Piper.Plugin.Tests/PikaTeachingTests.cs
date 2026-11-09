@@ -1,7 +1,6 @@
 using System.Diagnostics;
 using System.Text.Json;
 using System.Text.Json.Nodes;
-using System.Reflection;
 using LuckyEngine.PluginSdk;
 using LuckyRobots.Piper.Plugin;
 
@@ -85,29 +84,23 @@ internal static class PikaTeachingTests
 
         // Release confirmation must remain usable during the powered-grasp
         // segment of the same recording, not disappear because it is active.
-        const BindingFlags fields = BindingFlags.Instance | BindingFlags.NonPublic;
         var plugin = new PipersPlugin();
-        typeof(PipersPlugin).GetField("preferences", fields)!.SetValue(plugin, RobotProfileRouting.Normalize(new()));
+        plugin.preferences = RobotProfileRouting.Normalize(new());
         changed = new(identity, "disable-one", null, origin, DateTimeOffset.UnixEpoch);
         changed.RequestMotorMode("hold-two", true, Tick(.1));
-        var teachingField = typeof(PipersPlugin).GetField("pikaTeaching", fields)!;
-        object teaching = teachingField.GetValue(plugin)!;
-        teaching = teaching.GetType().GetMethod("<Clone>$")!.Invoke(teaching, null)!;
-        teaching.GetType().GetProperty("Recorder")!.SetValue(teaching, changed);
-        teaching.GetType().GetProperty("ConfirmationIdentity")!.SetValue(teaching, "pending-confirmation");
-        teachingField.SetValue(plugin, teaching);
+        plugin.pikaTeaching = plugin.pikaTeaching with { Recorder = changed, ConfirmationIdentity = "pending-confirmation" };
         var patches = new Dictionary<string, JsonObject>();
         var handGuiding = new JsonObject { ["fresh"] = true, ["status"] = new JsonObject { ["control"] = 2, ["teach_state"] = 1 } };
-        typeof(PipersPlugin).GetMethod("AddPikaTeachingPatches", fields)!.Invoke(plugin, [patches, handGuiding]);
+        plugin.AddPikaTeachingPatches(patches, handGuiding);
         Check(patches["teaching.pika.confirmation"]["visible"]?.GetValue<bool>() == true,
             "Active teaching hid the confirmation needed to free a held grasp");
-        var widget = (Widget)typeof(PipersPlugin).GetMethod("PikaTeachingControls", fields)!.Invoke(plugin, null)!;
+        var widget = plugin.PikaTeachingControls();
         IEnumerable<Widget> All(Widget root) => new[] { root }.Concat((root.Children ?? []).SelectMany(All));
         Widget confirmation = All(widget).Single(w => w.Id == "teaching.pika.confirmation");
         Check(confirmation.Type == "column" && All(confirmation).Single(w => w.Id == "teaching.pika.confirm").Width >= 190 &&
             All(confirmation).Single(w => w.Id == "teaching.pika.cancel").Width >= 90,
             "Release warning crowded its confirmation buttons into an unclickable row");
-        var controls = (Widget)typeof(PipersPlugin).GetMethod("ControlsPage", fields)!.Invoke(plugin, null)!;
+        var controls = plugin.ControlsPage();
         var children = controls.Children!.ToArray();
         int teachingIndex = Array.FindIndex(children, w => w.Id == "teaching");
         Check(teachingIndex >= 0 && teachingIndex < Array.FindIndex(children, w => w.Id == "cameras") && teachingIndex < Array.FindIndex(children, w => w.Id == "joint.1"),
@@ -119,6 +112,6 @@ internal static class PikaTeachingTests
         Check(patches["teaching.pika.saved"]["visible"]?.GetValue<bool>() == false &&
             patches["teaching.pika.status"]["hint"]?.GetValue<string>() == patches["teaching.pika.status"]["text"]?.GetValue<string>(),
             "Compact teaching status discarded its full tooltip or showed an empty saved-path row");
-        ((IDisposable)typeof(PipersPlugin).GetField("channel", fields)!.GetValue(plugin)!).Dispose();
+        plugin.channel.Dispose();
     }
 }

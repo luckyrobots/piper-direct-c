@@ -1,4 +1,3 @@
-using System.Reflection;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using LuckyEngine.PluginSdk;
@@ -28,16 +27,14 @@ internal static class SceneRobotBindingSettingsTests
         Check(roundTrip.Robots!.Select(p => (p.Id, p.RobotId, p.RobotJointPrefix)).SequenceEqual(prefs.Robots!.Select(p => (p.Id, p.RobotId, p.RobotJointPrefix))),
             "Friendly scene labels replaced or changed the saved exact entity/namespace binding");
 
-        const BindingFlags flags = BindingFlags.Instance | BindingFlags.NonPublic;
         var plugin = new PipersPlugin();
-        void Set(string name, object value) => typeof(PipersPlugin).GetField(name, flags)!.SetValue(plugin, value);
-        Widget Render() => (Widget)typeof(PipersPlugin).GetMethod("GlobalRobotsSettings", flags)!.Invoke(plugin, null)!;
+        Widget Render() => plugin.GlobalRobotsSettings();
         IEnumerable<Widget> Walk(Widget widget)
         {
             yield return widget;
             foreach (var child in widget.Children ?? []) foreach (var descendant in Walk(child)) yield return descendant;
         }
-        Set("preferences", prefs); Set("scene", scene);
+        plugin.preferences = prefs; plugin.scene = scene;
         var widgets = Walk(Render()).ToArray();
         Check(widgets.Where(w => w.Type is "input" or "dropdown").All(w => w.Width is null or <= 250) &&
             !widgets.Any(w => w.Id == "global.robot.headings" || w.Id.EndsWith(".connections", StringComparison.Ordinal)) &&
@@ -54,22 +51,21 @@ internal static class SceneRobotBindingSettingsTests
         }
         Check(widgets.Where(w => w.Id.EndsWith(".scene", StringComparison.Ordinal)).All(w => w.Options!.All(o => !o.Contains("shared relay", StringComparison.Ordinal) && !o.Contains("piper3_", StringComparison.Ordinal))),
             "Physics container names or joint namespaces leaked back into the arm dropdown");
-        Set("preferences", prefs with { Robots = [first, second with { Name = "Opposite robot" }] });
+        plugin.preferences = prefs with { Robots = [first, second with { Name = "Opposite robot" }] };
         var patches = new Dictionary<string, JsonObject>();
-        typeof(PipersPlugin).GetMethod("AddProfilePatches", flags)!.Invoke(plugin, [patches]);
+        plugin.AddProfilePatches(patches);
         Check(patches["global.robot.two.scene.assignment"]["text"]?.GetValue<string>() == "Opposite robot → Sim arm 2",
             "Renaming a robot left its assignment summary stale or required rebuilding the settings page");
 
         // A second assignment can change after this robot's dropdown rendered.
         // Recheck the exact selected identity before changing any preference or
         // touching a controller; a cached integer is not an assignment lease.
-        Set("preferences", prefs with { Robots = [first with { RobotId = "" }, second with { RobotId = "", RobotJointPrefix = "" }] });
+        plugin.preferences = prefs with { Robots = [first with { RobotId = "" }, second with { RobotId = "", RobotJointPrefix = "" }] };
         _ = Render();
-        Set("preferences", prefs with { Robots = [first, second with { RobotId = "", RobotJointPrefix = "" }] });
-        Reject(() => ((Task)typeof(PipersPlugin).GetMethod("GlobalSettingsEvent", flags)!.Invoke(plugin,
-            ["robot.two.scene", JsonSerializer.SerializeToElement(1), CancellationToken.None])!).GetAwaiter().GetResult(),
+        plugin.preferences = prefs with { Robots = [first, second with { RobotId = "", RobotJointPrefix = "" }] };
+        Reject(() => plugin.GlobalSettingsEvent("robot.two.scene", JsonSerializer.SerializeToElement(1), CancellationToken.None).GetAwaiter().GetResult(),
             "A stale dropdown selected the arm newly assigned to a different robot");
-        var unchanged = (Preferences)typeof(PipersPlugin).GetField("preferences", flags)!.GetValue(plugin)!;
+        var unchanged = plugin.preferences;
         Check(unchanged.Robots!.Single(p => p.Id == second.Id) is { RobotId: "", RobotJointPrefix: "" },
             "Rejected duplicate selection partially changed the real robot's binding");
 

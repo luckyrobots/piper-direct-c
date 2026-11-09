@@ -38,10 +38,10 @@ public sealed partial class PipersPlugin : ILuckyPlugin
     internal string uiActionError = "";
     internal RobotCommandAuthority CommandAuthority { get; } = new();
     internal volatile bool approved;
-    private volatile RobotLink? link;
-    private volatile bool linkCommandsEnabled;
+    internal volatile RobotLink? link;
+    internal volatile bool linkCommandsEnabled;
     private double? linkErrorDegrees;
-    private JsonObject? scene;
+    internal JsonObject? scene;
     private Task? worker;
     internal UiEventDispatch? uiEvents;
     private readonly CameraPreviewSlots<CameraCapture> cameras = new();
@@ -121,7 +121,7 @@ public sealed partial class PipersPlugin : ILuckyPlugin
         return Device(expected.Device, expected.Generation, expected.Backend, sourceReceipt);
     }
 
-    private Task Watch(CancellationToken cancellation) => Task.WhenAll(
+    internal Task Watch(CancellationToken cancellation) => Task.WhenAll(
         ReadTelemetry(cancellation), ProcessTelemetry(cancellation),
         ArmHeartbeats(cancellation), PikaHeartbeats(cancellation), MonitorAssignedPikas(cancellation));
 
@@ -215,7 +215,7 @@ public sealed partial class PipersPlugin : ILuckyPlugin
         if (resetConfirmed && action == "verify-reset") body["reset_completed"] = true;
     }
 
-    private long ControlInputEpoch => CommandAuthority.Epoch + Interlocked.Read(ref groupControlEpoch);
+    internal long ControlInputEpoch => CommandAuthority.Epoch + Interlocked.Read(ref groupControlEpoch);
 
     public async Task HandleEventAsync(UiEvent input, CancellationToken cancellation)
     {

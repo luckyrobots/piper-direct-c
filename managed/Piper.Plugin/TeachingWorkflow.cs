@@ -11,7 +11,7 @@ internal enum TeachingOwnership { None, ObservedWithoutApproval, ObservedAfterAp
 
 public sealed partial class PipersPlugin
 {
-    private TeachingState teaching = TeachingState.Inspect(null);
+    internal TeachingState teaching = TeachingState.Inspect(null);
     private string teachingDevice = "";
     private long teachingGeneration;
     internal TeachingOwnership teachingOwnership;
@@ -23,7 +23,7 @@ public sealed partial class PipersPlugin
             teachingOwnership = approved ? TeachingOwnership.ObservedAfterApproval : TeachingOwnership.ObservedWithoutApproval;
     }
     private readonly TeachingReturnGate teachingReturnGate = new();
-    private JsonObject? acknowledgedScenePose;
+    internal JsonObject? acknowledgedScenePose;
 
     private async Task ObserveTeaching(CancellationToken cancellation)
     {
@@ -116,7 +116,7 @@ public sealed partial class PipersPlugin
                 j["enabled"]?.GetValue<bool>() == true && j["fault"]?.GetValue<int>() == 0);
     }
 
-    private void AddTeachingPatches(Dictionary<string, JsonObject> patches, JsonObject? device)
+    internal void AddTeachingPatches(Dictionary<string, JsonObject> patches, JsonObject? device)
     {
         AddPikaTeachingPatches(patches, device);
         patches["teaching.label"] = new() { ["text"] = teaching.Label };

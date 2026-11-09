@@ -1,6 +1,5 @@
 using System.Collections.Concurrent;
 using System.Diagnostics;
-using System.Reflection;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using Grpc.Core;
@@ -11,15 +10,14 @@ internal static class PikaShutdownTests
 {
     public static async Task Run()
     {
-        const BindingFlags fields = BindingFlags.Instance | BindingFlags.NonPublic;
         const string backend = "shutdown-fixture";
         const string linux = "/dev/pika-linux", stalled = "/dev/pika-stalled", monitor = "/dev/pika-monitor",
             transferred = "/dev/pika-transferred", foreign = "/dev/pika-foreign";
         var plugin = new PipersPlugin();
-        string owner = (string)typeof(PipersPlugin).GetField("owner", fields)!.GetValue(plugin)!;
+        string owner = plugin.owner;
         string otherOwner = Guid.NewGuid().ToString();
-        var telemetry = (LatestTelemetry)typeof(PipersPlugin).GetField("telemetry", fields)!.GetValue(plugin)!;
-        typeof(PipersPlugin).GetField("token", fields)!.SetValue(plugin, backend);
+        var telemetry = plugin.telemetry;
+        plugin.token = backend;
         var requests = new ConcurrentQueue<(string Route, string Device, string? Distribution, string Owner)>();
         var linuxDisconnected = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var calls = new Calls(async (command, cancellation) =>
@@ -35,7 +33,7 @@ internal static class PikaShutdownTests
                 ? JsonSerializer.Serialize(new { ok = true, motor_request_id = device + "-shutdown" })
                 : "{\"ok\":true}" };
         });
-        typeof(PipersPlugin).GetField("client", fields)!.SetValue(plugin, new PiperControl.PiperControlClient(calls));
+        plugin.client = new PiperControl.PiperControlClient(calls);
         var grippers = new[]
         {
             Gripper(linux, null, owner, powered: true), Gripper(stalled, "PeerWsl", owner, powered: true),
@@ -49,7 +47,7 @@ internal static class PikaShutdownTests
         }, backend, sequence, Stopwatch.GetTimestamp(), 0));
         Publish(1);
         using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(3));
-        var release = (Task)typeof(PipersPlugin).GetMethod("ReleaseOwnedPikas", fields)!.Invoke(plugin, [deadline.Token])!;
+        var release = plugin.ReleaseOwnedPikas(deadline.Token);
         try
         {
             var admitted = requests.ToArray();
@@ -72,7 +70,7 @@ internal static class PikaShutdownTests
         {
             await deadline.CancelAsync();
             await release;
-            ((IDisposable)typeof(PipersPlugin).GetField("channel", fields)!.GetValue(plugin)!).Dispose();
+            plugin.channel.Dispose();
         }
 
         static JsonObject Gripper(string device, string? distribution, string owner, bool powered) => new()

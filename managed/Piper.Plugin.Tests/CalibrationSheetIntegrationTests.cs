@@ -12,15 +12,11 @@ internal static class CalibrationSheetIntegrationTests
     {
         // Real plugin UI routing, reads, persistence and solver; fake devices and
         // editor callbacks only. StartAsync is never called: no hardware/workers.
-        const BindingFlags hidden = BindingFlags.Instance | BindingFlags.NonPublic;
         var plugin = new PipersPlugin();
-        void Set(string key, object? value) => typeof(PipersPlugin).GetField(key, hidden)!.SetValue(plugin, value);
-        T Get<T>(string key) => (T)typeof(PipersPlugin).GetField(key, hidden)!.GetValue(plugin)!;
-        Task Invoke(string key, params object[] args) => (Task)typeof(PipersPlugin).GetMethod(key, hidden)!.Invoke(plugin, args)!;
         var folder = Path.Combine(Path.GetTempPath(), "piper-sheet-integration-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(folder);
         var preferences = RobotProfileRouting.Normalize(new Preferences(Robots: [new("piper-1", "Fixture", "can-a", RobotId: "fixture-robot")], ActiveRobotId: "piper-1"));
-        Set("preferences", preferences);
+        plugin.preferences = preferences;
         var root = CalibrationPlacement.At(new(.1, .75, -.2), 0);
         (double Left, double Back)[] marks = [(697.0, 200.0), (800.0, 450.0), (900.0, 120.0), (800.0, 440.0), (903.0, 350.0)];
         int point = 0;
@@ -36,7 +32,7 @@ internal static class CalibrationSheetIntegrationTests
             }).ToArray())
         };
         var snapshot = new JsonObject { ["token"] = "fixture-session", ["selected"] = "can-a", ["devices"] = new JsonArray(device), ["motion"] = new JsonObject { ["active"] = false } };
-        void Fresh() => Get<LatestTelemetry>("telemetry").Publish(new(snapshot, "fixture-session", 1, Stopwatch.GetTimestamp(), 0));
+        void Fresh() => plugin.telemetry.Publish(new(snapshot, "fixture-session", 1, Stopwatch.GetTimestamp(), 0));
         JsonObject Pose()
         {
             var m = marks[point];
@@ -66,7 +62,7 @@ internal static class CalibrationSheetIntegrationTests
         var deskMarkerReached = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var releaseDeskMarker = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         int pauseDeskMarker = 0;
-        var context = (PluginContext)Activator.CreateInstance(typeof(PluginContext), hidden, null,
+        var context = (PluginContext)Activator.CreateInstance(typeof(PluginContext), BindingFlags.Instance | BindingFlags.NonPublic, null,
             [new PluginStart("fixture", folder, folder),
                 (Func<object, CancellationToken, Task>)((message, _) =>
                 {
@@ -98,9 +94,9 @@ internal static class CalibrationSheetIntegrationTests
                     };
                     return JsonSerializer.SerializeToElement(response);
                 })], null)!;
-        Set("engine", context); Set("token", "fixture-session"); Set("state", snapshot); Fresh();
-        Set("link", new RobotLink("fixture-scene", "fixture-robot", Pose()["joints"]!.AsArray(), device));
-        Set("linkBackendToken", "fixture-session"); plugin.Navigation = WorkspaceNavigation.Calibration;
+        plugin.engine = context; plugin.token = "fixture-session"; plugin.state = snapshot; Fresh();
+        plugin.link = new RobotLink("fixture-scene", "fixture-robot", Pose()["joints"]!.AsArray(), device);
+        plugin.linkBackendToken = "fixture-session"; plugin.Navigation = WorkspaceNavigation.Calibration;
         IEnumerable<JsonObject> Walk(JsonObject node)
         {
             yield return node;
@@ -115,11 +111,11 @@ internal static class CalibrationSheetIntegrationTests
         }
         try
         {
-            await Invoke("Render", CancellationToken.None); await Invoke("Update", CancellationToken.None);
-            var initialDraft = Get<CalibrationWizardDraft>("calibrationWizard");
-            string retiredNext = WorkspaceEventScope.Wrap(Get<long>("workspaceViewEpoch"), "piper-1", $"wizard.{initialDraft.Epoch}.next");
+            await plugin.Render(CancellationToken.None); await plugin.Update(CancellationToken.None);
+            var initialDraft = plugin.calibrationWizard!;
+            string retiredNext = WorkspaceEventScope.Wrap(plugin.workspaceViewEpoch, "piper-1", $"wizard.{initialDraft.Epoch}.next");
             await plugin.HandleEventAsync(new("luckyrobots.pipers.controls", retiredNext, "click", JsonSerializer.SerializeToElement(true)), CancellationToken.None);
-            Check(ReferenceEquals(initialDraft, Get<CalibrationWizardDraft>("calibrationWizard")) && calls.Count == 0,
+            Check(ReferenceEquals(initialDraft, plugin.calibrationWizard) && calls.Count == 0,
                 "A retired wizard Next event still advanced a persisted draft or called the editor");
             foreach (var (field, value) in new[] { ("width", "1400"), ("depth", "700"), ("precision", "5") }) await Event("field." + field, value);
             for (int i = 0; i < marks.Length; i++)
@@ -128,13 +124,13 @@ internal static class CalibrationSheetIntegrationTests
                 await Event($"field.p{i}back", marks[i].Back.ToString(System.Globalization.CultureInfo.InvariantCulture));
             }
             Volatile.Write(ref pauseDeskMarker, 1);
-            Task renewal = Invoke("MaintainWizardHighlight", CancellationToken.None);
+            Task renewal = plugin.MaintainWizardHighlight(CancellationToken.None);
             Task? selection = null;
             try
             {
                 await deskMarkerReached.Task.WaitAsync(TimeSpan.FromSeconds(2));
                 selection = Event("move.1");
-                Check(!selection.IsCompleted && deskMarkers.Count == 1 && !Get<CalibrationWizardDraft>("calibrationWizard").Answers.ContainsKey("sheetselected"),
+                Check(!selection.IsCompleted && deskMarkers.Count == 1 && !plugin.calibrationWizard!.Answers.ContainsKey("sheetselected"),
                     "A manual selection changed state or published markers while the old background batch was still in flight");
             }
             finally { Fresh(); releaseDeskMarker.TrySetResult(); }
@@ -144,57 +140,57 @@ internal static class CalibrationSheetIntegrationTests
             Check(publishedMarks.Select(mark => mark.Id).SequenceEqual(markerIds.Concat(markerIds)) &&
                 publishedMarks.Take(5).Where(mark => mark.Label.EndsWith(" - SELECTED", StringComparison.Ordinal)).Select(mark => mark.Id).SequenceEqual(new[] { "desk-point-0" }) &&
                 publishedMarks.Skip(5).Where(mark => mark.Label.EndsWith(" - SELECTED", StringComparison.Ordinal) && mark.Framed).Select(mark => mark.Id).SequenceEqual(new[] { "desk-point-1" }) &&
-                Get<CalibrationWizardDraft>("calibrationWizard").Answers["sheetselected"] == "1",
+                plugin.calibrationWizard!.Answers["sheetselected"] == "1",
                 "An old marker batch overtook or mixed with the newer selected cross");
             await Event("move.0");
             await Event("left.show"); await Event("left.confirm"); await Event("back.show"); await Event("back.confirm");
             await Event("tool.show");
-            await Invoke("MaintainWizardHighlight", CancellationToken.None);
-            Check(Get<object>("wizardMarker") is MarkerState.Tool, "Background edge renewal erased the jaw-tip confirmation context");
+            await plugin.MaintainWizardHighlight(CancellationToken.None);
+            Check(plugin.wizardMarker is MarkerState.Tool, "Background edge renewal erased the jaw-tip confirmation context");
             await Event("tool.confirm"); await Event("surface");
-            Check(Get<CalibrationWizardDraft>("calibrationWizard").Setup.JawTipsConfirmed, "The actual confirmation event did not persist jaw-tip approval");
+            Check(plugin.calibrationWizard!.Setup.JawTipsConfirmed, "The actual confirmation event did not persist jaw-tip approval");
             string WidgetId(string suffix) => Walk(view!).Single(w => w["id"]!.GetValue<string>().EndsWith(suffix, StringComparison.Ordinal))["id"]!.GetValue<string>();
             bool CaptureEnabled(int row) => patches?[WidgetId(".sheet.capture." + row)]?["enabled"]?.GetValue<bool>() == true;
             string Status(string suffix) => patches?[WidgetId(suffix)]?["text"]?.GetValue<string>() ?? "";
             await Event("field.precision", "0");
             Check(!CaptureEnabled(0) && Status(".sheet.next").Contains("cannot be 0"), "Precision zero silently disabled Capture instead of showing its actionable repair");
             await Event("precision.default");
-            Check(Get<CalibrationWizardDraft>("calibrationWizard").Answers["precision"] == "5" && CaptureEnabled(0), "Use ±5 mm did not repair the accuracy gate immediately");
+            Check(plugin.calibrationWizard.Answers["precision"] == "5" && CaptureEnabled(0), "Use ±5 mm did not repair the accuracy gate immediately");
             await Event("field.p3back", "450"); await Event("field.p3left", "800");
             Check(Status(".sheet.row.status.3").Contains("overlaps P2"), "Duplicate reference measurement was not explained beside its row before hand guiding");
             await Event("field.p3back", "440"); await Event("field.p3left", "800");
             Check(!Status(".sheet.row.status.3").Contains("overlaps"), "P4 at BACK 440 / LEFT 800 was rejected merely because P2 is BACK 450 / LEFT 800");
-            var validDraft = Get<CalibrationWizardDraft>("calibrationWizard");
-            Set("calibrationWizard", validDraft with { ModelRevision = "changed-revision" });
-            Fresh(); await Invoke("Update", CancellationToken.None);
+            var validDraft = plugin.calibrationWizard;
+            plugin.calibrationWizard = validDraft with { ModelRevision = "changed-revision" };
+            Fresh(); await plugin.Update(CancellationToken.None);
             Check(!CaptureEnabled(0) && Status(".sheet.next").Contains("Reconfirm"), "Stale identity-bound desk confirmations still enabled capture");
             Check(patches?[WidgetId(".sheet.left.confirm")]?["enabled"]?.GetValue<bool>() == true, "Stale LEFT confirmation left the repair button disabled");
-            Set("calibrationWizard", validDraft);
+            plugin.calibrationWizard = validDraft;
             device["status"]!["teach_state"] = 0; device["status"]!["control"] = 1;
-            Fresh(); await Invoke("Update", CancellationToken.None);
+            Fresh(); await plugin.Update(CancellationToken.None);
             Check(!CaptureEnabled(0) && Status(".sheet.row.status.0").Contains("solid green"), "Inactive hand guiding silently blocked Capture");
             device["status"]!["teach_state"] = 1; device["status"]!["control"] = 2; device["status"]!["stationary_s"] = .1;
-            Fresh(); await Invoke("Update", CancellationToken.None);
+            Fresh(); await plugin.Update(CancellationToken.None);
             Check(!CaptureEnabled(0) && Status(".sheet.row.status.0").Contains("0.4 seconds"), "Moving feedback enabled Capture or failed to explain settling");
             device["status"]!["stationary_s"] = 1.0;
             for (point = 0; point < marks.Length; point++)
             {
                 await Event("move." + point);
-                int before = Get<List<CalibrationSample>>("calibrationSamples").Count;
+                int before = plugin.calibrationSamples.Count;
                 string captureId = Walk(view!).Single(w => w["id"]!.GetValue<string>().EndsWith(".sheet.capture." + point, StringComparison.Ordinal))["id"]!.GetValue<string>();
                 Check(patches?[captureId]?["enabled"]?.GetValue<bool>() == true, $"Actual UI never enabled capture for valid point {point + 1}");
                 if (point == 3) Check(CaptureEnabled(3), "The real UI event flow could not capture a distinct reference 10 mm from an earlier reference");
                 await Event("capture." + point);
-                Check(Get<List<CalibrationSample>>("calibrationSamples").Count == before + 1, $"Real row event failed to save point {point + 1}");
+                Check(plugin.calibrationSamples.Count == before + 1, $"Real row event failed to save point {point + 1}");
             }
             await Event("fit");
-            var fit = Get<CalibrationFit>("calibrationFit");
+            var fit = plugin.calibrationFit!;
             Check(fit.CanApply && fit.TrainingRmsMm < .001 && fit.ValidationMaxMm < .001, "Four actual row captures plus held-out check did not reach a passing alignment");
-            Check(Get<List<CalibrationSample>>("calibrationSamples").Count(s => s.HeldOut) == 1, "Final check was not kept independent of reference points");
-            string report = Get<string>("calibrationPath");
+            Check(plugin.calibrationSamples.Count(s => s.HeldOut) == 1, "Final check was not kept independent of reference points");
+            string report = plugin.calibrationPath;
             Check(File.Exists(report) && JsonSerializer.Deserialize<CalibrationReport>(File.ReadAllText(report), PluginProtocol.Json)!.Samples.Length == 5, "Complete calibration samples did not survive report persistence");
             // Correct a ruler entry without reacquiring or rewriting physical evidence.
-            var originalP2 = Get<List<CalibrationSample>>("calibrationSamples")[1];
+            var originalP2 = plugin.calibrationSamples[1];
             string reportBeforeBlockedCorrection = File.ReadAllText(report);
             foreach (var (row, left, back) in new[] { (1, "903", "375"), (4, "800", "425") })
             {
@@ -203,8 +199,8 @@ internal static class CalibrationSheetIntegrationTests
                 Check(!CaptureEnabled(row) && Status(".sheet.row.status." + row).Contains("50 mm", StringComparison.Ordinal),
                     "Editing either side of the check/reference pair within 50 mm did not block Save entry with the spacing reason");
                 await Event("capture." + row);
-                Check(File.ReadAllText(report) == reportBeforeBlockedCorrection && Get<CalibrationFit>("calibrationFit") == fit &&
-                    Get<int>("sheetEditingRow") == row,
+                Check(File.ReadAllText(report) == reportBeforeBlockedCorrection && plugin.calibrationFit == fit &&
+                    plugin.sheetEditingRow == row,
                     "A stale Save entry click committed a correction inside the 50 mm check spacing");
                 await Event("move." + row);
             }
@@ -216,24 +212,24 @@ internal static class CalibrationSheetIntegrationTests
                 Check(!CaptureEnabled(row) && Status(".sheet.row.status." + row).Contains($"overlaps P{other + 1}", StringComparison.Ordinal),
                     "Editing a reference to overlap an earlier or later captured reference did not disable Save entry with the overlap reason");
                 await Event("capture." + row);
-                Check(File.ReadAllText(report) == reportBeforeBlockedCorrection && Get<CalibrationFit>("calibrationFit") == fit &&
-                    Get<int>("sheetEditingRow") == row,
+                Check(File.ReadAllText(report) == reportBeforeBlockedCorrection && plugin.calibrationFit == fit &&
+                    plugin.sheetEditingRow == row,
                     "A stale Save entry click committed a duplicate reference correction");
                 await Event("move." + row);
             }
-            long editPage = Get<long>("workspaceViewEpoch");
+            long editPage = plugin.workspaceViewEpoch;
             await Event("move.1"); await Event("field.p1left", "780");
-            Check(Get<List<CalibrationSample>>("calibrationSamples")[1] == originalP2 &&
-                Get<CalibrationFit>("calibrationFit") == fit, "Typing a correction changed a captured observation or fit before explicit Save entry");
+            Check(plugin.calibrationSamples[1] == originalP2 &&
+                plugin.calibrationFit == fit, "Typing a correction changed a captured observation or fit before explicit Save entry");
             await Event("move.1");
-            Check(Get<CalibrationWizardDraft>("calibrationWizard").Answers["p1left"] == "800" &&
-                Get<List<CalibrationSample>>("calibrationSamples")[1] == originalP2, "Cancel edit failed to restore the captured coordinate");
-            Check(Get<long>("workspaceViewEpoch") == editPage, "Edit/cancel rebuilt the sheet and invalidated its visible controls");
+            Check(plugin.calibrationWizard.Answers["p1left"] == "800" &&
+                plugin.calibrationSamples[1] == originalP2, "Cancel edit failed to restore the captured coordinate");
+            Check(plugin.workspaceViewEpoch == editPage, "Edit/cancel rebuilt the sheet and invalidated its visible controls");
             await Event("move.1"); await Event("field.p1left", "-1"); await Event("capture.1");
-            Check(Get<List<CalibrationSample>>("calibrationSamples")[1] == originalP2 && Get<CalibrationFit>("calibrationFit") == fit,
+            Check(plugin.calibrationSamples[1] == originalP2 && plugin.calibrationFit == fit,
                 "An out-of-desk correction replaced the captured observation");
             await Event("field.p1back", "450"); await Event("field.p1left", "780"); await Event("capture.1");
-            var correctedP2 = Get<List<CalibrationSample>>("calibrationSamples")[1];
+            var correctedP2 = plugin.calibrationSamples[1];
             Check(correctedP2.Measurement.LeftMm == 780 && correctedP2.Measurement.BackMm == 450 &&
                 Math.Abs(correctedP2.MeasuredWorld.X - (780.0 / 1000 - .7)) < 1e-12,
                 "Save entry failed to update the entered ruler measurement and corresponding world point");
@@ -241,17 +237,17 @@ internal static class CalibrationSheetIntegrationTests
                 correctedP2.HostUnixMilliseconds == originalP2.HostUnixMilliseconds && correctedP2.PoseFingerprint == originalP2.PoseFingerprint &&
                 correctedP2.Name == originalP2.Name && correctedP2.HeldOut == originalP2.HeldOut,
                 "Correcting a ruler entry changed measured pose, acquisition time, identity, fingerprint or held-out role");
-            Check(Get<CalibrationFit?>("calibrationFit") is null && !patches![WidgetId(".sheet.apply")]!["enabled"]!.GetValue<bool>(),
+            Check(plugin.calibrationFit is null && !patches![WidgetId(".sheet.apply")]!["enabled"]!.GetValue<bool>(),
                 "A stale fit or Apply permission survived a measurement correction");
             var correctedReport = JsonSerializer.Deserialize<CalibrationReport>(File.ReadAllText(report), PluginProtocol.Json)!;
             Check(correctedReport.Samples[1].Measurement.LeftMm == 780 && correctedReport.Fit is null,
                 "Corrected measurement and fit invalidation did not survive report persistence");
             // Simulate a crash after corrected report commit but before the draft
             // commit: restored report observations must own captured coordinates.
-            var resumedDraft = Get<CalibrationWizardDraft>("calibrationWizard");
+            var resumedDraft = plugin.calibrationWizard;
             resumedDraft.Answers["p1left"] = "800"; resumedDraft.Answers["p1back"] = "499";
-            typeof(PipersPlugin).GetMethod("LoadSheetRows", hidden)!.Invoke(plugin, null);
-            var resumedPoint = (CalibrationPoint?)typeof(PipersPlugin).GetMethod("SheetPoint", hidden)!.Invoke(plugin, [1]);
+            plugin.LoadSheetRows();
+            var resumedPoint = plugin.SheetPoint(1);
             Check(resumedDraft.Answers["p1left"] == "780" && resumedDraft.Answers["p1back"] == "450" &&
                 resumedPoint.HasValue && Math.Abs(resumedPoint.Value.X - correctedP2.MeasuredWorld.X) < 1e-12 &&
                 Math.Abs(resumedPoint.Value.Z - correctedP2.MeasuredWorld.Z) < 1e-12,
@@ -265,76 +261,76 @@ internal static class CalibrationSheetIntegrationTests
                 correctionAudit["previousReport"]!["samples"]![1]!["measurement"]!["leftMm"]!.GetValue<double>() == 800,
                 "Correction audit lost the old observation/report or the explicit new entered value");
             await Event("move.1"); await Event("field.p1left", "800"); await Event("capture.1");
-            await Event("fit"); fit = Get<CalibrationFit>("calibrationFit");
+            await Event("fit"); fit = plugin.calibrationFit!;
             Check(fit.CanApply && fit.TrainingRmsMm < .001 && fit.ValidationMaxMm < .001 &&
-                Get<List<CalibrationSample>>("calibrationSamples").Count == 5,
+                plugin.calibrationSamples.Count == 5,
                 "Correcting an entered coordinate back to its measured value required recapture or failed to recover the fit");
-            var savedIdentity = Get<CalibrationIdentity>("calibrationIdentity");
-            Set("calibrationIdentity", savedIdentity with { Generation = 999 });
+            var savedIdentity = plugin.calibrationIdentity!;
+            plugin.calibrationIdentity = savedIdentity with { Generation = 999 };
             await Event("move.1");
-            Check(Get<int>("sheetEditingRow") == -1, "A changed robot connection permitted editing an old captured report");
-            Set("calibrationIdentity", savedIdentity); Set("calibrationPlacementUnverified", true);
+            Check(plugin.sheetEditingRow == -1, "A changed robot connection permitted editing an old captured report");
+            plugin.calibrationIdentity = savedIdentity; plugin.calibrationPlacementUnverified = true;
             await Event("move.1");
-            Check(Get<int>("sheetEditingRow") == -1, "An unverified scene placement permitted captured-measurement editing");
-            Set("calibrationPlacementUnverified", false);
+            Check(plugin.sheetEditingRow == -1, "An unverified scene placement permitted captured-measurement editing");
+            plugin.calibrationPlacementUnverified = false;
             Check(calls.All(c => c is "robot.read" or "robot.highlightReference" or "robot.highlightToolSite" or "robot.teleoperate"), "Calibration attempted a robot/scene mutation before Apply");
             Check(root.Same(CalibrationPlacement.At(new(.1, .75, -.2), 0)), "Fit changed the scene before explicit Apply");
             point = marks.Length - 1;
             sharedRoot = true;
-            Set("scene", new JsonObject { ["sceneId"] = "fixture-scene", ["robots"] = new JsonArray(Pose()) });
-            await Invoke("Render", CancellationToken.None);
+            plugin.scene = new JsonObject { ["sceneId"] = "fixture-scene", ["robots"] = new JsonArray(Pose()) };
+            await plugin.Render(CancellationToken.None);
             Check(Walk(view!).Any(w => w["id"]!.GetValue<string>().EndsWith(".calibration.branch.explanation", StringComparison.Ordinal)),
                 "The unprefixed arm of a compound entity presented an independent calibration sheet");
-            Set("scene", null);
-            await Invoke("Render", CancellationToken.None);
+            plugin.scene = null;
+            await plugin.Render(CancellationToken.None);
             await Event("apply");
-            Check(!calls.Contains("robot.placement") && !Get<bool>("calibrationPlacementUnverified") &&
-                Get<string>("uiActionError").Contains("move every arm", StringComparison.Ordinal),
+            Check(!calls.Contains("robot.placement") && !plugin.calibrationPlacementUnverified &&
+                plugin.uiActionError.Contains("move every arm", StringComparison.Ordinal),
                 "A compound model discovered in the live pose was allowed to write its shared root");
             sharedRoot = false;
             await Event("apply");
-            Check(root.Same(fit.ProposedPlacement) && Get<CalibrationPlacement>("calibrationApplied").Same(root), "Actual Apply event did not install and verify the proposed scene root");
-            Check(!Get<bool>("calibrationPlacementUnverified") && calls.Count(c => c == "robot.placement") == 1, "Apply remained unverified or repeated its scene write");
+            Check(root.Same(fit.ProposedPlacement) && plugin.calibrationApplied!.Same(root), "Actual Apply event did not install and verify the proposed scene root");
+            Check(!plugin.calibrationPlacementUnverified && calls.Count(c => c == "robot.placement") == 1, "Apply remained unverified or repeated its scene write");
             var appliedReport = JsonSerializer.Deserialize<CalibrationReport>(File.ReadAllText(report), PluginProtocol.Json)!;
             Check(appliedReport.AppliedPlacement!.Same(root) && !appliedReport.PlacementUnverified && appliedReport.Samples.Length == 5, "Verified placement and all observations did not survive final report persistence");
             await Event("move.1");
-            Check(Get<int>("sheetEditingRow") == -1 && Get<List<CalibrationSample>>("calibrationSamples")[1].Measurement.LeftMm == 800,
+            Check(plugin.sheetEditingRow == -1 && plugin.calibrationSamples[1].Measurement.LeftMm == 800,
                 "An applied alignment permitted changing its captured measurement without rollback");
             await Event("inspect");
-            Check(Get<CalibrationPlacement>("calibrationApplied").Same(root) && calls.Count(c => c == "robot.placement") == 1, "Checking an applied placement repeated a scene write");
+            Check(plugin.calibrationApplied!.Same(root) && calls.Count(c => c == "robot.placement") == 1, "Checking an applied placement repeated a scene write");
             // Jaw-height phases (Cal-D), reachable from the sheet through the
             // workspace navigation fix (B3).
             plugin.Navigation = WorkspaceNavigation.Calibration;
-            async Task Height(string action, string text = "") { Fresh(); await Invoke("HeightCheckEvent", action, JsonSerializer.SerializeToElement(text), CancellationToken.None); }
-            string HeightPhase() => typeof(PipersPlugin).GetField("heightPhase", hidden)!.GetValue(plugin)!.ToString()!;
+            async Task Height(string action, string text = "") { Fresh(); await plugin.HeightCheckEvent(action, JsonSerializer.SerializeToElement(text), CancellationToken.None); }
+            string HeightPhase() => plugin.heightPhase.ToString()!;
             await Height("toggle");
-            Check(HeightPhase() == "Live" && Get<string>("heightActionError") == "", "Check jaw height did not start live: " + Get<string>("heightActionError"));
+            Check(HeightPhase() == "Live" && plugin.heightActionError == "", "Check jaw height did not start live: " + plugin.heightActionError);
             await Height("pin");
-            Check(HeightPhase() == "Pinned", "Measure this pose did not pin the pose: " + Get<string>("heightActionError"));
+            Check(HeightPhase() == "Pinned", "Measure this pose did not pin the pose: " + plugin.heightActionError);
             await Height("measured", "250");
             await Height("save");
-            Check(HeightPhase() == "Saved", "Save check did not record the pinned pose: " + Get<string>("heightActionError"));
+            Check(HeightPhase() == "Saved", "Save check did not record the pinned pose: " + plugin.heightActionError);
             await Height("another");
-            Check(HeightPhase() == "Live" && Get<object?>("heightFrozen") is null, "Check another pose kept the previous pinned pose");
+            Check(HeightPhase() == "Live" && plugin.heightFrozen is null, "Check another pose kept the previous pinned pose");
             await Height("toggle");
             Check(HeightPhase() == "Inactive", "Stop height check left the check active");
-            plugin.Navigation = WorkspaceNavigation.Calibration; await Invoke("Render", CancellationToken.None);
+            plugin.Navigation = WorkspaceNavigation.Calibration; await plugin.Render(CancellationToken.None);
             // Reopening the same compiled model must not tell users to redo an
             // already applied alignment just to perform independent height checks.
             var reopenedPose = Pose(); reopenedPose["sceneId"] = "reopened-scene";
-            Set("link", new RobotLink("reopened-scene", savedIdentity.RobotId, reopenedPose["joints"]!.AsArray(), device));
-            Set("acknowledgedScenePose", new JsonObject { ["pose"] = reopenedPose });
-            Fresh(); await Invoke("Update", CancellationToken.None);
+            plugin.link = new RobotLink("reopened-scene", savedIdentity.RobotId, reopenedPose["joints"]!.AsArray(), device);
+            plugin.acknowledgedScenePose = new JsonObject { ["pose"] = reopenedPose };
+            Fresh(); await plugin.Update(CancellationToken.None);
             Check(Status(".sheet.next").Contains("Saved alignment loaded") && Status(".sheet.next").Contains("Check jaw height"),
                 "Reopening an applied model gave a misleading re-evaluation prompt instead of the independent height-check guidance");
             Check(!patches![WidgetId(".sheet.fit")]!["enabled"]!.GetValue<bool>() &&
-                !patches[WidgetId(".sheet.apply")]!["enabled"]!.GetValue<bool>() && Get<CalibrationIdentity>("calibrationIdentity") == savedIdentity,
+                !patches[WidgetId(".sheet.apply")]!["enabled"]!.GetValue<bool>() && plugin.calibrationIdentity == savedIdentity,
                 "The loaded-alignment message relaxed fit/apply scope or rebound saved observations to a new scene session");
             reopenedPose["modelRevision"] = "actually-changed-model";
-            Fresh(); await Invoke("Update", CancellationToken.None);
+            Fresh(); await plugin.Update(CancellationToken.None);
             Check(Status(".sheet.next").Contains("model or scene session changed") && !Status(".sheet.next").Contains("Saved alignment loaded"),
                 "The loaded-alignment message hid a real compiled model revision change");
         }
-        finally { Get<Grpc.Net.Client.GrpcChannel>("channel").Dispose(); Directory.Delete(folder, true); }
+        finally { plugin.channel.Dispose(); Directory.Delete(folder, true); }
     }
 }

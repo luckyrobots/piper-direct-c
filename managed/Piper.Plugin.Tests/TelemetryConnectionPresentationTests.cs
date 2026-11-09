@@ -1,5 +1,4 @@
 using System.Diagnostics;
-using System.Reflection;
 using System.Text.Json.Nodes;
 using System.Text.Json;
 using System.Collections.Concurrent;
@@ -10,12 +9,9 @@ internal static class TelemetryConnectionPresentationTests
 {
     public static async Task RunNavigation()
     {
-        const BindingFlags flags = BindingFlags.Instance | BindingFlags.NonPublic;
         var plugin = new PipersPlugin();
-        void Set(string field, object value) => typeof(PipersPlugin).GetField(field, flags)!.SetValue(plugin, value);
-        T Get<T>(string field) => (T)typeof(PipersPlugin).GetField(field, flags)!.GetValue(plugin)!;
-        Set("preferences", RobotProfileRouting.Normalize(new Preferences(Robots: [new("piper-1", "Piper 1", "can-a"), new("piper-2", "Piper 2", "can-b")], ActiveRobotId: "piper-2")));
-        Set("state", new JsonObject { ["selected"] = "can-b", ["devices"] = new JsonArray(new JsonObject { ["id"] = "can-b", ["fresh"] = false }) });
+        plugin.preferences = RobotProfileRouting.Normalize(new Preferences(Robots: [new("piper-1", "Piper 1", "can-a"), new("piper-2", "Piper 2", "can-b")], ActiveRobotId: "piper-2"));
+        plugin.state = new JsonObject { ["selected"] = "can-b", ["devices"] = new JsonArray(new JsonObject { ["id"] = "can-b", ["fresh"] = false }) };
         UiEvent Input(string id) => new("fixture", WorkspaceEventScope.Wrap(0, "piper-2", id), "click", JsonSerializer.SerializeToElement(true));
         bool Permission(UiEvent input) => PipersPlugin.ControlEventNeedsPermission(plugin.UnscopePublishedWorkspaceEvent(input.WidgetId));
         UiEvent navigation = Input("profiles.select.piper-1"), target = Input("joint.6.plus");
@@ -47,10 +43,10 @@ internal static class TelemetryConnectionPresentationTests
             }
             Check(executed.SequenceEqual([navigation.WidgetId]) && discarded.SequenceEqual([target.WidgetId]),
                 "CAN feedback loss discarded robot navigation or allowed an old queued movement to execute");
-            Check(!Get<bool>("approved") && plugin.CommandAuthority.Current is { Lease: null, Epoch: 1 },
+            Check(!plugin.approved && plugin.CommandAuthority.Current is { Lease: null, Epoch: 1 },
                 "Navigation eligibility restored power approval, an old lease or movement permission");
         }
-        ((IDisposable)Get<object>("channel")).Dispose(); Get<SemaphoreSlim>("commands").Dispose(); Get<CancellationTokenSource>("shutdown").Dispose();
+        plugin.channel.Dispose(); plugin.commands.Dispose(); plugin.shutdown.Dispose();
     }
 
     public static void Run()
@@ -86,7 +82,6 @@ internal static class TelemetryConnectionPresentationTests
 
     private sealed class Fixture : IDisposable
     {
-        private const BindingFlags Flags = BindingFlags.Instance | BindingFlags.NonPublic;
         private readonly PipersPlugin plugin = new();
         public JsonObject Device { get; } = new()
         {
@@ -95,23 +90,20 @@ internal static class TelemetryConnectionPresentationTests
             ["joints"] = new JsonArray(Enumerable.Range(1, 6).Select(_ => (JsonNode)new JsonObject { ["fresh"] = true, ["age_s"] = .001 }).ToArray())
         };
         public JsonObject State { get; }
-        public string Message => Get<string>("message");
-        public string Error { get => Get<string>("uiActionError"); set => Set("uiActionError", value); }
+        public string Message => plugin.message;
+        public string Error { get => plugin.uiActionError; set => plugin.uiActionError = value; }
         public long Permission => plugin.CommandAuthority.Epoch;
         public bool Stale { set { Device["fresh"] = !value; foreach (var joint in Device["joints"]!.AsArray()) joint!["fresh"] = !value; } }
         public Fixture()
         {
             State = new JsonObject { ["selected"] = "can-b", ["devices"] = new JsonArray(Device) };
-            Set("token", "connection-fixture");
-            Set("preferences", RobotProfileRouting.Normalize(new Preferences(Robots: [new("piper-2", "Piper 2", "can-b")], ActiveRobotId: "piper-2")));
+            plugin.token = "connection-fixture";
+            plugin.preferences = RobotProfileRouting.Normalize(new Preferences(Robots: [new("piper-2", "Piper 2", "can-b")], ActiveRobotId: "piper-2"));
             ResetMessage();
         }
-        public void ResetMessage() => Set("message", "Controller telemetry interrupted: Controller state stream ended.");
+        public void ResetMessage() => plugin.message = "Controller telemetry interrupted: Controller state stream ended.";
         public void Observe(double sourceAgeMilliseconds = 0, string backend = "connection-fixture") =>
-            typeof(PipersPlugin).GetMethod("ObserveTelemetryConnectionPresentation", Flags)!.Invoke(plugin,
-                [new TelemetryReceipt(State, backend, 1, Stopwatch.GetTimestamp(), sourceAgeMilliseconds)]);
-        private T Get<T>(string field) => (T)typeof(PipersPlugin).GetField(field, Flags)!.GetValue(plugin)!;
-        private void Set(string field, object value) => typeof(PipersPlugin).GetField(field, Flags)!.SetValue(plugin, value);
-        public void Dispose() { ((IDisposable)Get<object>("channel")).Dispose(); Get<SemaphoreSlim>("commands").Dispose(); Get<CancellationTokenSource>("shutdown").Dispose(); }
+            plugin.ObserveTelemetryConnectionPresentation(new TelemetryReceipt(State, backend, 1, Stopwatch.GetTimestamp(), sourceAgeMilliseconds));
+        public void Dispose() { plugin.channel.Dispose(); plugin.commands.Dispose(); plugin.shutdown.Dispose(); }
     }
 }

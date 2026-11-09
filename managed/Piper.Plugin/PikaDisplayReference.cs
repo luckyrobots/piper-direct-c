@@ -77,8 +77,8 @@ public sealed record PikaClosedDisplayReference(int Schema, string ProfileId, st
 
 public sealed partial class PipersPlugin
 {
-    private string pikaDisplayReferenceKey = "";
-    private PikaClosedDisplayReference? pikaDisplayReference;
+    internal string pikaDisplayReferenceKey = "";
+    internal PikaClosedDisplayReference? pikaDisplayReference;
     private string PikaReferencePath => PikaClosedDisplayReference.PathFor(engine.Start.SettingsDirectory, ActiveProfile.Id);
 
     private void LoadPikaDisplayReference()

@@ -67,11 +67,9 @@ internal static class RecoveryWorkspaceTests
 
     public static async Task RunEvents()
     {
-        const BindingFlags flags = BindingFlags.Instance | BindingFlags.NonPublic;
         var plugin = new PipersPlugin();
         string folder = Path.Combine(Path.GetTempPath(), "piper-recovery-ui-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(folder);
-        T Get<T>(string field) => (T)typeof(PipersPlugin).GetField(field, flags)!.GetValue(plugin)!;
         PipersPlugin.RecoveryOperation SimulatedRecovery(PipersPlugin.RecoveryKind kind)
         {
             var operation = new PipersPlugin.RecoveryOperation(kind, new("piper-2", "recovery-ui-fixture", "can-b", 7),
@@ -85,10 +83,10 @@ internal static class RecoveryWorkspaceTests
             ["motion"] = new JsonObject { ["active"] = false, ["request_id"] = 77L } };
         plugin.preferences = RobotProfileRouting.Normalize(new Preferences(Robots: [new("piper-2", "Piper 2", "can-b")], ActiveRobotId: "piper-2"));
         plugin.token = "recovery-ui-fixture"; plugin.client = new PiperControl.PiperControlClient(calls); plugin.state = snapshot;
-        plugin.engine = (PluginContext)Activator.CreateInstance(typeof(PluginContext), flags, null,
+        plugin.engine = (PluginContext)Activator.CreateInstance(typeof(PluginContext), BindingFlags.Instance | BindingFlags.NonPublic, null,
             [new PluginStart("fixture", folder, folder), (Func<object, CancellationToken, Task>)((_, _) => Task.CompletedTask),
                 (Func<string, JsonObject, CancellationToken, Task<JsonElement>>)((_, _, _) => Task.FromResult(JsonSerializer.SerializeToElement(new { applied = false })))], null)!;
-        void Fresh() => Get<LatestTelemetry>("telemetry").Publish(new(snapshot, "recovery-ui-fixture", 1, Stopwatch.GetTimestamp(), 0));
+        void Fresh() => plugin.telemetry.Publish(new(snapshot, "recovery-ui-fixture", 1, Stopwatch.GetTimestamp(), 0));
         Task Click(string id) => plugin.HandleEventAsync(new("fixture", WorkspaceEventScope.Wrap(plugin.workspaceViewEpoch, "piper-2", id), "click", JsonSerializer.SerializeToElement(true)), CancellationToken.None);
         try
         {
@@ -122,13 +120,13 @@ internal static class RecoveryWorkspaceTests
             foreach (var joint in device["joints"]!.AsArray()) joint!["enabled"] = false;
             device["recovery_required"] = false; device["blocker"] = ""; device.Remove("stop_event");
             Fresh();
-            await (Task)typeof(PipersPlugin).GetMethod("ObserveHandGuideRecovery", flags)!.Invoke(plugin, [CancellationToken.None])!;
+            await plugin.ObserveHandGuideRecovery(CancellationToken.None);
             Check(plugin.recoveryGuide is { Gate: null } && calls.Actions.Count == 0,
                 "Reset's retired stop record closed the visible range/holding guide or reused old teaching proof");
             using var reset = SimulatedRecovery(PipersPlugin.RecoveryKind.HoldHere);
             reset.ResetAt = Stopwatch.GetTimestamp();
             device["fresh"] = false; device["joints"]![0]!["fresh"] = false; Fresh();
-            bool Gap() => (bool)typeof(PipersPlugin).GetMethod("RecoveryExpectedGap", flags)!.Invoke(plugin, [Get<LatestTelemetry>("telemetry").Latest])!;
+            bool Gap() => plugin.RecoveryExpectedGap(plugin.telemetry.Latest);
             Check(Gap(), "A bounded same-device reset feedback gap invalidated supported recovery");
             device["generation"] = 8L; Fresh(); Check(!Gap(), "Another CAN generation inherited a reset-gap exception"); device["generation"] = 7L;
             device["present"] = false; Fresh(); Check(!Gap(), "A disconnected adapter inherited a reset-gap exception"); device["present"] = true;
@@ -136,13 +134,13 @@ internal static class RecoveryWorkspaceTests
             reset.ResetAt = 0; Fresh(); Check(!Gap(), "Stale feedback outside reset was treated as an expected gap");
             reset.ResetAt = Stopwatch.GetTimestamp() - Stopwatch.Frequency * 6; Fresh(); Check(!Gap(), "The reset-gap exception outlived its five-second bound");
             reset.ResetAt = Stopwatch.GetTimestamp();
-            Get<LatestTelemetry>("telemetry").Publish(new(snapshot, "recovery-ui-fixture", 1, Stopwatch.GetTimestamp() - Stopwatch.Frequency * 2, 0));
+            plugin.telemetry.Publish(new(snapshot, "recovery-ui-fixture", 1, Stopwatch.GetTimestamp() - Stopwatch.Frequency * 2, 0));
             Check(!Gap(), "An old telemetry envelope was accepted as a fresh reset gap");
             Fresh(); plugin.CommandAuthority.Revoke(revokeLocalApproval: () => plugin.approved = false);
             Check(!Gap(), "A STOP/permission change retained the reset-gap exception");
             bool retiredGrant = false;
-            try { typeof(PipersPlugin).GetMethod("GrantRecoveryHolding", flags)!.Invoke(plugin, [reset, CancellationToken.None]); }
-            catch (TargetInvocationException error) when (error.InnerException is InvalidOperationException) { retiredGrant = true; }
+            try { plugin.GrantRecoveryHolding(reset, CancellationToken.None); }
+            catch (InvalidOperationException) { retiredGrant = true; }
             Check(retiredGrant && !plugin.approved && calls.Actions.Count == 0, "A recovery continuation granted holding permission after STOP");
             plugin.recoveryOperation = null;
             device["fresh"] = true; device["joints"]![0]!["fresh"] = true;
@@ -159,7 +157,7 @@ internal static class RecoveryWorkspaceTests
         finally
         {
             plugin.shutdown.Cancel();
-            ((IDisposable)plugin.channel).Dispose(); plugin.commands.Dispose();
+            plugin.channel.Dispose(); plugin.commands.Dispose();
             if (Directory.Exists(folder)) Directory.Delete(folder, true);
         }
     }

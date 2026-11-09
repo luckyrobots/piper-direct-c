@@ -131,7 +131,6 @@ internal static class WorkspacePublicationTests
 
     private sealed class Fixture
     {
-        private const BindingFlags Flags = BindingFlags.Instance | BindingFlags.NonPublic;
         private readonly PipersPlugin plugin = new();
         public PipersPlugin Plugin => plugin;
         public Func<Widget, CancellationToken, Task> Publish = (_, _) => Task.CompletedTask;
@@ -140,7 +139,7 @@ internal static class WorkspacePublicationTests
         public Fixture()
         {
             plugin.preferences = RobotProfileRouting.Normalize(new Preferences(Robots: [new("one", "Piper 1")], ActiveRobotId: "one"));
-            var context = (PluginContext)Activator.CreateInstance(typeof(PluginContext), Flags, null,
+            var context = (PluginContext)Activator.CreateInstance(typeof(PluginContext), BindingFlags.Instance | BindingFlags.NonPublic, null,
                 [new PluginStart("fixture", Path.GetTempPath(), Path.GetTempPath()),
                     (Func<object, CancellationToken, Task>)(async (message, ct) =>
                     {
@@ -157,12 +156,10 @@ internal static class WorkspacePublicationTests
             plugin.engine = context;
         }
         public long Epoch => plugin.workspaceViewEpoch;
-        public T Get<T>(string name) => (T)typeof(PipersPlugin).GetField(name, Flags)!.GetValue(plugin)!;
-        public void Set(string name, object value) => typeof(PipersPlugin).GetField(name, Flags)!.SetValue(plugin, value);
         public string Wire(string id) => WorkspaceEventScope.Wrap(Epoch, RobotProfileRouting.Active(plugin.preferences).Id, id);
         public string Unscope(string id) => plugin.UnscopePublishedWorkspaceEvent(id);
-        public Task Render(CancellationToken ct = default) => (Task)typeof(PipersPlugin).GetMethod("Render", Flags)!.Invoke(plugin, [ct])!;
-        public Task Navigate(string action, CancellationToken ct) => (Task)typeof(PipersPlugin).GetMethod("WorkspaceEvent", Flags)!.Invoke(plugin, [action, ct])!;
-        public Task Update() => (Task)typeof(PipersPlugin).GetMethod("Update", Flags)!.Invoke(plugin, [CancellationToken.None])!;
+        public Task Render(CancellationToken ct = default) => plugin.Render(ct);
+        public Task Navigate(string action, CancellationToken ct) => plugin.WorkspaceEvent(action, ct);
+        public Task Update() => plugin.Update(CancellationToken.None);
     }
 }

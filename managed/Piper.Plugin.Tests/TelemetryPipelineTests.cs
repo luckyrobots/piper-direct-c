@@ -96,25 +96,22 @@ internal static class TelemetryPipelineTests
         // Exercise the real four-loop plugin with an in-memory gRPC stream and a
         // deliberately slow fake editor. No socket, camera, CAN or Pika is opened.
         var plugin = new PipersPlugin();
-        var flags = BindingFlags.Instance | BindingFlags.NonPublic;
-        void Set(string name, object? value) => typeof(PipersPlugin).GetField(name, flags)!.SetValue(plugin, value);
-        T Get<T>(string name) => (T)typeof(PipersPlugin).GetField(name, flags)!.GetValue(plugin)!;
         var pipe = Channel.CreateBounded<StateFrame>(new BoundedChannelOptions(1) { FullMode = BoundedChannelFullMode.DropOldest, SingleReader = true });
         var rpc = new FakeCalls(pipe.Reader);
-        Set("client", new PiperControl.PiperControlClient(rpc));
+        plugin.client = new PiperControl.PiperControlClient(rpc);
         var prefs = RobotProfileRouting.Normalize(new Preferences(Robots: [new RobotProfile("piper-1", "Fixture", "can-a")], ActiveRobotId: "piper-1"));
-        Set("preferences", prefs); Set("token", "session-a");
-        Set("telemetryScope", new TelemetryScope("session-a", "can-a", 7));
-        string sessionOwner = Get<string>("owner");
+        plugin.preferences = prefs; plugin.token = "session-a";
+        plugin.telemetryScope = new TelemetryScope("session-a", "can-a", 7);
+        string sessionOwner = plugin.owner;
         var model = new JsonArray(Enumerable.Range(1, 6).Select(i => (JsonNode)new JsonObject { ["name"] = "joint" + i, ["unit"] = "rad" }).ToArray());
         var device = State()["devices"]![0]!.AsObject();
         var binding = new RobotLink("fixture-scene", "fixture-robot", model, device);
         var authority = plugin.CommandAuthority;
         var commandScope = new RobotCommandScope("piper-1", "session-a", "can-a", 7);
-        Set("link", binding); Set("linkBackendToken", "session-a"); Set("approved", true); Set("linkCommandsEnabled", true);
+        plugin.link = binding; plugin.linkBackendToken = "session-a"; plugin.approved = true; plugin.linkCommandsEnabled = true;
         authority.TryAcknowledge(authority.Epoch, commandScope, 7);
         int sceneRequests = 0, editorMode = 0;
-        var context = (PluginContext)Activator.CreateInstance(typeof(PluginContext), flags, null,
+        var context = (PluginContext)Activator.CreateInstance(typeof(PluginContext), BindingFlags.Instance | BindingFlags.NonPublic, null,
             [new PluginStart("fixture", Path.GetTempPath(), Path.GetTempPath()),
                 (Func<object, CancellationToken, Task>)((_, _) => Task.CompletedTask),
                 (Func<string, JsonObject, CancellationToken, Task<JsonElement>>)(async (method, _, cancellation) =>
@@ -128,7 +125,7 @@ internal static class TelemetryPipelineTests
                     }
                     return JsonSerializer.SerializeToElement(new { applied = false });
                 })], null)!;
-        Set("engine", context);
+        plugin.engine = context;
         using var lifetime = new CancellationTokenSource(TimeSpan.FromSeconds(15));
         using var feeding = CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token);
         long sequence = 0;
@@ -146,7 +143,7 @@ internal static class TelemetryPipelineTests
             try { while (!feeding.IsCancellationRequested) { Feed(); await Task.Delay(20, feeding.Token); } }
             catch (OperationCanceledException) when (feeding.IsCancellationRequested) { }
         });
-        var watching = (Task)typeof(PipersPlugin).GetMethod("Watch", flags)!.Invoke(plugin, [lifetime.Token])!;
+        var watching = plugin.Watch(lifetime.Token);
         async Task Until(Func<bool> ready, string failure, int maximumMs = 5000)
         {
             long started = Stopwatch.GetTimestamp();
@@ -159,54 +156,53 @@ internal static class TelemetryPipelineTests
         try
         {
             await Until(() => Volatile.Read(ref sceneRequests) >= 2 && rpc.Heartbeats >= 3, "Slow rendering blocked ingestion or independent heartbeats");
-            var current = Get<LatestTelemetry>("telemetry").Latest!;
+            var current = plugin.telemetry.Latest!;
             Check(current.IsFresh(Stopwatch.GetTimestamp()) && current.Sequence >= 5, "Slow editor requests stopped fresh state consumption");
             Check(rpc.Heartbeats >= 3, "Slow editor requests stopped controller heartbeats");
-            Check(ReferenceEquals(Get<RobotLink?>("link"), binding), "A rendering timeout destroyed a healthy same-scope scene binding");
-            Check(Get<JsonObject?>("state") is not null && Get<string>("token") == "session-a", "A rendering timeout was classified as controller disconnection");
-            Check(!Get<bool>("linkCommandsEnabled"), "A failed scene acknowledgement automatically armed viewport targets");
+            Check(ReferenceEquals(plugin.link, binding), "A rendering timeout destroyed a healthy same-scope scene binding");
+            Check(plugin.state is not null && plugin.token == "session-a", "A rendering timeout was classified as controller disconnection");
+            Check(!plugin.linkCommandsEnabled, "A failed scene acknowledgement automatically armed viewport targets");
             int beforeModeChange = Volatile.Read(ref sceneRequests);
             Volatile.Write(ref editorMode, 1);
-            await Until(() => Volatile.Read(ref sceneRequests) > beforeModeChange && Get<string>("sceneTrackingStatus").StartsWith("Measured scene update deferred", StringComparison.Ordinal),
+            await Until(() => Volatile.Read(ref sceneRequests) > beforeModeChange && plugin.sceneTrackingStatus.StartsWith("Measured scene update deferred", StringComparison.Ordinal),
                 "The slow fake request did not drain before the leader/ghost check");
-            Set("viewportDrag", new ViewportDrag(ViewportDragPhase.Following, Request: 7)); Set("linkCommandsEnabled", true);
+            plugin.viewportDrag = new ViewportDrag(ViewportDragPhase.Following, Request: 7); plugin.linkCommandsEnabled = true;
             authority.TryAcknowledge(authority.Epoch, commandScope, 7);
             int beforeGhost = Volatile.Read(ref sceneRequests);
-            await Until(() => Volatile.Read(ref sceneRequests) > beforeGhost && Get<string>("sceneTrackingStatus").StartsWith("Leader target + measured ghost", StringComparison.Ordinal), "Native leader/ghost feedback was not recognized");
-            Check(Get<ViewportDrag>("viewportDrag").Phase != ViewportDragPhase.Off && Get<bool>("linkCommandsEnabled") && Get<ViewportDrag>("viewportDrag") is { Phase: ViewportDragPhase.Following, Request: 7 } && authority.Current.Lease?.Request == 7,
+            await Until(() => Volatile.Read(ref sceneRequests) > beforeGhost && plugin.sceneTrackingStatus.StartsWith("Leader target + measured ghost", StringComparison.Ordinal), "Native leader/ghost feedback was not recognized");
+            Check(plugin.viewportDrag.Phase != ViewportDragPhase.Off && plugin.linkCommandsEnabled && plugin.viewportDrag is { Phase: ViewportDragPhase.Following, Request: 7 } && authority.Current.Lease?.Request == 7,
                 "Expected native applied:false leader/ghost feedback stopped a valid drag or finishing target");
-            Check(Get<JsonObject?>("acknowledgedScenePose") is null,
+            Check(plugin.acknowledgedScenePose is null,
                 "Leader/ghost feedback was incorrectly promoted to a calibration pose acknowledgement");
             Volatile.Write(ref editorMode, 2);
-            await Until(() => Get<ViewportDrag>("viewportDrag").Phase == ViewportDragPhase.Off, "A remote teleoperation stop did not pause local following");
-            Check(!Get<bool>("linkCommandsEnabled") && Get<ViewportDrag>("viewportDrag").Phase != ViewportDragPhase.Following && authority.Current.Lease is null,
+            await Until(() => plugin.viewportDrag.Phase == ViewportDragPhase.Off, "A remote teleoperation stop did not pause local following");
+            Check(!plugin.linkCommandsEnabled && plugin.viewportDrag.Phase != ViewportDragPhase.Following && authority.Current.Lease is null,
                 "Unexpected remote editor deferral kept viewport targets armed");
             await feeding.CancelAsync(); await producer;
-            await Until(() => !Get<bool>("approved") && authority.Current.Lease is null, "Real telemetry loss did not disarm commands/deadlines", 1500);
-            Check(!Get<LatestTelemetry>("telemetry").Latest!.IsFresh(Stopwatch.GetTimestamp()), "Genuine telemetry loss remained fresh");
-            Check(ReferenceEquals(Get<RobotLink?>("link"), binding), "A genuine gap discarded a same-identity read-only binding instead of pausing it");
+            await Until(() => !plugin.approved && authority.Current.Lease is null, "Real telemetry loss did not disarm commands/deadlines", 1500);
+            Check(!plugin.telemetry.Latest!.IsFresh(Stopwatch.GetTimestamp()), "Genuine telemetry loss remained fresh");
+            Check(ReferenceEquals(plugin.link, binding), "A genuine gap discarded a same-identity read-only binding instead of pausing it");
             Feed();
-            await Until(() => Get<LatestTelemetry>("telemetry").Latest!.IsFresh(Stopwatch.GetTimestamp()), "Same-scope fresh telemetry did not resume reading");
-            Check(!Get<bool>("approved") && !Get<bool>("linkCommandsEnabled"), "Fresh telemetry silently rearmed old target permission");
+            await Until(() => plugin.telemetry.Latest!.IsFresh(Stopwatch.GetTimestamp()), "Same-scope fresh telemetry did not resume reading");
+            Check(!plugin.approved && !plugin.linkCommandsEnabled, "Fresh telemetry silently rearmed old target permission");
             currentGeneration = 8; Feed();
-            await Until(() => Get<RobotLink?>("link") is null, "A new CAN generation inherited the previous physical scene binding");
-            Check(!Get<bool>("approved"), "CAN generation change retained target permission");
+            await Until(() => plugin.link is null, "A new CAN generation inherited the previous physical scene binding");
+            Check(!plugin.approved, "CAN generation change retained target permission");
             var rebound = new RobotLink("fixture-scene", "fixture-robot", model, State(generation: 8)["devices"]![0]!.AsObject());
-            Set("link", rebound); Set("linkBackendToken", "session-a"); Set("approved", true);
+            plugin.link = rebound; plugin.linkBackendToken = "session-a"; plugin.approved = true;
             currentToken = "session-b"; Feed();
-            await Until(() => Get<RobotLink?>("link") is null && Get<string>("token") == "session-b", "Backend session change inherited old link/authorization");
-            Check(!Get<bool>("approved"), "Backend session change retained target permission");
+            await Until(() => plugin.link is null && plugin.token == "session-b", "Backend session change inherited old link/authorization");
+            Check(!plugin.approved, "Backend session change retained target permission");
             Check(rpc.Routes.All(route => route == "/api/heartbeat"), "Telemetry/render recovery issued a power, target, reset or configuration action");
 
             // A response to an action prepared before telemetry loss must not
             // recreate the discarded lease after fresh feedback returns.
-            Set("approved", true); Feed();
-            await Until(() => Get<LatestTelemetry>("telemetry").Latest!.BackendToken == "session-b" && Get<LatestTelemetry>("telemetry").Latest!.IsFresh(Stopwatch.GetTimestamp()), "Fixture did not restore fresh input for acknowledgement test");
+            plugin.approved = true; Feed();
+            await Until(() => plugin.telemetry.Latest!.BackendToken == "session-b" && plugin.telemetry.Latest!.IsFresh(Stopwatch.GetTimestamp()), "Fixture did not restore fresh input for acknowledgement test");
             rpc.DelayedCommand = new(TaskCreationOptions.RunContinuationsAsynchronously);
-            var pending = (Task)typeof(PipersPlugin).GetMethod("Command", flags)!.Invoke(plugin,
-                ["jog", new JsonObject { ["joint"] = 6, ["delta_deg"] = 1.0 }, lifetime.Token, CommandPurpose.Control, null, null, null])!;
+            var pending = plugin.Command("jog", new JsonObject { ["joint"] = 6, ["delta_deg"] = 1.0 }, lifetime.Token, CommandPurpose.Control, null, null, null);
             await Until(() => rpc.CommandReached.Task.IsCompleted, "Synthetic authorized action did not reach the fake transport");
-            typeof(PipersPlugin).GetMethod("DisarmTelemetryTargets", flags)!.Invoke(plugin, ["Fixture telemetry loss", false, null, false]);
+            plugin.DisarmTelemetryTargets("Fixture telemetry loss", false, null, false);
             rpc.DelayedCommand.SetResult(new ControlReply { Status = 202, Json = "{\"request_id\":99,\"message\":\"accepted\"}" });
             bool discarded = false;
             try { await pending; } catch (InvalidOperationException) { discarded = true; }
@@ -214,9 +210,8 @@ internal static class TelemetryPipelineTests
                 "A delayed old acknowledgement renewed its discarded operation after telemetry loss");
             int sentBefore = rpc.Routes.Count;
             long previousPermission = authority.Epoch - 1;
-            pending = (Task)typeof(PipersPlugin).GetMethod("Command", flags)!.Invoke(plugin,
-                ["teach-return", new JsonObject { ["button_off"] = true, ["same_pose_confirmed"] = true }, lifetime.Token,
-                    CommandPurpose.TeachingReturn, null, previousPermission, null])!;
+            pending = plugin.Command("teach-return", new JsonObject { ["button_off"] = true, ["same_pose_confirmed"] = true }, lifetime.Token,
+                    CommandPurpose.TeachingReturn, null, previousPermission, null);
             discarded = false;
             try { await pending; } catch (InvalidOperationException) { discarded = true; }
             Check(discarded && rpc.Routes.Count == sentBefore,
@@ -233,10 +228,10 @@ internal static class TelemetryPipelineTests
             var recoveryCancelled = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             var recoveryFinished = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             using var registration = recoveryCancellation.Token.Register(() => recoveryCancelled.TrySetResult());
-            var shutdown = Get<CancellationTokenSource>("shutdown");
+            var shutdown = plugin.shutdown;
             var recovery = new PipersPlugin.RecoveryOperation(PipersPlugin.RecoveryKind.ReturnToZero, commandScope,
                 authority.Epoch, recoveryCancellation) { Worker = recoveryFinished.Task };
-            Set("recoveryOperation", recovery);
+            plugin.recoveryOperation = recovery;
             Task disposal = plugin.DisposeAsync().AsTask();
             try
             {

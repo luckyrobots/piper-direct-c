@@ -15,7 +15,7 @@ internal enum PikaSessionRole { None, Monitoring, Owned }
 public sealed partial class PipersPlugin
 {
     // One field, written only through SetPikaRole/TryEnterPikaRole/ReleasePikaRole.
-    private int pikaRole;
+    internal int pikaRole;
     private PikaSessionRole PikaRole => (PikaSessionRole)Volatile.Read(ref pikaRole);
     private bool pikaOwned => PikaRole == PikaSessionRole.Owned;
     internal void SetPikaRole(PikaSessionRole next) => Volatile.Write(ref pikaRole, (int)next);
@@ -26,16 +26,16 @@ public sealed partial class PipersPlugin
     private void ReleasePikaRole() => SetPikaRole(PikaSessionRole.None);
 
     private string pikaMonitorStatus = "Pika telemetry starts read-only when the scene is linked.";
-    private long pikaMonitorAttemptAt;
-    private Task? pikaMonitorWorker;
+    internal long pikaMonitorAttemptAt;
+    internal Task? pikaMonitorWorker;
     private CancellationTokenSource? pikaMonitorCancellation;
-    private bool pikaMonitorStopping;
+    internal bool pikaMonitorStopping;
 
     private bool PikaMonitorRetryNeeded() => TelemetryIsFresh() && !switchingProfile && CurrentRecovery is null &&
         PikaMonitorConnectionPolicy.ShouldRetry(state?["pika"] as JsonObject, PikaMatchesProfile(), owner, link is not null, PikaRole,
             state?["motion"]?["active"]?.GetValue<bool>() == true, teleoperating);
 
-    private void RetryLinkedPikaMonitor()
+    internal void RetryLinkedPikaMonitor()
     {
         if (pikaMonitorStopping || pikaMonitorWorker is { IsCompleted: false } || !PikaMonitorRetryNeeded() ||
             pikaMonitorAttemptAt != 0 && Stopwatch.GetElapsedTime(pikaMonitorAttemptAt).TotalSeconds < 3) return;

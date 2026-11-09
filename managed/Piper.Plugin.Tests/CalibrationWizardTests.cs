@@ -161,11 +161,10 @@ public static class CalibrationWizardTests
             "A pointer without an echoed root placement enabled confirmation");
         Check(WizardReferenceHighlightScope.FailureMessage(new InvalidOperationException("Viewport overlays are hidden. Enable viewport overlays, then retry.")).Contains("Enable viewport overlays", StringComparison.Ordinal),
             "Hidden-overlay guidance was lost behind a generic marker failure");
-        const System.Reflection.BindingFlags hidden = System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic;
         var copyPlugin = new PipersPlugin();
         var sheetDraft = draft with { Answers = new(draft.Answers) { ["left"] = "697", ["back"] = "200", ["height"] = "75" } };
-        typeof(PipersPlugin).GetField("calibrationWizard", hidden)!.SetValue(copyPlugin, sheetDraft);
-        typeof(PipersPlugin).GetMethod("LoadSheetRows", hidden)!.Invoke(copyPlugin, null);
+        copyPlugin.calibrationWizard = sheetDraft;
+        copyPlugin.LoadSheetRows();
         Check(sheetDraft.Answers["p0left"] == "697" && sheetDraft.Answers["p0back"] == "200" && !sheetDraft.Answers.ContainsKey("p0height"), "Sheet migration lost current XY measurements or carried hover height into desk-contact rows");
         foreach (int row in Enumerable.Range(0, 5)) foreach (string axis in new[] { "left", "back" }) sheetDraft.Answers[$"p{row}{axis}"] = (100 + row * 100).ToString();
         CalibrationWizardFlow.ValidateDraft(sheetDraft, "robot-a");

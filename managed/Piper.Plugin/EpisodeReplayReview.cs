@@ -64,7 +64,7 @@ internal sealed record ReplayReview(EpisodeReplayArtifact Artifact, string Profi
 public sealed partial class PipersPlugin
 {
     private string replayPath = "", replayStatus = "Load a finished simulation episode to review its physical start.";
-    private ReplayReview? replayReview;
+    internal ReplayReview? replayReview;
     private string replayTimingStatus = "Recheck the arm's fresh reported speed and acceleration limits. No fallback acceleration is used.";
 
     private Widget ReplayPage()

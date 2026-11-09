@@ -7,12 +7,12 @@ public sealed record SimulationCameraPreferences(string SceneId, string CameraId
 
 public sealed partial class PipersPlugin
 {
-    private JsonObject? simulationCameras;
+    internal JsonObject? simulationCameras;
 
     private long simulationCameraDiscoveryEpoch;
     private sealed record SimulationCameraDiscovery(long Epoch, JsonObject Cameras);
     private readonly ThrottledProbe<SimulationCameraDiscovery> simulationCameraProbe = new(TimeSpan.FromSeconds(2));
-    private readonly CancellationTokenSource cameraDiscoveryShutdown = new();
+    internal readonly CancellationTokenSource cameraDiscoveryShutdown = new();
     private bool CameraDiscoveryRunning => passiveMeasuredTrackingStarted && !cameraDiscoveryShutdown.IsCancellationRequested;
 
     private async Task MaintainCameraDiscovery(CancellationToken cancellation)

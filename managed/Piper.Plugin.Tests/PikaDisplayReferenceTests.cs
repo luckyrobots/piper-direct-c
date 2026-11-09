@@ -91,15 +91,11 @@ internal static class PikaDisplayReferenceTests
 
     private static async Task RunRendered()
     {
-        const BindingFlags hidden = BindingFlags.Instance | BindingFlags.NonPublic;
         var plugin = new PipersPlugin();
-        void Set(string name, object? value) => typeof(PipersPlugin).GetField(name, hidden)!.SetValue(plugin, value);
-        T Get<T>(string name) => (T)typeof(PipersPlugin).GetField(name, hidden)!.GetValue(plugin)!;
-        Task Invoke(string name, params object[] args) => (Task)typeof(PipersPlugin).GetMethod(name, hidden)!.Invoke(plugin, args)!;
         string folder = Path.Combine(Path.GetTempPath(), "piper-display-reference-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(folder);
         var prefs = RobotProfileRouting.Normalize(new Preferences(Robots: [Profile], ActiveRobotId: "piper-1"));
-        Set("preferences", prefs); Set("token", "fixture-session"); Set("pikaRole", (int)PikaSessionRole.Monitoring);
+        plugin.preferences = prefs; plugin.token = "fixture-session"; plugin.pikaRole = (int)PikaSessionRole.Monitoring;
         var model = new JsonArray(Enumerable.Range(1, 6).Select(i => (JsonNode)new JsonObject { ["name"] = "joint" + i, ["unit"] = "rad" }).ToArray());
         const double travel = .0470221912391186;
         model.Add(new JsonObject { ["name"] = "joint7", ["unit"] = "m", ["limited"] = true, ["min"] = -travel, ["max"] = 0 });
@@ -112,11 +108,11 @@ internal static class PikaDisplayReferenceTests
         };
         var pika = Pika();
         var state = new JsonObject { ["token"] = "fixture-session", ["selected"] = "can-a", ["devices"] = new JsonArray(device), ["pika"] = pika, ["motion"] = new JsonObject { ["active"] = false } };
-        Set("state", state);
-        void Fresh() => Get<LatestTelemetry>("telemetry").Publish(new(state, "fixture-session", 1, Stopwatch.GetTimestamp(), 0));
+        plugin.state = state;
+        void Fresh() => plugin.telemetry.Publish(new(state, "fixture-session", 1, Stopwatch.GetTimestamp(), 0));
         var engineCalls = new List<string>(); var feedback = new List<JsonObject>();
-        var rpc = new FakeCalls(); Set("client", new PiperControl.PiperControlClient(rpc));
-        var context = (PluginContext)Activator.CreateInstance(typeof(PluginContext), hidden, null,
+        var rpc = new FakeCalls(); plugin.client = new PiperControl.PiperControlClient(rpc);
+        var context = (PluginContext)Activator.CreateInstance(typeof(PluginContext), BindingFlags.Instance | BindingFlags.NonPublic, null,
             [new PluginStart("fixture", folder, folder), (Func<object, CancellationToken, Task>)((_, _) => Task.CompletedTask),
                 (Func<string, JsonObject, CancellationToken, Task<JsonElement>>)((method, args, _) =>
                 {
@@ -132,46 +128,46 @@ internal static class PikaDisplayReferenceTests
                     else throw new InvalidOperationException("Unexpected display-reference engine request: " + method);
                     return Task.FromResult(JsonSerializer.SerializeToElement(reply));
                 })], null)!;
-        Set("engine", context);
+        plugin.engine = context;
         async Task Event(string id, double? value = null)
         {
             Fresh();
-            await plugin.HandleEventAsync(new("luckyrobots.pipers.controls", WorkspaceEventScope.Wrap(Get<long>("workspaceViewEpoch"), "piper-1", id), "click", JsonSerializer.SerializeToElement(value)), CancellationToken.None);
+            await plugin.HandleEventAsync(new("luckyrobots.pipers.controls", WorkspaceEventScope.Wrap(plugin.workspaceViewEpoch, "piper-1", id), "click", JsonSerializer.SerializeToElement(value)), CancellationToken.None);
         }
         try
         {
-            await Invoke("Render", CancellationToken.None); await Event("pika.reference.set");
+            await plugin.Render(CancellationToken.None); await Event("pika.reference.set");
             string path = Path.Combine(folder, "gripper-reference", "piper-1.json");
             Check(File.Exists(path) && JsonSerializer.Deserialize<PikaClosedDisplayReference>(File.ReadAllText(path), PluginProtocol.Json)?.MotorAngle == ClosedAngle,
                 "Actual display-reference action did not atomically persist the observed closed position");
-            Set("pikaDisplayReferenceKey", ""); Set("pikaDisplayReference", null);
+            plugin.pikaDisplayReferenceKey = ""; plugin.pikaDisplayReference = null;
             await Event("link");
             Check(feedback.Count == 1 && feedback[0]["joints"]?["joint7"]?.GetValue<double>() == -travel && feedback[0]["joints"]?["joint8"]?.GetValue<double>() == travel,
                 "Initial link failed to restore the saved reference and send both closed finger positions");
-            Check(Get<RobotLink>("link").GripperErrorMm == 0, "Initial scene link did not verify both gripper acknowledgements");
+            Check(plugin.link!.GripperErrorMm == 0, "Initial scene link did not verify both gripper acknowledgements");
             pika["telemetry"]!["motor"]!["Position"] = ClosedAngle + PikaProtocol.Angle(20); Fresh();
-            await Invoke("PublishMeasuredScene", CancellationToken.None);
+            await plugin.PublishMeasuredScene(CancellationToken.None);
             var updated = feedback[^1]["joints"]!;
             double gap = 2000 * travel + 1000 * (updated["joint7"]!.GetValue<double>() - updated["joint8"]!.GetValue<double>());
-            Check(Math.Abs(gap - 20) < 1e-7 && Get<RobotLink>("link").GripperErrorMm == 0,
+            Check(Math.Abs(gap - 20) < 1e-7 && plugin.link.GripperErrorMm == 0,
                 "Continuing telemetry omitted the saved display reference or failed to verify actual finger geometry");
             pika["telemetry"]!["motor"]!["Position"] = ClosedAngle + MeasuredAngle(90.0858); Fresh();
-            await Invoke("PublishMeasuredScene", CancellationToken.None);
+            await plugin.PublishMeasuredScene(CancellationToken.None);
             updated = feedback[^1]["joints"]!;
             double openGap = 2000 * travel + 1000 * (updated["joint7"]!.GetValue<double>() - updated["joint8"]!.GetValue<double>());
-            Check(Math.Abs(openGap - 90) < 1e-7 && Get<RobotLink>("link").GripperErrorMm == 0,
+            Check(Math.Abs(openGap - 90) < 1e-7 && plugin.link.GripperErrorMm == 0,
                 "Observed full-open endpoint noise left the reference-normalized scene gripper unsynchronized");
             pika["telemetry"]!["motor"]!["Position"] = ClosedAngle; Fresh();
-            await Invoke("PublishMeasuredScene", CancellationToken.None);
+            await plugin.PublishMeasuredScene(CancellationToken.None);
             Check(feedback[^1]["joints"]!["joint7"]!.GetValue<double>() == -travel, "Continuing closed feedback left the scene gripper open");
-            pika["device"] = "/dev/other"; Fresh(); await Invoke("PublishMeasuredScene", CancellationToken.None);
+            pika["device"] = "/dev/other"; Fresh(); await plugin.PublishMeasuredScene(CancellationToken.None);
             Check(feedback[^1]["joints"]!.AsObject().Count == 6, "A saved reference was applied to another gripper assignment");
-            pika["device"] = DevicePath; pika["fresh"] = false; Fresh(); await Invoke("PublishMeasuredScene", CancellationToken.None);
+            pika["device"] = DevicePath; pika["fresh"] = false; Fresh(); await plugin.PublishMeasuredScene(CancellationToken.None);
             Check(feedback[^1]["joints"]!.AsObject().Count == 6, "Stale feedback moved the scene fingers using a saved reference");
-            pika["fresh"] = true; pika["armed"] = true; pika["enabled"] = true; pika["owner"] = Get<string>("owner"); Set("pikaRole", (int)PikaSessionRole.Owned);
+            pika["fresh"] = true; pika["armed"] = true; pika["enabled"] = true; pika["owner"] = plugin.owner; plugin.pikaRole = (int)PikaSessionRole.Owned;
             await Event("pika.target", 40);
             Check(rpc.Requests.Count == 0, "A held gripper could accept a manual target after robot approval was revoked");
-            Set("approved", true);
+            plugin.approved = true;
             device["recovery_required"] = true;
             await Event("pika.plus");
             Check(rpc.Requests.Count == 0, "A gripper target bypassed arm recovery");
@@ -187,10 +183,10 @@ internal static class PikaDisplayReferenceTests
                 "Confirmed closed display reference kept normal controls blocked or changed the vendor outgoing target-angle formula");
             Check(engineCalls.All(m => m is "scene.robots" or "robot.feedback" or "robot.subscribe"), "Setting a display reference requested engine teleoperation, reset, enable or target motion");
             await Event("pika.reference.clear");
-            Check(!File.Exists(path) && Get<PikaClosedDisplayReference?>("pikaDisplayReference") is null,
+            Check(!File.Exists(path) && plugin.pikaDisplayReference is null,
                 "Clear display reference did not remove its persisted correction");
         }
-        finally { Get<Grpc.Net.Client.GrpcChannel>("channel").Dispose(); Directory.Delete(folder, true); }
+        finally { plugin.channel.Dispose(); Directory.Delete(folder, true); }
     }
 
     private sealed class FakeCalls : CallInvoker

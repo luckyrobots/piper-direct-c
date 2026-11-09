@@ -9,11 +9,11 @@ public sealed partial class PipersPlugin
     /// <summary>Plugin-H: null is Unknown. A probe (at most every 5 s, shared by
     /// publication and the visibility toggle) records what the engine host supports;
     /// visibility can therefore never be known while ghost support is unknown.</summary>
-    private sealed record GhostCapabilities(bool Ghosts, bool Visibility);
-    private GhostCapabilities? ghostCapabilities;
+    internal sealed record GhostCapabilities(bool Ghosts, bool Visibility);
+    internal GhostCapabilities? ghostCapabilities;
     private long ghostCapabilityAttempt;
     private const double GhostProbeBackoffSeconds = 5;
-    private bool? publishedGhostVisibility;
+    internal bool? publishedGhostVisibility;
     private readonly Dictionary<string, PikaClosedDisplayReference?> ghostDisplayReferences = new();
 
     private double? GhostDisplayReference(RobotProfile profile, JsonObject pika)
@@ -103,7 +103,7 @@ public sealed partial class PipersPlugin
         await engine.RequestAsync("robot.feedback", request, timeout.Token);
     }
 
-    private async Task PublishMeasuredGhosts(CancellationToken cancellation)
+    internal async Task PublishMeasuredGhosts(CancellationToken cancellation)
     {
         if (!passiveMeasuredTrackingStarted || switchingProfile) return;
         try

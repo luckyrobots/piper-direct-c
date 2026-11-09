@@ -7,7 +7,6 @@ using LuckyRobots.Piper.Plugin;
 
 internal static class CalibrationReevaluationTests
 {
-    private const BindingFlags Hidden = BindingFlags.Instance | BindingFlags.NonPublic;
 
     public static async Task Run()
     {
@@ -18,9 +17,9 @@ internal static class CalibrationReevaluationTests
         {
             using var fixture = new Fixture { Failure = unavailable };
             string before = File.ReadAllText(fixture.ReportPath);
-            await fixture.Invoke("Render", CancellationToken.None);
+            await fixture.Plugin.Render(CancellationToken.None);
             await fixture.Event("reevaluate");
-            string displayed = fixture.Patches?["sheet.action.feedback"]?["text"]?.GetValue<string>() ?? "missing patch: " + fixture.Get<string>("wizardMessage");
+            string displayed = fixture.Patches?["sheet.action.feedback"]?["text"]?.GetValue<string>() ?? "missing patch: " + fixture.Plugin.wizardMessage;
             Check(displayed.Contains("fixture capability reason"),
                 "The native calibration UI replaced the engine's actionable capability reason with a generic message: " + displayed);
             Check(File.ReadAllText(fixture.ReportPath) == before && fixture.Calls.SequenceEqual(["robot.read"]),
@@ -31,8 +30,8 @@ internal static class CalibrationReevaluationTests
             using var fixture = new Fixture { Failure = failure };
             string before = File.ReadAllText(fixture.ReportPath);
             await RejectAsync<InvalidOperationException>(() => fixture.Reevaluate(), failure + " unexpectedly replaced a saved calibration");
-            Check(File.ReadAllText(fixture.ReportPath) == before && fixture.Get<CalibrationIdentity>("calibrationIdentity") == fixture.Identity &&
-                fixture.Get<List<CalibrationSample>>("calibrationSamples").SequenceEqual(fixture.Originals),
+            Check(File.ReadAllText(fixture.ReportPath) == before && fixture.Plugin.calibrationIdentity == fixture.Identity &&
+                fixture.Plugin.calibrationSamples.SequenceEqual(fixture.Originals),
                 failure + " left partial recomputed geometry or identity in the saved report");
             Check(fixture.Calls.All(c => c is "robot.read" or "robot.evaluate"), failure + " attempted to replay a saved pose into the live scene");
         }
@@ -44,9 +43,9 @@ internal static class CalibrationReevaluationTests
         foreach (string blocked in new[] { "calibrationApplied", "calibrationPlacementUnverified", "sheetEditingRow", "stale", "motion" })
         {
             using var fixture = new Fixture();
-            if (blocked == "calibrationApplied") fixture.Set(blocked, fixture.Root);
-            else if (blocked == "calibrationPlacementUnverified") fixture.Set(blocked, true);
-            else if (blocked == "sheetEditingRow") fixture.Set(blocked, 1);
+            if (blocked == "calibrationApplied") fixture.Plugin.calibrationApplied = fixture.Root;
+            else if (blocked == "calibrationPlacementUnverified") fixture.Plugin.calibrationPlacementUnverified = true;
+            else if (blocked == "sheetEditingRow") fixture.Plugin.sheetEditingRow = 1;
             else if (blocked == "stale") fixture.State["devices"]![0]!["fresh"] = false;
             else fixture.State["motion"]!["active"] = true;
             await RejectAsync<InvalidOperationException>(() => fixture.Reevaluate(), blocked + " allowed re-evaluation");
@@ -57,8 +56,8 @@ internal static class CalibrationReevaluationTests
     private static async Task ReopenedSceneReevaluation(string revision)
     {
         using var f = new Fixture("reopened-scene", revision);
-        f.Set("acknowledgedScenePose", new JsonObject { ["pose"] = f.Pose() });
-        await f.Invoke("Render", CancellationToken.None); await f.Invoke("Update", CancellationToken.None);
+        f.Plugin.acknowledgedScenePose = new JsonObject { ["pose"] = f.Pose() };
+        await f.Plugin.Render(CancellationToken.None); await f.Plugin.Update(CancellationToken.None);
         string id = f.WidgetId(".sheet.reevaluate");
         Check(f.Patches?[id]?["enabled"]?.GetValue<bool>() == true && f.Patches[id]?["visible"]?.GetValue<bool>() == true,
             "A reopened scene hid the only explicit way to re-evaluate saved observations");
@@ -73,29 +72,29 @@ internal static class CalibrationReevaluationTests
         var audit = JsonNode.Parse(File.ReadAllText(Path.Combine(f.Directory, "calibration", "piper-1", report.ModelReevaluation!.AuditFile)))!;
         Check(audit["previousSceneId"]!.GetValue<string>() == "scene-a" && audit["sceneId"]!.GetValue<string>() == "reopened-scene" &&
             audit["previousReport"]!["identity"]!["sceneId"]!.GetValue<string>() == "scene-a", "Scene rebinding lost its original-scene provenance");
-        var draft = f.Get<CalibrationWizardDraft>("calibrationWizard");
+        var draft = f.Plugin.calibrationWizard!;
         draft.Answers["reevaluatedscene"] = "scene-a";
-        f.Set("calibrationWizard", draft with { Setup = new("old-root", "old-proof", "old-proof", JawTipsConfirmed: true) });
-        typeof(PipersPlugin).GetMethod("ReconcileReevaluatedWizard", Hidden)!.Invoke(f.Plugin, null);
-        draft = f.Get<CalibrationWizardDraft>("calibrationWizard");
+        f.Plugin.calibrationWizard = draft with { Setup = new("old-root", "old-proof", "old-proof", JawTipsConfirmed: true) };
+        f.Plugin.ReconcileReevaluatedWizard();
+        draft = f.Plugin.calibrationWizard;
         Check(draft.Answers["reevaluatedscene"] == "reopened-scene" && draft.Setup == new SheetSetup(),
             "An interrupted scene-only rebind restored confirmations from the old scene when the model revision was unchanged");
         foreach (string action in new[] { "left.show", "left.confirm", "back.show", "back.confirm", "tool.show", "tool.confirm", "surface", "fit" })
             await f.Event(action);
-        Check(f.Get<CalibrationFit>("calibrationFit").CanApply && f.Patches![f.WidgetId(".sheet.apply")]!["enabled"]!.GetValue<bool>(),
+        Check(f.Plugin.calibrationFit!.CanApply && f.Patches![f.WidgetId(".sheet.apply")]!["enabled"]!.GetValue<bool>(),
             "A deliberately rebound scene could not reconfirm references and calculate normally");
     }
 
     private static async Task SuccessfulReevaluation()
     {
         using var f = new Fixture();
-        f.Set("acknowledgedScenePose", new JsonObject { ["pose"] = f.Pose() });
-        await f.Invoke("Render", CancellationToken.None); await f.Invoke("Update", CancellationToken.None);
+        f.Plugin.acknowledgedScenePose = new JsonObject { ["pose"] = f.Pose() };
+        await f.Plugin.Render(CancellationToken.None); await f.Plugin.Update(CancellationToken.None);
         string id = f.Widgets().Single(w => w["id"]!.GetValue<string>().EndsWith(".sheet.reevaluate", StringComparison.Ordinal))["id"]!.GetValue<string>();
         Check(f.Patches?[id]?["visible"]?.GetValue<bool>() == true && f.Patches[id]?["enabled"]?.GetValue<bool>() == true,
             "A corrected model did not expose the explicit re-evaluation action");
         await f.Plugin.HandleEventAsync(new("luckyrobots.pipers.controls", id, "click", JsonSerializer.SerializeToElement<object?>(null)), CancellationToken.None);
-        var current = f.Get<List<CalibrationSample>>("calibrationSamples");
+        var current = f.Plugin.calibrationSamples;
         Check(current.Count == 5 && current.Where((s, i) => s.SceneWorld != f.Originals[i].SceneWorld).Count() == 5,
             "The explicit UI action failed to recompute all five saved scene points");
         for (int i = 0; i < current.Count; i++)
@@ -113,7 +112,7 @@ internal static class CalibrationReevaluationTests
         var audit = JsonNode.Parse(File.ReadAllText(Path.Combine(f.Directory, "calibration", "piper-1", report.ModelReevaluation!.AuditFile)))!;
         Check(audit["previousReport"]!["identity"]!["modelRevision"]!.GetValue<string>() == "old-model" && audit["evaluations"]!.AsArray().Count == 5 &&
             audit["previousWizard"]!["operatorSaysTcpMatches"]!.GetValue<bool>(), "Re-evaluation audit omitted original report, physical-point confirmation or per-pose receipts");
-        var draft = f.Get<CalibrationWizardDraft>("calibrationWizard");
+        var draft = f.Plugin.calibrationWizard!;
         Check(draft.ModelRevision == "new-model" && draft.Setup == new SheetSetup() &&
             !draft.Answers.ContainsKey("frame") && !draft.Answers.ContainsKey("sceneconfirmed"), "Old model visual confirmations survived re-evaluation");
         Check(draft.Answers["p1left"] == "600" && !f.Patches![f.WidgetId(".sheet.fit")]!["enabled"]!.GetValue<bool>(),
@@ -126,18 +125,18 @@ internal static class CalibrationReevaluationTests
         // saved tabletop/root. Exercise the same visible controls as the user.
         foreach (string action in new[] { "left.show", "left.confirm", "back.show", "back.confirm", "tool.show", "tool.confirm", "surface", "fit" })
             await f.Event(action);
-        Check(f.Get<CalibrationWizardDraft>("calibrationWizard").Setup.Stage(f.Get<CalibrationWizardDraft>("calibrationWizard").Setup.BackProof) == SheetSetupStage.Ready &&
-            f.Get<CalibrationWizardDraft>("calibrationWizard").Setup.SurfaceConfirmed &&
-            f.Get<CalibrationFit>("calibrationFit").CanApply && f.Patches![f.WidgetId(".sheet.apply")]!["enabled"]!.GetValue<bool>(),
+        Check(f.Plugin.calibrationWizard!.Setup.Stage(f.Plugin.calibrationWizard.Setup.BackProof) == SheetSetupStage.Ready &&
+            f.Plugin.calibrationWizard.Setup.SurfaceConfirmed &&
+            f.Plugin.calibrationFit!.CanApply && f.Patches![f.WidgetId(".sheet.apply")]!["enabled"]!.GetValue<bool>(),
             "Re-evaluated saved captures became trapped behind confirmations that could not be completed");
-        Check(f.Get<CalibrationDesk>("calibrationDesk").SurfaceY == .75 && f.Get<List<CalibrationSample>>("calibrationSamples").Count == 5 &&
+        Check(f.Plugin.calibrationDesk.SurfaceY == .75 && f.Plugin.calibrationSamples.Count == 5 &&
             f.Calls.All(c => c is "robot.read" or "robot.evaluate" or "robot.highlightReference" or "robot.highlightToolSite"),
             "Reconfirming the corrected model changed the fixed tabletop, recaptured poses or wrote placement");
 
         // Simulate report commit followed by an interrupted wizard-draft write.
-        f.Set("calibrationWizard", draft with { ModelRevision = "old-model", Setup = new("old-root", "old-proof", "old-proof", JawTipsConfirmed: true) });
-        typeof(PipersPlugin).GetMethod("ReconcileReevaluatedWizard", Hidden)!.Invoke(f.Plugin, null);
-        draft = f.Get<CalibrationWizardDraft>("calibrationWizard");
+        f.Plugin.calibrationWizard = draft with { ModelRevision = "old-model", Setup = new("old-root", "old-proof", "old-proof", JawTipsConfirmed: true) };
+        f.Plugin.ReconcileReevaluatedWizard();
+        draft = f.Plugin.calibrationWizard;
         Check(draft.ModelRevision == "new-model" && draft.Setup == new SheetSetup(),
             "A stale wizard draft restored the old model and approvals after the recomputed report committed");
     }
@@ -177,7 +176,7 @@ internal static class CalibrationReevaluationTests
                 ["joints"] = new JsonArray(Enumerable.Range(1, 6).Select(_ => (JsonNode)new JsonObject { ["actual_deg"] = 0.0,
                     ["fresh"] = true, ["age_s"] = 0.0, ["fault"] = 0, ["enabled"] = false }).ToArray()) };
             State = new() { ["token"] = "session", ["selected"] = "can-a", ["devices"] = new JsonArray(device), ["motion"] = new JsonObject { ["active"] = false } };
-            var context = (PluginContext)Activator.CreateInstance(typeof(PluginContext), Hidden, null,
+            var context = (PluginContext)Activator.CreateInstance(typeof(PluginContext), BindingFlags.Instance | BindingFlags.NonPublic, null,
                 [new PluginStart("fixture", Directory, Directory), (Func<object, CancellationToken, Task>)((message, _) =>
                 {
                     var json = JsonSerializer.SerializeToNode(message, PluginProtocol.Json)!.AsObject();
@@ -199,17 +198,17 @@ internal static class CalibrationReevaluationTests
                     return Task.FromResult(JsonSerializer.SerializeToElement(response));
                 })], null)!;
             var prefs = RobotProfileRouting.Normalize(new Preferences(Robots: [new("piper-1", "Fixture", "can-a", RobotId: "robot-a")], ActiveRobotId: "piper-1"));
-            Set("engine", context); Set("preferences", prefs); Set("state", State); Set("token", "session");
-            Set("link", new RobotLink(liveScene, liveEntity, Pose()["joints"]!.AsArray(), device));
-            Set("linkBackendToken", "session"); Plugin.Navigation = WorkspaceNavigation.Calibration;
-            Set("calibrationProfile", "piper-1"); Set("wizardProfile", "piper-1"); Set("calibrationIdentity", Identity);
-            Set("calibrationOriginal", Root); Set("calibrationFit", originalFit); Set("calibrationDesk", desk); Set("calibrationPath", ReportPath);
-            Get<List<CalibrationSample>>("calibrationSamples").AddRange(Originals);
+            Plugin.engine = context; Plugin.preferences = prefs; Plugin.state = State; Plugin.token = "session";
+            Plugin.link = new RobotLink(liveScene, liveEntity, Pose()["joints"]!.AsArray(), device);
+            Plugin.linkBackendToken = "session"; Plugin.Navigation = WorkspaceNavigation.Calibration;
+            Plugin.calibrationProfile = "piper-1"; Plugin.wizardProfile = "piper-1"; Plugin.calibrationIdentity = Identity;
+            Plugin.calibrationOriginal = Root; Plugin.calibrationFit = originalFit; Plugin.calibrationDesk = desk; Plugin.calibrationPath = ReportPath;
+            Plugin.calibrationSamples.AddRange(Originals);
             var wizard = CalibrationWizardFlow.New("piper-1") with { ModelAssetId = "asset-a", ModelRevision = "old-model",
                 Setup = new(Root.Json().ToJsonString(), "old-left", "old-back", JawTipsConfirmed: true, SurfaceConfirmed: true) };
             foreach (var (key, text) in new[] { ("tool", "calibration_jaw_tips"), ("width", "1400"), ("depth", "700"), ("precision", "5"),
                 ("sceney", "750") }) wizard.Answers[key] = text;
-            Set("calibrationWizard", wizard); Fresh();
+            Plugin.calibrationWizard = wizard; Fresh();
         }
 
         public JsonObject Pose() => new()
@@ -247,27 +246,24 @@ internal static class CalibrationReevaluationTests
                 if (Failure == "joint") result["joints"]![0]!["position"] = 99;
                 if (Failure == "dependency") site["requiredJoints"]!.AsArray().Add("joint7");
                 if (Failure == "not-read-only") result["evaluationOnly"] = false;
-                if (Failure == "connection") Set("token", "changed");
-                if (Failure == "scene-switch") Set("link", new RobotLink("third-scene", liveEntity, Pose()["joints"]!.AsArray(), State["devices"]![0]!.AsObject()));
+                if (Failure == "connection") Plugin.token = "changed";
+                if (Failure == "scene-switch") Plugin.link = new RobotLink("third-scene", liveEntity, Pose()["joints"]!.AsArray(), State["devices"]![0]!.AsObject());
             }
             return result;
         }
-        public void Set(string key, object? value) => typeof(PipersPlugin).GetField(key, Hidden)!.SetValue(Plugin, value);
-        public T Get<T>(string key) => (T)typeof(PipersPlugin).GetField(key, Hidden)!.GetValue(Plugin)!;
-        public Task Invoke(string name, CancellationToken cancellation) => (Task)typeof(PipersPlugin).GetMethod(name, Hidden)!.Invoke(Plugin, [cancellation])!;
-        public Task Reevaluate() => Invoke("ReevaluateCalibrationModel", CancellationToken.None);
+        public Task Reevaluate() => Plugin.ReevaluateCalibrationModel(CancellationToken.None);
         public Task Event(string action)
         {
             Fresh();
             return Plugin.HandleEventAsync(new("luckyrobots.pipers.controls", WidgetId(".sheet." + action), "click", JsonSerializer.SerializeToElement<object?>(null)), CancellationToken.None);
         }
-        private void Fresh() => Get<LatestTelemetry>("telemetry").Publish(new(State, "session", 1, Stopwatch.GetTimestamp(), 0));
+        private void Fresh() => Plugin.telemetry.Publish(new(State, "session", 1, Stopwatch.GetTimestamp(), 0));
         public IEnumerable<JsonObject> Widgets(JsonObject? root = null)
         {
             var node = root ?? View!; yield return node;
             foreach (var child in node["children"]?.AsArray().OfType<JsonObject>() ?? []) foreach (var nested in Widgets(child)) yield return nested;
         }
         public string WidgetId(string suffix) => Widgets().Single(w => w["id"]!.GetValue<string>().EndsWith(suffix, StringComparison.Ordinal))["id"]!.GetValue<string>();
-        public void Dispose() { Get<Grpc.Net.Client.GrpcChannel>("channel").Dispose(); System.IO.Directory.Delete(Directory, true); }
+        public void Dispose() { Plugin.channel.Dispose(); System.IO.Directory.Delete(Directory, true); }
     }
 }

@@ -30,7 +30,7 @@ public sealed partial class PipersPlugin
     private bool SupportedRecoveryBusy => CurrentRecovery?.Kind == RecoveryKind.HoldHere;
     private bool RecoveryHomeBusy => CurrentRecovery?.Kind == RecoveryKind.ReturnToZero;
 
-    private RecoveryOperation BeginRecovery(RecoveryKind kind, JsonObject device, long expectedEpoch, CancellationToken cancellation)
+    internal RecoveryOperation BeginRecovery(RecoveryKind kind, JsonObject device, long expectedEpoch, CancellationToken cancellation)
     {
         if (CurrentRecovery is not null || GroupFollowActive)
             throw new InvalidOperationException("Finish the current recovery or stop following before starting recovery.");
@@ -96,7 +96,7 @@ public sealed partial class PipersPlugin
             throw new InvalidOperationException("STOP or a connection change retired the recovery result.");
     }
 
-    private void RetireRecovery(RecoveryOperation operation)
+    internal void RetireRecovery(RecoveryOperation operation)
     {
         Debug.Assert(ReferenceEquals(CurrentRecovery, operation));
         // On an interrupted native step, independently stop renewing the exact

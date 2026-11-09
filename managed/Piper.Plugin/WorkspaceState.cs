@@ -112,7 +112,7 @@ public sealed partial class PipersPlugin
     private string cameraDetail => Navigation.CameraDetail;
     internal long workspaceViewEpoch;
     private Task? wizardHighlightMaintenance;
-    private bool connectionDetailsOpen, cameraStreamDetailsOpen, cameraLensDetailsOpen;
+    internal bool connectionDetailsOpen, cameraStreamDetailsOpen, cameraLensDetailsOpen;
 
     internal async Task WorkspaceEvent(string action, CancellationToken cancellation)
     {

@@ -37,7 +37,7 @@ public sealed partial class PipersPlugin
         return Widget.Row("workspace", RobotSidebar(), content) with { Spacing = 0 };
     }
 
-    private Widget ControlsPage()
+    internal Widget ControlsPage()
     {
         var widgets = new List<Widget> {
             new Widget("checkbox", "group.follow.selected") { Text = "Follow simulation with this robot", Value = ActiveProfile.FollowSimulationSelected ? 1 : 0,

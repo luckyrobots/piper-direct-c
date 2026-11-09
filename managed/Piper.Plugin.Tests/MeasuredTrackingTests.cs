@@ -23,17 +23,17 @@ internal static class MeasuredTrackingTests
         using (var delayed = new Fixture(started: true) { RequestDelayMilliseconds = 250 })
         {
             await delayed.Restore();
-            Check(delayed.Get<RobotLink?>("link") is not null && delayed.Requests.Count == 3,
+            Check(delayed.Plugin.link is not null && delayed.Requests.Count == 3,
                 "A healthy three-RPC measured-link handshake shared one 400ms budget under editor load");
         }
         using (var retry = new Fixture(started: true))
         {
             await retry.Restore();
-            var previous = retry.Get<RobotLink?>("link");
-            retry.Set("measuredTrackingSceneUnverified", true); retry.Set("measuredTrackingAttemptAt", 0L);
+            var previous = retry.Plugin.link;
+            retry.Plugin.measuredTrackingSceneUnverified = true; retry.Plugin.measuredTrackingAttemptAt = 0L;
             retry.FailRequest = "robot.subscribe"; retry.Fresh();
             await retry.Restore();
-            Check(ReferenceEquals(previous, retry.Get<RobotLink?>("link")) && !retry.Get<bool>("linkCommandsEnabled"),
+            Check(ReferenceEquals(previous, retry.Plugin.link) && !retry.Plugin.linkCommandsEnabled,
                 "A transient same-scene subscribe failure destroyed the verified measured binding or restored target permission");
         }
 
@@ -41,15 +41,15 @@ internal static class MeasuredTrackingTests
         {
             await f.Restore();
             Check(f.Requests.Count == 0, "An unstarted fixture began passive background discovery");
-            f.Set("passiveMeasuredTrackingStarted", true);
+            f.Plugin.passiveMeasuredTrackingStarted = true;
             f.Snapshot["devices"]![0]!["status"]!["control"] = 2;
             f.Snapshot["devices"]![0]!["status"]!["teach_state"] = 1;
             f.Fresh();
             await f.Restore();
             Check(f.Requests.Select(r => r.Method).SequenceEqual(new[] { "scene.robots", "robot.feedback", "robot.subscribe" }),
                 "Passive linking did not validate/apply/ack/subscribe in order during hand-guiding");
-            Check(f.Get<RobotLink?>("link") is { EntityId: "robot-a", DeviceId: "can-a", Generation: 7 } &&
-                !f.Get<bool>("approved") && !f.Get<bool>("linkCommandsEnabled") && f.Get<ViewportDrag>("viewportDrag").Phase == ViewportDragPhase.Off && f.Authority.Current.Lease is null,
+            Check(f.Plugin.link is { EntityId: "robot-a", DeviceId: "can-a", Generation: 7 } &&
+                !f.Plugin.approved && !f.Plugin.linkCommandsEnabled && f.Plugin.viewportDrag.Phase == ViewportDragPhase.Off && f.Authority.Current.Lease is null,
                 "Passive measured linking granted control, teleoperation or a previous motion lease");
             var feedback = f.Requests.Single(r => r.Method == "robot.feedback").Body;
             Check(feedback["joints"]?["joint7"]?.GetValue<double>() is double jaw && Math.Abs(jaw + .047) < 1e-8,
@@ -58,24 +58,24 @@ internal static class MeasuredTrackingTests
             await f.Restore();
             Check(f.Requests.Count == before, "Automatic scene discovery ran more than once per second");
             await f.DrainMonitor();
-            f.Set("pikaMonitorAttemptAt", 0L);
-            f.InvokeVoid("RetryLinkedPikaMonitor");
+            f.Plugin.pikaMonitorAttemptAt = 0L;
+            f.Plugin.RetryLinkedPikaMonitor();
             await f.DrainMonitor();
             Check(f.Rpc.Routes.Count == 1 && f.Rpc.Routes.Single().Route == "/api/pika/connect" &&
                 f.Rpc.Routes.Single().Body["take_over"]?.GetValue<bool>() == false,
                 "Automatic tracking sent a physical request beyond Pika's monitor-only connection");
-            Check(f.Get<int>("pikaRole") == (int)PikaSessionRole.Monitoring, "Monitoring silently acquired gripper motor control");
+            Check(f.Plugin.pikaRole == (int)PikaSessionRole.Monitoring, "Monitoring silently acquired gripper motor control");
 
-            f.Set("measuredTrackingAttemptAt", 0L); f.Fresh(); before = f.Requests.Count;
+            f.Plugin.measuredTrackingAttemptAt = 0L; f.Fresh(); before = f.Requests.Count;
             await f.Restore();
             Check(f.Requests.Count == before, "A healthy measured link polled scene discovery while holding the input gate");
-            f.SceneId = "scene-b"; f.Fresh(); f.Set("measuredTrackingAttemptAt", 0L);
-            await f.Invoke("PublishMeasuredScene", CancellationToken.None);
-            Check(f.Get<bool>("measuredTrackingSceneUnverified"), "A reloaded scene's rejected feedback did not request measured-link rediscovery");
+            f.SceneId = "scene-b"; f.Fresh(); f.Plugin.measuredTrackingAttemptAt = 0L;
+            await f.Plugin.PublishMeasuredScene(CancellationToken.None);
+            Check(f.Plugin.measuredTrackingSceneUnverified, "A reloaded scene's rejected feedback did not request measured-link rediscovery");
             await f.Restore();
-            Check(f.Get<RobotLink?>("link")?.SceneId == "scene-b" && f.Requests.Count(r => r.Method == "robot.subscribe") == 2,
+            Check(f.Plugin.link?.SceneId == "scene-b" && f.Requests.Count(r => r.Method == "robot.subscribe") == 2,
                 "Loading a different scene did not restore the exact assigned robot's measured link");
-            Check(!f.Get<bool>("linkCommandsEnabled"), "Scene reload restored viewport target permission");
+            Check(!f.Plugin.linkCommandsEnabled, "Scene reload restored viewport target permission");
         }
 
         foreach (string invalid in new[] { "selected", "stale", "missing", "offline", "generation" })
@@ -87,7 +87,7 @@ internal static class MeasuredTrackingTests
             if (invalid == "generation") f.Snapshot["devices"]![0]!["generation"] = 0L;
             if (invalid == "missing") f.SetPreferences(f.Profile with { RobotId = "unknown-robot" });
             f.Fresh(); await f.Restore();
-            Check(f.Get<RobotLink?>("link") is null && !f.Requests.Any(r => r.Method is "robot.feedback" or "robot.subscribe") && f.Rpc.Routes.Count == 0,
+            Check(f.Plugin.link is null && !f.Requests.Any(r => r.Method is "robot.feedback" or "robot.subscribe") && f.Rpc.Routes.Count == 0,
                 "An unknown, stale or incorrectly scoped assignment reached measured pose binding: " + invalid);
         }
 
@@ -98,15 +98,15 @@ internal static class MeasuredTrackingTests
             f.AfterRequest = method =>
             {
                 if (method != awaitPoint) return;
-                if (changed == "backend") { f.Snapshot["token"] = "backend-b"; f.Set("token", "backend-b"); }
+                if (changed == "backend") { f.Snapshot["token"] = "backend-b"; f.Plugin.token = "backend-b"; }
                 if (changed == "generation") f.Snapshot["devices"]![0]!["generation"] = 8L;
                 if (changed == "profile") f.SetPreferences(f.Profile with { Id = "other-profile" });
                 if (changed == "permission") f.Authority.Revoke();
-                if (changed == "disposing") f.Set("passiveMeasuredTrackingStarted", false);
+                if (changed == "disposing") f.Plugin.passiveMeasuredTrackingStarted = false;
                 f.Fresh();
             };
             await f.Restore();
-            Check(f.Get<RobotLink?>("link") is null && !f.Get<bool>("approved") && !f.Get<bool>("linkCommandsEnabled") && f.Rpc.Routes.Count == 0,
+            Check(f.Plugin.link is null && !f.Plugin.approved && !f.Plugin.linkCommandsEnabled && f.Rpc.Routes.Count == 0,
                 "A delayed " + awaitPoint + " acknowledgement survived changed " + changed + " scope");
             if (awaitPoint != "robot.subscribe") Check(!f.Requests.Any(r => r.Method == "robot.subscribe"), "Scope changed before subscribe but the stale robot was subscribed");
         }
@@ -121,8 +121,8 @@ internal static class MeasuredTrackingTests
         foreach (string active in new[] { "teleoperation", "follow", "motion" })
         {
             using var f = new Fixture(started: true);
-            if (active == "teleoperation") f.Set("viewportDrag", new ViewportDrag(ViewportDragPhase.Teleoperating));
-            if (active == "follow") f.Set("viewportDrag", new ViewportDrag(ViewportDragPhase.Following, Request: 7));
+            if (active == "teleoperation") f.Plugin.viewportDrag = new ViewportDrag(ViewportDragPhase.Teleoperating);
+            if (active == "follow") f.Plugin.viewportDrag = new ViewportDrag(ViewportDragPhase.Following, Request: 7);
             if (active == "motion") f.Snapshot["motion"]!["active"] = true;
             f.Fresh(); await f.Restore();
             Check(f.Requests.Count == 0 && f.Commands.CurrentCount == 1, "Passive discovery interfered with active " + active + " inputs");
@@ -131,7 +131,7 @@ internal static class MeasuredTrackingTests
         {
             f.WrongAcknowledgement = true;
             await f.Restore();
-            Check(f.Get<RobotLink?>("link") is null && !f.Requests.Any(r => r.Method == "robot.subscribe"),
+            Check(f.Plugin.link is null && !f.Requests.Any(r => r.Method == "robot.subscribe"),
                 "A wrong scene/entity acknowledgement was promoted to a measured binding");
         }
         using (var f = new Fixture(started: true))
@@ -139,18 +139,18 @@ internal static class MeasuredTrackingTests
             // Exercise the real public Link toggle without StartAsync, cameras
             // or a real server. Persisted false must survive a new instance.
             await f.Restore(); await f.DrainMonitor();
-            f.Set("pikaRole", (int)PikaSessionRole.None); f.Set("pikaMonitorStopping", true);
+            f.Plugin.pikaRole = (int)PikaSessionRole.None; f.Plugin.pikaMonitorStopping = true;
             await f.LinkEvent();
             var saved = JsonSerializer.Deserialize<Preferences>(await File.ReadAllTextAsync(Path.Combine(f.Folder, "preferences.json")), PluginProtocol.Json)!;
-            Check(RobotProfileRouting.Active(saved).RememberMeasuredLink == false && f.Get<RobotLink?>("link") is null,
+            Check(RobotProfileRouting.Active(saved).RememberMeasuredLink == false && f.Plugin.link is null,
                 "Explicit Unlink did not persist passive tracking off for the active profile");
-            f.Set("measuredTrackingAttemptAt", 0L); f.Fresh();
+            f.Plugin.measuredTrackingAttemptAt = 0L; f.Fresh();
             int before = f.Requests.Count;
             await f.Restore();
             Check(f.Requests.Count == before, "A refresh immediately relinked after explicit Unlink");
             await f.LinkEvent();
             saved = JsonSerializer.Deserialize<Preferences>(await File.ReadAllTextAsync(Path.Combine(f.Folder, "preferences.json")), PluginProtocol.Json)!;
-            Check(RobotProfileRouting.Active(saved).RememberMeasuredLink == true && f.Get<RobotLink?>("link") is not null,
+            Check(RobotProfileRouting.Active(saved).RememberMeasuredLink == true && f.Plugin.link is not null,
                 "Explicit Link did not persist automatic measured tracking back on");
             Check(f.Rpc.Routes.All(r => r.Route == "/api/pika/connect"), "Link/Unlink sent power, reset, target, configuration or teleoperation requests");
         }
@@ -158,8 +158,8 @@ internal static class MeasuredTrackingTests
 
     private sealed class Fixture : IDisposable
     {
-        private const BindingFlags Flags = BindingFlags.Instance | BindingFlags.NonPublic;
         private readonly PipersPlugin plugin = new();
+        public PipersPlugin Plugin => plugin;
         public string Folder { get; } = Path.Combine(Path.GetTempPath(), "piper-passive-link-" + Guid.NewGuid().ToString("N"));
         public FakeCalls Rpc { get; } = new();
         public List<(string Method, JsonObject Body)> Requests { get; } = [];
@@ -169,33 +169,29 @@ internal static class MeasuredTrackingTests
         public string FailRequest = "";
         public Action<string>? AfterRequest;
         public JsonObject Snapshot { get; }
-        public RobotProfile Profile => RobotProfileRouting.Active(Get<Preferences>("preferences"));
-        public SemaphoreSlim Commands => Get<SemaphoreSlim>("commands");
-        public void Set(string name, object? value) => typeof(PipersPlugin).GetField(name, Flags)!.SetValue(plugin, value);
-        public T Get<T>(string name) => (T)typeof(PipersPlugin).GetField(name, Flags)!.GetValue(plugin)!;
+        public RobotProfile Profile => RobotProfileRouting.Active(plugin.preferences);
+        public SemaphoreSlim Commands => plugin.commands;
         public RobotCommandAuthority Authority => plugin.CommandAuthority;
-        public Task Invoke(string name, params object[] arguments) => (Task)typeof(PipersPlugin).GetMethod(name, Flags)!.Invoke(plugin, arguments)!;
-        public void InvokeVoid(string name) => typeof(PipersPlugin).GetMethod(name, Flags)!.Invoke(plugin, null);
-        public Task Restore() => Invoke("RestoreMeasuredTracking", CancellationToken.None);
-        public void SetPreferences(RobotProfile profile) => Set("preferences", RobotProfileRouting.Normalize(new Preferences(Robots: [profile], ActiveRobotId: profile.Id)));
+        public Task Restore() => plugin.RestoreMeasuredTracking(CancellationToken.None);
+        public void SetPreferences(RobotProfile profile) => plugin.preferences = RobotProfileRouting.Normalize(new Preferences(Robots: [profile], ActiveRobotId: profile.Id));
         public void Fresh()
         {
-            Set("state", Snapshot);
-            Get<LatestTelemetry>("telemetry").Publish(new(Snapshot, Snapshot["token"]!.GetValue<string>(), 1, Stopwatch.GetTimestamp(), 0));
+            plugin.state = Snapshot;
+            plugin.telemetry.Publish(new(Snapshot, Snapshot["token"]!.GetValue<string>(), 1, Stopwatch.GetTimestamp(), 0));
         }
         public async Task DrainMonitor()
         {
-            if (Get<Task?>("pikaMonitorWorker") is { } worker) await worker.WaitAsync(TimeSpan.FromSeconds(1));
+            if (plugin.pikaMonitorWorker is { } worker) await worker.WaitAsync(TimeSpan.FromSeconds(1));
         }
-        public Task LinkEvent() => plugin.HandleEventAsync(new("fixture", WorkspaceEventScope.Wrap(Get<long>("workspaceViewEpoch"), Profile.Id, "link"),
+        public Task LinkEvent() => plugin.HandleEventAsync(new("fixture", WorkspaceEventScope.Wrap(plugin.workspaceViewEpoch, Profile.Id, "link"),
             "click", JsonSerializer.SerializeToElement(true)), default);
 
         public Fixture(bool started = false)
         {
             Directory.CreateDirectory(Folder);
             SetPreferences(new("piper-1", "Fixture", "can-a", RobotId: "robot-a", PikaDevice: "/dev/pika-a"));
-            Set("token", "backend-a"); Set("client", new PiperControl.PiperControlClient(Rpc));
-            Set("passiveMeasuredTrackingStarted", started);
+            plugin.token = "backend-a"; plugin.client = new PiperControl.PiperControlClient(Rpc);
+            plugin.passiveMeasuredTrackingStarted = started;
             Snapshot = new JsonObject
             {
                 ["token"] = "backend-a", ["selected"] = "can-a", ["motion"] = new JsonObject { ["active"] = false },
@@ -217,7 +213,7 @@ internal static class MeasuredTrackingTests
             // feedback before this plugin opens its monitor session.
             Snapshot["pika"]!["connected"] = true;
             Fresh();
-            Set("engine", (PluginContext)Activator.CreateInstance(typeof(PluginContext), Flags, null,
+            plugin.engine = (PluginContext)Activator.CreateInstance(typeof(PluginContext), BindingFlags.Instance | BindingFlags.NonPublic, null,
                 [new PluginStart("fixture", Folder, Folder),
                     (Func<object, CancellationToken, Task>)((_, _) => Task.CompletedTask),
                     (Func<string, JsonObject, CancellationToken, Task<JsonElement>>)(async (method, body, cancellation) =>
@@ -238,7 +234,7 @@ internal static class MeasuredTrackingTests
                         { ["name"] = pair.Key, ["position"] = pair.Value!.DeepClone() }).ToArray());
                         var reply = JsonSerializer.SerializeToElement(method == "robot.feedback" ? new JsonObject { ["applied"] = true, ["pose"] = pose } : pose);
                         AfterRequest?.Invoke(method); return reply;
-                    })], null)!);
+                    })], null)!;
         }
 
         private static JsonArray Model() => new(Enumerable.Range(1, 8).Select(i => (JsonNode)(i < 7
@@ -246,10 +242,10 @@ internal static class MeasuredTrackingTests
             : new JsonObject { ["name"] = "joint" + i, ["unit"] = "m", ["limited"] = true, ["min"] = i == 7 ? -.047 : 0.0, ["max"] = i == 7 ? 0.0 : .047 })).ToArray());
         public void Dispose()
         {
-            Set("pikaMonitorStopping", true);
-            Get<CancellationTokenSource>("shutdown").Cancel();
+            plugin.pikaMonitorStopping = true;
+            plugin.shutdown.Cancel();
             DrainMonitor().GetAwaiter().GetResult();
-            ((IDisposable)Get<object>("channel")).Dispose(); Commands.Dispose();
+            plugin.channel.Dispose(); Commands.Dispose();
         }
     }
 
