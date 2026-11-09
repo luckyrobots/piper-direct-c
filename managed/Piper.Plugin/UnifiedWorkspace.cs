@@ -119,7 +119,8 @@ public sealed partial class PipersPlugin
         {
             case RobotPrimaryAction.OpenStoppedRecovery:
                 BeginHandGuideRecovery(device);
-                message = handGuideRecoveryMessage = RecoveryCardState(device).NextStep;
+                message = RecoveryCardState(device).NextStep;
+                SetRecoveryGuideMessage(message);
                 break;
             case RobotPrimaryAction.OpenRecovery:
                 BeginHandGuideRecovery(device);
@@ -223,13 +224,15 @@ public sealed partial class PipersPlugin
             ["enabled"] = controls && device?["fresh"]?.GetValue<bool>() == true && canReleasePower && !switchingProfile,
             ["hint"] = "Support the arm. Disable cancels pending plugin actions, stops following, then removes motor holding torque. It does not home or replay." };
         bool currentRecoveryGuide = RecoveryGuideFor(device);
+        var guide = currentRecoveryGuide ? CurrentGuide : null;
+        string guideMessage = guide?.Message ?? "";
         patches["workspace.incident"] = new() { ["visible"] = controls && RecoveryPanelVisible(device) };
         var recoveryView = RecoveryCardState(device);
-        string recoveryCause = supportedRecoveryStop?["reason"]?.GetValue<string>() is { Length: > 0 } original && currentRecoveryGuide ? "Recovery after: " + original : recoveryView.Cause;
+        string recoveryCause = guide?.SupportedStop?["reason"]?.GetValue<string>() is { Length: > 0 } original ? "Recovery after: " + original : recoveryView.Cause;
         patches["incident"] = new() { ["text"] = recoveryCause, ["hint"] = recoveryCause };
         patches["recovery.next"] = new() { ["text"] = recoveryView.NextStep, ["hint"] = recoveryView.NextStep };
         patches["recovery.requirements"] = new() { ["text"] = recoveryView.Requirements, ["visible"] = recoveryView.Requirements.Length > 0, ["hint"] = recoveryView.Requirements };
-        patches["recovery.feedback"] = new() { ["text"] = currentRecoveryGuide ? handGuideRecoveryMessage : "", ["visible"] = currentRecoveryGuide && handGuideRecoveryMessage.Length > 0, ["hint"] = currentRecoveryGuide ? handGuideRecoveryMessage : "" };
+        patches["recovery.feedback"] = new() { ["text"] = guideMessage, ["visible"] = guideMessage.Length > 0, ["hint"] = guideMessage };
         patches["recovery.card.run"] = new() { ["text"] = recoveryView.ActionText, ["enabled"] = RecoveryCardCanRun(recoveryView), ["hint"] = recoveryView.NextStep };
         patches["teaching"] = new() { ["visible"] = !controllerStopped && teaching.BlocksTargets || PikaTeachingControlsVisible };
         patches["teleoperate.toggle"]!["text"] = teleoperating ? "Finish dragging" : "Drag joints";

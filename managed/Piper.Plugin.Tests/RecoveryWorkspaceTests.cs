@@ -94,7 +94,7 @@ internal static class RecoveryWorkspaceTests
         try
         {
             Fresh(); await Click("enable");
-            check(calls.Actions.Count == 0 && Get<bool>("recoveryGuideOpen"), "Generic Recover click removed torque instead of opening its supported guide");
+            check(calls.Actions.Count == 0 && Get<RecoveryGuide?>("recoveryGuide") is not null, "Generic Recover click removed torque instead of opening its supported guide");
             Fresh(); await Click("recovery.run");
             check(calls.Actions.Count == 0, "Diagnostics' Verify controller state ran a power-changing supported STOP recovery");
             using (SimulatedRecovery(PipersPlugin.RecoveryKind.ReturnToZero))
@@ -115,16 +115,16 @@ internal static class RecoveryWorkspaceTests
                 Set("recoveryOperation", null);
             }
             Fresh(); await Click("recovery.card.run");
-            check(calls.Actions.SequenceEqual(["recover-at-pose"]) && Get<bool>("handGuideRecoveryCommandSent"),
+            check(calls.Actions.SequenceEqual(["recover-at-pose"]) && Get<RecoveryGuide?>("recoveryGuide")?.CommandSent == true,
                 "A qualified green/off cycle did not admit the explicit same-pose return");
-            calls.Actions.Clear(); Set("handGuideRecoveryCommandSent", false);
+            calls.Actions.Clear(); Set("recoveryGuide", Get<RecoveryGuide>("recoveryGuide") with { CommandSent = false });
             device["status"]!["arm_status"] = 0; device["teaching"]!["phase"] = "off";
             device["status"]!["control"] = 1; device["status"]!["teach_state"] = 0;
             foreach (var joint in device["joints"]!.AsArray()) joint!["enabled"] = false;
             device["recovery_required"] = false; device["blocker"] = ""; device.Remove("stop_event");
             Fresh();
             await (Task)typeof(PipersPlugin).GetMethod("ObserveHandGuideRecovery", flags)!.Invoke(plugin, [CancellationToken.None])!;
-            check(Get<bool>("recoveryGuideOpen") && Get<HandGuideRecoveryGate?>("handGuideRecovery") is null && calls.Actions.Count == 0,
+            check(Get<RecoveryGuide?>("recoveryGuide") is { Gate: null } && calls.Actions.Count == 0,
                 "Reset's retired stop record closed the visible range/holding guide or reused old teaching proof");
             using var reset = SimulatedRecovery(PipersPlugin.RecoveryKind.HoldHere);
             reset.ResetAt = Stopwatch.GetTimestamp();

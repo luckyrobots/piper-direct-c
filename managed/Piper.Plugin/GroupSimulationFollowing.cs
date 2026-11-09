@@ -144,7 +144,7 @@ public sealed partial class PipersPlugin
             string robot = preferences.Robots?.FirstOrDefault(profile => profile.Id == lease.Scope.ProfileId)?.Name ?? "the robot";
             return $"Finish the current arm action for {robot} before arming Follow simulation.";
         }
-        return teleoperating || followRequest != 0 || calibrationOpen || handGuideRecovery is not null ||
+        return teleoperating || followRequest != 0 || calibrationOpen || CurrentGuide?.Gate is not null ||
             CurrentRecovery is not null || PikaTeachingRecording
             ? "Finish the current control, recovery, or calibration action before arming Follow simulation." : null;
     }
