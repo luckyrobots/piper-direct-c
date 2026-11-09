@@ -99,7 +99,7 @@ internal static partial class SimulationFollowingTests
                 check(Renewed("/dev/pika-b") == 1, "A stalled gripper accumulated duplicate heartbeat requests");
                 f.Rpc.ReleaseDelayed.TrySetResult();
                 await Until(() => Renewed("/dev/pika-a") >= 3, "A failed Pika heartbeat retired the healthy gripper's renewal");
-                check(f.Get<bool>("pikaOwned"), "A partner Pika heartbeat failure cleared ownership of the healthy selected gripper");
+                check(f.Get<int>("pikaRole") == (int)PikaSessionRole.Owned, "A partner Pika heartbeat failure cleared ownership of the healthy selected gripper");
             }
             finally
             {

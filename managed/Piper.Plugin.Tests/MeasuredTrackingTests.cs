@@ -64,7 +64,7 @@ internal static class MeasuredTrackingTests
             check(f.Rpc.Routes.Count == 1 && f.Rpc.Routes.Single().Route == "/api/pika/connect" &&
                 f.Rpc.Routes.Single().Body["take_over"]?.GetValue<bool>() == false,
                 "Automatic tracking sent a physical request beyond Pika's monitor-only connection");
-            check(!f.Get<bool>("pikaOwned") && f.Get<bool>("pikaMonitoring"), "Monitoring silently acquired gripper motor control");
+            check(f.Get<int>("pikaRole") == (int)PikaSessionRole.Monitoring, "Monitoring silently acquired gripper motor control");
 
             f.Set("measuredTrackingAttemptAt", 0L); f.Fresh(); before = f.Requests.Count;
             await f.Restore();
@@ -139,7 +139,7 @@ internal static class MeasuredTrackingTests
             // Exercise the real public Link toggle without StartAsync, cameras
             // or a real server. Persisted false must survive a new instance.
             await f.Restore(); await f.DrainMonitor();
-            f.Set("pikaMonitoring", false); f.Set("pikaMonitorStopping", true);
+            f.Set("pikaRole", (int)PikaSessionRole.None); f.Set("pikaMonitorStopping", true);
             await f.LinkEvent();
             var saved = JsonSerializer.Deserialize<Preferences>(await File.ReadAllTextAsync(Path.Combine(f.Folder, "preferences.json")), PluginProtocol.Json)!;
             check(RobotProfileRouting.Active(saved).RememberMeasuredLink == false && f.Get<RobotLink?>("link") is null,

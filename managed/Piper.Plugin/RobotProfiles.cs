@@ -291,7 +291,7 @@ public sealed partial class PipersPlugin
         if (link is not null) await engine.RequestAsync("robot.unsubscribe", cancellation: cancellation);
         CommandAuthority.Revoke();
         teleoperating = false; followInput.End(); followRequest = 0;
-        approved = pikaOwned = pikaMonitoring = linkCommandsEnabled = recoveryInProgress = false; link = null; linkErrorDegrees = null;
+        approved = linkCommandsEnabled = recoveryInProgress = false; ReleasePikaRole(); link = null; linkErrorDegrees = null;
         CancelHandGuideRecovery();
     }
 
@@ -306,7 +306,7 @@ public sealed partial class PipersPlugin
         try
         {
             if (!groupViewOnly) await ReleaseProfileControl(cancellation);
-            else { CommandAuthority.Revoke(); link = null; approved = pikaOwned = pikaMonitoring = linkCommandsEnabled = false; }
+            else { CommandAuthority.Revoke(); link = null; approved = linkCommandsEnabled = false; ReleasePikaRole(); }
             await FinishPikaTeaching("Robot profile or hardware assignment changed", cancellation);
             StorePikaTeachingWorkspace(ActiveProfile);
             preferences = RobotProfileRouting.Capture(preferences);

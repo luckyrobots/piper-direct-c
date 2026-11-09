@@ -361,7 +361,7 @@ internal static partial class SimulationFollowingTests
             await gripperUnready.Click("enable");
             _ = await WaitPrimary(gripperUnready, "complete");
             check(gripperUnready.Rpc.Requests.Select(r => r.Route).SequenceEqual(["/api/pika/connect", "/api/pika/enable"]) &&
-                gripperUnready.Get<bool>("pikaOwned") && gripperUnready.PrimaryActionName() == "Enabled",
+                gripperUnready.Get<int>("pikaRole") == (int)PikaSessionRole.Owned && gripperUnready.PrimaryActionName() == "Enabled",
                 "Enable robot did not finish the assigned read-only/unready gripper connection");
             check(gripperUnready.Session is null && !gripperUnready.Ready && !gripperUnready.PlayStarted && gripperUnready.Mode == "edit" &&
                 !gripperUnready.EngineRequests.Any(r => r.Method == "robot.runtime.control"),
@@ -587,7 +587,7 @@ internal static partial class SimulationFollowingTests
         public void SetApproved(bool value) => Set("approved", value);
         public void SetGripperUnready()
         {
-            Set("pikaOwned", false);
+            Set("pikaRole", (int)PikaSessionRole.None);
             Snapshot["pika"]!["enabled"] = false; Snapshot["pika"]!["armed"] = false; Snapshot["pika"]!["read_only"] = true;
             Refresh();
         }
@@ -680,7 +680,7 @@ internal static partial class SimulationFollowingTests
             Set("client", new PiperControl.PiperControlClient(Rpc));
             Set("preferences", RobotProfileRouting.Normalize(new Preferences(Robots:
                 [new("piper-1", "Fixture", "can-a", RobotId: "robot-a", PikaDevice: "/dev/pika-a")], ActiveRobotId: "piper-1")));
-            Set("token", "fixture-backend"); Set("approved", true); Set("pikaOwned", true); Set("linkCommandsEnabled", true);
+            Set("token", "fixture-backend"); Set("approved", true); Set("pikaRole", (int)PikaSessionRole.Owned); Set("linkCommandsEnabled", true);
             var model = SimulationFollowTests.Pose();
             var sample = SimulationFollowSample.Read(model);
             Snapshot = new JsonObject

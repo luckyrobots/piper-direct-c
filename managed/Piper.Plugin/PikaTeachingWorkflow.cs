@@ -124,7 +124,7 @@ public sealed partial class PipersPlugin
         // Existing disable retires both following and ordinary position targets.
         // No new protocol command, automatic release, enable or target is added.
         var reply = await PikaTeachingMotorCall("/api/pika/disable", new JsonObject { ["owner"] = owner }, false, cancellation, expectedToken);
-        pikaOwned = false; pikaMonitoring = true;
+        SetPikaRole(PikaSessionRole.Monitoring);
         string request = reply["motor_request_id"]?.GetValue<string>() ?? "";
         pikaTeachingDisableRequest = request;
         if (request.Length == 0)
@@ -203,7 +203,7 @@ public sealed partial class PipersPlugin
                 pika["owner"]?.GetValue<string>() == owner && pika["armed"]?.GetValue<bool>() == true && pika["enabled"]?.GetValue<bool>() == true &&
                 pika["feedback_time_s"]?.GetValue<double>() > pika["request_time_s"]?.GetValue<double>())
             {
-                pikaOwned = true; pikaMonitoring = false; pikaTeachingDisableRequest = "";
+                SetPikaRole(PikaSessionRole.Owned); pikaTeachingDisableRequest = "";
                 pikaTeachingStatus = MeasuredPikaHoldStatus(PikaTeachingRecording, TeachingState.Inspect(device).HandGuiding);
                 return;
             }

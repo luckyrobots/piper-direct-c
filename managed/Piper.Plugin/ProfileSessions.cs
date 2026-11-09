@@ -83,8 +83,7 @@ public sealed partial class PipersPlugin
         {
             approved = true;
             linkCommandsEnabled = link is not null;
-            pikaOwned = owns;
-            pikaMonitoring = monitoring;
+            SetPikaRole(owns ? PikaSessionRole.Owned : monitoring ? PikaSessionRole.Monitoring : PikaSessionRole.None);
         });
     }
 
