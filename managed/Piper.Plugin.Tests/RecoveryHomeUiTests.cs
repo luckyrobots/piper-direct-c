@@ -177,7 +177,8 @@ internal static class RecoveryHomeUiTests
             {
                 Actions.Add(step); SpeedPercents.Add(body["speed_percent"]!.GetValue<double>());
                 AllCommandsScoped &= body["owner"]?.GetValue<string>() == owner && body["device_id"]?.GetValue<string>() == "resting-arm" &&
-                    body["generation"]?.GetValue<long>() == 7 && body["supported"]?.GetValue<bool>() == true && body["clear"]?.GetValue<bool>() == true;
+                    body["generation"]?.GetValue<long>() == 7 && body["clear"]?.GetValue<bool>() == true &&
+                    (body["supported"]?.GetValue<bool>() == true) == (step is "reset" or "enable") && body["reset_completed"] is null;
                 enabled = step != "reset";
                 moving = step == "move-to-zero" && leaveMoveActive;
                 if (step == "move-to-zero" && !moving) angles = new double[6];

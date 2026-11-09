@@ -60,6 +60,22 @@ internal static class RecoveryPlanTests
         var ordinary = Stopped(); ordinary["reset_pending"] = false;
         check(RecoveryPlan.Inspect(ordinary, false) is { Action: "reset", RetryFailedReset: false },
             "Residual teach flag in verified STOP/all-off blocked an ordinary supported reset");
+        JsonObject Confirmations(string action, bool reset)
+        {
+            var body = new JsonObject();
+            PipersPlugin.AddOperatorConfirmations(body, action, reset);
+            return body;
+        }
+        bool Flags(JsonObject body, bool clear, bool supported, bool completed) => body["standalone"]?.GetValue<bool>() == true &&
+            body.ContainsKey("clear") == clear && body.ContainsKey("supported") == supported && body.ContainsKey("reset_completed") == completed;
+        check(Flags(Confirmations("verify-reset", true), false, true, true) && Flags(Confirmations("verify-reset", false), false, true, false),
+            "verify-reset carried a reset confirmation without an operator-acknowledged recovery");
+        check(Flags(Confirmations("reset", true), true, true, false) && Flags(Confirmations("verify-current", true), true, true, false),
+            "Reset or current-state verification carried the wrong operator confirmations");
+        check(Flags(Confirmations("enable", false), true, true, false) && Flags(Confirmations("disable", false), false, true, false),
+            "Motor-power commands carried the wrong operator confirmations");
+        check(Flags(Confirmations("joint", false), true, false, false) && Flags(Confirmations("move-to-zero", false), true, false, false) &&
+            Flags(Confirmations("teach-return", false), true, true, false), "Motion or teaching return carried the wrong operator confirmations");
         ordinary["status"]!["arm_status"] = 11;
         check(RecoveryPlan.Inspect(ordinary, false).Action is null,
             "Genuine hand guiding with all motors off was mistaken for residual stopped teaching");

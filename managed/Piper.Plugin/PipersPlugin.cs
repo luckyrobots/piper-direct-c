@@ -160,7 +160,8 @@ public sealed partial class PipersPlugin : ILuckyPlugin
         body["action"] = action;
         body["device_id"] = scope.Device;
         body["generation"] = scope.Generation;
-        body["owner"] = owner; body["standalone"] = true; body["clear"] = true; body["supported"] = true; body["reset_completed"] = true;
+        body["owner"] = owner;
+        AddOperatorConfirmations(body, action, resetConfirmed: recoveryOnly);
         body["speed_percent"] = speedOverridePercent ?? preferences.Speed; body["tolerance_deg"] = preferences.Tolerance;
         if (permissionEpoch != CommandAuthority.Epoch) throw new InvalidOperationException("Control permission changed while preparing the command; start a new action.");
         cancellation.ThrowIfCancellationRequested();
@@ -170,6 +171,22 @@ public sealed partial class PipersPlugin : ILuckyPlugin
             throw new InvalidOperationException("Control permission changed before acknowledgement; the old action will not be renewed or resumed.");
         message = result["message"]?.GetValue<string>() ?? "Command accepted.";
         return result;
+    }
+
+    /// <summary>Attaches only the operator confirmations that the controller's
+    /// admission of <paramref name="action"/> reads (src/controller.c). Each flag
+    /// is a gate: sending it on every request would make the gate meaningless.</summary>
+    internal static void AddOperatorConfirmations(JsonObject body, string action, bool resetConfirmed)
+    {
+        // Every /api/command admission requires the standalone acknowledgement.
+        body["standalone"] = true;
+        // Power release and recovery verification do not read the clear-path flag.
+        if (action is not ("disable" or "verify-reset" or "verify-disabled")) body["clear"] = true;
+        // Motor-power and recovery transitions require a supported arm.
+        if (action is "enable" or "disable" or "reset" or "verify-reset" or "verify-disabled" or "verify-current" or "teach-return" or "recover-at-pose")
+            body["supported"] = true;
+        // Only an operator-acknowledged recovery confirms that a reset completed.
+        if (resetConfirmed && action == "verify-reset") body["reset_completed"] = true;
     }
 
     private long ControlInputEpoch => CommandAuthority.Epoch + Interlocked.Read(ref groupControlEpoch);
