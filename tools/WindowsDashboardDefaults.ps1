@@ -17,3 +17,19 @@ function Get-PiperDashboardDefaults([Parameter(Mandatory=$true)][string]$StateDi
         PikaDevice=$(if($taskSaved){[string]$taskSaved.device}else{$null})
     }
 }
+
+# One supervisor per port. The launcher holds this mutex for its whole life,
+# so the name is defined once for the launcher and for whoever waits on it.
+function Get-PiperSupervisorMutexName([Parameter(Mandatory=$true)][int]$Port) { "Local\LuckyRobotsPiperDashboard.$Port" }
+
+# True once no supervisor holds the port's mutex. The backend exits before its
+# supervisor does, so a relauncher waits here instead of guessing a delay.
+function Wait-PiperSupervisorReleased([Parameter(Mandatory=$true)][int]$Port,[Parameter(Mandatory=$true)][int]$TimeoutSeconds) {
+    $taskMutex=New-Object Threading.Mutex($false,(Get-PiperSupervisorMutexName $Port))
+    try {
+        # A supervisor that died without releasing still left the mutex free.
+        try { $taskFree=$taskMutex.WaitOne([TimeSpan]::FromSeconds($TimeoutSeconds)) } catch [Threading.AbandonedMutexException] { $taskFree=$true }
+        if($taskFree) { $taskMutex.ReleaseMutex() }
+        return $taskFree
+    } finally { $taskMutex.Dispose() }
+}

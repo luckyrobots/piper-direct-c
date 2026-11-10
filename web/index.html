@@ -6,7 +6,7 @@
 
 <body>
 
-<dialog id="safety-prompt" aria-labelledby="safety-title"><h2 id="safety-title">Make sure it's safe</h2><p>Give the arm and gripper room to move. Support the arm for motor power changes and use only this controller.</p><div class="row"><button id="safety-cancel">Cancel</button><button id="safety-continue" class="primary">Enable controls</button></div></dialog>
+<dialog id="safety-prompt" aria-labelledby="safety-title"><h2 id="safety-title">Confirm</h2><p id="safety-text"></p><div class="row"><button id="safety-cancel">Cancel</button><button id="safety-continue" class="primary">Confirm</button></div></dialog>
 
 <header><div class="brand"><span class="brand-mark">P</span><div><h1>PiPer <span>Direct control</span></h1><p>Six joints. One arm. Windows &amp; Linux.</p></div></div><div class="header-right"><span id="mode" class="badge">CONNECTING</span><button id="stop" class="stop">STOP <kbd>Esc</kbd></button></div></header>
 
@@ -54,11 +54,11 @@
 
   <div class="pika-main-row">
 
-   <div class="pika-title"><h3>Pika</h3><span id="pika-status" role="status">Connecting…</span></div>
+   <div class="pika-title"><h3>Pika</h3><span id="pika-status" role="status">Not connected</span></div>
 
    <strong id="pika-measured">— mm</strong>
 
-   <div class="pika-power"><span class="hint">Power follows robot</span><button id="pika-enable" hidden disabled>Enable</button><button id="pika-disable" hidden disabled>Disable</button></div>
+   <div class="pika-power"><span class="hint">Jaw power is yours to enable</span><button id="pika-enable" disabled>Enable</button><button id="pika-disable" disabled>Disable</button></div>
 
    <div class="pika-jog"><button id="pika-close" disabled aria-label="Close Pika step">−</button><input id="pika-slider" type="range" min="0" max="90" step="0.1" value="0" disabled aria-label="Pika target opening in millimeters" title="Release to move to opening"><button id="pika-open" disabled aria-label="Open Pika step">+</button><button id="pika-zero" disabled>Zero</button></div>
 
