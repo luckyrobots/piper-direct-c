@@ -10,7 +10,7 @@ internal static class HostRoutes
     internal const string Heartbeat = "/api/heartbeat";
     internal const string Query = "/api/query";
     internal const string Reconnect = "/api/reconnect";
-    internal const string Stop = "/api/stop";
+    internal const string Stop = ControllerService.StopRoute;
     internal const string CoordinatedStop = "/api/stop/coordinated";
     internal const string Shutdown = "/api/shutdown";
     internal const string Restart = "/api/maintenance/restart";

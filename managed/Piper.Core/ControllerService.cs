@@ -14,6 +14,8 @@ public sealed class ControllerService : IDisposable
     private readonly Task worker;
     private IntPtr core;
     public string Token { get; } = Convert.ToHexString(RandomNumberGenerator.GetBytes(32)).ToLowerInvariant();
+    /// <summary>The native emergency STOP route; the one action a faulted tick loop still admits.</summary>
+    public const string StopRoute = "/api/stop";
     private volatile string? workerError;
     private int disposed;
 
@@ -38,6 +40,9 @@ public sealed class ControllerService : IDisposable
             catch (Exception e) { workerError = e.Message; }
         }, CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default);
     }
+
+    /// <summary>Test seam: latches the same fault a throwing native tick records.</summary>
+    internal void FaultLoopForTest(string failure) => workerError = failure;
     public string Snapshot()
     {
         lock (gate) { Check(); return Take(Native.State(core, Token)); }
@@ -68,15 +73,17 @@ public sealed class ControllerService : IDisposable
             // later admission. The synchronous action completes under this
             // same gate, so a subsequent hold is ordered after it.
             requestCancellation.ThrowIfCancellationRequested();
-            Check();
+            // STOP is always attempted: a faulted tick loop refuses every other
+            // action, but it must never refuse the request that stops the arm.
+            Check(requireLoop: route != StopRoute);
             var result = Native.Action(core, route, json, out int status);
             return (status, result == IntPtr.Zero ? "{\"ok\":false,\"error\":\"Invalid controller request\"}" : Take(result));
         }
     }
-    private void Check()
+    private void Check(bool requireLoop = true)
     {
         ObjectDisposedException.ThrowIf(core == IntPtr.Zero, this);
-        if (workerError is { } failure) throw new InvalidOperationException($"Controller loop stopped: {failure}");
+        if (requireLoop && workerError is { } failure) throw new InvalidOperationException($"Controller loop stopped: {failure}");
     }
     private static string Take(IntPtr value)
     {
