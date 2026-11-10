@@ -75,7 +75,7 @@ internal static class HostPikaBoundaryTests
                 registry.Snapshot()["device"]?.GetValue<string>() == first && !agents.ContainsKey(replacement),
                 "Pika configuration committed after an arm started moving.");
             // The emergency STOP names nobody: a caller who owns nothing still holds the gripper.
-            var stopped = await Send(HostRoutes.CoordinatedStop, new { owner = Guid.NewGuid().ToString() });
+            var stopped = await Send(PiperApi.Paths.CoordinatedStop, new { owner = Guid.NewGuid().ToString() });
             Check(stopped.Status == 200 && stopped.Payload is CoordinatedStopResult { Ok: true } &&
                 agents[peer].Actions.Count(action => action == "hold") == 1 && !agents[first].Actions.Contains("hold"),
                 "Coordinated STOP after denied configuration did not hold exactly the connected gripper.");
@@ -92,9 +92,17 @@ internal static class HostPikaBoundaryTests
                 Check(moved.Status == 409 && moved.Error?.Contains("only on Windows", StringComparison.Ordinal) == true &&
                     registry.DefaultAssignment == (replacement, null) && context.Control.PikaState(replacement, null)["distribution"] is null,
                     "A WSL distribution was configured on a non-Windows host: " + moved.Error);
-            _ = await context.Control.DiscoverPikaAsync(null, deadline.Token);
-            Check(discovery.Distributions[^1] == (OperatingSystem.IsWindows() ? "Debian" : null),
+            // The inventory read (GET) and the inventory control (POST) are one handler:
+            // both resolve an absent distribution to the current assignment (B4).
+            string? current = OperatingSystem.IsWindows() ? "Debian" : null;
+            int listed = discovery.Distributions.Count;
+            var read = await context.Control.ReadPikaInventoryAsync(null, deadline.Token);
+            Check(read.Status == 200 && discovery.Distributions.Count == listed + 1 && discovery.Distributions[^1] == current,
                 "HTTP Pika inventory did not use the current registry distribution after configure.");
+            var posted = await Send(PiperApi.Paths.PikaDevices, new { owner });
+            Check(posted.Status == 200 && discovery.Distributions.Count == listed + 2 && discovery.Distributions[^1] == current &&
+                JsonNode.DeepEquals(JsonNode.Parse(read.ToJson()), JsonNode.Parse(posted.ToJson())),
+                "The Pika inventory read and control resolved the distribution differently.");
             Console.WriteLine("Host Pika boundaries passed: same-sample snapshot, source clock, idle commit, and independent STOP/peer writes.");
 
             JsonObject ArmState() => controller.SnapshotJson();

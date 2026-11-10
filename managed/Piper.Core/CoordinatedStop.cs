@@ -10,7 +10,7 @@ public sealed record CoordinatedStopResult(StopChannelResult Arm, StopChannelRes
 /// other attempt. Caller disconnection does not cancel an already requested stop.</summary>
 public static class CoordinatedStop
 {
-    public const string Route = "/api/stop/coordinated";
+    public const string Route = PiperApi.Paths.CoordinatedStop;
 
     public static async Task<CoordinatedStopResult> RunAsync(
         Func<CancellationToken, Task<StopChannelResult>> stopArm,

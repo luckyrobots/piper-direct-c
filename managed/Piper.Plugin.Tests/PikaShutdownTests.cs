@@ -17,7 +17,7 @@ internal static class PikaShutdownTests
         string owner = plugin.owner;
         string otherOwner = Guid.NewGuid().ToString();
         var telemetry = plugin.telemetry;
-        plugin.token = backend;
+        plugin.telemetry.AdoptBackend(backend);
         var requests = new ConcurrentQueue<(string Route, string Device, string? Distribution, string Owner)>();
         var linuxDisconnected = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var calls = new Calls(async (command, cancellation) =>

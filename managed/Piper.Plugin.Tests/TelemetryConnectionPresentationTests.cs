@@ -11,7 +11,7 @@ internal static class TelemetryConnectionPresentationTests
     {
         var plugin = new PipersPlugin();
         plugin.preferences = RobotProfileRouting.Normalize(new Preferences(Robots: [new("piper-1", "Piper 1", "can-a"), new("piper-2", "Piper 2", "can-b")], ActiveRobotId: "piper-2"));
-        plugin.state = new JsonObject { ["selected"] = "can-b", ["devices"] = new JsonArray(new JsonObject { ["id"] = "can-b", ["fresh"] = false }) };
+        plugin.telemetry.PublishState(new JsonObject { ["selected"] = "can-b", ["devices"] = new JsonArray(new JsonObject { ["id"] = "can-b", ["fresh"] = false }) });
         UiEvent Input(string id) => new("fixture", WorkspaceEventScope.Wrap(0, "piper-2", id), "click", JsonSerializer.SerializeToElement(true));
         bool Permission(UiEvent input) => PipersPlugin.ControlEventNeedsPermission(plugin.UnscopePublishedWorkspaceEvent(input.WidgetId));
         UiEvent navigation = Input("profiles.select.piper-1"), target = Input("joint.6.plus");
@@ -97,7 +97,7 @@ internal static class TelemetryConnectionPresentationTests
         public Fixture()
         {
             State = new JsonObject { ["selected"] = "can-b", ["devices"] = new JsonArray(Device) };
-            plugin.token = "connection-fixture";
+            plugin.telemetry.AdoptBackend("connection-fixture");
             plugin.preferences = RobotProfileRouting.Normalize(new Preferences(Robots: [new("piper-2", "Piper 2", "can-b")], ActiveRobotId: "piper-2"));
             ResetMessage();
         }

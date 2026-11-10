@@ -196,7 +196,7 @@ internal static class WorkspaceViewTests
                 var device = PowerDevice(sample.Enabled);
                 device["status"]!["teach_state"] = sample.Teach;
                 var snapshot = new JsonObject { ["token"] = "header-fixture", ["selected"] = "can-a", ["devices"] = new JsonArray(device) };
-                plugin.state = snapshot; plugin.token = "header-fixture"; plugin.approved = sample.Approved;
+                plugin.telemetry.PublishState(snapshot); plugin.telemetry.AdoptBackend("header-fixture"); plugin.approved = sample.Approved;
                 plugin.telemetry.Publish(new(snapshot, "header-fixture", ++headerSequence, Stopwatch.GetTimestamp(), 0));
                 await CheckView("controls");
                 Check(HeaderPatch("workspace.power")["text"]?.GetValue<string>() == sample.Power &&
@@ -209,7 +209,7 @@ internal static class WorkspaceViewTests
                         HeaderPatch("workspace.power")["hint"]?.GetValue<string>()?.Contains("All six motors report enabled", StringComparison.Ordinal) == true,
                         "Teaching hid the distinction between powered motors and blocked plugin controls");
             }
-            plugin.preferences = prefs; plugin.link = null; plugin.ReleasePikaRole();
+            plugin.preferences = prefs; plugin.link = null; plugin.telemetry.Pika.Release();
             // A real disconnect invalidates the receipt while leaving its last
             // complete snapshot available to the settings projection.
             plugin.telemetry.Disconnect(); plugin.approved = false;
@@ -250,7 +250,7 @@ internal static class WorkspaceViewTests
             Check(plugin.preferences.SimulationCameras?.GetValueOrDefault("bench")?.SceneId == "source-a",
                 "An Automatic selection from an old scene changed the new scene's binding");
 
-            plugin.groupSimulation = new PipersPlugin.GroupSession(plugin.token, "source-a", "robot-a", "asset-a", "revision-a", [],
+            plugin.groupSimulation = new PipersPlugin.GroupSession(plugin.telemetry.BackendToken, "source-a", "robot-a", "asset-a", "revision-a", [],
                 plugin.groupInputEpoch, TimeProvider.System);
             try
             {
@@ -320,7 +320,7 @@ internal static class WorkspaceViewTests
             {
                 if (request.Route == "/api/command") state["motion"]!["active"] = false;
             });
-            plugin.client = new PiperControl.PiperControlClient(calls); plugin.state = state; plugin.token = "fixture-session";
+            plugin.client = new PiperControl.PiperControlClient(calls); plugin.telemetry.PublishState(state); plugin.telemetry.AdoptBackend("fixture-session");
             plugin.telemetry.Publish(new(state, "fixture-session", 1, Stopwatch.GetTimestamp(), 0));
             plugin.Navigation = WorkspaceNavigation.Initial; plugin.approved = true; plugin.linkCommandsEnabled = true;
             plugin.teachingSession.ObserveHandOver(new(binding.DeviceId, binding.Generation), approved: true); plugin.viewportDrag = new ViewportDrag(ViewportDragPhase.Following, Request: 7);

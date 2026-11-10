@@ -6,18 +6,7 @@ namespace LuckyRobots.Piper.Plugin;
 /// <summary>Visual feedback never owns the leader's physics or sends a hardware target.</summary>
 public sealed partial class PipersPlugin
 {
-    /// <summary>Plugin-H: Unknown unless probed for the current backend identity. A probe
-    /// (at most every 5 s, shared by publication and the visibility toggle) records
-    /// what the engine host supports; visibility can therefore never be known while
-    /// ghost support is unknown. A backend restart (a new token) makes the recorded
-    /// capability Unknown again, so it is re-probed.</summary>
-    internal sealed record GhostCapabilities(string Backend, bool Ghosts, bool Visibility);
-    internal GhostCapabilities? ghostCapabilities;
-    private GhostCapabilities? KnownGhostCapabilities => ghostCapabilities is { } known && known.Backend == token ? known : null;
-    private long ghostCapabilityAttempt;
-    private const double GhostProbeBackoffSeconds = 5;
     private const int GhostVisibilityTimeoutMilliseconds = 500;
-    internal bool? publishedGhostVisibility;
     private readonly Dictionary<PikaDisplayReferenceKey, PikaClosedDisplayReference?> ghostDisplayReferences = new();
 
     private double? GhostDisplayReference(RobotProfile profile, JsonObject pika)
@@ -34,23 +23,32 @@ public sealed partial class PipersPlugin
         return saved?.AngleFor(profile, pika);
     }
 
+    /// <summary>Plugin-H: the capability for the current backend instance, probing the
+    /// engine host when it is Unknown. Null while another probe is in flight or backing off.</summary>
     private async Task<GhostCapabilities?> ProbeGhostCapabilities(CancellationToken cancellation)
     {
-        if (KnownGhostCapabilities is { } known) return known;
-        if (ghostCapabilityAttempt != 0 && Stopwatch.GetElapsedTime(ghostCapabilityAttempt).TotalSeconds < GhostProbeBackoffSeconds) return null;
-        ghostCapabilityAttempt = Stopwatch.GetTimestamp();
         string backend = token;
-        using var discovery = CancellationTokenSource.CreateLinkedTokenSource(cancellation);
-        discovery.CancelAfter(400);
-        var info = await engine.RequestAsync("host.info", cancellation: discovery.Token);
-        if (token != backend) return null; // The backend changed during the probe; probe again for the new one.
-        return ghostCapabilities = new(backend, info.TryGetProperty("robotFeedbackGhostSupported", out var supported) && supported.GetBoolean(),
-            info.TryGetProperty("robotGhostVisibilitySupported", out var visibility) && visibility.GetBoolean());
+        var capability = telemetry.Ghosts;
+        if (capability.Known(backend) is { } known) return known;
+        if (!capability.TryBeginProbe(Stopwatch.GetTimestamp())) return null;
+        GhostCapabilities? probed = null;
+        try
+        {
+            using var discovery = CancellationTokenSource.CreateLinkedTokenSource(cancellation);
+            discovery.CancelAfter(400);
+            var info = await engine.RequestAsync("host.info", cancellation: discovery.Token);
+            // A backend that changed during the probe is probed again under its own identity.
+            if (token == backend)
+                probed = new(backend, info.TryGetProperty("robotFeedbackGhostSupported", out var supported) && supported.GetBoolean(),
+                    info.TryGetProperty("robotGhostVisibilitySupported", out var visibility) && visibility.GetBoolean());
+        }
+        finally { capability.EndProbe(probed); }
+        return probed;
     }
 
     private async Task SetMeasuredGhostVisibility(bool visible, CancellationToken cancellation)
     {
-        // Unknown and backing off: leave publishedGhostVisibility unset so it is retried.
+        // Unknown and backing off: leave the published visibility unset so it is retried.
         if (await ProbeGhostCapabilities(cancellation) is not { } capabilities) return;
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellation);
         timeout.CancelAfter(GhostVisibilityTimeoutMilliseconds);
@@ -58,7 +56,7 @@ public sealed partial class PipersPlugin
             await engine.RequestAsync("robot.ghost.visibility", new JsonObject { ["visible"] = visible }, timeout.Token);
         // Older hosts expire an unpublished overlay naturally. No visibility
         // preference changes leader physics, motor state or control ownership.
-        publishedGhostVisibility = visible;
+        telemetry.Ghosts.PublishVisibility(visible);
     }
 
     private int measuredGhostProfileCursor;
@@ -118,7 +116,7 @@ public sealed partial class PipersPlugin
             foreach (var obsolete in ghostDisplayReferences.Keys.Where(key => !referenceKeys.Contains(key)).ToArray())
                 ghostDisplayReferences.Remove(obsolete);
             if (await ProbeGhostCapabilities(cancellation) is not { } capabilities) return;
-            if (publishedGhostVisibility != preferences.ShowMeasuredGhosts)
+            if (telemetry.Ghosts.PublishedVisibility != preferences.ShowMeasuredGhosts)
                 await SetMeasuredGhostVisibility(preferences.ShowMeasuredGhosts, cancellation);
             if (!preferences.ShowMeasuredGhosts || !capabilities.Ghosts || scene?["robots"] is not JsonArray robots) return;
             string source = scene["sceneId"]!.GetValue<string>();
