@@ -7,7 +7,7 @@ $stubs=Join-Path $root 'stubs'
 $publish=Join-Path $root 'build/publish-windows'
 $state=Join-Path $root 'data-windows-managed'
 $launcher=Join-Path $root 'tools/Start-WindowsDashboard.ps1'
-$savedProgramFiles=$env:ProgramFiles
+$savedUsbipd=$env:PIPER_USBIPD
 $savedPath=$env:PATH
 $started=New-Object Collections.Generic.List[Diagnostics.Process]
 
@@ -37,7 +37,7 @@ function Get-Launches { @(Get-Content -LiteralPath (Join-Path $publish 'launches
 function Get-StubProcesses { @(Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -and $_.ExecutablePath.StartsWith($root,[StringComparison]::OrdinalIgnoreCase) }) }
 
 try {
-    New-Item -ItemType Directory -Force $stubs,$publish,(Join-Path $root 'tools'),(Join-Path $root 'ProgramFiles/usbipd-win') | Out-Null
+    New-Item -ItemType Directory -Force $stubs,$publish,(Join-Path $root 'tools') | Out-Null
     Copy-Item (Join-Path $repo 'tools/Start-WindowsDashboard.ps1'),(Join-Path $repo 'tools/WindowsDashboardDefaults.ps1') (Join-Path $root 'tools')
     . (Join-Path $repo 'tools/WindowsDashboardDefaults.ps1')
 
@@ -69,8 +69,8 @@ static class Stub {
     $compileLog=& $compiler /nologo "/out:$stub" $source 2>&1
     Assert ($LASTEXITCODE -eq 0) "stand-in program did not compile: $compileLog"
     Copy-Item $stub (Join-Path $stubs 'wsl.exe')
-    Copy-Item $stub (Join-Path $root 'ProgramFiles/usbipd-win/usbipd.exe')
-    $env:ProgramFiles=Join-Path $root 'ProgramFiles'
+    $usbipd=Join-Path $stubs 'usbipd.exe'; Copy-Item $stub $usbipd
+    $env:PIPER_USBIPD=$usbipd
     $env:PATH=$stubs+';'+$env:PATH
 
     # Refusal: without a built host nothing is started and no supervisor is claimed.
@@ -87,7 +87,8 @@ static class Stub {
     Set-Content -LiteralPath (Join-Path $publish 'plan.txt') -Value '0'
     $bad=Start-Process powershell.exe -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-File',('"'+$launcher+'"'),'-Port','70000') -WorkingDirectory $root -WindowStyle Hidden -PassThru -RedirectStandardError (Join-Path $root 'err-bad.log')
     $null=$bad.Handle; $started.Add($bad); $bad.WaitForExit()
-    Assert ($bad.ExitCode -ne 0 -and (Get-Content -Raw (Join-Path $root 'err-bad.log')) -match 'Invalid dashboard port') 'an invalid port must be refused'
+    $badError=[string](Get-Content -Raw (Join-Path $root 'err-bad.log'))
+    Assert ($bad.ExitCode -ne 0 -and $badError -match 'Invalid dashboard port') "an invalid port must be refused: $($bad.ExitCode) $badError"
     Assert ((Get-Launches).Count -eq 0) 'an invalid port must not start the host'
     Write-Output 'PASS invalid port refused'
 
@@ -134,7 +135,7 @@ static class Stub {
     Assert ($restart -match 'Wait-PiperSupervisorReleased \$Port' -and $restart -notmatch 'Start-Sleep -Seconds') 'the restart script must wait for the old supervisor'
     Write-Output 'PASS restart script waits for the previous supervisor'
 } finally {
-    $env:ProgramFiles=$savedProgramFiles
+    $env:PIPER_USBIPD=$savedUsbipd
     $env:PATH=$savedPath
     foreach($process in $started) { if(!$process.HasExited){ $process.Kill() }; $process.Dispose() }
     Get-StubProcesses | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
