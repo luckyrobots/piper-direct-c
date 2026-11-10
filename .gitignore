@@ -9,3 +9,7 @@
 !.env.example
 __pycache__/
 *.py[cod]
+
+/data-managed-sim/
+/data-windows-managed/
+/piper-core.dll

@@ -1,0 +1,17 @@
+* text=auto
+Makefile text eol=lf
+*.c text eol=lf
+*.h text eol=lf
+*.inc text eol=lf
+*.cs text eol=lf
+*.csproj text eol=lf
+*.proto text eol=lf
+*.js text eol=lf
+*.mjs text eol=lf
+*.json text eol=lf
+*.md text eol=lf
+*.yaml text eol=lf
+*.yml text eol=lf
+*.ps1 text eol=lf
+*.sh text eol=lf
+*.svg text eol=lf

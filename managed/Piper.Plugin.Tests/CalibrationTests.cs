@@ -1,0 +1,144 @@
+using System.Text.Json.Nodes;
+using LuckyRobots.Piper.Plugin;
+
+public static class CalibrationTests
+{
+    public static void Run()
+    {
+        var desk = new CalibrationDesk();
+        var original = CalibrationPlacement.At(new(.1, .75, -.2), .15);
+        double yaw = .32, tx = -.02, tz = .03;
+        CalibrationPoint Transform(CalibrationPoint p)
+        {
+            var rotated = CalibrationSolver.Rotate(p, yaw); return new(rotated.X + tx, rotated.Y, rotated.Z + tz);
+        }
+        CalibrationSample Sample(CalibrationPoint p, int i, bool heldOut = false) => new("Point " + i, Transform(p), p, [0, 0, 0, 0, 0, 0], 1000 + i, heldOut, new(), "fingerprint-" + i);
+        var samples = new[] { Sample(new(-.14, .75, -.12), 1), Sample(new(.14, .75, -.12), 2), Sample(new(.14, .75, .12), 3), Sample(new(-.14, .75, .12), 4), Sample(new(0, .75, 0), 5, true) };
+        var fit = CalibrationSolver.Fit(desk, original, samples);
+        var targetRoot = Transform(original.Position);
+        Check(fit.CanApply, "Exact rigid desk fit did not pass independent validation");
+        Check(Math.Abs(fit.YawDeltaRadians - yaw) < 1e-10 && fit.ProposedPlacement.Position.Distance(targetRoot) < 1e-10, "Yaw/translation solver produced the wrong world-Y placement");
+        Check(fit.ProposedPlacement.Position.Y == desk.SurfaceY && Math.Abs(fit.ProposedPlacement.YawRadians - original.YawRadians - yaw) < 1e-10, "Fit changed desk height or discarded existing root yaw");
+        Check(fit.TrainingRmsMm < 1e-8 && fit.ValidationMaxMm < 1e-8 && fit.VerticalRmsMm < 1e-8, "Exact data acquired spurious residuals");
+        var noisy = samples.Select((s, i) => s with { MeasuredWorld = new(s.MeasuredWorld.X + (i % 2 == 0 ? .001 : -.001), s.MeasuredWorld.Y + .001, s.MeasuredWorld.Z + (i % 2 == 0 ? -.001 : .001)) }).ToArray();
+        Check(CalibrationSolver.Fit(desk, original, noisy).CanApply, "Sub-millimetre-scale measurement noise was rejected at 10mm operator precision");
+        Check(!CalibrationSolver.Fit(desk, original, samples.Take(3).ToArray()).CanApply, "Three training points were treated as a complete check");
+        var noHeldOut = CalibrationSolver.Fit(desk, original, samples.Take(4).ToArray());
+        Check(!noHeldOut.CanApply && noHeldOut.ProposedPlacement.Same(fit.ProposedPlacement), "A missing validation point changed the fitted placement or enabled Apply");
+        var badValidation = samples.ToArray(); badValidation[4] = badValidation[4] with { MeasuredWorld = new(badValidation[4].MeasuredWorld.X + .04, .75, badValidation[4].MeasuredWorld.Z) };
+        var invalid = CalibrationSolver.Fit(desk, original, badValidation);
+        Check(!invalid.CanApply && invalid.Reason.Contains("validation", StringComparison.OrdinalIgnoreCase), "A 4cm held-out failure enabled Apply");
+        Check(invalid.ProposedPlacement.Same(fit.ProposedPlacement), "Validation data leaked into the training fit");
+        var reused = samples.ToArray(); reused[4] = reused[4] with { MeasuredWorld = samples[0].MeasuredWorld, SceneWorld = samples[0].SceneWorld };
+        Check(!CalibrationSolver.Fit(desk, original, reused).CanApply, "A training point was accepted as independent validation");
+        var duplicate = samples.ToArray(); duplicate[3] = duplicate[0];
+        Check(!CalibrationSolver.Fit(desk, original, duplicate).CanApply, "Duplicate training points inflated geometric evidence");
+        // Nearby references remain legitimate observations when the full set
+        // spans both desk axes; duplicate and held-out checks stay independent.
+        var closeReferences = new[]
+        {
+            Sample(new(-.003, .75, -.15), 1), Sample(new(.1, .75, .1), 2),
+            Sample(new(.2, .75, -.23), 3), Sample(new(.1, .75, .09), 4),
+            Sample(new(.203, .75, 0), 5, true)
+        };
+        Check(CalibrationSolver.Fit(desk, original, closeReferences).CanApply,
+            "A geometrically well-spread reference set containing distinct points 10 mm apart was rejected");
+        var subMillimetreDuplicate = closeReferences.ToArray();
+        subMillimetreDuplicate[3] = Sample(new(.1, .75, .1005), 4);
+        Check(!CalibrationSolver.Fit(desk, original, subMillimetreDuplicate).CanApply,
+            "A sub-millimetre repeated reference was counted as distinct geometric evidence");
+        var nearbyCheck = samples.ToArray();
+        nearbyCheck[4] = Sample(new(samples[0].SceneWorld.X + .049, .75, samples[0].SceneWorld.Z), 5, true);
+        var nearbyCheckFit = CalibrationSolver.Fit(desk, original, nearbyCheck);
+        Check(!nearbyCheckFit.CanApply && nearbyCheckFit.Reason.Contains("5 cm"),
+            "Relaxing reference spacing also relaxed the independent check's 50 mm clearance");
+        Check(new CalibrationPoint(0, 0, 0).PlanarDistance(new(.01, 0, .1)) > .1,
+            "Reference distance uses one coordinate instead of both tabletop coordinates");
+        var line = Enumerable.Range(0, 5).Select(i => Sample(new(i * .07, .75, 0), i, i == 4)).ToArray();
+        Check(!CalibrationSolver.Fit(desk, original, line).CanApply, "Collinear desk points yielded an actionable yaw fit");
+        var tiny = samples.Select(s => s with { SceneWorld = new(s.SceneWorld.X / 10, .75, s.SceneWorld.Z / 10), MeasuredWorld = Transform(new(s.SceneWorld.X / 10, .75, s.SceneWorld.Z / 10)) }).ToArray();
+        Check(!CalibrationSolver.Fit(desk, original, tiny).CanApply, "Closely clustered points passed the 10cm geometry guard");
+        var outlier = samples.ToArray(); outlier[0] = outlier[0] with { MeasuredWorld = new(outlier[0].MeasuredWorld.X + .1, .75, outlier[0].MeasuredWorld.Z) };
+        Check(!CalibrationSolver.Fit(desk, original, outlier).CanApply, "A large inconsistent training outlier was silently compensated");
+        var wrongTcp = samples.Select(s => s with { SceneWorld = new(s.SceneWorld.X, s.SceneWorld.Y + .03, s.SceneWorld.Z) }).ToArray();
+        var vertical = CalibrationSolver.Fit(desk, original, wrongTcp);
+        Check(!vertical.CanApply && vertical.Reason.Contains("Height") && vertical.ProposedPlacement.Position.Y == .75, "A TCP height mismatch was hidden by floating the base");
+        var outside = samples.Select(s => s with { MeasuredWorld = new(s.MeasuredWorld.X + 2, .75, s.MeasuredWorld.Z) }).ToArray();
+        Check(!CalibrationSolver.Fit(desk, original, outside).CanApply, "A base centre outside the desk enabled Apply");
+        Reject(() => CalibrationSolver.Fit(desk with { PrecisionMm = 25 }, original, samples), "A loose precision setting bypassed the conservative gate");
+        Check(desk.World(0, 0, 0) == new CalibrationPoint(-.7, .75, -.35), "Desk left/back origin conversion is incorrect");
+        Check(desk.World(1400, 700, 100) == new CalibrationPoint(.7, .85, .35), "Desk edge/height millimetre conversion is incorrect");
+        var grid = new CalibrationMeasurement("grid intersections", HeightMm: 0, SquareMm: 50, OriginLeftMm: 100, OriginBackMm: 200, Column: 2, Row: 3);
+        Check(grid.World(desk).Distance(new(-.5, .75, 0)) < 1e-12, "Grid origin and numbered intersection conversion is incorrect");
+        Reject(() => desk.World(-1, 0, 0), "Negative physical edge measurement was accepted");
+        Reject(() => (grid with { Column = -1 }).World(desk), "A negative grid intersection was accepted");
+        Reject(() => desk.World(0, double.NaN, 0), "A non-finite reference measurement was accepted");
+        var roundTrip = CalibrationPlacement.Read(original.Json());
+        Check(original.Same(roundTrip), "Metric root placement did not survive the public JSON contract");
+        Check(original.Same(original with { Rotation = original.Rotation.Select(x => -x).ToArray() }), "Equivalent quaternion signs were treated as different roots");
+        Check(CalibrationPlacement.At(new(0, .75, 0), Math.PI + .2).YawRadians is >= -Math.PI and <= Math.PI, "Absolute scene yaw was not wrapped to the engine placement contract");
+        Reject(() => CalibrationPlacement.Read(new JsonObject { ["position"] = new JsonArray(0.0, .75, 0.0), ["rotation"] = new JsonArray(.1, 0.0, 0.0, Math.Sqrt(.99)), ["unit"] = "m" }), "A tilted base entered the yaw-only fit");
+
+        var identity = new CalibrationIdentity("piper-1", "usb:one", 7, "session-hash", "scene", "robot");
+        var device = new JsonObject { ["id"] = "usb:one", ["generation"] = 7L, ["fresh"] = true,
+            ["status"] = new JsonObject { ["error"] = 0, ["arm_status"] = 0, ["stationary_s"] = .5, ["control"] = 2, ["teach_state"] = 1 },
+            ["joints"] = new JsonArray(Enumerable.Range(0, 6).Select(i => (JsonNode)new JsonObject { ["actual_deg"] = (double)i, ["fresh"] = true, ["fault"] = 0 }).ToArray()) };
+        var pose = new JsonObject { ["sceneId"] = "scene", ["entityId"] = "robot", ["rootPlacement"] = original.Json(), ["modelAssetId"] = "model-a", ["modelRevision"] = "revision-a", ["metricPlacementSupported"] = true, ["metricFrame"] = "engine-world-y-up",
+            ["joints"] = new JsonArray(Enumerable.Range(0, 6).Select(i => (JsonNode)new JsonObject { ["name"] = "joint" + (i + 1), ["position"] = i * Math.PI / 180, ["unit"] = "rad" }).ToArray()),
+            ["toolSites"] = new JsonArray(new JsonObject { ["name"] = "grasp_site", ["position"] = new JsonArray(.1, .75, .2), ["rotation"] = new JsonArray(0.0, 0.0, 0.0, 1.0), ["unit"] = "m" }) };
+        var captured = CalibrationCapture.Read(identity, identity, desk, original, device, pose, 1000, 1200);
+        Check(captured.ToolWorld == new CalibrationPoint(.1, .75, .2) && captured.JointDegrees.SequenceEqual(Enumerable.Range(0, 6).Select(i => (double)i)), "Capture did not preserve measured joints and named TCP world pose");
+        Check(captured.PoseFingerprint.Length == 64, "A calibration sample has no inspectable pose fingerprint");
+        Check(captured.ModelAssetId == "model-a", "Capture did not bind the compiled robot model asset");
+        foreach (var changed in new[] { identity with { ProfileId = "other" }, identity with { DeviceId = "usb:two" }, identity with { Generation = 8 }, identity with { BackendSessionFingerprint = "new-session" }, identity with { SceneId = "new-scene" }, identity with { RobotId = "another-robot" } })
+            Reject(() => CalibrationCapture.Read(identity, changed, desk, original, device, pose, 1000, 1200), "A changed calibration identity reused old measurements");
+        Reject(() => CalibrationCapture.Read(identity, identity, desk, original, device, pose, 1000, 1501), "An IPC measurement older than500ms was captured");
+        Reject(() => CalibrationCapture.Read(identity, identity, desk, original, device, pose, 1000, 999), "A reversed capture clock was accepted");
+        JsonObject copy = (JsonObject)device.DeepClone(); copy["fresh"] = false;
+        Reject(() => CalibrationCapture.Read(identity, identity, desk, original, copy, pose, 1000, 1200), "Stale arm feedback entered a geometric fit");
+        copy = (JsonObject)device.DeepClone(); copy["joints"]![2]!["fault"] = 1;
+        Reject(() => CalibrationCapture.Read(identity, identity, desk, original, copy, pose, 1000, 1200), "A faulted driver entered a calibration capture");
+        copy = (JsonObject)device.DeepClone(); copy["status"]!["stationary_s"] = .39;
+        Reject(() => CalibrationCapture.Read(identity, identity, desk, original, copy, pose, 1000, 1200), "A moving arm was captured");
+        copy = (JsonObject)device.DeepClone(); copy["status"]!["teach_state"] = 0; copy["status"]!["control"] = 1;
+        Reject(() => CalibrationCapture.Read(identity, identity, desk, original, copy, pose, 1000, 1200), "An ordinary enabled robot was treated as hand guiding");
+        foreach (int faultStatus in new[] { 1, 5 })
+        {
+            copy = (JsonObject)device.DeepClone(); copy["status"]!["arm_status"] = faultStatus;
+            Reject(() => CalibrationCapture.Read(identity, identity, desk, original, copy, pose, 1000, 1200), "A fault/STOP controller status with retained teach state entered calibration");
+        }
+        copy = (JsonObject)device.DeepClone(); copy["status"]!["arm_status"] = 11;
+        Check(CalibrationCapture.Read(identity, identity, desk, original, copy, pose, 1000, 1200).ToolWorld.Finite, "Benign hand-guiding status11 was rejected");
+        JsonObject badPose = (JsonObject)pose.DeepClone(); badPose["rootPlacement"]!["position"]![0] = .11;
+        Reject(() => CalibrationCapture.Read(identity, identity, desk, original, device, badPose, 1000, 1200), "A scene base edit was mixed into old calibration samples");
+        badPose = (JsonObject)pose.DeepClone(); badPose["joints"]![0]!["position"] = .01;
+        Reject(() => CalibrationCapture.Read(identity, identity, desk, original, device, badPose, 1000, 1200), "An unacknowledged simulated pose entered the point fit");
+        badPose = (JsonObject)pose.DeepClone(); badPose["toolSites"]![0]!["name"] = "camera_origin";
+        Reject(() => CalibrationCapture.Read(identity, identity, desk, original, device, badPose, 1000, 1200), "An arbitrary camera origin replaced the chosen fixed TCP");
+        badPose = (JsonObject)pose.DeepClone(); badPose["toolSites"]!.AsArray().Add(badPose["toolSites"]![0]!.DeepClone());
+        Reject(() => CalibrationCapture.Read(identity, identity, desk, original, device, badPose, 1000, 1200), "Ambiguous duplicate named tool sites were accepted");
+        badPose = (JsonObject)pose.DeepClone(); badPose["metricPlacementSupported"] = false;
+        Reject(() => CalibrationCapture.Read(identity, identity, desk, original, device, badPose, 1000, 1200), "Unsupported metric model placement was treated as usable FK");
+        var modelBound = identity with { ModelAssetId = "model-a", ModelRevision = "revision-a" };
+        badPose = (JsonObject)pose.DeepClone(); badPose["modelAssetId"] = "model-b";
+        Reject(() => CalibrationCapture.Read(modelBound, modelBound, desk, original, device, badPose, 1000, 1200), "Replacing the compiled model reused old calibration geometry");
+        badPose = (JsonObject)pose.DeepClone(); badPose["modelRevision"] = "revision-b";
+        Reject(() => CalibrationCapture.Read(modelBound, modelBound, desk, original, device, badPose, 1000, 1200), "An in-place compiled source/dependency revision reused old calibration geometry");
+        foreach (string targetAction in new[] { "enable", "safety.accept", "zero.all", "pika.target", "joint.6.plus", "joint.3.target", "teleoperate.toggle", "engine.robot.target", "engine.robot.follow" })
+            Check(WorkspaceCommandPolicy.RequiresControls(targetAction), "A queued/hotkey target escaped the calibration routing guard: " + targetAction);
+        Check(WorkspaceNavigation.Calibration is { CalibrationOpen: true, Page: not WorkspacePage.Controls }, "Calibration was open on the Controls page");
+        Check(!WorkspaceCommandPolicy.RequiresControls("stop") && !WorkspaceCommandPolicy.RequiresControls("disable") && !WorkspaceCommandPolicy.RequiresControls("calibration.capture"), "Calibration routing blocked STOP/disable/passive capture");
+        var report = new CalibrationReport(1, modelBound, desk, original, samples, fit, null, true, DateTimeOffset.UtcNow);
+        var decoded = System.Text.Json.JsonSerializer.Deserialize<CalibrationReport>(System.Text.Json.JsonSerializer.Serialize(report))!;
+        decoded.Validate("piper-1");
+        Check(decoded.RequiresInspection && decoded.OriginalPlacement.Same(original) && decoded.Fit!.ProposedPlacement.Same(fit.ProposedPlacement), "Restart discarded pending scene-write original/proposed rollback evidence");
+        var applied = report with { PlacementUnverified = false, AppliedPlacement = fit.ProposedPlacement };
+        applied.Validate("piper-1");
+        Check(applied.RequiresInspection && applied.AppliedPlacement!.Same(fit.ProposedPlacement), "Reload treated a previous applied root as currently verified or lost rollback placement");
+        Check(!(report with { PlacementUnverified = false }).RequiresInspection, "An unapplied completed report silently resumed an old fit");
+        Check(!System.Text.Json.JsonSerializer.Serialize(report).Contains("RequiresInspection", StringComparison.Ordinal), "A derived restore flag was persisted in the report");
+        Reject(() => report.Validate("another-profile"), "Saved rollback state crossed robot profiles");
+        Reject(() => (applied with { Fit = null }).Validate("piper-1"), "A saved applied placement without its proposing fit was restored");
+        Reject(() => CalibrationCapture.ValidateLive(identity, identity with { Generation = 8 }, device, true), "Post-save scope guard allowed a new CAN generation");
+    }
+}

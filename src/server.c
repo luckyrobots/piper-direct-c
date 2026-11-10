@@ -23,6 +23,9 @@ struct asset { const char *route,*name,*mime; char *data; size_t size; };
 static struct asset assets[]={
     {"/","index.html","text/html; charset=utf-8",NULL,0},
     {"/app.js","app.js","text/javascript; charset=utf-8",NULL,0},
+    {"/pika.mjs","pika.mjs","text/javascript; charset=utf-8",NULL,0},
+    {"/pika_remote.mjs","pika_remote.mjs","text/javascript; charset=utf-8",NULL,0},
+    {"/bench.mjs","bench.mjs","text/javascript; charset=utf-8",NULL,0},
     {"/style.css","style.css","text/css; charset=utf-8",NULL,0},
     {"/api/openapi.json","openapi.json","application/json",NULL,0}
 };
@@ -36,7 +39,7 @@ static void close_client(struct client *c)
 static void respond(struct client *c,int status,const char *mime,const char *data,size_t size)
 {
     const char *reason=status==200?"OK":status==202?"Accepted":status==400?"Bad Request":status==403?"Forbidden":status==404?"Not Found":status==409?"Conflict":status==413?"Payload Too Large":"Server Error";
-    const char *format="HTTP/1.1 %d %s\r\nContent-Type: %s\r\nContent-Length: %zu\r\nConnection: close\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nReferrer-Policy: no-referrer\r\nContent-Security-Policy: default-src 'self'; style-src 'self'; script-src 'self'; connect-src 'self'; img-src 'self' data: blob:; frame-ancestors 'none'; base-uri 'none'; form-action 'none'\r\n\r\n";
+    const char *format="HTTP/1.1 %d %s\r\nContent-Type: %s\r\nContent-Length: %zu\r\nConnection: close\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nReferrer-Policy: no-referrer\r\nContent-Security-Policy: default-src 'self'; style-src 'self'; script-src 'self'; connect-src 'self'; img-src 'self' data: blob:; media-src 'self' blob:; frame-ancestors 'none'; base-uri 'none'; form-action 'none'\r\n\r\n";
     size_t capacity=size+1024; c->output=malloc(capacity);
     if (!c->output) { close_client(c); return; }
     int n=snprintf(c->output,capacity,format,status,reason,mime,size);
@@ -115,7 +118,8 @@ static void request(struct client *client,struct controller *controller,const ch
     if (!content_length||!type||(strcmp(type,"application/json")&&strcmp(type,"application/json; charset=utf-8"))) { error_response(client,400,"Use a JSON body and Content-Length."); return; }
     /* This API needs numbers, booleans and opaque ASCII IDs. Reject JSON unicode
        escapes to avoid embedded-NUL string truncation and ambiguous keys in C. */
-    if (memchr(client->input+header_size,0,length)||strstr(client->input+header_size,"\\u")) { error_response(client,400,"Unicode escapes are unsupported in control requests."); return; }
+    /* The receive loop already rejects any NUL byte, so strstr sees the whole body. */
+    if (strstr(client->input+header_size,"\\u")) { error_response(client,400,"Unicode escapes are unsupported in control requests."); return; }
     cJSON *body=cJSON_ParseWithLengthOpts(client->input+header_size,length+1,NULL,1);
     if (!cJSON_IsObject(body)||!unique_keys(body)) { cJSON_Delete(body); error_response(client,400,"Expected one JSON object with unique keys."); return; }
     controller_tick(controller,piper_now());
