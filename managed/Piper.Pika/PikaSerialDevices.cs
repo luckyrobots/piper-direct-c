@@ -97,9 +97,9 @@ public static class PikaSerialDevices
     public static bool IsPikaUsb(string vendorFile, string productFile) =>
         File.ReadAllText(vendorFile).Trim() == PikaProtocol.UsbVendorId && File.ReadAllText(productFile).Trim() == PikaProtocol.UsbProductId;
 
-    public static string ResolveLinux(string configured)
+    public static string ResolveLinux(string configured, string sysRoot = "/sys", string devRoot = "/dev")
     {
-        var devices = EnumerateLinux();
+        var devices = EnumerateLinux(sysRoot, devRoot);
         var matches = devices.Where(item => item.Device == configured || item.Aliases.Contains(configured, StringComparer.Ordinal)).ToArray();
         if (matches.Length != 1) throw new InvalidOperationException("The assigned Pika is unavailable, ambiguous or has no readable USB port identity. Refresh gripper devices in Settings; the plugin will not substitute another gripper.");
         return matches[0].SystemDevice;

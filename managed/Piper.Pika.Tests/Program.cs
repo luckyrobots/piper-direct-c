@@ -93,6 +93,7 @@ foreach (bool requested in new[] { false, true })
 await PikaFollowTests.RunAsync();
 await PikaMultiDeviceTests.Run();
 await BoundedProcessTests.Run();
+await PikaAgentFaultTests.Run();
 await PikaReadOnlyAdoptionTests.Run();
 PikaMeasuredHoldResumeTests.Run();
 await PikaDisabledEvidenceTests.Run();
