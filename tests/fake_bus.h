@@ -19,8 +19,8 @@
      sent";
    - transmit-failure injection.
 
-   fake_bus_reset() returns all of it to the initial state; every fixture
-   calls it first. */
+   fake_bus_reset() returns all of it to the initial state, which is also the
+   state a test process starts in. */
 #include "controller_internal.h"
 
 struct fake_frame {

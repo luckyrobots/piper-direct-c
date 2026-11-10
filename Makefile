@@ -41,7 +41,8 @@ build/piper-control: src/server.c src/camera.c src/camera.h $(CORE) $(HEADERS) |
 BUS_TESTS = speed-units control range-drift range-transition arrival-tolerance configuration-cache \
 	idle-reconnect multi-lanes pose-entry-order startup reset-retry enable-sequence disable-sequence cycle \
 	gripper obstruction-controller follow follow-noop trajectory-follow trajectory-viability teaching \
-	teach-batches stationary recover-at-pose stop-generation hold-target record-load
+	teach-batches stationary recover-at-pose stop-generation hold-target record-load \
+	rows-latch rows-lane
 FAKE_BUS = piper_now can_bus_receive can_bus_send
 WRAP_idle-reconnect = can_bus_reconnect can_bus_reconnect_device
 # The real clock is the unit under test, so this one keeps the real bus.
@@ -78,6 +79,8 @@ test: all $(TESTS:%=build/test-%)
 	@# A skipped check still exits 0, so machines without its tool pass; say so loudly.
 	@if [ -s build/test-skips.log ]; then echo "==== SKIPPED native checks ===="; cat build/test-skips.log; echo "==============================="; \
 		[ -z "$(NO_SKIPS)" ] || { echo "FAILED: NO_SKIPS is set and native checks were skipped"; exit 1; }; fi
+	@# Every row of the section 3.1 tables names a test that just passed (P7).
+	sh tests/check_rows.sh docs/target-architecture.md $(TESTS:%=build/test-%.log)
 	./build/piper-can --help >/dev/null
 	! ./build/piper-can --query-firmware >/dev/null 2>&1
 	! ./build/piper-can --seconds nonsense >/dev/null 2>&1
