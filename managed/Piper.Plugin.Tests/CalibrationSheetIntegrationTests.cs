@@ -300,16 +300,16 @@ internal static class CalibrationSheetIntegrationTests
             // workspace navigation fix (B3).
             plugin.workspace.Commit(WorkspaceNavigation.Calibration);
             async Task Height(string action, string text = "") { Fresh(); await plugin.HeightCheckEvent(action, JsonSerializer.SerializeToElement(text), CancellationToken.None); }
-            string HeightPhase() => plugin.heightPhase.ToString()!;
+            string HeightPhase() => plugin.calibration.Height.Session.Phase.ToString();
             await Height("toggle");
-            Check(HeightPhase() == "Live" && plugin.heightActionError == "", "Check jaw height did not start live: " + plugin.heightActionError);
+            Check(HeightPhase() == "Live" && plugin.calibration.Height.Session.ActionError == "", "Check jaw height did not start live: " + plugin.calibration.Height.Session.ActionError);
             await Height("pin");
-            Check(HeightPhase() == "Pinned", "Measure this pose did not pin the pose: " + plugin.heightActionError);
+            Check(HeightPhase() == "Pinned", "Measure this pose did not pin the pose: " + plugin.calibration.Height.Session.ActionError);
             await Height("measured", "250");
             await Height("save");
-            Check(HeightPhase() == "Saved", "Save check did not record the pinned pose: " + plugin.heightActionError);
+            Check(HeightPhase() == "Saved", "Save check did not record the pinned pose: " + plugin.calibration.Height.Session.ActionError);
             await Height("another");
-            Check(HeightPhase() == "Live" && plugin.heightFrozen is null, "Check another pose kept the previous pinned pose");
+            Check(HeightPhase() == "Live" && plugin.calibration.Height.Session.Frozen is null, "Check another pose kept the previous pinned pose");
             await Height("toggle");
             Check(HeightPhase() == "Inactive", "Stop height check left the check active");
             plugin.workspace.Commit(WorkspaceNavigation.Calibration); await plugin.Render(CancellationToken.None);

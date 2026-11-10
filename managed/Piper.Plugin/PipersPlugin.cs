@@ -736,7 +736,7 @@ public sealed partial class PipersPlugin : ILuckyPlugin
         await shutdown.CancelAsync();
         await Quietly(StopFollowUp, "STOP follow-up");
         await Quietly(wizardHighlightMaintenance, "Calibration marker maintenance");
-        await Quietly(HeightMaintenanceIdle, "Height guide maintenance");
+        await Quietly(calibration.Height.MaintenanceIdle, "Height guide maintenance");
         await Quietly(lensWorker, "Lens calibration");
         await Quietly(cameraRetirement, "Camera");
         await Quietly(worker, "Telemetry");

@@ -10,6 +10,7 @@ public sealed record CalibrationPreferences(CalibrationDesk Desk, CalibrationMea
 
 public sealed partial class PipersPlugin
 {
+    internal readonly CalibrationComponent calibration = new();
     internal bool calibrationPlacementUnverified, calibrationArchiveConfirmation;
     internal string calibrationProfile = "";
     internal string calibrationPath = "";

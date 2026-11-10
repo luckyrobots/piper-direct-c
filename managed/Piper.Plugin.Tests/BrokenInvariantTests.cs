@@ -95,10 +95,10 @@ internal static class BrokenInvariantTests
             Check(resume.Contains("primary robot action", StringComparison.Ordinal) && rpc.Routes.IsEmpty && plugin.workspace.PrimaryAction.Current.Phase == PrimaryActionPhase.Idle,
                 "Resume controls ran outside the primary robot action: " + resume);
 
-            plugin.SetHeightPhase(PipersPlugin.HeightCheckPhase.Live);
-            Check(plugin.heightPhase == PipersPlugin.HeightCheckPhase.Live && plugin.heightActionError.Length == 0, "A consistent jaw-height phase was refused");
-            plugin.SetHeightPhase(PipersPlugin.HeightCheckPhase.Saved);
-            Check(plugin.heightPhase == PipersPlugin.HeightCheckPhase.Inactive && plugin.heightActionError.Contains("Nothing was saved", StringComparison.Ordinal),
+            plugin.calibration.Height.Enter(HeightCheckPhase.Live);
+            Check(plugin.calibration.Height.Session.Phase == HeightCheckPhase.Live && plugin.calibration.Height.Session.ActionError.Length == 0, "A consistent jaw-height phase was refused");
+            plugin.calibration.Height.Enter(HeightCheckPhase.Saved);
+            Check(plugin.calibration.Height.Session.Phase == HeightCheckPhase.Inactive && plugin.calibration.Height.Session.ActionError.Contains("Nothing was saved", StringComparison.Ordinal),
                 "A jaw-height phase without its pinned pose stayed open or was not reported");
 
             Check(plugin.CalibrationSessionFault is null, "An empty calibration session was reported as inconsistent");
