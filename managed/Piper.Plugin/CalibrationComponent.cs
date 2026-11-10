@@ -8,6 +8,7 @@ namespace LuckyRobots.Piper.Plugin;
 /// takes no lock.
 /// <code>
 ///   part     machine                          table on
+///   Desk     Cal-A desk calibration session   DeskCalibration
 ///   Height   Cal-D jaw-height check           HeightCheckSession
 ///   Markers  Cal-C marker ownership           CalibrationMarkers
 ///   Lens     Cal-E lens calibration           LensCalibration
@@ -24,6 +25,7 @@ namespace LuckyRobots.Piper.Plugin;
 /// the robot link the calibration is measured against.</summary>
 internal sealed class CalibrationComponent
 {
+    public DeskCalibration Desk { get; } = new();
     public HeightCheckSession Height { get; } = new();
     public CalibrationMarkers Markers { get; } = new();
     public LensCalibration Lens { get; } = new();

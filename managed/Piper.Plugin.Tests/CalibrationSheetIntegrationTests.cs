@@ -264,13 +264,13 @@ internal static class CalibrationSheetIntegrationTests
                 plugin.calibrationSamples.Count == 5,
                 "Correcting an entered coordinate back to its measured value required recapture or failed to recover the fit");
             var savedIdentity = plugin.calibrationIdentity!;
-            plugin.calibrationIdentity = savedIdentity with { Generation = 999 };
+            plugin.calibration.Desk.Reinstate(plugin.calibration.Desk.Session with { Identity = savedIdentity with { Generation = 999 } });
             await Event("move.1");
             Check(plugin.sheetEditingRow == -1, "A changed robot connection permitted editing an old captured report");
-            plugin.calibrationIdentity = savedIdentity; plugin.calibrationPlacementUnverified = true;
+            plugin.calibration.Desk.Reinstate(plugin.calibration.Desk.Session with { Identity = savedIdentity }); plugin.calibration.Desk.MarkWritePending();
             await Event("move.1");
             Check(plugin.sheetEditingRow == -1, "An unverified scene placement permitted captured-measurement editing");
-            plugin.calibrationPlacementUnverified = false;
+            plugin.calibration.Desk.MarkWriteNotSent();
             Check(calls.All(c => c is "robot.read" or "robot.highlightReference" or "robot.highlightToolSite" or "robot.teleoperate"), "Calibration attempted a robot/scene mutation before Apply");
             Check(root.Same(CalibrationPlacement.At(new(.1, .75, -.2), 0)), "Fit changed the scene before explicit Apply");
             point = marks.Length - 1;

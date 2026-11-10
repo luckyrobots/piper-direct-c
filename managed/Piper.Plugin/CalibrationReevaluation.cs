@@ -6,7 +6,7 @@ namespace LuckyRobots.Piper.Plugin;
 
 public sealed partial class PipersPlugin
 {
-    private CalibrationModelReevaluation? calibrationReevaluation;
+    private CalibrationModelReevaluation? calibrationReevaluation => deskSession.Reevaluation;
 
     private string AcknowledgedModelRevision => calibrationIdentity is { } saved &&
         link is { } current && acknowledgedScenePose?["pose"] is JsonObject pose && pose["sceneId"]?.GetValue<string>() == current.SceneId &&
@@ -132,16 +132,11 @@ public sealed partial class PipersPlugin
             previousModelRevision = saved.ModelRevision, modelRevision = revision, evaluations = receipts
         }, PluginProtocol.Json), cancellation);
         RequireReevaluationScope(saved, live, root, originals);
-        var oldFit = calibrationFit; var oldEvaluation = calibrationReevaluation;
-        calibrationIdentity = updated; calibrationSamples.Clear(); calibrationSamples.AddRange(evaluated); calibrationFit = null;
-        calibrationReevaluation = new(saved.ModelRevision, revision, "model-reevaluations/" + auditName, DateTimeOffset.UtcNow,
-            PreviousSceneId: saved.SceneId, SceneId: live.SceneId);
+        var before = calibration.Desk.Session;
+        calibration.Desk.Reevaluate(updated, evaluated, new(saved.ModelRevision, revision, "model-reevaluations/" + auditName, DateTimeOffset.UtcNow,
+            PreviousSceneId: saved.SceneId, SceneId: live.SceneId));
         try { await SaveCalibration(cancellation); }
-        catch
-        {
-            calibrationIdentity = saved; calibrationSamples.Clear(); calibrationSamples.AddRange(originals);
-            calibrationFit = oldFit; calibrationReevaluation = oldEvaluation; throw;
-        }
+        catch { calibration.Desk.Reinstate(before); throw; }
         InvalidateReevaluationSetup(revision);
         wizardMessage = "Saved poses re-evaluated in the current scene and model; all physical angles, measurements and capture times are preserved. Reconfirm LEFT, BACK, jaw tips and the desk, then Calculate alignment. Nothing has moved or been applied.";
         await SaveWizard(cancellation);

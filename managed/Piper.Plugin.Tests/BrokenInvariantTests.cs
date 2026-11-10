@@ -102,8 +102,8 @@ internal static class BrokenInvariantTests
                 "A jaw-height phase without its pinned pose stayed open or was not reported");
 
             Check(plugin.CalibrationSessionFault is null, "An empty calibration session was reported as inconsistent");
-            plugin.calibrationIdentity = new("piper-1", "can-one", 1, "fingerprint", "scene", "robot");
-            plugin.calibrationApplied = new CalibrationPlacement(new CalibrationPoint(0, 0, 0), [1, 0, 0, 0]);
+            plugin.calibration.Desk.Reinstate(plugin.calibration.Desk.Session with { Identity = new("piper-1", "can-one", 1, "fingerprint", "scene", "robot"),
+                Applied = new CalibrationPlacement(new CalibrationPoint(0, 0, 0), [1, 0, 0, 0]) });
             string save = await Refusal(() => plugin.SaveCalibration(CancellationToken.None));
             Check(plugin.CalibrationSessionFault is not null && save.Contains("Nothing was saved", StringComparison.Ordinal),
                 "A calibration session whose applied placement has no fit was saved as a report: " + save);

@@ -42,8 +42,8 @@ internal static class CalibrationReevaluationTests
         foreach (string blocked in new[] { "calibrationApplied", "calibrationPlacementUnverified", "sheetEditingRow", "stale", "motion" })
         {
             using var fixture = new Fixture();
-            if (blocked == "calibrationApplied") fixture.Plugin.calibrationApplied = fixture.Root;
-            else if (blocked == "calibrationPlacementUnverified") fixture.Plugin.calibrationPlacementUnverified = true;
+            if (blocked == "calibrationApplied") fixture.Plugin.calibration.Desk.PlacementVerified(fixture.Root);
+            else if (blocked == "calibrationPlacementUnverified") fixture.Plugin.calibration.Desk.MarkWritePending();
             else if (blocked == "sheetEditingRow") fixture.Plugin.sheetEditingRow = 1;
             else if (blocked == "stale") fixture.State["devices"]![0]!["fresh"] = false;
             else fixture.State["motion"]!["active"] = true;
@@ -199,9 +199,9 @@ internal static class CalibrationReevaluationTests
             Plugin.engine = context; Plugin.preferences = prefs; Plugin.telemetry.PublishState(State); Plugin.telemetry.AdoptBackend("session");
             Plugin.link = new RobotLink(liveScene, liveEntity, Pose()["joints"]!.AsArray(), device);
             Plugin.linkBackendToken = "session"; Plugin.workspace.Commit(WorkspaceNavigation.Calibration);
-            Plugin.calibrationProfile = "piper-1"; Plugin.wizardProfile = "piper-1"; Plugin.calibrationIdentity = Identity;
-            Plugin.calibrationOriginal = Root; Plugin.calibrationFit = originalFit; Plugin.calibrationDesk = desk; Plugin.calibrationPath = ReportPath;
-            Plugin.calibrationSamples.AddRange(Originals);
+            Plugin.wizardProfile = "piper-1";
+            Plugin.calibration.Desk.Reinstate(DeskSession.Unloaded with { Profile = "piper-1", Identity = Identity, Original = Root, Fit = originalFit,
+                Desk = desk, Path = ReportPath, Samples = [.. Originals] });
             var wizard = CalibrationWizardFlow.New("piper-1") with { ModelAssetId = "asset-a", ModelRevision = "old-model",
                 Setup = new(Root.Json().ToJsonString(), "old-left", "old-back", JawTipsConfirmed: true, SurfaceConfirmed: true) };
             foreach (var (key, text) in new[] { ("tool", "calibration_jaw_tips"), ("width", "1400"), ("depth", "700"), ("precision", "5"),

@@ -114,7 +114,7 @@ internal static class WorkspaceViewTests
         string folder = Path.Combine(Path.GetTempPath(), "piper-workspace-view-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(folder);
         var prefs = RobotProfileRouting.Normalize(new Preferences(Robots: [new("piper-1", "Fixture", "can-a")], ActiveRobotId: "piper-1"));
-        plugin.preferences = prefs; plugin.calibrationProfile = "piper-1";
+        plugin.preferences = prefs; plugin.calibration.Desk.Reinstate(DeskSession.Unloaded with { Profile = "piper-1" });
         JsonObject? rendered = null, patched = null;
         var engineRequests = new List<(string Method, JsonObject Arguments)>();
         var context = Fixtures.Context(new PluginStart("fixture", folder, folder),
@@ -280,7 +280,7 @@ internal static class WorkspaceViewTests
             {
                 plugin.wizardProfile = "piper-1";
                 plugin.calibrationWizard = CalibrationWizardFlow.New("piper-1") with { Step = step };
-                plugin.calibrationArchiveConfirmation = step == CalibrationWizardStep.InspectSaved;
+                if (step == CalibrationWizardStep.InspectSaved) plugin.calibration.Desk.AskArchive(); else plugin.calibration.Desk.CancelArchive();
                 await CheckView("settings", "bench");
             }
 

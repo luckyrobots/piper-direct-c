@@ -79,12 +79,10 @@ public sealed partial class PipersPlugin
             reason = "Operator corrected entered desk measurements; captured pose unchanged", row, originalSample = sample,
             correctedMeasurement = correction.Measurement, previousReport = JsonDocument.Parse(await File.ReadAllTextAsync(calibrationPath, cancellation)).RootElement.Clone()
         }, LuckyEngine.PluginSdk.PluginProtocol.Json), cancellation);
-        int index = calibrationSamples.IndexOf(sample);
-        var oldFit = calibrationFit;
-        calibrationSamples[index] = correction;
-        calibrationFit = null;
+        var before = calibration.Desk.Session;
+        calibration.Desk.Correct(sample, correction);
         try { await SaveCalibration(cancellation); }
-        catch { calibrationSamples[index] = sample; calibrationFit = oldFit; throw; }
+        catch { calibration.Desk.Reinstate(before); throw; }
         sheetEditingRow = -1; calibration.Markers.InvalidateSheet();
         wizardMessage = $"{SheetPointName(row)} measurements corrected and saved. Its captured arm pose is unchanged; the original report is retained. Calculate alignment again.";
         await SaveWizard(cancellation);

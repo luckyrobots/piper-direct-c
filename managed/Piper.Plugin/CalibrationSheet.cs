@@ -196,7 +196,7 @@ public sealed partial class PipersPlugin
         if (calibrationIdentity is not null && (calibrationOriginal is null || !calibrationOriginal.Same(root) || Math.Abs(root.Position.Y - calibrationDesk.SurfaceY) > 1e-6))
             throw new InvalidOperationException("Reconfirming a corrected model cannot change the saved original placement or tabletop height.");
         Wizard.Answers["sceney"] = CalibrationNumber(root.Position.Y * 1000);
-        calibrationDesk = calibrationDesk with { SurfaceY = root.Position.Y };
+        calibration.Desk.UseDesk(calibrationDesk with { SurfaceY = root.Position.Y });
         bool rootMoved = Wizard.Setup.EdgeRoot.Length > 0 && !CalibrationPlacement.Read(JsonNode.Parse(Wizard.Setup.EdgeRoot)).Same(root);
         UpdateSetup(setup => (rootMoved ? setup.ClearEdges() : setup) with { SurfaceConfirmed = true });
     }

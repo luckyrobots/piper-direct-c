@@ -52,7 +52,7 @@ public sealed partial class PipersPlugin
             calibrationWizard = Wizard with { Step = CalibrationWizardStep.Review, Epoch = Wizard.Epoch + 1 };
         if (calibrationIdentity is null && Wizard.Setup.SurfaceConfirmed)
         {
-            try { calibrationDesk = calibrationDesk with { SurfaceY = CalibrationWizardFlow.Number(Wizard, "sceney", 0, 3000) / 1000 }; }
+            try { calibration.Desk.UseDesk(calibrationDesk with { SurfaceY = CalibrationWizardFlow.Number(Wizard, "sceney", 0, 3000) / 1000 }); }
             catch (InvalidOperationException) { UpdateSetup(setup => setup with { SurfaceConfirmed = false }); }
         }
         ReconcileReevaluatedWizard();
@@ -181,9 +181,9 @@ public sealed partial class PipersPlugin
             throw new InvalidOperationException("The LEFT/BACK pointers have not been confirmed for this robot and these desk measurements. Start new questions and compare both desk edges before capturing more points; the saved report is retained.");
         if (Math.Abs(CalibrationWizardFlow.SceneSurface(Wizard) - calibrationDesk.SurfaceY * 1000) > .001)
             throw new InvalidOperationException("The saved scene reference changed. Start new questions before mixing measurements from different scene surfaces.");
-        if (calibrationIdentity is null) calibrationDesk = tabletop.Desk;
+        if (calibrationIdentity is null) calibration.Desk.UseDesk(tabletop.Desk);
         else if (calibrationDesk != tabletop.Desk) throw new InvalidOperationException("The captured session's fixed tabletop settings changed. Start new questions before mixing references.");
-        calibrationMeasurement = tabletop.Measurement;
+        calibration.Desk.UseMeasurement(tabletop.Measurement);
         if (!WizardValidation && WizardCross() is { } cross && calibrationMeasurement.World(calibrationDesk).PlanarDistance(calibrationDesk.World(cross.LeftMm, cross.BackMm, 0)) < .05)
             throw new InvalidOperationException("Keep the saved profile cross and its nearby5cm for independent validation. Choose a different training location.");
         if (calibrationIdentity is null) { await CalibrationEvent("start", cancellation); await SaveWizard(cancellation); }
