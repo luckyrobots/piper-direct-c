@@ -148,7 +148,7 @@ internal static class MeasuredGhostPublicationTests
 
         public void Dispose()
         {
-            plugin.channel.Dispose(); plugin.shutdown.Dispose(); plugin.commands.Dispose(); plugin.cameraDiscoveryShutdown.Dispose();
+            plugin.channel.Dispose(); plugin.shutdown.Dispose(); plugin.commands.Dispose(); plugin.calibration.Cameras.Dispose();
             if (Directory.Exists(folder)) Directory.Delete(folder, true);
         }
     }

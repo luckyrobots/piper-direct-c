@@ -233,19 +233,19 @@ internal static class WorkspaceViewTests
             }
 
             plugin.workspace.ToggleCameraStreamDetails();
-            plugin.simulationCameras = CameraInventory("source-a", "camera-a", "camera-b");
+            plugin.calibration.Cameras.ApplySimulation(CameraInventory("source-a", "camera-a", "camera-b"));
             await CheckView("settings", "cameras");
             string selector = WidgetId("camera.bench.simselect");
-            plugin.simulationCameras = CameraInventory("source-a", "camera-b", "camera-a");
+            plugin.calibration.Cameras.ApplySimulation(CameraInventory("source-a", "camera-b", "camera-a"));
             await Click(selector, 1);
             Check(plugin.preferences.SimulationCameras?.GetValueOrDefault("bench") is { CameraId: "camera-a", SceneId: "source-a" },
                 "A reordered camera inventory routed a rendered selection to the wrong camera");
-            plugin.simulationCameras = CameraInventory("source-a", "camera-b");
+            plugin.calibration.Cameras.ApplySimulation(CameraInventory("source-a", "camera-b"));
             await Click(selector, 1);
             Check(plugin.preferences.SimulationCameras?.GetValueOrDefault("bench")?.CameraId == "camera-a" &&
                 plugin.uiActionError.Contains("Simulation cameras changed", StringComparison.Ordinal),
                 "A removed camera selection silently rebound the bench preview");
-            plugin.simulationCameras = CameraInventory("source-b", "camera-a", "camera-b");
+            plugin.calibration.Cameras.ApplySimulation(CameraInventory("source-b", "camera-a", "camera-b"));
             await Click(selector, 0);
             Check(plugin.preferences.SimulationCameras?.GetValueOrDefault("bench")?.SceneId == "source-a",
                 "An Automatic selection from an old scene changed the new scene's binding");

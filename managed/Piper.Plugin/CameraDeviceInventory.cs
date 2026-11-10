@@ -62,20 +62,19 @@ public static class CameraDeviceChoices
 
 public sealed partial class PipersPlugin
 {
-    private sealed record CameraDeviceInventory(ColorCameraDevice[]? Color, DepthCameraDevice[]? Depth);
-    private CameraDeviceChoice[] cameraDeviceChoices = [], depthDeviceChoices = [];
-    private readonly ThrottledProbe<CameraDeviceInventory> cameraDeviceProbe = new(TimeSpan.FromSeconds(15));
-    private string cameraDeviceDiscoveryStatus = "Camera inventory is loading…";
+    private CameraDeviceChoice[] cameraDeviceChoices => calibration.Cameras.ColorChoices;
+    private CameraDeviceChoice[] depthDeviceChoices => calibration.Cameras.DepthChoices;
+    private string cameraDeviceDiscoveryStatus => calibration.Cameras.Status;
 
     private void QueueCameraDeviceRefresh(CancellationToken cancellation, bool force = false)
     {
         if (!CameraDiscoveryRunning) return;
-        cameraDeviceProbe.Queue(() => ReadCameraDevices(cancellation), force);
+        calibration.Cameras.DeviceProbe.Queue(() => ReadCameraDevices(cancellation), force);
     }
 
     private async Task<CameraDeviceInventory?> ReadCameraDevices(CancellationToken cancellation)
     {
-        using var lifetime = CancellationTokenSource.CreateLinkedTokenSource(cancellation, cameraDiscoveryShutdown.Token);
+        using var lifetime = CancellationTokenSource.CreateLinkedTokenSource(cancellation, calibration.Cameras.Shutdown);
         cancellation = lifetime.Token;
         try
         {
@@ -88,22 +87,17 @@ public sealed partial class PipersPlugin
                 depth.Result.ExitCode == 0 ? JsonSerializer.Deserialize<DepthCameraDevice[]>(depth.Result.Output, PluginProtocol.Json) ?? [] : null);
         }
         catch (Exception error) when (!cancellation.IsCancellationRequested)
-        { cameraDeviceDiscoveryStatus = "Camera discovery: " + error.Message; }
+        { calibration.Cameras.Report("Camera discovery: " + error.Message); }
         catch (OperationCanceledException) when (cancellation.IsCancellationRequested) { }
         return null;
     }
 
     private async Task<bool> ApplyCameraDeviceInventory(CancellationToken cancellation)
     {
-        var inventory = cameraDeviceProbe.Take();
+        var inventory = calibration.Cameras.DeviceProbe.Take();
         if (inventory is null) return false;
         cancellation.ThrowIfCancellationRequested();
-        string previous = JsonSerializer.Serialize(cameraDeviceChoices, PluginProtocol.Json) + JsonSerializer.Serialize(depthDeviceChoices, PluginProtocol.Json);
-        if (inventory.Color is { } colorInventory) cameraDeviceChoices = CameraDeviceChoices.Merge(cameraDeviceChoices, colorInventory);
-        if (inventory.Depth is { } depthInventory)
-            depthDeviceChoices = CameraDeviceChoices.Merge(depthDeviceChoices,
-                depthInventory.Select(device => new ColorCameraDevice(device.Name + " · " + device.Serial, device.Serial)).ToArray());
-        cameraDeviceDiscoveryStatus = $"Video inventory: {(inventory.Color is null ? "temporarily unavailable" : inventory.Color.Length)} · D405 inventory: {(inventory.Depth is null ? "temporarily unavailable" : inventory.Depth.Length)}";
+        bool changed = calibration.Cameras.ApplyInventory(inventory);
         string oldGripper = CameraSettings("gripper").Device, oldBench = CameraSettings("bench").Device;
         string previousPreferences = JsonSerializer.Serialize(preferences, PluginProtocol.Json);
         preferences = RobotProfileRouting.Capture(preferences);
@@ -125,8 +119,7 @@ public sealed partial class PipersPlugin
             cancellation.ThrowIfCancellationRequested();
             await RestartCamera(id);
         }
-        string current = JsonSerializer.Serialize(cameraDeviceChoices, PluginProtocol.Json) + JsonSerializer.Serialize(depthDeviceChoices, PluginProtocol.Json);
-        return current != previous;
+        return changed;
     }
 
 }

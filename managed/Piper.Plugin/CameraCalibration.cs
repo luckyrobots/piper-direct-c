@@ -39,13 +39,10 @@ internal sealed record LensSession(LensPhase Phase, string? Folder, long LastSeq
 
 public sealed partial class PipersPlugin
 {
-    private readonly ConcurrentDictionary<string, JsonObject> cameraCalibration = new();
-    // Written by the event handler and the lens worker; one record per change.
-    private LensSession lens = LensSession.Initial;
-    private Task? lensWorker;
+    private LensSession lens => calibration.Lens.Session;
 
     private string LensCalibrationDirectory => Path.Combine(engine.Start.SettingsDirectory, "camera-calibration", ActiveProfile.Id);
-    private bool LensWorkerBusy => lensWorker is { IsCompleted: false };
+    private bool LensWorkerBusy => calibration.Lens.WorkerBusy;
 
     private async Task LoadCameraCalibration(CancellationToken cancellation)
     {
@@ -61,11 +58,11 @@ public sealed partial class PipersPlugin
         {
             var value = JsonNode.Parse(await File.ReadAllTextAsync(path, cancellation))!.AsObject();
             Materialize(value);
-            cameraCalibration["gripper"] = value;
-            lens = lens.WithStatus("Saved lens profile loaded. Mount alignment still required.");
+            calibration.Lens.InstallProfile("gripper", value);
+            calibration.Lens.Report("Saved lens profile loaded. Mount alignment still required.");
         }
         catch (Exception error) when (error is System.Text.Json.JsonException or InvalidOperationException)
-        { lens = lens.WithStatus("Saved lens profile is invalid; capture a new calibration."); }
+        { calibration.Lens.Report("Saved lens profile is invalid; capture a new calibration."); }
     }
 
     private async Task CameraCalibrationEvent(string id, string action, CancellationToken cancellation)
@@ -82,13 +79,13 @@ public sealed partial class PipersPlugin
         if (LensWorkerBusy) throw new InvalidOperationException("Camera setup or calibration is still running.");
         if (action == "calibrationtools")
         {
-            lens = lens.WithStatus("Checking the bundled camera runtime…");
-            lensWorker = SetUpCameraTools(shutdown.Token);
+            calibration.Lens.Report("Checking the bundled camera runtime…");
+            calibration.Lens.Run(SetUpCameraTools(shutdown.Token));
             return;
         }
         if (action == "calibrationnew")
         {
-            lens = lens.New();
+            calibration.Lens.New();
             return;
         }
         var frame = cameras.Get(id)?.LatestFrame ?? throw new InvalidOperationException("Wait for a camera frame first.");
@@ -111,13 +108,13 @@ public sealed partial class PipersPlugin
             // A camera worker restart resets its sequence. Keep prior captures intact.
             string captureName = $"frame-{frame.TimestampUnixMicroseconds:D18}-{frame.Sequence:D8}-{Guid.NewGuid():N}.jpg";
             await File.WriteAllBytesAsync(Path.Combine(folder, captureName), Convert.FromBase64String(frame.JpegBase64), cancellation);
-            lens = lens.Captured(folder, frame.Sequence, Directory.GetFiles(folder, "frame-*.jpg").Length);
+            calibration.Lens.Captured(folder, frame.Sequence, Directory.GetFiles(folder, "frame-*.jpg").Length);
         }
         else if (action == "calibrationsolve")
         {
             if (lens.Folder is not { } folder) throw new InvalidOperationException("Capture at least 20 board images first.");
-            lens = lens.Solving();
-            lensWorker = SolveCameraCalibration(folder, shutdown.Token);
+            calibration.Lens.BeginSolve();
+            calibration.Lens.Run(SolveCameraCalibration(folder, shutdown.Token));
         }
     }
 
@@ -128,10 +125,10 @@ public sealed partial class PipersPlugin
             var result = await RunCameraTool(["check"], TimeSpan.FromSeconds(15), cancellation);
             if (result.ExitCode != 0) throw new InvalidOperationException(result.Error);
             if (JsonNode.Parse(result.Output)?["ready"]?.GetValue<bool>() != true) throw new InvalidDataException("Invalid camera runtime response.");
-            lens = lens.WithStatus("Bundled camera runtime ready. No Python required. Open the board and capture varied views.");
+            calibration.Lens.Report("Bundled camera runtime ready. No Python required. Open the board and capture varied views.");
         }
         catch (Exception error) when (!cancellation.IsCancellationRequested)
-        { lens = lens.WithStatus("Camera runtime: " + error.Message + " Reinstall the Pipers package if a bundled library is missing."); }
+        { calibration.Lens.Report("Camera runtime: " + error.Message + " Reinstall the Pipers package if a bundled library is missing."); }
     }
 
     private Task<BoundedProcess.Result> RunCameraTool(string[] arguments, TimeSpan timeout, CancellationToken cancellation) =>
@@ -151,10 +148,10 @@ public sealed partial class PipersPlugin
             string path = Path.Combine(LensCalibrationDirectory, "gripper.json");
             await File.WriteAllTextAsync(path + ".tmp", profile.ToJsonString(), cancellation);
             File.Move(path + ".tmp", path, true);
-            cameraCalibration["gripper"] = profile;
-            lens = lens.Saved(profile["validationRmsPixels"]!.GetValue<double>());
+            calibration.Lens.InstallProfile("gripper", profile);
+            calibration.Lens.Saved(profile["validationRmsPixels"]!.GetValue<double>());
         }
         catch (Exception error) when (!cancellation.IsCancellationRequested)
-        { lens = lens.Rejected(error.Message); }
+        { calibration.Lens.Rejected(error.Message); }
     }
 }
