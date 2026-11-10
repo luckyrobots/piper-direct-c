@@ -12,9 +12,9 @@ internal static class MeasuredGhostPublicationTests
         using (var fixture = new Fixture())
         {
             // Plugin-H: a capability probed under an earlier backend is Unknown after a restart.
-            fixture.Plugin.ghostCapabilities = new("previous-backend", Ghosts: false, Visibility: false);
+            fixture.Plugin.telemetry.Ghosts.Record(new("previous-backend", Ghosts: false, Visibility: false));
             await fixture.Publish();
-            Check(fixture.HostProbes == 1 && fixture.Plugin.ghostCapabilities is { Backend: "backend", Ghosts: true } && fixture.Ghosts.Count == 2,
+            Check(fixture.HostProbes == 1 && fixture.Plugin.telemetry.Ghosts.Kind("backend") == GhostCapabilityKind.Supported && fixture.Ghosts.Count == 2,
                 "A backend restart kept the previous backend's ghost capability instead of re-probing it");
             await fixture.Publish();
             Check(fixture.HostProbes == 1 && fixture.Ghosts.Count == 4, "Ghost capability was re-probed for an unchanged backend");
@@ -96,8 +96,8 @@ internal static class MeasuredGhostPublicationTests
                 new("b", "Second", "can-b", RobotId: "compound", PikaDevice: "/dev/b", RobotJointPrefix: "piper3_")], ActiveRobotId: "a"));
             SetPreferences(Preferences);
             plugin.passiveMeasuredTrackingStarted = true;
-            plugin.ghostCapabilities = new("backend", Ghosts: true, Visibility: true);
-            plugin.publishedGhostVisibility = true;
+            plugin.telemetry.Ghosts.Record(new("backend", Ghosts: true, Visibility: true));
+            plugin.telemetry.Ghosts.PublishVisibility(true);
             plugin.telemetry.AdoptBackend("backend");
             var joints = new JsonArray();
             foreach (string prefix in new[] { "", "piper3_" })

@@ -18,6 +18,8 @@ namespace LuckyRobots.Piper.Plugin;
 ///   issue          telemetry reader loop (ReportIssue)           volatile string
 ///   Pika           PikaSession's own compare-and-swap            one volatile reference to an
 ///                  (callers and threads listed on PikaSession)   immutable PikaSessionState
+///   Ghosts         GhostCapability's own compare-and-swap        one volatile reference to an
+///                  (callers and threads listed there)            immutable GhostCapabilityState
 /// </code>
 /// The reader loop is <c>PipersPlugin.ReadTelemetry</c>. For each frame it adopts
 /// the backend and scope (after the shell has discarded what the old scope
@@ -33,6 +35,9 @@ internal sealed class TelemetryComponent
 
     /// <summary>Plugin-F: this plugin's role in, and read-only monitor of, the active profile's Pika session.</summary>
     public PikaSession Pika { get; } = new(TimeSpan.FromSeconds(3));
+
+    /// <summary>Plugin-H: what the engine host can draw for the current backend instance.</summary>
+    public GhostCapability Ghosts { get; } = new(TimeSpan.FromSeconds(5));
 
     /// <summary>The newest accepted frame with its receipt clock; null before the first.</summary>
     public TelemetryReceipt? Latest => receipts.Latest;
