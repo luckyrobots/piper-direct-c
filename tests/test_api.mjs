@@ -100,9 +100,6 @@ try {
   await action({ action: 'joint', joint: 1, degrees: -1.234 });
   assert(Math.abs(selected().joints[0].actual_deg + 1.234) <= .002);
   assert.deepEqual(selected().joints.slice(1).map(j => j.actual_deg), before.slice(1));
-  const completedTx = selected().tx_frames;
-  await post('/api/stop', { request_id: lease }, 409);
-  await refresh(); assert.equal(selected().tx_frames, completedTx);
   await post('/api/command', { action: 'joint', joint: 2, degrees: -1 }, 400);
   await post('/api/command', { action: 'joint', joint: 1, degrees: 1, generation: selected().generation + 1 }, 409);
   await action({ action: 'jog', joint: 1, degrees: .234 }); assert.equal(selected().joints[0].actual_deg, -1);
@@ -129,7 +126,6 @@ try {
   await post('/api/reconnect', {}, 409);
   await post('/api/command', { action: 'joint', joint: 2, degrees: 40, owner: 'different-client-123' }, 409);
   await post('/api/heartbeat', { request_id: lease, owner: 'different-client-123' }, 409);
-  await post('/api/stop', { request_id: lease, owner: 'different-client-123' }, 409);
   clearInterval(keepalive);
   /* A slow HTTP client must not starve CAN receive/lease expiry. */
   const slow = net.createConnection(port, '127.0.0.1'); slow.write(`POST /api/command HTTP/1.1\r\nHost: 127.0.0.1:${port}\r\nContent-Length: 500\r\n`);

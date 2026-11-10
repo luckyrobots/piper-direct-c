@@ -697,8 +697,12 @@ static bool send_pose(struct controller *c,struct controller_lane *l,struct can_
     l->pose_tx_at=piper_now();
     memcpy(l->pose_tx_millidegrees,encoded,sizeof encoded); return true;
 }
-/* kind is KIND_STOP or KIND_OBSTRUCTION and is persisted with the event. */
-static void lane_stop(struct controller *c,struct controller_lane *l,const char *kind,const char *reason)
+/* Deliver one lane's STOP: capture the evidence, send the frame, latch the
+   in-memory record and idle the lane. Nothing is written to disk here, so a
+   STOP for several arms reaches every arm before the first fsync. Returns
+   whether a record changed and must be persisted. kind is KIND_STOP or
+   KIND_OBSTRUCTION and is kept with the event. */
+static bool lane_stop_deliver(struct controller *c,struct controller_lane *l,const char *kind,const char *reason)
 {
     forget_teaching_cycle(l); l->recovering_at_pose=false;
     l->stop_delivered=false;
@@ -774,11 +778,16 @@ static void lane_stop(struct controller *c,struct controller_lane *l,const char 
         const char *latched_kind=kind,*latched=cleanup?active_incident(c,d->id,reason,&latched_kind):reason;
         latch_record(c,d->id,latched,latched_kind,reset_pending(c,d->id));
         flag(r,"stop_event_active",true);
-        persist(c);
     }
     lane_go_idle(l); l->query=QUERY_IDLE;
     l->stop_delivered=sent;
     message(l,"stopped","%s %s",reason,sent?"Controller STOP requested; holding torque may be lost.":"Stop delivery unavailable; physical stop may be needed.");
+    return d!=NULL;
+}
+/* STOP one lane and save its incident. */
+static void lane_stop(struct controller *c,struct controller_lane *l,const char *kind,const char *reason)
+{
+    if (lane_stop_deliver(c,l,kind,reason)) persist(c);
 }
 static void stop_lane(struct controller *c,struct controller_lane *l,const char *reason) { lane_stop(c,l,KIND_STOP,reason); }
 /* The public STOP acts on the selected device's lane. */
@@ -1149,16 +1158,6 @@ static cJSON *follow_command(struct controller *c,struct controller_lane *l,stru
     }
     return reply(status,202,"Latest following target accepted.");
 }
-/* /api/stop for one lane, after its device and generation checks. */
-static cJSON *lane_stop_request(struct controller *c,struct controller_lane *l,const cJSON *body,int *status)
-{
-    if (field(body,"request_id")) {
-        double request;
-        if (l->op==OP_IDLE||strcmp(l->owner,text_field(body,"owner"))||!numeric(body,"request_id",1,UINT32_MAX,&request)||request!=l->request_id)
-            return reply(status,409,"No matching active action for this automatic stop.");
-    }
-    stop_lane(c,l,"Operator stop."); return reply(status,200,l->message);
-}
 static cJSON *lane_heartbeat(struct controller *c,struct controller_lane *l,struct can_device *d,const cJSON *body,double now,int *status)
 {
     double request;
@@ -1506,21 +1505,9 @@ static cJSON *lane_action(struct controller *c,struct controller_lane *l,enum ap
         (!cJSON_IsString(field(body,"trajectory_transport"))||action!=ACTION_FOLLOW_START||!yes(body,"trajectory")||
          (strcmp(text_field(body,"trajectory_transport"),"position-velocity")&&strcmp(text_field(body,"trajectory_transport"),"streamed-position"))))
         return reply(status,400,"trajectory_transport must be position-velocity or streamed-position, only on trajectory follow-start.");
-    if (route==ROUTE_STOP) {
-        if (*text_field(body,"device_id")&&(!d||strcmp(text_field(body,"device_id"),d->id))) return reply(status,409,"Stop belongs to a different selected adapter.");
-        if (field(body,"generation")) {
-            double generation;
-            if (!d||!numeric(body,"generation",1,UINT32_MAX,&generation)||generation!=d->generation)
-                return reply(status,409,"Stop belongs to a different CAN connection generation.");
-        }
-    }
     observe_teaching_cycle(l,d,now);
     relinquish_to_teaching(c,l,d,now);
-    switch (route) {
-    case ROUTE_STOP: return lane_stop_request(c,l,body,status);
-    case ROUTE_HEARTBEAT: return lane_heartbeat(c,l,d,body,now,status);
-    default: break;
-    }
+    if (route==ROUTE_HEARTBEAT) return lane_heartbeat(c,l,d,body,now,status);
     if (l->op!=OP_IDLE) return active_lane_request(c,l,d,action,body,now,status);
     if (route==ROUTE_RECONNECT) {
         const char *why=reconnect_and_query(c,l,d,now);
@@ -1565,24 +1552,75 @@ static cJSON *select_adapter(struct controller *c,const char *requested,int *sta
     discover_lanes(c);
     return reply(status,200,"Display selection changed. All device-qualified control lanes are unchanged.");
 }
-static cJSON *global_stop(struct controller *c,const cJSON *body,int *status)
+/* Why a STOP that names a known arm does not match what that arm is doing,
+   or NULL. The arm is stopped either way; this is only reported. */
+static const char *stop_scope_mismatch(const struct controller_lane *l,const struct can_device *d,const cJSON *body)
 {
-    if (field(body,"generation")||field(body,"request_id"))
-        return reply(status,409,"A scoped cleanup STOP requires its explicit device_id. It cannot become a global STOP.");
-    cJSON *result=reply(status,200,"STOP requested independently on every known arm. Previous targets were discarded."),*stops=cJSON_CreateArray();
-    bool failed=false;
-    for (unsigned i=0;i<CANBUS_MAX;++i) if (*c->bus.devices[i].id) {
-        struct can_device *device=&c->bus.devices[i];
+    double value;
+    if (field(body,"generation")&&(!numeric(body,"generation",1,UINT32_MAX,&value)||value!=d->generation))
+        return "its generation is not this adapter's current CAN connection";
+    if (field(body,"request_id")&&(l->op==OP_IDLE||strcmp(l->owner,text_field(body,"owner"))||
+        !numeric(body,"request_id",1,UINT32_MAX,&value)||value!=l->request_id))
+        return "its request_id and owner do not match an active action on this arm";
+    return NULL;
+}
+/* /api/stop. A STOP is never refused without stopping:
+     device_id names a known arm    that arm stops, even when the request's
+                                    generation, request_id or owner is stale
+     no device_id (or "")           every arm stops: the operator's global STOP
+     anything else                  the request cannot be tied to one arm
+                                    (device_id not a string or not known, or
+                                    scoping fields without a device), so every
+                                    arm stops
+   Every arm's STOP frame is sent before the incident records are saved, and
+   they are saved before the reply. The reply lists what was stopped. It is
+   200 only when the scope was honoured as asked, every frame was delivered
+   and the records were saved; otherwise 409 with the reason. */
+static cJSON *stop_request(struct controller *c,const cJSON *body,int *status)
+{
+    const cJSON *id=field(body,"device_id");
+    const char *requested=text_field(body,"device_id");
+    struct can_device *device=*requested?can_bus_find(&c->bus,requested):NULL;
+    struct controller_lane *only=device?lane_for(c,device->id):NULL;
+    const char *degraded=NULL;
+    if (id&&!cJSON_IsString(id)) degraded="its device_id is not an adapter identity";
+    else if (*requested&&!device) degraded="its device_id is not a known CAN adapter";
+    else if (device&&!only) degraded="no control lane is available for its adapter";
+    else if (only) degraded=stop_scope_mismatch(only,device,body);
+    else if (field(body,"generation")||field(body,"request_id")) degraded="a scoped cleanup STOP needs its device_id";
+    cJSON *stops=cJSON_CreateArray();
+    bool changed=false,undelivered=false;
+    if (only) {
+        double now=piper_now();
+        observe_teaching_cycle(only,device,now); relinquish_to_teaching(c,only,device,now);
+    }
+    for (unsigned i=0;i<CANBUS_MAX;++i) if (*c->bus.devices[i].id&&(!only||&c->bus.devices[i]==device)) {
+        struct can_device *d=&c->bus.devices[i];
         /* discover_lanes makes one lane per device; if that ever fails,
            report this arm as unverified and keep stopping the others. */
-        struct controller_lane *l=lane_for(c,device->id);
-        if (l) stop_lane(c,l,"Operator global stop.");
-        cJSON *entry=cJSON_CreateObject();str(entry,"device_id",device->id);num(entry,"generation",device->generation);
-        bool delivered=l&&l->stop_delivered;flag(entry,"ok",delivered);str(entry,"message",l?l->message:"No control lane for this arm; STOP was not sent.");cJSON_AddItemToArray(stops,entry);
-        failed|=!delivered;
+        struct controller_lane *l=only?only:lane_for(c,d->id);
+        if (l) changed|=lane_stop_deliver(c,l,KIND_STOP,only?"Operator stop.":"Operator global stop.");
+        cJSON *entry=cJSON_CreateObject(); str(entry,"device_id",d->id); num(entry,"generation",d->generation);
+        bool delivered=l&&l->stop_delivered; flag(entry,"ok",delivered);
+        str(entry,"message",l?l->message:"No control lane for this arm; STOP was not sent.");
+        cJSON_AddItemToArray(stops,entry); undelivered|=!delivered;
     }
+    bool saved=!changed||persist(c);
+    bool broken=only&&!lane_check(c,only);
+    char text[640];
+    const char *reached=only?"this arm":"every known arm";
+    if (degraded)
+        snprintf(text,sizeof text,"This STOP could not be scoped as asked: %s. STOP was sent to %s instead%s%s",degraded,reached,
+            undelivered?", and one or more deliveries are unverified; inspect each arm's result":"",
+            saved?".":". The incident record could not be saved.");
+    else if (undelivered)
+        snprintf(text,sizeof text,"%s",only?only->message:"One or more STOP deliveries are unverified; inspect each arm's result.");
+    else if (!saved) snprintf(text,sizeof text,"STOP was sent to %s, but the incident record could not be saved.",reached);
+    else snprintf(text,sizeof text,"%s",only?only->message:"STOP requested independently on every known arm. Previous targets were discarded.");
+    cJSON *result=reply(status,broken?500:degraded||undelivered||!saved?409:200,broken?only->message:text);
+    str(result,"stop_scope",only?"device":"all"); flag(result,"stop_scope_degraded",degraded!=NULL);
+    if (degraded) str(result,"stop_scope_reason",degraded);
     put(result,"stops",stops);
-    if (failed) { *status=409;flag(result,"ok",false);str(result,"error","One or more STOP deliveries are unverified; inspect each arm's result."); }
     return result;
 }
 static cJSON *global_reconnect(struct controller *c,int *status)
@@ -1600,11 +1638,12 @@ cJSON *controller_action(struct controller *c,const char *path,const cJSON *body
     discover_lanes(c);
     enum api_route route=parse_route(path);
     const char *requested=text_field(body,"device_id");
+    /* STOP resolves its own scope: it is never refused for a malformed one. */
+    if (route==ROUTE_STOP) return stop_request(c,body,status);
     if (field(body,"device_id")&&!cJSON_IsString(field(body,"device_id"))) return reply(status,400,"device_id must be an explicit adapter identity.");
     /* Requests that act on the display or, without a device id, on every arm. */
     switch (route) {
     case ROUTE_SELECT: return select_adapter(c,requested,status);
-    case ROUTE_STOP: if (!*requested) return global_stop(c,body,status); break;
     case ROUTE_QUERY: case ROUTE_RECONNECT:
         if (controller_any_motion_active(c)) return reply(status,409,"Finish all arm movements before opening or querying a CAN transport.");
         if (route==ROUTE_RECONNECT&&!*requested) return global_reconnect(c,status);

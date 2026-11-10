@@ -259,7 +259,7 @@ The streamed-position transport (`streamed_position_mode`) is not a target state
 
 | # | From | Event / evidence | To `[outcome]` | C‑C effect |
 |---|---|---|---|---|
-| G1 | any ≠ `IDLE`, `TEACH_*` | `/api/stop` (owner and request match if `request_id` given) | `IDLE [STOPPED]`, STOP frame (+ gripper 0 if `GRIPPER`) | → `INCIDENT(operator_stop)`; first event kept |
+| G1 | any ≠ `IDLE`, `TEACH_*` | `/api/stop`. Never refused without stopping: a known `device_id` stops that arm even when `generation`, `request_id` or `owner` is stale; a scope that names no known arm stops every arm. All STOP frames are sent before the records are saved; a scope that was not honoured replies 409 with `stop_scope`, `stop_scope_reason` and `stops` | `IDLE [STOPPED]`, STOP frame (+ gripper 0 if `GRIPPER`) | → `INCIDENT(operator_stop)`; first event kept |
 | G2 | any ≠ `IDLE`, `TEACH_*` | lease age ≥ 0.8 s (tick or heartbeat) | `IDLE [STOPPED]` | → `INCIDENT(lease_expired)` |
 | G3 | `TEACH_*` | lease age ≥ 0.8 s | `IDLE [ABANDONED]`, no STOP | none |
 | G4 | any ≠ `IDLE`, `TEACH_*` | adapter absent or generation ≠ pinned | `IDLE [STOPPED]` | → `INCIDENT(transport)` |
