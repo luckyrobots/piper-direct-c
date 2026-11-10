@@ -17,16 +17,16 @@ public sealed partial class PipersPlugin
             return text.Length <= 2000 ? text : text[..2000];
         }
         string reason = Redact(error.Message);
-        if (Interlocked.CompareExchange(ref group.FirstFailure, reason, "").Length != 0)
+        if (!group.TryRecordFailure(reason))
         {
             foreach (var lane in group.Lanes) lane.Diagnostics?.AppendCleanup([reason]);
             return;
         }
-        if (ReferenceEquals(Volatile.Read(ref groupSimulation), group))
+        if (ReferenceEquals(follow.Session, group))
         {
             uiActionError = "Following stopped: " + reason;
-            groupFollowStatus = "Following stopped · " + reason;
-            groupFollowDetail = "All selected targets are discarded. The simulation remains paused; restore feedback or fix the reported issue before arming again.";
+            follow.Report("Following stopped · " + reason,
+                "All selected targets are discarded. The simulation remains paused; restore feedback or fix the reported issue before arming again.");
         }
         var receipt = telemetry.Latest;
         long now = Stopwatch.GetTimestamp();
@@ -61,7 +61,7 @@ public sealed partial class PipersPlugin
                             Milliseconds(pika?["age_s"]), double.IsFinite(age) ? age : null,
                             Milliseconds(pika?["agent_diagnostics"]?["maximum_valid_decode_interval_s"]),
                             Milliseconds(pika?["agent_diagnostics"]?["maximum_stdout_emit_s"]),
-                            Volatile.Read(ref lane.RejectedPikaAudit) ?? (error as PikaFollowRejectedException)?.Audit ??
+                            lane.RejectedPikaAudit ?? (error as PikaFollowRejectedException)?.Audit ??
                                 pika?["follow_audit"]?.Deserialize<PikaFollowAudit>()));
                 }
                 var sample = lane.LastSample;
@@ -70,11 +70,11 @@ public sealed partial class PipersPlugin
                     sample.MeasuredDegrees.ToArray(), sample.CommandOpeningMm, sample.MeasuredOpeningMm, sample.SimTimeSeconds);
                 SimulationFollowFailureOrdered? ordered = null;
                 lock (group.Gate)
-                    if (lane.Execution is { } execution && lane.LastHardware is { } observed)
-                        ordered = SimulationFollowFailureOrdered.Capture(execution, observed, lane.LastStationary, lane.LastGripperSpeed, lane.LastGripperFeedback);
+                    if (lane.Execution is { } execution && lane.LastStep is { } step)
+                        ordered = SimulationFollowFailureOrdered.Capture(execution, step.Hardware, step.Stationary, step.GripperSpeed, step.GripperFeedback);
                 string phase = group.Phase.ToString().ToLowerInvariant();
                 lane.Diagnostics?.Capture(new(DateTimeOffset.UtcNow, phase, "group:" + phase,
-                    error.GetType().Name, reason, lane.Arm.CurrentRequest, Interlocked.Read(ref lane.Sequence),
+                    error.GetType().Name, reason, lane.Arm.CurrentRequest, lane.Sequence,
                     new(group.Scene, group.RunId, group.Entity, group.Asset, group.Revision, lane.Robot.DeviceId,
                         lane.Robot.Generation, lane.Profile.PikaDevice, receipt?.State["backend_process_id"]?.GetValue<long>(), lane.Robot.JointPrefix),
                     runtime, hardware, lane.Publications.Snapshot(), ordered));

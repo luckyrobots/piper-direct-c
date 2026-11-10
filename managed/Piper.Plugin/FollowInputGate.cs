@@ -7,7 +7,9 @@ public sealed class FollowInputGate
 {
     private ulong lastGesture;
     private long sequence;
-    public string? Active { get; private set; }
+    // The UI actor accepts gestures; a STOP on another thread may end the active one.
+    private volatile string? active;
+    public string? Active { get => active; private set => active = value; }
 
     public void Accept(JsonObject input, long nowMilliseconds)
     {

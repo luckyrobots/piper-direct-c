@@ -400,11 +400,10 @@ internal static partial class SimulationFollowingTests
             string wireId = WorkspaceEventScope.Wrap(plugin.workspace.Epoch, "piper-1", id);
             return plugin.HandleEventAsync(new("fixture", wireId, "click", JsonSerializer.SerializeToElement(true)), CancellationToken.None);
         }
-        public void SetDetail(string detail) => plugin.groupFollowDetail = detail;
         public string GroupSetupFailure()
         {
-            var outcome = plugin.groupFollowOutcome;
-            return outcome.Stage == PipersPlugin.GroupFollowStage.SetupFailed ? outcome.Summary : "";
+            var outcome = plugin.follow.Outcome;
+            return outcome.Stage == GroupFollowStage.SetupFailed ? outcome.Summary : "";
         }
         public Task PublishMeasured() { Refresh(); return plugin.PublishMeasuredScene(CancellationToken.None); }
         public async Task Gap(Func<CancellationToken, Task> worker)

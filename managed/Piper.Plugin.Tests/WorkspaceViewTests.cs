@@ -250,8 +250,9 @@ internal static class WorkspaceViewTests
             Check(plugin.preferences.SimulationCameras?.GetValueOrDefault("bench")?.SceneId == "source-a",
                 "An Automatic selection from an old scene changed the new scene's binding");
 
-            plugin.groupSimulation = new PipersPlugin.GroupSession(plugin.telemetry.BackendToken, "source-a", "robot-a", "asset-a", "revision-a", [],
-                plugin.groupInputEpoch, TimeProvider.System);
+            var installed = new GroupSession(plugin.telemetry.BackendToken, "source-a", "robot-a", "asset-a", "revision-a", [],
+                plugin.follow.InputEpoch, TimeProvider.System);
+            Check(plugin.follow.TryInstall(installed), "The fixture could not install a Follow session");
             try
             {
                 await CheckView("settings", "cameras");
@@ -265,7 +266,7 @@ internal static class WorkspaceViewTests
                 Check(plugin.workspace.Navigation.Page == WorkspacePage.Controls && plugin.workspace.Epoch > before,
                     "The old page became unclickable after rejected Bench navigation");
             }
-            finally { plugin.groupSimulation = null; }
+            finally { plugin.follow.Retire(installed); }
             await CheckView("recording");
             plugin.workspace.Replay.Load(EpisodeReplayTests.ValidArtifact(), "piper-1");
             await CheckView("replay");
@@ -323,14 +324,14 @@ internal static class WorkspaceViewTests
             plugin.client = new PiperControl.PiperControlClient(calls); plugin.telemetry.PublishState(state); plugin.telemetry.AdoptBackend("fixture-session");
             plugin.telemetry.Publish(new(state, "fixture-session", 1, Stopwatch.GetTimestamp(), 0));
             plugin.workspace.Commit(WorkspaceNavigation.Initial); plugin.approved = true; plugin.linkCommandsEnabled = true;
-            plugin.recovery.Teaching.ObserveHandOver(new(binding.DeviceId, binding.Generation), approved: true); plugin.viewportDrag = new ViewportDrag(ViewportDragPhase.Following, Request: 7);
+            plugin.recovery.Teaching.ObserveHandOver(new(binding.DeviceId, binding.Generation), approved: true); plugin.follow.Viewport.Follow(7);
             plugin.CommandAuthority.TryAcknowledge(plugin.CommandAuthority.Epoch, new("piper-1", "fixture-session", binding.DeviceId, binding.Generation), 7);
             plugin.link = binding; plugin.linkBackendToken = "fixture-session";
             long previousPermission = plugin.CommandAuthority.Epoch;
             await plugin.WorkspaceEvent("settings.robot", CancellationToken.None);
             Check(calls.Requests.Count == 1 && calls.Requests[0].Route == "/api/command" &&
                 JsonNode.Parse(calls.Requests[0].Json)?["action"]?.GetValue<string>() == "follow-end", "Leaving Controls replayed a target or failed to end its gesture");
-            Check(plugin.approved && plugin.recovery.Teaching.Current.RestoresApproval && plugin.linkCommandsEnabled && plugin.viewportDrag.Phase == ViewportDragPhase.Off,
+            Check(plugin.approved && plugin.recovery.Teaching.Current.RestoresApproval && plugin.linkCommandsEnabled && plugin.follow.Viewport.Current.Phase == ViewportDragPhase.Off,
                 "Browsing settings revoked readiness or retained a live viewport gesture");
             Check(ReferenceEquals(plugin.link, binding) && plugin.CommandAuthority.Epoch == previousPermission,
                 "Browsing settings dropped the measured binding or revoked healthy idle approval");

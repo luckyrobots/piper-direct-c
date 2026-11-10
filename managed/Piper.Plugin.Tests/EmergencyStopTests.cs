@@ -271,24 +271,22 @@ internal static class EmergencyStopTests
         {
             // Deterministic interleavings: a STOP lands between a gesture writer's
             // observation and its transition. STOP must win every time.
-            var plugin = new PipersPlugin();
-            var teleoperating = new ViewportDrag(ViewportDragPhase.Teleoperating, "joint3");
-            plugin.viewportDrag = teleoperating;
-            plugin.StopViewportDrag();
-            Check(!plugin.TryBeginViewportFollowing(teleoperating, 7, "joint3") && plugin.viewportDrag.Phase == ViewportDragPhase.Off,
+            var viewport = new PipersPlugin().follow.Viewport;
+            var teleoperating = viewport.Teleoperate("joint3");
+            viewport.Stop();
+            Check(!viewport.TryBeginFollowing(teleoperating, 7, "joint3") && viewport.Current.Phase == ViewportDragPhase.Off,
                 "A follow-start acknowledgement observed before STOP revived Following after it");
-            var following = new ViewportDrag(ViewportDragPhase.Following, "joint3", Request: 7);
-            plugin.viewportDrag = following;
-            plugin.StopViewportDrag();
-            plugin.EndViewportGesture(following);
-            Check(plugin.viewportDrag is { Phase: ViewportDragPhase.Off, Joint: "joint3" },
+            var following = viewport.Follow(7, "joint3");
+            viewport.Stop();
+            viewport.EndGesture(following);
+            Check(viewport.Current is { Phase: ViewportDragPhase.Off, Joint: "joint3" },
                 "A gesture end observed before STOP turned Off back into Teleoperating");
-            plugin.viewportDrag = teleoperating;
-            Check(plugin.TryBeginViewportFollowing(teleoperating, 7, "joint4") &&
-                plugin.viewportDrag is { Phase: ViewportDragPhase.Following, Request: 7, FollowJoint: "joint4" },
+            teleoperating = viewport.Teleoperate("joint3");
+            Check(viewport.TryBeginFollowing(teleoperating, 7, "joint4") &&
+                viewport.Current is { Phase: ViewportDragPhase.Following, Request: 7, FollowJoint: "joint4" },
                 "An undisturbed follow-start did not enter Following");
-            plugin.EndViewportGesture(plugin.viewportDrag);
-            Check(plugin.viewportDrag is { Phase: ViewportDragPhase.Teleoperating, Request: 0 }, "An undisturbed gesture end did not keep teleoperation selected");
+            viewport.EndGesture(viewport.Current);
+            Check(viewport.Current is { Phase: ViewportDragPhase.Teleoperating, Request: 0 }, "An undisturbed gesture end did not keep teleoperation selected");
         }
         {
             // Pika role interleavings through the observation seam: a stale writer

@@ -153,17 +153,17 @@ internal static class TelemetryPipelineTests
             Volatile.Write(ref editorMode, 1);
             await Until(() => Volatile.Read(ref sceneRequests) > beforeModeChange && plugin.sceneTrackingStatus.StartsWith("Measured scene update deferred", StringComparison.Ordinal),
                 "The slow fake request did not drain before the leader/ghost check");
-            plugin.viewportDrag = new ViewportDrag(ViewportDragPhase.Following, Request: 7); plugin.linkCommandsEnabled = true;
+            plugin.follow.Viewport.Follow(7); plugin.linkCommandsEnabled = true;
             authority.TryAcknowledge(authority.Epoch, commandScope, 7);
             int beforeGhost = Volatile.Read(ref sceneRequests);
             await Until(() => Volatile.Read(ref sceneRequests) > beforeGhost && plugin.sceneTrackingStatus.StartsWith("Leader target + measured ghost", StringComparison.Ordinal), "Native leader/ghost feedback was not recognized");
-            Check(plugin.viewportDrag.Phase != ViewportDragPhase.Off && plugin.linkCommandsEnabled && plugin.viewportDrag is { Phase: ViewportDragPhase.Following, Request: 7 } && authority.Current.Lease?.Request == 7,
+            Check(plugin.follow.Viewport.Current.Phase != ViewportDragPhase.Off && plugin.linkCommandsEnabled && plugin.follow.Viewport.Current is { Phase: ViewportDragPhase.Following, Request: 7 } && authority.Current.Lease?.Request == 7,
                 "Expected native applied:false leader/ghost feedback stopped a valid drag or finishing target");
             Check(plugin.acknowledgedScenePose is null,
                 "Leader/ghost feedback was incorrectly promoted to a calibration pose acknowledgement");
             Volatile.Write(ref editorMode, 2);
-            await Until(() => plugin.viewportDrag.Phase == ViewportDragPhase.Off, "A remote teleoperation stop did not pause local following");
-            Check(!plugin.linkCommandsEnabled && plugin.viewportDrag.Phase != ViewportDragPhase.Following && authority.Current.Lease is null,
+            await Until(() => plugin.follow.Viewport.Current.Phase == ViewportDragPhase.Off, "A remote teleoperation stop did not pause local following");
+            Check(!plugin.linkCommandsEnabled && plugin.follow.Viewport.Current.Phase != ViewportDragPhase.Following && authority.Current.Lease is null,
                 "Unexpected remote editor deferral kept viewport targets armed");
             await feeding.CancelAsync(); await producer;
             await Until(() => !plugin.approved && authority.Current.Lease is null, "Real telemetry loss did not disarm commands/deadlines", 1500);

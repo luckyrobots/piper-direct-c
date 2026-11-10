@@ -58,7 +58,7 @@ public sealed partial class PipersPlugin : ILuckyPlugin
         // Injected fixtures must supply both in the same monotonic domain.
         if (followClock.TimestampFrequency != Stopwatch.Frequency)
             throw new ArgumentException("The Follow clock must use the telemetry timestamp frequency.", nameof(followClock));
-        this.followClock = followClock;
+        follow = new(followClock);
         recovery = new(new PikaTeachingSession(() => engine.Start.SettingsDirectory));
         var uri = new Uri(address);
         if (!uri.IsLoopback || uri.Scheme != "http") throw new ArgumentException("The controller must use a local HTTP/2 endpoint.");
@@ -219,7 +219,7 @@ public sealed partial class PipersPlugin : ILuckyPlugin
         if (resetConfirmed && action == "verify-reset") body["reset_completed"] = true;
     }
 
-    internal long ControlInputEpoch => CommandAuthority.Epoch + Interlocked.Read(ref groupControlEpoch);
+    internal long ControlInputEpoch => CommandAuthority.Epoch + follow.ControlEpoch;
 
     public async Task HandleEventAsync(UiEvent input, CancellationToken cancellation)
     {
@@ -243,7 +243,7 @@ public sealed partial class PipersPlugin : ILuckyPlugin
         }
         if (eventId == "disable" && uiEvents is { } urgentDispatch)
         {
-            CancelGroupSimulationFollowingInput("Disable requested · stopping the follower group");
+            follow.CancelInput("Disable requested · stopping the follower group");
             DisarmTelemetryTargets("Disable requested; previous actions discarded", clearLink: false, forgetApproval: eventProfile.Id);
             CancelHandGuideRecovery();
             uiActionError = "";
@@ -256,7 +256,7 @@ public sealed partial class PipersPlugin : ILuckyPlugin
         {
             // The SDK delivers button events serially. Leave retirement with
             // the coordinator so a queued emergency STOP can run immediately.
-            CancelGroupSimulationFollowingInput("Stopping all selected followers · holding");
+            follow.CancelInput("Stopping all selected followers · holding");
             return;
         }
         if (GroupFollowActive && GroupBlocksControlEvent(eventId)) return;

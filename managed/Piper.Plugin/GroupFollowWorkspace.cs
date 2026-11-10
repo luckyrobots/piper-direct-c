@@ -13,7 +13,7 @@ public sealed partial class PipersPlugin
     internal FollowPreparationReport GroupPreparation(RobotProfile[]? selected = null, TelemetryReceipt? receipt = null, JsonObject? discovered = null)
     {
         var report = FollowPreparationReport.Inspect(selected ?? SelectedFollowProfiles(), receipt ?? telemetry.Latest, token, owner, controlApprovals,
-            discovered ?? scene, followClock.GetTimestamp());
+            discovered ?? scene, follow.Clock.GetTimestamp());
         return GroupStartConflict() is { } conflict ? report with { Issues = [.. report.Issues, new("", "", "control-busy", conflict)] } : report;
     }
 
@@ -29,11 +29,11 @@ public sealed partial class PipersPlugin
         Widget.Button("group.follow.cancel", "Stop following") with {
             Height = 42, Visible = GroupFollowActive, Hint = "Stop sending targets, request a hold for the arms and grippers used, and pause the simulation." },
         Widget.Label("group.follow.status", status) with {
-            Height = GroupStatusHeight(status), Hint = GroupFollowActive ? groupFollowDetail : status }) with { Spacing = 8 };
+            Height = GroupStatusHeight(status), Hint = GroupFollowActive ? follow.Status.Detail : status }) with { Spacing = 8 };
     }
 
-    private string GroupStatusLabel(FollowPreparationReport preparation) => GroupFollowActive ? groupFollowStatus
-        : Volatile.Read(ref groupFollowOutcome) is { Summary.Length: > 0 } outcome ? outcome.Summary : preparation.Summary;
+    private string GroupStatusLabel(FollowPreparationReport preparation) => GroupFollowActive ? follow.Status.Headline
+        : follow.Outcome is { Summary.Length: > 0 } outcome ? outcome.Summary : preparation.Summary;
 
     private int GroupStatusHeight(string status) => GroupFollowActive ? 72
         : Math.Clamp((status.Count(c => c == '\n') + 2) * 38, 72, 420);
@@ -47,7 +47,7 @@ public sealed partial class PipersPlugin
             string id = ActiveProfile.Id;
             preferences = RobotProfileRouting.Capture(preferences);
             preferences = preferences with { Robots = preferences.Robots!.Select(p => p.Id == id ? p with { FollowSimulationSelected = selected } : p).ToArray() };
-            SetGroupOutcome(GroupFollowIdle);
+            follow.ClearOutcome();
             await Save(cancellation);
             // Patching avoids resetting a camera or an in-flight profile click.
             await Update(cancellation);
@@ -63,10 +63,10 @@ public sealed partial class PipersPlugin
         var preparation = GroupPreparation();
         string status = GroupStatusLabel(preparation);
         patches["group.follow.toggle"] = new() { ["visible"] = !active,
-            ["enabled"] = !active && preparation.RobotCount > 0, ["hint"] = active ? groupFollowDetail : preparation.Summary };
+            ["enabled"] = !active && preparation.RobotCount > 0, ["hint"] = active ? follow.Status.Detail : preparation.Summary };
         patches["group.follow.cancel"] = new() { ["visible"] = active, ["enabled"] = true };
         patches["group.follow.status"] = new() { ["text"] = status, ["height"] = GroupStatusHeight(status),
-            ["hint"] = active ? groupFollowDetail : status };
+            ["hint"] = active ? follow.Status.Detail : status };
         patches["group.follow.selected"] = new() { ["value"] = ActiveProfile.FollowSimulationSelected ? 1 : 0,
             ["enabled"] = !active, ["hint"] = active ? "Stop following before changing the group." : "Include this robot when you press Follow simulation in the left sidebar." };
         if (!active) return;
