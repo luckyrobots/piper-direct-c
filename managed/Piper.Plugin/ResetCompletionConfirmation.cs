@@ -47,6 +47,11 @@ public sealed partial class PipersPlugin
             throw new InvalidOperationException("No reset confirmation is pending. Use the recovery card for the current step.");
         if (!ResetCompletionCurrent(prompt))
             throw new InvalidOperationException("STOP or a connection change retired the reset confirmation. Nothing was sent; use the recovery card again.");
+        // The answer attests one specific pending reset. The controller clears any
+        // latch on an attested verification, so a latch that is no longer a pending
+        // reset (verified elsewhere, or replaced by a new STOP) must not receive it.
+        if (Device(prompt.Scope)["reset_pending"]?.GetValue<bool>() != true)
+            throw new InvalidOperationException("The controller no longer reports a pending reset. Nothing was sent; use the recovery card for the current step.");
         await Command("verify-reset", null, cancellation, CommandPurpose.Recovery, prompt.Scope, prompt.Epoch, resetCompletion: prompt);
         const string requested = "Controller reset verification requested. Use the recovery card for the next step; nothing moves automatically.";
         SetRecoveryGuideMessage(requested);

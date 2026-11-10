@@ -198,7 +198,9 @@ public sealed partial class PipersPlugin
                     StartSupportedStopRecovery(device, permissionEpoch, cancellation);
                     break;
                 case RecoveryWorkspaceAction.Disable:
-                    approved = linkCommandsEnabled = false; ForgetControlApproval();
+                    // Forget first: a remembered approval could otherwise be restored
+                    // by the telemetry thread between the two steps.
+                    ForgetControlApproval(); approved = linkCommandsEnabled = false;
                     await Command("disable", null, cancellation);
                     progress = "Disable requested. Keep supporting the arm until all six motors report off; the next recovery action appears here.";
                     break;
