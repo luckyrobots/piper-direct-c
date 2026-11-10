@@ -1,6 +1,6 @@
 #define _GNU_SOURCE
 #include "fixture.h"
-#include <assert.h>
+#include "fake_bus.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -37,7 +37,7 @@ static void send_command(struct controller *c,cJSON *j,int expected)
 }
 static void setup(struct controller *c,char *directory)
 {
-    CHECK(mkdtemp(directory)); CHECK(controller_init(c,true,directory,""));
+    CHECK(controller_init(c,true,directory,""));
     memset(c->bus.sim_target,0,sizeof c->bus.sim_target);
     memset(c->bus.devices[0].feedback.arm[0].deg,0,sizeof c->bus.devices[0].feedback.arm[0].deg);
     c->bus.sim_enabled=63;
@@ -48,13 +48,9 @@ static void setup(struct controller *c,char *directory)
     send_command(c,command(c,"follow-start",0,0),202);
     CHECK(LANE(c)->follow==FOLLOW_LIVE&&LANE(c)->op==OP_MOVE);
 }
-static void cleanup(struct controller *c,const char *directory)
+static void scenarios(void)
 {
-    fixture_cleanup(c,directory);
-}
-int main(void)
-{
-    struct controller c; char first[]="/tmp/piper-follow-XXXXXX"; setup(&c,first);
+    struct controller c; char first[FIXTURE_DIRECTORY]; fixture_directory(first,sizeof first,"piper-follow"); setup(&c,first);
     struct can_device *d=&c.bus.devices[0];
     unsigned long long tx=d->tx;
     send_command(&c,command(&c,"follow-update",1,3),202);
@@ -65,7 +61,7 @@ int main(void)
     send_command(&c,wrong,409); CHECK(LANE(&c)->target[5]==3);
     send_command(&c,command(&c,"follow-update",2,181),400); CHECK(LANE(&c)->target[5]==3);
     send_command(&c,command(&c,"follow-update",2,-3),202); CHECK(LANE(&c)->target[5]==-3);
-    usleep(21000);
+    fake_bus_advance(0.021);
     double previous=LANE(&c)->command[5], tick_at=piper_now(), elapsed=fmin(tick_at-LANE(&c)->last_tick,.05);
     controller_tick(&c,tick_at);
     CHECK(fabs(LANE(&c)->command[5]-previous)<=LANE(&c)->speed*(elapsed+.000001)&&fabs(LANE(&c)->command[5]-d->feedback.arm[0].deg[5])<=1);
@@ -73,9 +69,9 @@ int main(void)
     send_command(&c,command(&c,"follow-end",3,0),200);
     CHECK(LANE(&c)->op==OP_IDLE&&LANE(&c)->follow!=FOLLOW_LIVE&&c.bus.sim_enabled==63);
     tx=d->tx; send_command(&c,command(&c,"follow-update",4,5),400); CHECK(d->tx==tx);
-    cleanup(&c,first);
+    fixture_cleanup(&c,first);
 
-    char second[]="/tmp/piper-follow-expiry-XXXXXX"; setup(&c,second);
+    char second[FIXTURE_DIRECTORY]; fixture_directory(second,sizeof second,"piper-follow-expiry"); setup(&c,second);
     send_command(&c,command(&c,"follow-update",1,8),202);
     /* Feedback is as fresh as the update, so the expiry below is the only
        thing that has aged however long this process was descheduled. */
@@ -85,11 +81,11 @@ int main(void)
     CHECK(LANE(&c)->op==OP_IDLE&&LANE(&c)->follow!=FOLLOW_LIVE&&c.bus.sim_enabled==63);
     CHECK(strstr(LANE(&c)->message,"expired"));
     CHECK(fabs(LANE(&c)->target[5]-c.bus.devices[0].feedback.arm[0].deg[5])<.0001);
-    cleanup(&c,second);
+    fixture_cleanup(&c,second);
 
     /* Releasing commits the LAST target, including a final cursor change that
        arrived between streamed updates. It keeps the lease, not the mouse. */
-    char committed[]="/tmp/piper-follow-commit-XXXXXX"; setup(&c,committed);
+    char committed[FIXTURE_DIRECTORY]; fixture_directory(committed,sizeof committed,"piper-follow-commit"); setup(&c,committed);
     send_command(&c,command(&c,"follow-update",1,1),202);
     send_command(&c,command(&c,"follow-commit",2,3),202);
     CHECK(LANE(&c)->follow!=FOLLOW_LIVE&&LANE(&c)->follow==FOLLOW_COMMITTED&&LANE(&c)->op==OP_MOVE&&LANE(&c)->target[5]==3);
@@ -99,26 +95,26 @@ int main(void)
         int status; cJSON *j=command(&c,"",0,0);
         cJSON *response=controller_action(&c,"/api/heartbeat",j,&status);
         CHECK(status==200); cJSON_Delete(j); cJSON_Delete(response);
-        usleep(20000); controller_tick(&c,piper_now());
+        fake_bus_advance(0.02); controller_tick(&c,piper_now());
     }
     CHECK(LANE(&c)->op==OP_IDLE&&LANE(&c)->obstruction_joint==0&&c.bus.sim_enabled==63);
     CHECK(fabs(c.bus.devices[0].feedback.arm[0].deg[5]-3)<.1);
-    cleanup(&c,committed);
+    fixture_cleanup(&c,committed);
 
-    char cancelled[]="/tmp/piper-follow-cancel-tail-XXXXXX"; setup(&c,cancelled);
+    char cancelled[FIXTURE_DIRECTORY]; fixture_directory(cancelled,sizeof cancelled,"piper-follow-cancel-tail"); setup(&c,cancelled);
     send_command(&c,command(&c,"follow-commit",1,30),202);
-    usleep(21000); controller_tick(&c,piper_now());
+    fake_bus_advance(0.021); controller_tick(&c,piper_now());
     send_command(&c,command(&c,"follow-end",2,0),200);
     CHECK(LANE(&c)->op==OP_IDLE&&LANE(&c)->follow!=FOLLOW_COMMITTED&&c.bus.sim_enabled==63);
     CHECK(fabs(LANE(&c)->target[5]-c.bus.devices[0].feedback.arm[0].deg[5])<.001);
-    cleanup(&c,cancelled);
+    fixture_cleanup(&c,cancelled);
 
-    char third[]="/tmp/piper-follow-obstruction-XXXXXX"; setup(&c,third);
+    char third[FIXTURE_DIRECTORY]; fixture_directory(third,sizeof third,"piper-follow-obstruction"); setup(&c,third);
     double started=piper_now(); unsigned sequence=0;
     while(LANE(&c)->op!=OP_IDLE&&piper_now()-started<1) {
         ++sequence; send_command(&c,command(&c,"follow-update",sequence,10+(sequence%3)),202);
         c.bus.sim_target[5]=0;
-        usleep(20000); controller_tick(&c,piper_now());
+        fake_bus_advance(0.02); controller_tick(&c,piper_now());
     }
     CHECK(LANE(&c)->op==OP_IDLE&&LANE(&c)->obstruction_joint==6);
     CHECK(piper_now()-started<.75);
@@ -130,6 +126,8 @@ int main(void)
     cJSON_ReplaceItemInObject(record,"stop_event_active",cJSON_CreateFalse());
     controller_stop(&c,"Second stop after recovery.");
     CHECK(cJSON_IsFalse(cJSON_GetObjectItem(cJSON_GetObjectItem(record,"stop_event"),"following")));
-    cleanup(&c,third);
+    fixture_cleanup(&c,third);
     puts("Following: final-target release/completion, cancel/expiry hold, owner/sequence/limits and obstruction across retargets passed.");
 }
+static const struct check_test tests[]={{"follow","every scenario of this file",scenarios,NULL}};
+int main(void) { return check_main("follow",tests,1); }

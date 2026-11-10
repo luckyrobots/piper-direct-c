@@ -1,6 +1,6 @@
 #define _GNU_SOURCE
 #include "fixture.h"
-#include <assert.h>
+#include "fake_bus.h"
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -8,12 +8,10 @@
 #include <unistd.h>
 
 static bool slow_first_enable=true;
-static double clock_now=100;
-FIXTURE_WRAP_PIPER_NOW(clock_now)
 
 static void tick(struct controller *c)
 {
-    clock_now+=.01;
+    fake_bus.now+=.01;
     LANE(c)->heartbeat=piper_now(); controller_tick(c,piper_now());
 }
 static void settle(struct controller *c)
@@ -69,7 +67,7 @@ static bool recovery(struct controller *c)
     cJSON *s=controller_state(c,"test"),*d=cJSON_GetArrayItem(cJSON_GetObjectItem(s,"devices"),0);
     bool result=cJSON_IsTrue(cJSON_GetObjectItem(d,"recovery_required")); cJSON_Delete(s); return result;
 }
-int main(void)
+static void scenarios(void)
 {
     char directory[96]; fixture_directory(directory,sizeof directory,"piper-startup");
     struct controller c; CHECK(controller_init(&c,true,directory,""));
@@ -165,3 +163,5 @@ int main(void)
     fixture_cleanup(&c,directory);
     puts("Startup regression passed: measured resting pose, power-only enable, explicit bounded range entry, retained joints, normal disable/re-enable, verified recovery without CAN writes, pending-reset/fault/movement rejection.");
 }
+static const struct check_test tests[]={{"startup","every scenario of this file",scenarios,NULL}};
+int main(void) { return check_main("startup",tests,1); }

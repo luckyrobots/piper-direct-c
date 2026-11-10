@@ -1,6 +1,6 @@
 #define _GNU_SOURCE
 #include "fixture.h"
-#include <assert.h>
+#include "fake_bus.h"
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -47,7 +47,7 @@ static void drive(struct controller *c)
     double now=LANE(c)->started; unsigned request=LANE(c)->request_id; bool destination_seen=false;
     for (unsigned tick=0;tick<1000&&LANE(c)->op!=OP_IDLE;++tick) {
         bool seed=(LANE(c)->pose_phase==POSE_SEEDING);
-        now+=.03; LANE(c)->heartbeat=now; controller_tick(c,now);
+        fake_bus.now=now+=.03; LANE(c)->heartbeat=now; controller_tick(c,now);
         for (unsigned i=0;i<6;++i) {
             if(seed) CHECK(fabs(c->bus.sim_target[i]-LANE(c)->initial[i])<.00051);
             else CHECK(c->bus.sim_target[i]>=limits[i][0]&&c->bus.sim_target[i]<=limits[i][1]);
@@ -61,7 +61,7 @@ static void drive(struct controller *c)
     CHECK(destination_seen && LANE(c)->op==OP_IDLE && !strcmp(LANE(c)->phase,"complete") && !(LANE(c)->stage==STAGE_ALIGN_FOLLOWUP));
     CHECK(c->bus.sim_enabled==63);
 }
-int main(void)
+static void scenarios(void)
 {
     struct controller c; init(&c); struct can_device *d=&c.bus.devices[0];
     cJSON *state=controller_state(&c,"test"),*device=cJSON_GetArrayItem(cJSON_GetObjectItem(state,"devices"),0);
@@ -108,7 +108,7 @@ int main(void)
         tx=d->tx; CHECK(command(&c,"stale-hold",0,0)==409&&(LANE(&c)->stage==STAGE_ALIGN_FOLLOWUP)&&d->tx==tx);
         if (cancel==0) controller_stop(&c,"Operator stop fixture.");
         if (cancel==1) CHECK(command(&c,"hold",0,0)==200);
-        double now=piper_now()+.03;
+        double now=fake_bus_advance(.03);
         if (cancel==2) { d->feedback.arm[0].control=2; d->feedback.arm[0].teach=1; d->feedback.arm[0].arm_status=11; }
         if (cancel==3) ++d->generation;
         if (cancel==4) d->present=false;
@@ -117,7 +117,7 @@ int main(void)
         CHECK(LANE(&c)->op==OP_IDLE&&!(LANE(&c)->stage==STAGE_ALIGN_FOLLOWUP));
         tx=d->tx;
         d->present=true; d->feedback.arm[0].control=0; d->feedback.arm[0].teach=0; d->feedback.arm[0].arm_status=0;
-        for (unsigned tick=0;tick<30;++tick) { now+=.03; controller_tick(&c,now); }
+        for (unsigned tick=0;tick<30;++tick) { fake_bus.now=now+=.03; controller_tick(&c,now); }
         CHECK(LANE(&c)->op==OP_IDLE&&!(LANE(&c)->stage==STAGE_ALIGN_FOLLOWUP)&&d->tx==tx); /* Refresh is never a resume trigger. */
         close_fixture(&c);
     }
@@ -125,9 +125,11 @@ int main(void)
     double frozen_now=LANE(&c)->started;
     for (unsigned tick=0;tick<30&&LANE(&c)->op!=OP_IDLE;++tick) {
         memcpy(c.bus.sim_target,d->feedback.arm[0].deg,sizeof c.bus.sim_target);
-        frozen_now+=.03; LANE(&c)->heartbeat=frozen_now; controller_tick(&c,frozen_now);
+        fake_bus.now=frozen_now+=.03; LANE(&c)->heartbeat=frozen_now; controller_tick(&c,frozen_now);
     }
     CHECK(LANE(&c)->op==OP_IDLE&&!(LANE(&c)->stage==STAGE_ALIGN_FOLLOWUP)&&strstr(LANE(&c)->message,"Possible obstruction"));
     close_fixture(&c);
     puts("Range transition passed: selected inward control, verified slow entry then zero, strict full-pose limits, fresh/fault guards and cancellation without destination replay.");
 }
+static const struct check_test tests[]={{"range-transition","every scenario of this file",scenarios,NULL}};
+int main(void) { return check_main("range-transition",tests,1); }

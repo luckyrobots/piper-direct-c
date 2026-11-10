@@ -1,6 +1,6 @@
 #define _GNU_SOURCE
 #include "fixture.h"
-#include <assert.h>
+#include "fake_bus.h"
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -9,12 +9,11 @@
 
 /* A supported, unpowered joint may move slightly while another driver wakes.
    Model independent delayed acknowledgements instead of ideal instant power. */
-static double clock_now=100,first_wire[6],last_wire[6],wire_pose[6],ack_delay[6],low_stamp[6];
+static double first_wire[6],last_wire[6],wire_pose[6],ack_delay[6],low_stamp[6];
 static unsigned power_count[6],stops;
 static double previous_power;
 static bool pump_before_completion;
-FIXTURE_WRAP_PIPER_NOW(clock_now)
-void __wrap_can_bus_receive(struct can_bus *bus,double now)
+static void mcu_receive(struct can_bus *bus,double now)
 {
     struct can_device *d=&bus->devices[0]; struct piper_sample *s=&d->feedback.arm[0];
     s->status_seen=true; s->status_at=now;
@@ -26,7 +25,7 @@ void __wrap_can_bus_receive(struct can_bus *bus,double now)
         m->position_raw=(int32_t)llround(s->deg[i]*1000*3.141592653589793/180);
     }
 }
-bool __wrap_can_bus_send(struct can_bus *bus,struct can_device *d,unsigned generation,const struct can_frame *frames,size_t count)
+static bool mcu_send(struct can_bus *bus,struct can_device *d,unsigned generation,const struct can_frame *frames,size_t count)
 {
     CHECK(bus->simulated&&d&&generation==d->generation&&count==1);
     const struct can_frame *f=&frames[0]; CHECK(f->len==8);
@@ -34,15 +33,15 @@ bool __wrap_can_bus_send(struct can_bus *bus,struct can_device *d,unsigned gener
         CHECK(f->data[0]>=1&&f->data[0]<=6&&f->data[1]==2);
         for (unsigned b=2;b<8;++b) CHECK(!f->data[b]);
         unsigned i=f->data[0]-1;
-        if (previous_power) CHECK(clock_now-previous_power>=.02-1e-9);
-        if (power_count[i]) CHECK(clock_now-last_wire[i]>=.15-1e-9);
-        else { first_wire[i]=clock_now; wire_pose[i]=d->feedback.arm[0].deg[i]; }
-        ++power_count[i]; last_wire[i]=previous_power=clock_now;
+        if (previous_power) CHECK(fake_bus.now-previous_power>=.02-1e-9);
+        if (power_count[i]) CHECK(fake_bus.now-last_wire[i]>=.15-1e-9);
+        else { first_wire[i]=fake_bus.now; wire_pose[i]=d->feedback.arm[0].deg[i]; }
+        ++power_count[i]; last_wire[i]=previous_power=fake_bus.now;
         if (pump_before_completion&&i==0&&power_count[i]==1) {
-            clock_now+=.001;
-            d->feedback.motor[i].enabled=true; d->feedback.motor[i].at=low_stamp[i]=clock_now;
-            d->feedback.arm[0].joint_at[i]=d->feedback.motor[i].high_at=clock_now;
-            clock_now+=.001; /* Simulate receive pumping before the OUT write completes. */
+            fake_bus.now+=.001;
+            d->feedback.motor[i].enabled=true; d->feedback.motor[i].at=low_stamp[i]=fake_bus.now;
+            d->feedback.arm[0].joint_at[i]=d->feedback.motor[i].high_at=fake_bus.now;
+            fake_bus.now+=.001; /* Simulate receive pumping before the OUT write completes. */
         }
     } else {
         /* A failed guard can STOP; no mode, position, reset, broadcast or
@@ -56,22 +55,22 @@ bool __wrap_can_bus_send(struct can_bus *bus,struct can_device *d,unsigned gener
 static void fixture_pose(struct controller *c,char directory[96],const double *resting_pose)
 {
     fixture_directory(directory,96,"piper-enable-sequence");
-    clock_now+=10; CHECK(controller_init(c,true,directory,""));
+    fake_bus.now+=10; CHECK(controller_init(c,true,directory,""));
     memset(first_wire,0,sizeof first_wire); memset(last_wire,0,sizeof last_wire);
     memset(power_count,0,sizeof power_count); previous_power=0; stops=0;
     pump_before_completion=false;
     struct can_device *d=&c->bus.devices[0];
     strcpy(d->feedback.hardware,"H-V1.2-1"); strcpy(d->feedback.version,"S-V1.8-2");
-    d->feedback.arm[0].motion_mode=1; fixture_still(d,clock_now-1);
+    d->feedback.arm[0].motion_mode=1; fixture_still(d,fake_bus.now-1);
     const double limits[6][2]={{-150,150},{0,180},{-170,0},{-100,100},{-70,70},{-180,180}};
     const double pose[6]={2,25,-25,-20,60,8};
     memcpy(d->feedback.arm[0].deg,resting_pose?resting_pose:pose,sizeof pose);
     for (unsigned i=0;i<6;++i) {
-        d->feedback.limit[i]=(struct piper_limit){.seen=true,.min=limits[i][0],.max=limits[i][1],.speed=.3,.at=clock_now};
-        d->feedback.acceleration[i]=(struct piper_acceleration){.seen=true,.max=5,.at=clock_now};
+        d->feedback.limit[i]=(struct piper_limit){.seen=true,.min=limits[i][0],.max=limits[i][1],.speed=.3,.at=fake_bus.now};
+        d->feedback.acceleration[i]=(struct piper_acceleration){.seen=true,.max=5,.at=fake_bus.now};
         d->feedback.motor[i].enabled=false; ack_delay[i]=.025; low_stamp[i]=-1;
     }
-    __wrap_can_bus_receive(&c->bus,clock_now);
+    can_bus_receive(&c->bus,fake_bus.now);
     cJSON *body=cJSON_CreateObject();
     cJSON_AddStringToObject(body,"device_id",d->id); cJSON_AddNumberToObject(body,"generation",d->generation);
     cJSON_AddStringToObject(body,"owner","enable-sequence-regression-client"); cJSON_AddStringToObject(body,"action","enable");
@@ -82,11 +81,11 @@ static void fixture_pose(struct controller *c,char directory[96],const double *r
 static void fixture(struct controller *c,char directory[96]) { fixture_pose(c,directory,NULL); }
 static void tick(struct controller *c)
 {
-    clock_now+=.025; LANE(c)->heartbeat=clock_now; controller_tick(c,clock_now);
+    fake_bus.now+=.025; LANE(c)->heartbeat=fake_bus.now; controller_tick(c,fake_bus.now);
 }
 static void move(struct controller *c,unsigned joint,double degrees)
 {
-    struct can_device *d=&c->bus.devices[0]; d->feedback.arm[0].deg[joint]=degrees; fixture_still(d,clock_now);
+    struct can_device *d=&c->bus.devices[0]; d->feedback.arm[0].deg[joint]=degrees; fixture_still(d,fake_bus.now);
 }
 static void complete(struct controller *c)
 {
@@ -98,8 +97,9 @@ static void close_fixture(struct controller *c,const char *directory)
 {
     CHECK(LANE(c)->op==OP_IDLE); fixture_cleanup(c,directory);
 }
-int main(void)
+static void scenarios(void)
 {
+    fake_bus_model(mcu_receive,mcu_send);
     struct controller c; char directory[96]; fixture(&c,directory);
     /* Delayed J1 cannot starve the five later drivers. No completion can reuse
        stationary time from before their own acknowledgement/settling window. */
@@ -110,9 +110,9 @@ int main(void)
     double all_ack_at=0;
     for (unsigned n=0;n<100&&LANE(&c)->op!=OP_IDLE;++n) {
         tick(&c); bool all=true; for (unsigned i=0;i<6;++i) all=all&&LANE(&c)->power_acknowledged[i];
-        if (all&&!all_ack_at) all_ack_at=clock_now;
+        if (all&&!all_ack_at) all_ack_at=fake_bus.now;
     }
-    CHECK(LANE(&c)->op==OP_IDLE&&!strcmp(LANE(&c)->phase,"complete")&&all_ack_at&&clock_now-all_ack_at>=.4-1e-9&&stops==0);
+    CHECK(LANE(&c)->op==OP_IDLE&&!strcmp(LANE(&c)->phase,"complete")&&all_ack_at&&fake_bus.now-all_ack_at>=.4-1e-9&&stops==0);
     for (unsigned i=1;i<6;++i) CHECK(power_count[i]==1);
     close_fixture(&c,directory);
 
@@ -165,7 +165,9 @@ int main(void)
     close_fixture(&c,directory);
 
     fixture(&c,directory); for (unsigned i=0;i<6;++i) ack_delay[i]=-1;
-    tick(&c); clock_now=LANE(&c)->started+8.01; LANE(&c)->heartbeat=clock_now; controller_tick(&c,clock_now);
+    tick(&c); fake_bus.now=LANE(&c)->started+8.01; LANE(&c)->heartbeat=fake_bus.now; controller_tick(&c,fake_bus.now);
     CHECK(LANE(&c)->op==OP_IDLE&&stops==1&&strstr(LANE(&c)->message,"Enable timed out")); close_fixture(&c,directory);
     puts("Enable sequencing passed: paced round-robin power only, per-driver retries/fresh ACKs, bounded free support motion, frozen requested baselines, lost-power guard and post-ACK settling.");
 }
+static const struct check_test tests[]={{"enable-sequence","every scenario of this file",scenarios,NULL}};
+int main(void) { return check_main("enable-sequence",tests,1); }

@@ -1,6 +1,6 @@
 #define _GNU_SOURCE
 #include "fixture.h"
-#include <assert.h>
+#include "fake_bus.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -30,7 +30,7 @@ static void act(struct controller *c,double width,bool offset,int expected)
     CHECK(status==expected); CHECK(d->tx==tx);
     cJSON_Delete(r); cJSON_Delete(b);
 }
-int main(void)
+static void scenarios(void)
 {
     char directory[96]; fixture_directory(directory,sizeof directory,"piper-gripper");
     struct controller c; CHECK(controller_init(&c,true,directory,""));
@@ -59,16 +59,16 @@ int main(void)
     CHECK(cJSON_GetObjectItem(g,"width_mm")->valuedouble==-1.3);
     CHECK(cJSON_GetObjectItem(g,"max_width_mm")->valuedouble==100); cJSON_Delete(s);
     act(&c,5,true,202);
-    usleep(25000); LANE(&c)->heartbeat=piper_now(); controller_tick(&c,piper_now());
+    fake_bus_advance(0.025); LANE(&c)->heartbeat=piper_now(); controller_tick(&c,piper_now());
     CHECK(LANE(&c)->op==OP_GRIPPER&&LANE(&c)->gripper_command==1&&LANE(&c)->gripper_effort==.1);
     unsigned ticks=0;
-    while (LANE(&c)->op!=OP_IDLE&&ticks++<250) { usleep(10000); LANE(&c)->heartbeat=piper_now(); controller_tick(&c,piper_now()); }
+    while (LANE(&c)->op!=OP_IDLE&&ticks++<250) { fake_bus_advance(0.01); LANE(&c)->heartbeat=piper_now(); controller_tick(&c,piper_now()); }
     CHECK(LANE(&c)->op==OP_IDLE&&!strcmp(LANE(&c)->phase,"complete"));
     CHECK(d->feedback.gripper_mm>=4.5&&!LANE(&c)->gripper_entry);
     act(&c,95,false,202);
     cJSON *hold=request(d,95,false); cJSON_ReplaceItemInObject(hold,"action",cJSON_CreateString("hold"));
     int status; cJSON *reply=controller_action(&c,"/api/command",hold,&status); CHECK(status==409); cJSON_Delete(reply);
-    usleep(25000); LANE(&c)->heartbeat=piper_now(); controller_tick(&c,piper_now());
+    fake_bus_advance(0.025); LANE(&c)->heartbeat=piper_now(); controller_tick(&c,piper_now());
     cJSON_ReplaceItemInObject(hold,"owner",cJSON_CreateString("different-client-owner"));
     reply=controller_action(&c,"/api/command",hold,&status); CHECK(status==409); cJSON_Delete(reply);
     cJSON_ReplaceItemInObject(hold,"owner",cJSON_CreateString("gripper-regression-client"));
@@ -76,7 +76,7 @@ int main(void)
     reply=controller_action(&c,"/api/command",hold,&status); CHECK(status==200); cJSON_Delete(reply); cJSON_Delete(hold);
     CHECK(LANE(&c)->op==OP_IDLE&&d->tx==holding_tx&&c.bus.sim_gripper==held&&d->feedback.gripper_enabled);
     act(&c,95,false,202);
-    d->feedback.gripper_max_mm=70; usleep(25000); LANE(&c)->heartbeat=piper_now(); controller_tick(&c,piper_now());
+    d->feedback.gripper_max_mm=70; fake_bus_advance(0.025); LANE(&c)->heartbeat=piper_now(); controller_tick(&c,piper_now());
     CHECK(LANE(&c)->op==OP_IDLE&&!strcmp(LANE(&c)->phase,"stopped"));
     CHECK(strstr(LANE(&c)->message,"configuration changed"));
     d->feedback.gripper_config_seen=false;
@@ -87,5 +87,6 @@ int main(void)
     CHECK(!can_bus_send(&c.bus,d,d->generation,&frame,1)&&d->tx==tx); /* No parameter writes. */
     fixture_cleanup(&c,directory);
     puts("Gripper guards passed: verified range, low effort, raw negative feedback, bounded entry, range change, disable and read-only query.");
-    return 0;
 }
+static const struct check_test tests[]={{"gripper","every scenario of this file",scenarios,NULL}};
+int main(void) { return check_main("gripper",tests,1); }

@@ -15,7 +15,7 @@ build:
 	mkdir -p build
 
 CORE = src/controller.c src/canbus.c src/protocol.c vendor/cJSON.c
-HEADERS = tests/fixture.h tests/check.h src/controller.h src/controller_internal.h src/controller_lane_fields.inc src/obstruction.h src/canbus.h src/protocol.h vendor/cJSON.h
+HEADERS = src/controller.h src/controller_internal.h src/controller_lane_fields.inc src/obstruction.h src/canbus.h src/protocol.h vendor/cJSON.h
 
 build/piper-can: src/main.c src/protocol.c src/protocol.h | build
 	$(CC) $(CPPFLAGS) $(CFLAGS) src/main.c src/protocol.c -o $@ $(LDLIBS)
@@ -29,49 +29,47 @@ build/piper-record: src/record.c src/canbus.c src/protocol.c vendor/cJSON.c $(HE
 build/piper-control: src/server.c src/camera.c src/camera.h $(CORE) $(HEADERS) | build
 	$(CC) $(CPPFLAGS) $(CFLAGS) src/server.c src/camera.c $(CORE) -o $@ $(LDLIBS)
 
-build/test-protocol: tests/test_protocol.c src/protocol.c src/protocol.h tests/check.h | build
-	$(CC) $(CPPFLAGS) $(CFLAGS) tests/test_protocol.c src/protocol.c -o $@ $(LDLIBS)
-
-build/test-obstruction: tests/test_obstruction.c src/obstruction.h tests/check.h | build
-	$(CC) $(CPPFLAGS) $(CFLAGS) tests/test_obstruction.c -o $@ $(LDLIBS)
-
-build/test-can-lost: tests/test_can_lost.c src/canbus.c src/protocol.c $(HEADERS) | build
-	$(CC) $(CPPFLAGS) $(CFLAGS) tests/test_can_lost.c src/canbus.c src/protocol.c -o $@ $(LDLIBS)
-
-build/test-camera: tests/test_camera.c src/camera.c src/camera.h src/canbus.c src/protocol.c vendor/cJSON.c $(HEADERS) | build
-	$(CC) $(CPPFLAGS) $(CFLAGS) tests/test_camera.c src/camera.c src/canbus.c src/protocol.c vendor/cJSON.c -o $@ $(LDLIBS)
-
-# Offline controller tests: build/test-NAME links tests/test_NAME.c (dashes
-# become underscores) with CORE. WRAP_NAME lists the boundaries the test
-# replaces through -Wl,--wrap.
-CONTROLLER_TESTS = speed-units control range-drift range-transition arrival-tolerance configuration-cache \
+# Native tests. build/test-NAME is tests/test_NAME.c (dashes become
+# underscores), linked by the one rule below. What differs between tests is
+# data:
+#   BUS_TESTS    the controller tests. Each links CORE and the shared fake CAN
+#                bus (tests/fake_bus.c: injected clock, MCU model, record of
+#                emitted frames) through the FAKE_BUS link seams.
+#   SRC_NAME     production sources of any other test (default: CORE).
+#   WRAP_NAME    further boundaries a test replaces through -Wl,--wrap.
+#   FLAGS_NAME, LIBS_NAME   extra compiler flags and libraries.
+BUS_TESTS = speed-units control range-drift range-transition arrival-tolerance configuration-cache \
 	idle-reconnect multi-lanes pose-entry-order startup reset-retry enable-sequence disable-sequence cycle \
 	gripper obstruction-controller follow follow-noop trajectory-follow trajectory-viability teaching \
-	teach-batches stationary recover-at-pose stop-generation hold-target record-load clock-failure
-FAKE_CLOCK = piper_now
+	teach-batches stationary recover-at-pose stop-generation hold-target record-load \
+	rows-latch rows-lane
 FAKE_BUS = piper_now can_bus_receive can_bus_send
-WRAP_arrival-tolerance = can_bus_receive can_bus_send
-WRAP_idle-reconnect = $(FAKE_BUS) can_bus_reconnect can_bus_reconnect_device
-WRAP_multi-lanes = $(FAKE_BUS)
-WRAP_pose-entry-order = $(FAKE_BUS)
-WRAP_startup = $(FAKE_CLOCK)
-WRAP_reset-retry = $(FAKE_BUS)
-WRAP_enable-sequence = $(FAKE_BUS)
-WRAP_disable-sequence = $(FAKE_BUS)
-WRAP_follow-noop = $(FAKE_BUS)
-WRAP_trajectory-follow = $(FAKE_CLOCK)
-WRAP_trajectory-viability = $(FAKE_BUS)
-WRAP_teach-batches = $(FAKE_BUS)
-WRAP_stationary = $(FAKE_CLOCK)
-WRAP_recover-at-pose = $(FAKE_BUS)
+WRAP_idle-reconnect = can_bus_reconnect can_bus_reconnect_device
+# The real clock is the unit under test, so this one keeps the real bus.
 WRAP_clock-failure = clock_gettime
+SRC_protocol = src/protocol.c
+SRC_obstruction =
+SRC_can-lost = src/canbus.c src/protocol.c
+SRC_camera = src/camera.c src/canbus.c src/protocol.c vendor/cJSON.c
+# The Windows transport tests include the transport source they fake.
+SRC_can-windows-pump = src/protocol.c
+SRC_can-windows-hotplug = src/controller.c src/protocol.c vendor/cJSON.c
+SRC_candle-tx-pump-windows = vendor/candle/candle_ctrl_req.c
+# It also includes the vendored driver, which is not held to our warnings.
+FLAGS_candle-tx-pump-windows = -DCANDLE_API_LIBRARY -DUNICODE -D_UNICODE -Ivendor/candle -Wno-error
+LIBS_candle-tx-pump-windows = -lwinusb -lole32
 
 comma := ,
+on_bus = $(filter $1,$(BUS_TESTS))
+test_sources = $(if $(call on_bus,$1),$(CORE) tests/fake_bus.c,$(if $(filter undefined,$(origin SRC_$1)),$(CORE),$(SRC_$1)))
+test_wraps = $(if $(call on_bus,$1),$(FAKE_BUS)) $(WRAP_$1)
+# Any source or header change rebuilds every test; none is slow to build.
+TEST_INPUTS = $(wildcard src/*.c src/*.h src/*.inc vendor/*.c vendor/*.h vendor/candle/*.c vendor/candle/*.h tests/*.h tests/fake_bus.c)
 .SECONDEXPANSION:
-$(CONTROLLER_TESTS:%=build/test-%): build/test-%: tests/test_$$(subst -,_,$$*).c $(CORE) $(HEADERS) | build
-	$(CC) $(CPPFLAGS) $(CFLAGS) $< $(CORE) $(patsubst %,-Wl$(comma)--wrap=%,$(WRAP_$*)) -o $@ $(LDLIBS)
+build/test-%: tests/test_$$(subst -,_,$$*).c $(TEST_INPUTS) | build
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(FLAGS_$*) $< $(call test_sources,$*) $(patsubst %,-Wl$(comma)--wrap=%,$(call test_wraps,$*)) -o $@ $(LDLIBS) $(LIBS_$*)
 
-TESTS = $(CONTROLLER_TESTS) can-lost obstruction protocol camera
+TESTS = $(BUS_TESTS) clock-failure can-lost obstruction protocol camera
 # NO_SKIPS=1 (CI) turns a skipped native check into a failure.
 test: all $(TESTS:%=build/test-%)
 	@rm -f build/test-skips.log
@@ -81,6 +79,8 @@ test: all $(TESTS:%=build/test-%)
 	@# A skipped check still exits 0, so machines without its tool pass; say so loudly.
 	@if [ -s build/test-skips.log ]; then echo "==== SKIPPED native checks ===="; cat build/test-skips.log; echo "==============================="; \
 		[ -z "$(NO_SKIPS)" ] || { echo "FAILED: NO_SKIPS is set and native checks were skipped"; exit 1; }; fi
+	@# Every row of the section 3.1 tables names a test that just passed (P7).
+	sh tests/check_rows.sh docs/target-architecture.md $(TESTS:%=build/test-%.log)
 	./build/piper-can --help >/dev/null
 	! ./build/piper-can --query-firmware >/dev/null 2>&1
 	! ./build/piper-can --seconds nonsense >/dev/null 2>&1
@@ -100,18 +100,7 @@ test-web:
 # process boundary is a fake callback: nothing enumerates or opens an adapter,
 # starts a server or sends a robot command. The shared controller fixtures in
 # the list are the ones that also run on Windows.
-WINDOWS_TESTS = candle-tx-pump-windows can-windows-pump can-windows-hotplug 	idle-reconnect multi-lanes pose-entry-order disable-sequence
-CANDLE = vendor/candle/candle.c vendor/candle/candle.h vendor/candle/candle_defs.h vendor/candle/candle_ctrl_req.c vendor/candle/candle_ctrl_req.h
-
-build/test-candle-tx-pump-windows: tests/test_candle_tx_pump_windows.c $(CANDLE) tests/check.h | build
-	$(CC) -std=c17 -O2 -g -DCANDLE_API_LIBRARY -DUNICODE -D_UNICODE -Ivendor/candle tests/test_candle_tx_pump_windows.c vendor/candle/candle_ctrl_req.c -o $@ -lsetupapi -lwinusb -lole32
-
-build/test-can-windows-pump: tests/test_can_windows_pump.c src/canbus.c src/canbus_windows.inc src/protocol.c $(HEADERS) | build
-	$(CC) $(CPPFLAGS) $(CFLAGS) tests/test_can_windows_pump.c src/protocol.c -o $@ $(LDLIBS)
-
-build/test-can-windows-hotplug: tests/test_can_windows_hotplug.c src/controller.c src/canbus.c src/canbus_windows.inc src/protocol.c vendor/cJSON.c $(HEADERS) | build
-	$(CC) $(CPPFLAGS) $(CFLAGS) tests/test_can_windows_hotplug.c src/controller.c src/protocol.c vendor/cJSON.c -o $@ $(LDLIBS)
-
+WINDOWS_TESTS = candle-tx-pump-windows can-windows-pump can-windows-hotplug idle-reconnect multi-lanes pose-entry-order disable-sequence
 test-windows: $(WINDOWS_TESTS:%=build/test-%)
 	for t in $(WINDOWS_TESTS); do ./build/test-$$t || { echo "FAILED: build/test-$$t"; exit 1; }; done
 

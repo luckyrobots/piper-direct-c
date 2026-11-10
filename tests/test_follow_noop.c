@@ -1,16 +1,14 @@
 #define _GNU_SOURCE
 #include "fixture.h"
-#include <assert.h>
+#include "fake_bus.h"
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
-static double clock_now=100;
 static unsigned full_poses,stops,sequence;
 static bool fail_pose;
-FIXTURE_WRAP_PIPER_NOW(clock_now)
-void __wrap_can_bus_receive(struct can_bus *b,double now)
+static void mcu_receive(struct can_bus *b,double now)
 {
     struct can_device *d=&b->devices[0]; struct piper_sample *s=&d->feedback.arm[0];
     s->status_seen=true; s->status_at=now;
@@ -20,7 +18,7 @@ void __wrap_can_bus_receive(struct can_bus *b,double now)
         d->feedback.motor[i].at=d->feedback.motor[i].high_at=now;
     }
 }
-bool __wrap_can_bus_send(struct can_bus *b,struct can_device *d,unsigned generation,const struct can_frame *f,size_t count)
+static bool mcu_send(struct can_bus *b,struct can_device *d,unsigned generation,const struct can_frame *f,size_t count)
 {
     CHECK(b->simulated&&generation==d->generation);
     if (count==1) { CHECK(f->can_id==0x150&&f->data[0]==1); ++stops; return true; }
@@ -44,20 +42,21 @@ static void command(struct controller *c,const char *action,double wrist,int exp
 }
 static void fixture(struct controller *c,char directory[96])
 {
-    fixture_directory(directory,96,"piper-follow-noop"); clock_now+=10;
+    fixture_directory(directory,96,"piper-follow-noop"); fake_bus.now+=10;
     CHECK(controller_init(c,true,directory,"")); full_poses=stops=sequence=0; fail_pose=false;
-    struct can_device *d=&c->bus.devices[0]; fixture_still(d,clock_now-1); d->feedback.arm[0].motion_mode=1;
+    struct can_device *d=&c->bus.devices[0]; fixture_still(d,fake_bus.now-1); d->feedback.arm[0].motion_mode=1;
     memset(d->feedback.arm[0].deg,0,sizeof d->feedback.arm[0].deg);
-    fixture_configure(d,"S-V1.8-2",-180,180,.3,clock_now);
-    __wrap_can_bus_receive(&c->bus,clock_now); command(c,"follow-start",0,202);
+    fixture_configure(d,"S-V1.8-2",-180,180,.3,fake_bus.now);
+    can_bus_receive(&c->bus,fake_bus.now); command(c,"follow-start",0,202);
 }
-static void tick(struct controller *c) { clock_now+=.025; LANE(c)->heartbeat=clock_now; controller_tick(c,clock_now); }
+static void tick(struct controller *c) { fake_bus.now+=.025; LANE(c)->heartbeat=fake_bus.now; controller_tick(c,fake_bus.now); }
 static void close_fixture(struct controller *c,const char *directory)
 {
     CHECK(LANE(c)->op==OP_IDLE); fixture_cleanup(c,directory);
 }
-int main(void)
+static void scenarios(void)
 {
+    fake_bus_model(mcu_receive,mcu_send);
     struct controller c; char directory[96]; fixture(&c,directory); tick(&c); CHECK(full_poses==1);
     double sent=LANE(&c)->sent_at,wire=LANE(&c)->pose_tx_at;
     for (unsigned n=0;n<25;++n) { command(&c,"follow-update",0,202); tick(&c); }
@@ -77,7 +76,7 @@ int main(void)
     for (unsigned expiry=0;expiry<2;++expiry) {
         fixture(&c,directory); tick(&c); struct can_device *d=&c.bus.devices[0];
         d->feedback.arm[0].deg[5]=.02; fail_pose=true;
-        if (expiry) { clock_now=LANE(&c)->follow_updated+.251; LANE(&c)->heartbeat=clock_now; controller_tick(&c,clock_now); }
+        if (expiry) { fake_bus.now=LANE(&c)->follow_updated+.251; LANE(&c)->heartbeat=fake_bus.now; controller_tick(&c,fake_bus.now); }
         else command(&c,"follow-end",0,409);
         CHECK(LANE(&c)->op==OP_IDLE&&stops==1&&!LANE(&c)->pose_tx_valid);
         cJSON *record=cJSON_GetObjectItem(cJSON_GetObjectItem(c.saved,"devices"),d->id),*event=cJSON_GetObjectItem(record,"stop_event");
@@ -88,3 +87,5 @@ int main(void)
     }
     puts("Following no-op passed: unchanged full tuple suppresses only redundant writes, actual TX timestamps persist, new targets/speed/mode/session transmit and failed hold preserves its first trigger.");
 }
+static const struct check_test tests[]={{"follow-noop","every scenario of this file",scenarios,NULL}};
+int main(void) { return check_main("follow-noop",tests,1); }

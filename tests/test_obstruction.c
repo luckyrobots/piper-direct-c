@@ -1,8 +1,7 @@
 #include "obstruction.h"
 #include "check.h"
-#include <assert.h>
 #include <stdio.h>
-int main(void) {
+static void scenarios(void) {
     struct obstruction_watch w[6];
     for (unsigned j=0;j<6;j++) obstruction_reset(w+j,0);
     /* Frozen joint: never trip before .5 s, trip at the threshold. */
@@ -58,3 +57,5 @@ int main(void) {
     CHECK(obstruction_stalled(w,.5,0,1,20,.2));
     puts("Obstruction checks passed: 500 ms threshold, independent joints, slow bidirectional progress, settling and jitter.");
 }
+static const struct check_test tests[]={{"obstruction","every scenario of this file",scenarios,NULL}};
+int main(void) { return check_main("obstruction",tests,1); }

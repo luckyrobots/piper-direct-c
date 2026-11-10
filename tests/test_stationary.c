@@ -1,25 +1,23 @@
 #define _GNU_SOURCE
 #include "fixture.h"
-#include <assert.h>
+#include "fake_bus.h"
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 
-static double clock_now=100;
-FIXTURE_WRAP_PIPER_NOW(clock_now)
 static void feed_at(struct can_device *d,const double pose[6],double elapsed)
 {
-    clock_now+=elapsed;
+    fake_bus.now+=elapsed;
     for (unsigned i=0;i<6;++i) {
         d->feedback.motor[i].seen=d->feedback.motor[i].high_seen=d->feedback.motor[i].enabled=true;
-        d->feedback.motor[i].at=d->feedback.motor[i].high_at=clock_now;
+        d->feedback.motor[i].at=d->feedback.motor[i].high_at=fake_bus.now;
     }
     struct can_frame frames[3],status={.can_id=0x2a1,.len=8,.data={1,0,1,0,0}};
     CHECK(piper_targets(pose,frames));
-    for (unsigned i=0;i<3;++i) { frames[i].can_id=0x2a5+i; can_bus_ingest(d,&frames[i],false,clock_now); }
-    can_bus_ingest(d,&status,false,clock_now);
+    for (unsigned i=0;i<3;++i) { frames[i].can_id=0x2a5+i; can_bus_ingest(d,&frames[i],false,fake_bus.now); }
+    can_bus_ingest(d,&status,false,fake_bus.now);
 }
 static void feed(struct can_device *d,const double pose[6]) { feed_at(d,pose,.05); }
 static bool ready(struct controller *c)
@@ -32,13 +30,13 @@ static bool ready(struct controller *c)
         CHECK(result==cJSON_IsTrue(cJSON_GetObjectItem(cJSON_GetArrayItem(joints,i),"can_move")));
     cJSON_Delete(state); return result;
 }
-int main(void)
+static void scenarios(void)
 {
     char directory[96]; fixture_directory(directory,sizeof directory,"piper-stationary");
     struct controller c; CHECK(controller_init(&c,true,directory,""));
     struct can_device *d=&c.bus.devices[0];
     const double fixed[6]={2,25,-25,-20,60,8}; double pose[6]; memcpy(pose,fixed,sizeof pose);
-    fixture_configure(d,"S-V1.9-0",-180,180,.3,clock_now);
+    fixture_configure(d,"S-V1.9-0",-180,180,.3,fake_bus.now);
     for (unsigned n=0;n<25;++n) feed(d,pose);
     CHECK(ready(&c)); double qualified=d->stationary_since;
     /* Independent encoder quantization phases used to reset the common timer
@@ -51,7 +49,7 @@ int main(void)
     memcpy(pose,fixed,sizeof pose);
     for (unsigned n=0;n<35;++n) {
         pose[0]+=.01; feed(d,pose);
-        if (n>=6) { CHECK(!ready(&c)); CHECK(!d->stationary_since||clock_now-d->stationary_since<.3); }
+        if (n>=6) { CHECK(!ready(&c)); CHECK(!d->stationary_since||fake_bus.now-d->stationary_since<.3); }
     }
     for (unsigned n=0;n<25;++n) feed(d,pose);
     CHECK(ready(&c));
@@ -70,12 +68,12 @@ int main(void)
     /* Status-only traffic cannot qualify a frozen set of joint packets. */
     ++d->generation; feed(d,pose); CHECK(!ready(&c));
     struct can_frame status={.can_id=0x2a1,.len=8,.data={1,0,1,0,0}};
-    for (unsigned n=0;n<6;++n) { clock_now+=.05; can_bus_ingest(d,&status,false,clock_now); CHECK(!ready(&c)); }
-    clock_now+=.1; can_bus_ingest(d,&status,false,clock_now);
+    for (unsigned n=0;n<6;++n) { fake_bus.now+=.05; can_bus_ingest(d,&status,false,fake_bus.now); CHECK(!ready(&c)); }
+    fake_bus.now+=.1; can_bus_ingest(d,&status,false,fake_bus.now);
     CHECK(!ready(&c)&&!d->stationary_since&&!d->stationary_count);
     /* Restore static information invalidated by the intentional status gap. */
     for (unsigned n=0;n<25;++n) feed(d,pose);
-    CHECK(d->stationary_since&&clock_now-d->stationary_since>=.3);
+    CHECK(d->stationary_since&&fake_bus.now-d->stationary_since>=.3);
     /* Regression from 106 actual idle observations after the 1-degree wrist
        test. All six joint angles are constant, with isolated raw velocity
        pulses up to 0.161 rad/s and one-quantum motor encoder oscillations. */
@@ -90,11 +88,11 @@ int main(void)
         if (!warmed) {
             for (unsigned i=0;i<6;++i) d->feedback.motor[i].velocity=0;
             for (unsigned n=0;n<25;++n) feed(d,pose);
-            warmed=true; CHECK(d->stationary_since&&clock_now-d->stationary_since>=.3);
+            warmed=true; CHECK(d->stationary_since&&fake_bus.now-d->stationary_since>=.3);
         }
         for (unsigned i=0;i<6;++i) d->feedback.motor[i].velocity=velocities[i];
         feed_at(d,pose,samples?seconds-previous:.05);
-        CHECK(d->pose_stationary_since&&clock_now-d->pose_stationary_since>=.3&&ready(&c));
+        CHECK(d->pose_stationary_since&&fake_bus.now-d->pose_stationary_since>=.3&&ready(&c));
         previous=seconds; ++samples;
     }
     CHECK(samples==106); fclose(trace);
@@ -119,7 +117,7 @@ int main(void)
         }
         for (unsigned i=0;i<6;++i) d->feedback.motor[i].velocity=velocities[i];
         feed_at(d,pose,samples?seconds-previous:.05);
-        CHECK(ready(&c)&&d->pose_stationary_since&&clock_now-d->pose_stationary_since>=.3);
+        CHECK(ready(&c)&&d->pose_stationary_since&&fake_bus.now-d->pose_stationary_since>=.3);
         previous=seconds; ++samples;
     }
     CHECK(samples==192); fclose(trace);
@@ -153,3 +151,5 @@ int main(void)
     fixture_cleanup(&c,directory);
     puts("Position readiness passed: noisy angles plus 106 idle/192 loaded real samples keep controls usable; genuine joint/independent encoder movement, faults and stale/generation guards reject; strict velocity-dependent dwell remains separate.");
 }
+static const struct check_test tests[]={{"stationary","every scenario of this file",scenarios,NULL}};
+int main(void) { return check_main("stationary",tests,1); }

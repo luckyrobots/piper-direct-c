@@ -1,18 +1,16 @@
 #define _GNU_SOURCE
 #include "fixture.h"
-#include <assert.h>
+#include "fake_bus.h"
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 
-static double clock_now=100;
 static unsigned pose_batches,stop_packets;
 static bool stale_high;
 static double frozen[6];
-FIXTURE_WRAP_PIPER_NOW(clock_now)
-void __wrap_can_bus_receive(struct can_bus *bus,double now)
+static void mcu_receive(struct can_bus *bus,double now)
 {
     struct can_device *d=&bus->devices[0]; struct piper_sample *s=&d->feedback.arm[0];
     s->status_seen=true; s->status_at=now;
@@ -23,7 +21,7 @@ void __wrap_can_bus_receive(struct can_bus *bus,double now)
         m->position_raw=(int32_t)llround(s->deg[i]*1000*3.141592653589793/180);
     }
 }
-bool __wrap_can_bus_send(struct can_bus *bus,struct can_device *d,unsigned generation,const struct can_frame *frames,size_t count)
+static bool mcu_send(struct can_bus *bus,struct can_device *d,unsigned generation,const struct can_frame *frames,size_t count)
 {
     CHECK(bus->simulated&&d->generation==generation);
     if (count==1&&frames[0].can_id==0x150) { CHECK(frames[0].data[0]==1); ++stop_packets; ++d->tx; return true; }
@@ -46,19 +44,19 @@ static cJSON *record(struct controller *c)
     return cJSON_GetObjectItem(cJSON_GetObjectItem(c->saved,"devices"),c->bus.devices[0].id);
 }
 static bool blocked(struct controller *c) { return cJSON_IsTrue(cJSON_GetObjectItem(record(c),"blocked")); }
-static void tick(struct controller *c,double dt) { clock_now+=dt; LANE(c)->heartbeat=clock_now; controller_tick(c,clock_now); }
+static void tick(struct controller *c,double dt) { fake_bus.now+=dt; LANE(c)->heartbeat=fake_bus.now; controller_tick(c,fake_bus.now); }
 static void fixture(struct controller *c,char directory[96])
 {
-    fixture_directory(directory,96,"piper-recover-at-pose"); clock_now+=10;
+    fixture_directory(directory,96,"piper-recover-at-pose"); fake_bus.now+=10;
     CHECK(controller_init(c,true,directory,"")); struct can_device *d=&c->bus.devices[0];
     stale_high=false; pose_batches=stop_packets=0;
-    d->simulated=false; d->fd=FIXTURE_FD; fixture_still(d,clock_now-1);
+    d->simulated=false; d->fd=FIXTURE_FD; fixture_still(d,fake_bus.now-1);
     strcpy(d->feedback.hardware,"H-V1.2-1"); strcpy(d->feedback.version,"S-V1.9-0");
     d->feedback.arm[0].control=1; d->feedback.arm[0].motion_mode=1;
     const double pose[6]={2,25,-25,-20,60,8}; memcpy(frozen,pose,sizeof frozen); memcpy(d->feedback.arm[0].deg,pose,sizeof pose);
-    fixture_vendor_limits(d,.3,clock_now);
+    fixture_vendor_limits(d,.3,fake_bus.now);
     for (unsigned i=0;i<6;++i) d->feedback.motor[i].enabled=true;
-    __wrap_can_bus_receive(&c->bus,clock_now);
+    can_bus_receive(&c->bus,fake_bus.now);
     LANE(c)->obstruction_joint=1;
     controller_stop_obstruction(c,"Possible obstruction at J1: no measured progress for 0.5 seconds.");
     CHECK(blocked(c)&&stop_packets==1); stop_packets=0;
@@ -87,8 +85,9 @@ static void close_fixture(struct controller *c,const char *directory)
 {
     CHECK(LANE(c)->op==OP_IDLE); c->bus.devices[0].fd=-1; fixture_cleanup(c,directory);
 }
-int main(void)
+static void scenarios(void)
 {
+    fake_bus_model(mcu_receive,mcu_send);
     struct controller c; char directory[96]; fixture(&c,directory);
     c.bus.devices[0].feedback.arm[0].control=2; c.bus.devices[0].feedback.arm[0].teach=2;
     action(&c,"recover-at-pose",409); action(&c,"teach-return",409); /* Ended bit alone is not proof. */
@@ -106,11 +105,11 @@ int main(void)
         fixture(&c,directory); physical_cycle(&c); struct can_device *d=&c.bus.devices[0];
         if (failure==0) ++d->generation;
         if (failure==1) d->feedback.motor[0].fault=1;
-        if (failure==2) d->feedback.motor[1].high_at=clock_now-1;
+        if (failure==2) d->feedback.motor[1].high_at=fake_bus.now-1;
         if (failure==3) d->feedback.motor[2].enabled=false;
         if (failure==4) d->feedback.arm[0].deg[1]=-.2;
         if (failure==5) cJSON_ReplaceItemInObject(record(&c),"state",cJSON_CreateString("reset_pending"));
-        if (failure==6) { clock_now+=121; __wrap_can_bus_receive(&c.bus,clock_now); }
+        if (failure==6) { fake_bus.now+=121; can_bus_receive(&c.bus,fake_bus.now); }
         if (failure==7) cJSON_ReplaceItemInObject(record(&c),"kind",cJSON_CreateString("stop"));
         if (failure==8) cJSON_AddItemToObject(record(&c),"last_fault",cJSON_CreateObject());
         if (failure==9) strcpy(d->feedback.version,"S-V1.8-2");
@@ -182,3 +181,5 @@ int main(void)
     strcpy(c.state_dir,directory); close_fixture(&c,directory);
     puts("Recover-at-pose passed: observed physical cycle, frozen-pose-only 3+4 handoff, ACK-before-clear, no power/reset/home/replay, identity/freshness/fault/range/incident/storage rejection.");
 }
+static const struct check_test tests[]={{"recover-at-pose","every scenario of this file",scenarios,NULL}};
+int main(void) { return check_main("recover-at-pose",tests,1); }
