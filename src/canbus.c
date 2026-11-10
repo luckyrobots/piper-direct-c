@@ -1,7 +1,6 @@
 #define _GNU_SOURCE
 #include "canbus.h"
 #include <math.h>
-#include <assert.h>
 #include <errno.h>
 #ifndef _WIN32
 #include <linux/can/raw.h>
@@ -29,12 +28,18 @@ static void lost(struct can_device *d,const char *why);
 #include "canbus_windows.inc"
 #else
 
+/* A failed monotonic clock is latched for the life of the process and time
+   stays at the last good reading. The controller stops every action and
+   refuses new ones while piper_clock_failed() is true; nothing aborts. */
+static bool clock_failed;
 double piper_now(void)
 {
+    static double last;
     struct timespec t;
-    if (clock_gettime(CLOCK_MONOTONIC,&t)<0) abort();
-    return (double)t.tv_sec+(double)t.tv_nsec/1e9;
+    if (clock_failed||clock_gettime(CLOCK_MONOTONIC,&t)<0) { clock_failed=true; return last; }
+    return last=(double)t.tv_sec+(double)t.tv_nsec/1e9;
 }
+bool piper_clock_failed(void) { return clock_failed; }
 static bool number(const char *name,const char *field,unsigned long *n)
 {
     char path[256],text[80],*end;
@@ -435,7 +440,6 @@ bool can_bus_send(struct can_bus *b,struct can_device *d,unsigned generation,con
     if (!can_bus_batch_allowed(d,frames,count)) return false;
     for (size_t i=0;i<count;++i) {
         const struct can_frame *f=&frames[i];
-        assert(f->len==8&&f->can_id<=0x7ff); /* can_bus_batch_allowed rejected anything else. */
         if (!b->simulated) {
 #ifdef _WIN32
             unsigned os_error=0; int transport_error=0;

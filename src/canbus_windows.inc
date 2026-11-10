@@ -87,6 +87,8 @@ double piper_now(void) {
     LARGE_INTEGER ticks,freq; QueryPerformanceCounter(&ticks); QueryPerformanceFrequency(&freq);
     return (double)ticks.QuadPart/(double)freq.QuadPart;
 }
+/* QueryPerformanceCounter cannot fail on supported Windows versions. */
+bool piper_clock_failed(void) { return false; }
 static bool windows_load(void) {
     if (win.dll) return true;
     HMODULE module=NULL; wchar_t path[32768];

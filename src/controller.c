@@ -459,6 +459,8 @@ static bool acceleration_valid(const struct piper_acceleration *a) { return isfi
 static bool limits_valid(const struct piper_limit *l,const struct piper_acceleration *a) { return limit_valid(l)&&acceleration_valid(a); }
 const char *controller_blocker(struct controller *c,struct can_device *d,double now)
 {
+    /* Every freshness check below compares against a clock that has stopped. */
+    if (piper_clock_failed()) return "The monotonic clock failed. Restart the service; motion remains blocked.";
     const char *why=health(d,now,CHECK_CONTROL); if (why) return why;
     if (c->storage_failed) return "Control-state storage failed. Repair storage and restart; motion remains blocked.";
     if (blocked(c,d->id)) return "Stopped earlier. Click Enable controls to verify the current robot state.";
@@ -2120,6 +2122,8 @@ void controller_tick(struct controller *c,double now)
             unsigned index=order[(turn+offset)%count];
             struct controller_lane *l=&c->lanes[index];
             if (c->storage_failed&&l->op!=OP_IDLE) stop_lane(c,l,"Shared recovery-state storage failed.");
+            /* Time is frozen, so no lease or watchdog can expire any more. */
+            if (piper_clock_failed()&&l->op!=OP_IDLE) stop_lane(c,l,"Monotonic clock failed.");
             /* A previous lane's send can pump newer RX frames. Do not add real
                elapsed time to an already-advanced deterministic caller clock. */
             double lane_now=advanced?fmax(now,piper_now()):now;
