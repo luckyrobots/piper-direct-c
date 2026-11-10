@@ -29,6 +29,33 @@ internal static class BoundedProcessTests
             Check(tree.Length == 2 && tree.All(Ended), "A timed-out helper left part of its process tree running");
         }
         finally { File.Delete(pidFile); }
+        await StartFailureIsControlError();
+        KillFailureNeverEscapes();
+    }
+
+    // P6: a missing helper binary is an IOException (a 409 control error on
+    // both transports), not the Win32Exception that surfaced as HTTP 500.
+    private static async Task StartFailureIsControlError()
+    {
+        string missing = Path.Combine(Path.GetTempPath(), "pika-missing-helper-" + Guid.NewGuid().ToString("N"));
+        await RejectAsync<IOException>(() => BoundedProcess.RunAsync(missing, [], "Could not start the fixture.", "Fixture deadline.", default),
+            "A missing helper binary was not a control error naming its operation and binary",
+            error => error.Message.StartsWith("Could not start the fixture.", StringComparison.Ordinal) && error.Message.Contains(missing));
+    }
+
+    // P5: the tree kill runs on a cancellation callback. No failure the
+    // runtime documents for Kill(entireProcessTree) may escape it.
+    private static void KillFailureNeverEscapes()
+    {
+        using var self = Process.GetCurrentProcess();
+        foreach (Exception failure in new Exception[] { new System.ComponentModel.Win32Exception(5), new InvalidOperationException(),
+            new AggregateException(new System.ComponentModel.Win32Exception(5)), new NotSupportedException() })
+        {
+            bool killed = true, escaped = false;
+            try { killed = BoundedProcess.KillTree(self, _ => throw failure); } catch (Exception) { escaped = true; }
+            Check(!escaped && !killed, $"A {failure.GetType().Name} escaped the process tree kill");
+        }
+        Check(BoundedProcess.KillTree(self, _ => { }), "A successful tree kill was reported as a failure");
     }
 
     // Fixture: a parent that starts a child of its own and never exits.

@@ -201,7 +201,7 @@ foreach (string garbage in new[] { "/dev/pika-garbage-fixture", "/dev/pika-garba
     await using (var failedMonitor = Fixture("/dev/pika-fixture", "/nonexistent-pika-agent-" + Guid.NewGuid()))
     {
         bool failed = false;
-        try { await failedMonitor.ExecuteAsync("connect", Input(owner), default); } catch (System.ComponentModel.Win32Exception) { failed = true; }
+        try { await failedMonitor.ExecuteAsync("connect", Input(owner), default); } catch (IOException error) when (error.Message.StartsWith("Could not start the Pika serial agent.", StringComparison.Ordinal)) { failed = true; }
         Check(failed && failedMonitor.Snapshot()["owner"] is null && !failedMonitor.Snapshot()["configuration_blocked"]!.GetValue<bool>(), "Failed monitor setup stranded serial ownership before process start");
     }
     await using (var exitedMonitor = Fixture("/dev/pika-monitor-die-fixture"))

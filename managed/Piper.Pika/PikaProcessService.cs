@@ -317,7 +317,7 @@ public sealed class PikaProcessService : IPikaSession
             // launch, must release a read-only reservation as well.
             var info = await AgentStartInfoAsync(cancellation);
             var ready = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-            var agent = Process.Start(info) ?? throw new IOException("Could not start the Pika serial agent");
+            var agent = BoundedProcess.Start(info, "Could not start the Pika serial agent.");
             var stderr = agent.StandardError.ReadToEndAsync();
             var launched = new AgentProcess(agent, stderr);
             lock (stateGate) slot = new LaunchingSlot(requestedOwner, launched);
@@ -708,8 +708,7 @@ public sealed class PikaProcessService : IPikaSession
             try { agent.StandardInput.Close(); } catch (Exception e) when (e is IOException or InvalidOperationException) { }
             if (!await ExitedWithin(agent, ExitWait))
             {
-                try { agent.Kill(entireProcessTree: true); }
-                catch (Exception e) when (e is InvalidOperationException or System.ComponentModel.Win32Exception) { }
+                BoundedProcess.KillTree(agent);
                 await ExitedWithin(agent, ExitWait);
             }
             try { await Task.WhenAll(new[] { pump, stderr }.OfType<Task>()).WaitAsync(ExitWait); }
