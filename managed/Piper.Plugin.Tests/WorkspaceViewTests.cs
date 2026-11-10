@@ -323,14 +323,14 @@ internal static class WorkspaceViewTests
             plugin.client = new PiperControl.PiperControlClient(calls); plugin.telemetry.PublishState(state); plugin.telemetry.AdoptBackend("fixture-session");
             plugin.telemetry.Publish(new(state, "fixture-session", 1, Stopwatch.GetTimestamp(), 0));
             plugin.workspace.Commit(WorkspaceNavigation.Initial); plugin.approved = true; plugin.linkCommandsEnabled = true;
-            plugin.teachingSession.ObserveHandOver(new(binding.DeviceId, binding.Generation), approved: true); plugin.viewportDrag = new ViewportDrag(ViewportDragPhase.Following, Request: 7);
+            plugin.recovery.Teaching.ObserveHandOver(new(binding.DeviceId, binding.Generation), approved: true); plugin.viewportDrag = new ViewportDrag(ViewportDragPhase.Following, Request: 7);
             plugin.CommandAuthority.TryAcknowledge(plugin.CommandAuthority.Epoch, new("piper-1", "fixture-session", binding.DeviceId, binding.Generation), 7);
             plugin.link = binding; plugin.linkBackendToken = "fixture-session";
             long previousPermission = plugin.CommandAuthority.Epoch;
             await plugin.WorkspaceEvent("settings.robot", CancellationToken.None);
             Check(calls.Requests.Count == 1 && calls.Requests[0].Route == "/api/command" &&
                 JsonNode.Parse(calls.Requests[0].Json)?["action"]?.GetValue<string>() == "follow-end", "Leaving Controls replayed a target or failed to end its gesture");
-            Check(plugin.approved && plugin.teachingSession.Current.RestoresApproval && plugin.linkCommandsEnabled && plugin.viewportDrag.Phase == ViewportDragPhase.Off,
+            Check(plugin.approved && plugin.recovery.Teaching.Current.RestoresApproval && plugin.linkCommandsEnabled && plugin.viewportDrag.Phase == ViewportDragPhase.Off,
                 "Browsing settings revoked readiness or retained a live viewport gesture");
             Check(ReferenceEquals(plugin.link, binding) && plugin.CommandAuthority.Epoch == previousPermission,
                 "Browsing settings dropped the measured binding or revoked healthy idle approval");

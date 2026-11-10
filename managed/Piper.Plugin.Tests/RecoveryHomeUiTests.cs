@@ -70,7 +70,7 @@ internal static class RecoveryHomeUiTests
                 JsonSerializer.SerializeToElement(new { })), CancellationToken.None);
             Task? recoveryWorker = null;
             // A run that stops at the reset question may retire before this poll.
-            await Eventually(() => (recoveryWorker = plugin.recoveryOperation?.Worker) is not null || resetPending && plugin.resetCompletionPrompt is not null,
+            await Eventually(() => (recoveryWorker = plugin.recovery.Operation?.Worker) is not null || resetPending && plugin.recovery.ResetPrompt is not null,
                 () => "Recovery UI event did not start its worker: " + string.Join("; ", errors));
             recoveryWorker ??= Task.CompletedTask;
             if (cancelMove)
@@ -93,20 +93,20 @@ internal static class RecoveryHomeUiTests
                     return patches?[question]?["visible"]?.GetValue<bool>() == visible;
                 }
                 await Eventually(() => Published(true), () => "Recovery to zero never published the operator's reset question: " + plugin.message);
-                Check(calls.Actions.Count == 0 && plugin.resetCompletionPrompt is not null && plugin.recoveryOperation is null &&
+                Check(calls.Actions.Count == 0 && plugin.recovery.ResetPrompt is not null && plugin.recovery.Operation is null &&
                     patches?[question]?["visible"]?.GetValue<bool>() == true,
                     "Recovery to zero verified a pending reset instead of stopping at the operator's confirmation: " + plugin.message);
                 await plugin.HandleEventAsync(new("fixture", confirm, "click", JsonSerializer.SerializeToElement(true)), CancellationToken.None);
                 await Eventually(() => calls.Actions.Count != 0, () => "Confirming the reset question sent nothing: " + string.Join("; ", errors));
                 await Eventually(() => Published(false), () => "Confirming the reset question left it on screen: " + plugin.message);
-                Check(calls.Actions.SequenceEqual(["verify-reset"]) && calls.ResetCompletedAttestations == 1 && plugin.resetCompletionPrompt is null &&
+                Check(calls.Actions.SequenceEqual(["verify-reset"]) && calls.ResetCompletedAttestations == 1 && plugin.recovery.ResetPrompt is null &&
                     patches?[question]?["visible"]?.GetValue<bool>() == false,
                     "Confirming the reset question did not send exactly one attested verify-reset: " + string.Join("; ", errors));
                 return;
             }
             Check(calls.Actions.SequenceEqual(["enable", "move-to-zero"]),
                 "The single real UI-actor healthy/all-off recovery event cancelled itself, reset unnecessarily or failed to finish: " + plugin.message);
-            Check(errors.IsEmpty && plugin.recoveryOperation is null && plugin.approved == !cancelMove,
+            Check(errors.IsEmpty && plugin.recovery.Operation is null && plugin.approved == !cancelMove,
                 "Retired UI recovery published incorrect approval");
             if (cancelMove)
                 Check(calls.ScopedStopRequest == 12 && plugin.CommandAuthority.Current.Lease is null,

@@ -389,6 +389,33 @@ internal static class EmergencyStopTests
         }
     }
 
+    // B11: a STOP the hardware never answers uses its whole acknowledgement
+    // budget. The cleanup after it has its own budget, so it still ends the
+    // Pika teaching recording and waits for the observations to be written.
+    public static async Task RunStopCleanupBudget()
+    {
+        using var fixture = new Fixture();
+        var plugin = fixture.Plugin;
+        await plugin.Render(CancellationToken.None);
+        var teaching = plugin.recovery.PikaTeaching;
+        var identity = PikaTeachingIdentity.Create("piper-1", "can-one", 1, "/dev/pika-one",
+            RobotProfileRouting.Active(plugin.preferences).PikaDistribution, "fake-backend-session");
+        teaching.StartRecording(new PikaTeachingRecorder(identity, "free-1", null, Stopwatch.GetTimestamp(), DateTimeOffset.UtcNow), "recording");
+        fixture.Rpc.StopUnanswered = true;
+        try
+        {
+            await fixture.Event("robot.piper-1.stop", default);
+            Check(fixture.Rpc.StopCallsCancelled > 0 && plugin.message.StartsWith("STOP acknowledgement unavailable", StringComparison.Ordinal),
+                "The fixture's STOP was answered, so its acknowledgement budget was not used up: " + plugin.message);
+            await Eventually(() => plugin.StopFollowUp.IsCompleted, "The follow-up of an unanswered STOP never ended");
+            var after = teaching.Current;
+            Check(plugin.uiActionError.Length == 0, "Cleanup after a STOP that used its whole budget did not get a budget of its own: " + plugin.uiActionError);
+            Check(after is { Recorder: null, Saving: false, Unsaved: null } && File.Exists(after.Path),
+                "The STOP follow-up ended before the teaching observations were written: " + after.Status);
+        }
+        finally { if (Directory.Exists(plugin.engine.Start.SettingsDirectory)) Directory.Delete(plugin.engine.Start.SettingsDirectory, true); }
+    }
+
     // Enable waits for the request its own command acknowledged, even when
     // telemetry ends the shared lease before Enable looks at it.
     public static async Task RunEnableAcknowledgement()
@@ -486,6 +513,10 @@ internal static class EmergencyStopTests
         public ConcurrentQueue<string> Routes { get; } = new();
         public ConcurrentQueue<string> RequestBodies { get; } = new();
         public bool DelayConnect, DelayCommand, CoordinatedMissing;
+        /// <summary>A STOP call gets no reply: it ends only when its caller cancels it, as a real call does.</summary>
+        public bool StopUnanswered;
+        private int stopCallsCancelled;
+        public int StopCallsCancelled => Volatile.Read(ref stopCallsCancelled);
         public StatusCode? CoordinatedRpcFailure;
         public bool RequestTokensWereLive { get; private set; } = true;
         public TaskCompletionSource ConnectReached { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -503,6 +534,16 @@ internal static class EmergencyStopTests
             { ConnectReached.TrySetResult(); reply = ConnectReply.Task; }
             else if (command.Route == "/api/command" && DelayCommand)
             { CommandReached.TrySetResult(); reply = CommandReply.Task; }
+            else if (StopUnanswered && command.Route.StartsWith("/api/stop", StringComparison.Ordinal))
+            {
+                var unanswered = new TaskCompletionSource<ControlReply>(TaskCreationOptions.RunContinuationsAsynchronously);
+                options.CancellationToken.Register(() =>
+                {
+                    Interlocked.Increment(ref stopCallsCancelled);
+                    unanswered.TrySetException(new RpcException(new Status(StatusCode.Cancelled, "Call canceled by the client.")));
+                });
+                reply = unanswered.Task;
+            }
             else if (command.Route == "/api/stop/coordinated" && CoordinatedRpcFailure is StatusCode failure)
                 reply = Task.FromException<ControlReply>(new RpcException(new Status(failure, "Synthetic legacy unsupported route")));
             else reply = Task.FromResult(command.Route == "/api/stop/coordinated"

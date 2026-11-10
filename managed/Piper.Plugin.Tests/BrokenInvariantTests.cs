@@ -72,24 +72,24 @@ internal static class BrokenInvariantTests
             var scope = new RobotCommandScope("piper-1", Backend, "can-one", 1);
             using var ownerCancellation = new CancellationTokenSource();
             using var strayCancellation = new CancellationTokenSource();
-            var slotOwner = new PipersPlugin.RecoveryOperation(PipersPlugin.RecoveryKind.HoldHere, scope, plugin.CommandAuthority.Epoch, ownerCancellation);
-            var stray = new PipersPlugin.RecoveryOperation(PipersPlugin.RecoveryKind.ReturnToZero, scope, plugin.CommandAuthority.Epoch, strayCancellation);
-            plugin.recoveryOperation = slotOwner;
+            var slotOwner = new RecoveryOperation(RecoveryKind.HoldHere, scope, plugin.CommandAuthority.Epoch, ownerCancellation);
+            var stray = new RecoveryOperation(RecoveryKind.ReturnToZero, scope, plugin.CommandAuthority.Epoch, strayCancellation);
+            plugin.recovery.TryAdmit(slotOwner);
             plugin.approved = true;
             long epoch = plugin.CommandAuthority.Epoch;
             var ownerToken = slotOwner.Token; var strayToken = stray.Token;
             plugin.RetireRecovery(stray);
-            Check(ReferenceEquals(plugin.recoveryOperation, slotOwner), "Retiring a stray recovery freed the slot of the recovery that owns it");
+            Check(ReferenceEquals(plugin.recovery.Operation, slotOwner), "Retiring a stray recovery freed the slot of the recovery that owns it");
             Check(ownerToken.IsCancellationRequested && strayToken.IsCancellationRequested && !plugin.approved && plugin.CommandAuthority.Epoch > epoch,
                 "A recovery bookkeeping mismatch left a recovery running or motion permission standing");
             Check(plugin.uiActionError.Contains("Recovery state was inconsistent", StringComparison.Ordinal), "A recovery bookkeeping mismatch was not reported to the operator");
-            plugin.recoveryOperation = null; plugin.uiActionError = "";
+            plugin.recovery.TryRetire(plugin.recovery.Operation!); plugin.uiActionError = "";
             // The ordinary path still clears the slot quietly.
             using var ordinaryCancellation = new CancellationTokenSource();
-            var ordinary = new PipersPlugin.RecoveryOperation(PipersPlugin.RecoveryKind.HoldHere, scope, plugin.CommandAuthority.Epoch, ordinaryCancellation);
-            plugin.recoveryOperation = ordinary;
+            var ordinary = new RecoveryOperation(RecoveryKind.HoldHere, scope, plugin.CommandAuthority.Epoch, ordinaryCancellation);
+            plugin.recovery.TryAdmit(ordinary);
             plugin.RetireRecovery(ordinary);
-            Check(plugin.recoveryOperation is null && plugin.uiActionError.Length == 0, "An ordinary recovery retirement reported a fault or kept the slot");
+            Check(plugin.recovery.Operation is null && plugin.uiActionError.Length == 0, "An ordinary recovery retirement reported a fault or kept the slot");
 
             string resume = await Refusal(() => plugin.ResumeControls(CancellationToken.None));
             Check(resume.Contains("primary robot action", StringComparison.Ordinal) && rpc.Routes.IsEmpty && plugin.workspace.PrimaryAction.Current.Phase == PrimaryActionPhase.Idle,

@@ -38,7 +38,7 @@ internal static partial class SimulationFollowingTests
                 ["return_reason"] = "Hold the arm still until all six motor encoders confirm stationary feedback for 0.4 seconds.",
                 ["seamless_supported"] = true, ["return_requires_zero"] = false, ["return_strategy"] = "measured-pose" };
             device["motion"] = Snapshot["motion"]!.DeepClone();
-            plugin.approved = false; plugin.teaching = TeachingState.Inspect(device.AsObject());
+            plugin.approved = false; plugin.recovery.ObserveTeaching(TeachingState.Inspect(device.AsObject()));
             Rpc.Accepted = (route, body) =>
             {
                 if (route != "/api/command" || body["action"]?.GetValue<string>() != "teach-return") return;

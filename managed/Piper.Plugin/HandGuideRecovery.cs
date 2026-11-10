@@ -144,18 +144,9 @@ internal abstract record RecoveryGuide(string Scope, string Message, JsonObject?
 
 public sealed partial class PipersPlugin
 {
-    internal RecoveryGuide? recoveryGuide;
-    private RecoveryGuide? CurrentGuide => Volatile.Read(ref recoveryGuide);
+    private RecoveryGuide? CurrentGuide => recovery.Guide;
 
-    /// <summary>Applies <paramref name="change"/> to the open guide; a closed guide stays closed,
-    /// so a late worker update cannot reopen what Cancel or STOP retired.</summary>
-    private void UpdateRecoveryGuide(Func<RecoveryGuide, RecoveryGuide> change)
-    {
-        while (CurrentGuide is { } current)
-            if (ReferenceEquals(Interlocked.CompareExchange(ref recoveryGuide, change(current), current), current)) return;
-    }
-
-    private void SetRecoveryGuideMessage(string text) => UpdateRecoveryGuide(guide => guide with { Message = text });
+    private void SetRecoveryGuideMessage(string text) => recovery.ShowGuideMessage(text);
 
     private string RecoveryConnectionIdentity(JsonObject device) => token + ":" + ActiveProfile.Id + ":" +
         device["id"]?.GetValue<string>() + ":" + device["generation"]?.GetValue<long>();
@@ -186,8 +177,7 @@ public sealed partial class PipersPlugin
         if (verifyOnly && !VerifiesOnly(view)) throw new InvalidOperationException("Use the recovery card on Controls for this step. " + view.NextStep);
         if (!verifyOnly)
         {
-            string scope = RecoveryConnectionIdentity(device);
-            if (CurrentGuide?.Scope != scope) Volatile.Write(ref recoveryGuide, new RecoveryGuide.Open(scope));
+            recovery.OpenGuide(RecoveryConnectionIdentity(device));
         }
         string? progress = null;
         try
@@ -218,7 +208,7 @@ public sealed partial class PipersPlugin
                         : new JsonObject { ["button_off"] = true, ["same_pose_confirmed"] = true };
                     await Command(view.Action!, flags, cancellation, teaching ? CommandPurpose.TeachingReturn : CommandPurpose.Recovery);
                     progress = "Restoring holding control at the measured pose. No homing, replay or power change.";
-                    UpdateRecoveryGuide(guide => guide.Sent(progress));
+                    recovery.MarkCommandSent(progress);
                     break;
                 case RecoveryWorkspaceAction.VerifyReset:
                     // B1: ask; ConfirmResetCompletion sends verify-reset only on Confirm.
@@ -240,16 +230,13 @@ public sealed partial class PipersPlugin
     private void BeginHandGuideRecovery(JsonObject device)
     {
         const string instructions = "Single-click the physical arm button for a solid green light. Move the arm clear of the obstacle, then single-click again and hold still. Controls return at that pose; no homing or replay.";
-        Volatile.Write(ref recoveryGuide, new RecoveryGuide.Armed(RecoveryConnectionIdentity(device),
-            new(RecoveryIdentity(device), device["teaching"]?["recovery_teach_cycle_complete"]?.GetValue<bool>() == true), instructions));
+        recovery.ArmGuide(RecoveryConnectionIdentity(device),
+            new(RecoveryIdentity(device), device["teaching"]?["recovery_teach_cycle_complete"]?.GetValue<bool>() == true), instructions);
         message = instructions;
     }
 
-    private void CancelHandGuideRecovery()
-    {
-        CurrentRecovery?.Cancel();
-        Volatile.Write(ref recoveryGuide, null);
-    }
+    /// <summary>Plugin-3's one reset. STOP calls it: it takes no lock.</summary>
+    private void CancelHandGuideRecovery() => recovery.Cancel();
 
     internal async Task ObserveHandGuideRecovery(CancellationToken cancellation)
     {
@@ -263,7 +250,7 @@ public sealed partial class PipersPlugin
             if (device["recovery_required"]?.GetValue<bool>() != true && TeachingCanResume(device))
             {
                 RememberControlApproval(expectedPermission, activate: true);
-                teachingSession.Release();
+                recovery.Teaching.Release();
                 CancelHandGuideRecovery();
                 message = "Ready · holding the hand-guided pose · interrupted movement discarded";
             }
@@ -276,15 +263,13 @@ public sealed partial class PipersPlugin
         {
             // Reset retires the old obstruction evidence, but the same arm's
             // visible guide must remain available for range/holding checks.
-            UpdateRecoveryGuide(current => current.HandGuideGate is null ? current : current.Disarmed(
-                "The previous recovery record changed. Use the current step shown above; no earlier target or hand-guiding proof will be reused."));
+            recovery.DisarmGuide("The previous recovery record changed. Use the current step shown above; no earlier target or hand-guiding proof will be reused.");
             return;
         }
         if (guide is not RecoveryGuide.Armed) return; // The one return was already claimed; never retried.
         var mode = TeachingState.Inspect(device);
         var observed = gate.Observe(RecoveryIdentity(device), mode);
-        if (observed != gate)
-            UpdateRecoveryGuide(current => current is RecoveryGuide.Armed armed && armed.Gate == gate ? armed with { Gate = observed } : current);
+        if (observed != gate) recovery.ObserveGate(gate, observed);
         if (mode.HandGuiding) SetRecoveryGuideMessage("Hand guiding active. Move to a clear pose, then single-click the arm button to turn the green light off.");
         else if (observed.SawGuiding) SetRecoveryGuideMessage(device["teaching"]?["recover_at_pose_reason"]?.GetValue<string>() is { Length: > 0 } why
             ? why : "Hold still while the controller checks the hand-guided pose.");
@@ -296,11 +281,10 @@ public sealed partial class PipersPlugin
                 !armed.Gate.Qualifies(RecoveryIdentity(device), TeachingState.Inspect(device), device["teaching"]?["can_recover_at_pose"]?.GetValue<bool>() == true))
                 return;
             // Claim the single return before sending, so a failure is never retried.
-            var claimed = new RecoveryGuide.Attempted(armed.Scope, armed.Gate, armed.Message, armed.SupportedStop);
-            if (!ReferenceEquals(Interlocked.CompareExchange(ref recoveryGuide, claimed, armed), armed)) return;
+            if (!recovery.TryClaimReturn(armed)) return;
             await Command("recover-at-pose", new() { ["button_off"] = true, ["same_pose_confirmed"] = true }, cancellation,
                 CommandPurpose.Recovery, expectedPermissionEpoch: expectedPermission);
-            UpdateRecoveryGuide(current => current is RecoveryGuide.Attempted ? current.Sent("Restoring holding control at the measured pose · no power change, homing or replay") : current);
+            recovery.MarkClaimedReturnSent("Restoring holding control at the measured pose · no power change, homing or replay");
         }
         catch (InvalidOperationException error) { SetRecoveryGuideMessage(error.Message); }
         finally { commands.Release(); }
@@ -312,8 +296,8 @@ public sealed partial class PipersPlugin
         var scope = operation.Scope;
         const string starting = "Supported recovery starting. Keep the arm supported; Cancel or Disable interrupts this sequence.";
         var stopped = initial["stop_event"] is JsonObject recorded ? (JsonObject)recorded.DeepClone() : new JsonObject { ["reason"] = initial["stop_reason"]?.DeepClone() };
-        UpdateRecoveryGuide(guide => guide with { SupportedStop = stopped, Message = starting });
-        operation.Worker = Task.Run(async () =>
+        recovery.RecordSupportedStop(stopped, starting);
+        operation.Attach(Task.Run(async () =>
         {
             bool entered = false;
             bool completedHolding = false;
@@ -350,7 +334,7 @@ public sealed partial class PipersPlugin
                     // Only reset's bounded missing-feedback interval is expected.
                     // Every command below still calls Device() and rejects stale
                     // evidence; only the runner's wait can consume a gap marker.
-                    Volatile.Write(ref operation.ResetAt, action == "reset" ? Stopwatch.GetTimestamp() : 0);
+                    operation.BeginStep(action == "reset" ? Stopwatch.GetTimestamp() : 0);
                     // The runner never sends verify-reset; Command would refuse it without the operator's answer.
                     var result = await Command(action, null, ct, action == "disable" ? CommandPurpose.Control : CommandPurpose.Recovery,
                         scope, operation.Epoch);
@@ -368,7 +352,7 @@ public sealed partial class PipersPlugin
                     {
                         CompleteRecoveryHolding(operation);
                         completedHolding = true;
-                        Volatile.Write(ref recoveryGuide, null);
+                        recovery.CloseGuide();
                     }
                     message = finalStatus;
                 }
@@ -388,6 +372,6 @@ public sealed partial class PipersPlugin
                 if (outcome == SupportedRecoveryOutcome.ResetConfirmationRequired)
                     RequestResetCompletion(scope, operation.Epoch);
             }
-        }, CancellationToken.None);
+        }, CancellationToken.None));
     }
 }

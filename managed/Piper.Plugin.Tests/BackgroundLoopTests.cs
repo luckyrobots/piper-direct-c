@@ -57,7 +57,7 @@ internal static class BackgroundLoopTests
             plugin.RequestResetCompletion(scope, edge);
             for (int tick = 0; tick < 5; tick++) await plugin.ArmHeartbeatTick(CancellationToken.None);
             Check(authority.Epoch == edge, "Stale feedback advanced the permission epoch on every watchdog tick");
-            Check(plugin.resetCompletionPrompt is { } prompt && prompt.Epoch == authority.Epoch,
+            Check(plugin.recovery.ResetPrompt is { } prompt && prompt.Epoch == authority.Epoch,
                 "A reset question raised during a feedback gap went inert on the next watchdog tick");
             // Anything granted while feedback is still stale is withdrawn on the next tick.
             plugin.approved = true;

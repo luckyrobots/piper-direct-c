@@ -236,7 +236,7 @@ public sealed partial class PipersPlugin
         patches["recovery.requirements"] = new() { ["text"] = recoveryView.Requirements, ["visible"] = recoveryView.Requirements.Length > 0, ["hint"] = recoveryView.Requirements };
         patches["recovery.feedback"] = new() { ["text"] = guideMessage, ["visible"] = guideMessage.Length > 0, ["hint"] = guideMessage };
         patches["recovery.card.run"] = new() { ["text"] = recoveryView.ActionText, ["enabled"] = RecoveryCardCanRun(recoveryView), ["hint"] = recoveryView.NextStep };
-        patches["teaching"] = new() { ["visible"] = !controllerStopped && teaching.BlocksTargets || PikaTeachingControlsVisible };
+        patches["teaching"] = new() { ["visible"] = !controllerStopped && recovery.ObservedTeaching.BlocksTargets || PikaTeachingControlsVisible };
         patches["teleoperate.toggle"]!["text"] = teleoperating ? "Finish dragging" : "Drag joints";
         patches["profiles.inventory"] = new() { ["text"] = pikaInventoryMessage };
         patches["recovery.guide.cancel"] = new() { ["visible"] = currentRecoveryGuide || CurrentRecovery is not null };

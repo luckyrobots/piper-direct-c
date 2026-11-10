@@ -69,11 +69,11 @@ internal static class RecoveryWorkspaceTests
         var plugin = new PipersPlugin();
         string folder = Path.Combine(Path.GetTempPath(), "piper-recovery-ui-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(folder);
-        PipersPlugin.RecoveryOperation SimulatedRecovery(PipersPlugin.RecoveryKind kind)
+        RecoveryOperation SimulatedRecovery(RecoveryKind kind)
         {
-            var operation = new PipersPlugin.RecoveryOperation(kind, new("piper-2", "recovery-ui-fixture", "can-b", 7),
+            var operation = new RecoveryOperation(kind, new("piper-2", "recovery-ui-fixture", "can-b", 7),
                 plugin.CommandAuthority.Epoch, new());
-            plugin.recoveryOperation = operation;
+            plugin.recovery.TryAdmit(operation);
             return operation;
         }
         var calls = new Calls();
@@ -89,49 +89,49 @@ internal static class RecoveryWorkspaceTests
         try
         {
             Fresh(); await Click("enable");
-            Check(calls.Actions.Count == 0 && plugin.recoveryGuide is not null, "Generic Recover click removed torque instead of opening its supported guide");
+            Check(calls.Actions.Count == 0 && plugin.recovery.Guide is not null, "Generic Recover click removed torque instead of opening its supported guide");
             Fresh(); await Click("recovery.run");
             Check(calls.Actions.Count == 0, "Diagnostics' Verify controller state ran a power-changing supported STOP recovery");
-            using (SimulatedRecovery(PipersPlugin.RecoveryKind.ReturnToZero))
+            using (SimulatedRecovery(RecoveryKind.ReturnToZero))
             {
                 Fresh(); await Click("disable");
                 Check(calls.Actions.SequenceEqual(["disable"]), "A visible Disable action was blocked by the STOP teaching presentation or sent a reset/target");
-                plugin.recoveryOperation = null;
+                plugin.recovery.TryRetire(plugin.recovery.Operation!);
             }
             calls.Actions.Clear();
             device["status"]!["arm_status"] = 0; device["status"]!["control"] = 2; device["status"]!["teach_state"] = 2;
             device["teaching"]!["phase"] = "ended"; device["teaching"]!["can_recover_at_pose"] = true;
             device["teaching"]!["recovery_teach_cycle_complete"] = true;
             device["joints"]![1]!["actual_deg"] = .5; device["joints"]![2]!["actual_deg"] = -.5;
-            using (SimulatedRecovery(PipersPlugin.RecoveryKind.ReturnToZero))
+            using (SimulatedRecovery(RecoveryKind.ReturnToZero))
             {
                 Fresh(); await Click("recovery.card.run");
                 Check(calls.Actions.Count == 0, "A queued recovery click ran while its card was disabled by another recovery action");
-                plugin.recoveryOperation = null;
+                plugin.recovery.TryRetire(plugin.recovery.Operation!);
             }
             Fresh(); await Click("recovery.card.run");
-            Check(calls.Actions.SequenceEqual(["recover-at-pose"]) && plugin.recoveryGuide is RecoveryGuide.CommandSent,
+            Check(calls.Actions.SequenceEqual(["recover-at-pose"]) && plugin.recovery.Guide is RecoveryGuide.CommandSent,
                 "A qualified green/off cycle did not admit the explicit same-pose return");
-            calls.Actions.Clear(); plugin.recoveryGuide = new RecoveryGuide.Open(plugin.recoveryGuide!.Scope);
+            calls.Actions.Clear(); { string guideScope = plugin.recovery.Guide!.Scope; plugin.recovery.CloseGuide(); plugin.recovery.OpenGuide(guideScope); }
             device["status"]!["arm_status"] = 0; device["teaching"]!["phase"] = "off";
             device["status"]!["control"] = 1; device["status"]!["teach_state"] = 0;
             foreach (var joint in device["joints"]!.AsArray()) joint!["enabled"] = false;
             device["recovery_required"] = false; device["blocker"] = ""; device.Remove("stop_event");
             Fresh();
             await plugin.ObserveHandGuideRecovery(CancellationToken.None);
-            Check(plugin.recoveryGuide is RecoveryGuide.Open && calls.Actions.Count == 0,
+            Check(plugin.recovery.Guide is RecoveryGuide.Open && calls.Actions.Count == 0,
                 "Reset's retired stop record closed the visible range/holding guide or reused old teaching proof");
-            using var reset = SimulatedRecovery(PipersPlugin.RecoveryKind.HoldHere);
-            reset.ResetAt = Stopwatch.GetTimestamp();
+            using var reset = SimulatedRecovery(RecoveryKind.HoldHere);
+            reset.BeginStep(Stopwatch.GetTimestamp());
             device["fresh"] = false; device["joints"]![0]!["fresh"] = false; Fresh();
             bool Gap() => plugin.RecoveryExpectedGap(plugin.telemetry.Latest);
             Check(Gap(), "A bounded same-device reset feedback gap invalidated supported recovery");
             device["generation"] = 8L; Fresh(); Check(!Gap(), "Another CAN generation inherited a reset-gap exception"); device["generation"] = 7L;
             device["present"] = false; Fresh(); Check(!Gap(), "A disconnected adapter inherited a reset-gap exception"); device["present"] = true;
             device["joints"]![0]!["fault"] = 1; Fresh(); Check(!Gap(), "Reset-gap handling masked a known motor-driver fault"); device["joints"]![0]!["fault"] = 0;
-            reset.ResetAt = 0; Fresh(); Check(!Gap(), "Stale feedback outside reset was treated as an expected gap");
-            reset.ResetAt = Stopwatch.GetTimestamp() - Stopwatch.Frequency * 6; Fresh(); Check(!Gap(), "The reset-gap exception outlived its five-second bound");
-            reset.ResetAt = Stopwatch.GetTimestamp();
+            reset.BeginStep(0); Fresh(); Check(!Gap(), "Stale feedback outside reset was treated as an expected gap");
+            reset.BeginStep(Stopwatch.GetTimestamp() - Stopwatch.Frequency * 6); Fresh(); Check(!Gap(), "The reset-gap exception outlived its five-second bound");
+            reset.BeginStep(Stopwatch.GetTimestamp());
             plugin.telemetry.Publish(new(snapshot, "recovery-ui-fixture", 1, Stopwatch.GetTimestamp() - Stopwatch.Frequency * 2, 0));
             Check(!Gap(), "An old telemetry envelope was accepted as a fresh reset gap");
             Fresh(); plugin.CommandAuthority.Revoke(revokeLocalApproval: () => plugin.approved = false);
@@ -140,28 +140,28 @@ internal static class RecoveryWorkspaceTests
             try { plugin.GrantRecoveryHolding(reset, CancellationToken.None); }
             catch (InvalidOperationException) { retiredGrant = true; }
             Check(retiredGrant && !plugin.approved && calls.Actions.Count == 0, "A recovery continuation granted holding permission after STOP");
-            plugin.recoveryOperation = null;
+            plugin.recovery.TryRetire(plugin.recovery.Operation!);
             device["fresh"] = true; device["joints"]![0]!["fresh"] = true;
             device["reset_pending"] = true; device["recovery_required"] = true;
             // B1: verify-reset stops at the operator's reset question.
             Fresh(); await Click("recovery.run");
-            Check(calls.Actions.Count == 0 && plugin.resetCompletionPrompt is not null,
+            Check(calls.Actions.Count == 0 && plugin.recovery.ResetPrompt is not null,
                 "Verify controller state sent verify-reset before the operator confirmed the reset completed");
             Fresh(); await Click("recovery.reset.cancel");
-            Check(calls.Actions.Count == 0 && plugin.resetCompletionPrompt is null, "Cancelling the reset question sent a command or kept it open");
+            Check(calls.Actions.Count == 0 && plugin.recovery.ResetPrompt is null, "Cancelling the reset question sent a command or kept it open");
             Fresh(); await Click("recovery.reset.confirm");
             Check(calls.Actions.Count == 0, "A reset confirmation without an open question sent verify-reset");
             Fresh(); await Click("recovery.card.run");
-            Check(calls.Actions.Count == 0 && plugin.resetCompletionPrompt is not null,
+            Check(calls.Actions.Count == 0 && plugin.recovery.ResetPrompt is not null,
                 "The Controls recovery card sent verify-reset before the operator confirmed the reset completed");
             Fresh(); plugin.CommandAuthority.Revoke(revokeLocalApproval: () => plugin.approved = false);
             Fresh(); await Click("recovery.reset.confirm");
-            Check(calls.Actions.Count == 0 && plugin.resetCompletionPrompt is null, "STOP left an earlier reset question able to verify a reset");
+            Check(calls.Actions.Count == 0 && plugin.recovery.ResetPrompt is null, "STOP left an earlier reset question able to verify a reset");
             Fresh(); await Click("recovery.run");
             Fresh(); await Click("recovery.reset.confirm");
             Fresh(); await Click("recovery.reset.confirm");
             Check(calls.Actions.SequenceEqual(["verify-reset"]) && calls.Bodies[^1]["reset_completed"]?.GetValue<bool>() == true &&
-                plugin.resetCompletionPrompt is null, "Confirming the reset question did not send exactly one attested verify-reset");
+                plugin.recovery.ResetPrompt is null, "Confirming the reset question did not send exactly one attested verify-reset");
             bool refused = false;
             try { await plugin.Command("verify-reset", null, CancellationToken.None, CommandPurpose.Recovery); }
             catch (InvalidOperationException) { refused = true; }
@@ -170,10 +170,10 @@ internal static class RecoveryWorkspaceTests
             // it before the operator answers, the attestation is not sent.
             calls.Actions.Clear(); calls.Bodies.Clear();
             Fresh(); await Click("recovery.run");
-            Check(calls.Actions.Count == 0 && plugin.resetCompletionPrompt is not null, "The reset question was not raised again for a still-pending reset");
+            Check(calls.Actions.Count == 0 && plugin.recovery.ResetPrompt is not null, "The reset question was not raised again for a still-pending reset");
             device["reset_pending"] = false;
             Fresh(); await Click("recovery.reset.confirm");
-            Check(calls.Actions.Count == 0 && plugin.resetCompletionPrompt is null,
+            Check(calls.Actions.Count == 0 && plugin.recovery.ResetPrompt is null,
                 "A reset confirmation attested a latch that the controller no longer reports as a pending reset");
             calls.Actions.Clear(); calls.Bodies.Clear(); device["reset_pending"] = false; device["recovery_required"] = false;
             device["blocker"] = "Another controller is sending commands on this CAN bus.";

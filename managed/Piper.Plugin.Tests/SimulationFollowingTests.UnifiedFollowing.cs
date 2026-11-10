@@ -18,10 +18,10 @@ internal static partial class SimulationFollowingTests
             f.ConfigureGroup(); f.SelectGroupFollowers("piper-2"); f.UseUiDispatcher();
             var plugin = f.Plugin;
             var authority = plugin.CommandAuthority;
-            PipersPlugin.RecoveryOperation? recovery = null;
+            RecoveryOperation? recovery = null;
             if (supportedRecovery)
             {
-                recovery = plugin.BeginRecovery(PipersPlugin.RecoveryKind.HoldHere, f.Snapshot["devices"]![0]!.AsObject(), authority.Epoch, CancellationToken.None);
+                recovery = plugin.BeginRecovery(RecoveryKind.HoldHere, f.Snapshot["devices"]![0]!.AsObject(), authority.Epoch, CancellationToken.None);
             }
             else authority.TryAcknowledge(authority.Epoch, new("piper-1", f.Plugin.telemetry.BackendToken, "can-a", 7), 77);
             try

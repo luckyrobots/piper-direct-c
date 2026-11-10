@@ -143,7 +143,7 @@ public sealed partial class PipersPlugin
     {
         RequireCalibrationIdle();
         approved = linkCommandsEnabled = false;
-        teachingSession.WithdrawApproval();
+        recovery.Teaching.WithdrawApproval();
         PauseSceneFollowing();
         if (link is { } current) await engine.RequestAsync("robot.teleoperate", new JsonObject { ["sceneId"] = current.SceneId, ["entityId"] = current.EntityId, ["enabled"] = false }, cancellation);
     }

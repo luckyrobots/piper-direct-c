@@ -97,7 +97,7 @@ public sealed partial class PipersPlugin
         CommandAuthority.Revoke(forgetApproval, () =>
         {
             approved = linkCommandsEnabled = false;
-            teachingSession.Release();
+            recovery.Teaching.Release();
         }, forgetAllApprovals);
         CurrentRecovery?.Cancel();
         CancelGroupSimulationFollowingInput(reason);
@@ -159,12 +159,12 @@ public sealed partial class PipersPlugin
             // Observe the transition on the reader even if the editor is busy,
             // so a short teaching interval cannot leave an old drag armed.
             var linkedScope = new TeachingScope(linked.DeviceId, linked.Generation);
-            if (teachingSession.Current is not { Owned: true } owned || owned.Scope != linkedScope)
+            if (recovery.Teaching.Current is not { Owned: true } owned || owned.Scope != linkedScope)
             {
                 telemetry.Disconnect();
                 CommandAuthority.Revoke(revokeLocalApproval: () =>
                 {
-                    teachingSession.ObserveHandOver(linkedScope, approved);
+                    recovery.Teaching.ObserveHandOver(linkedScope, approved);
                     approved = linkCommandsEnabled = false;
                 });
             }
@@ -266,9 +266,9 @@ public sealed partial class PipersPlugin
 
     // Everything a stale-feedback disarm withdraws. While none of it stands, a
     // repeated disarm would change nothing except the permission epoch.
-    private bool MotionGrantStanding() => approved || linkCommandsEnabled || teleoperating || teachingSession.Current.Owned ||
+    private bool MotionGrantStanding() => approved || linkCommandsEnabled || teleoperating || recovery.Teaching.Current.Owned ||
         CommandAuthority.Current is { Lease: not null } or { Confirmation: not null } ||
-        CurrentRecovery is { } recovery && !recovery.Token.IsCancellationRequested;
+        CurrentRecovery is { } running && !running.Token.IsCancellationRequested;
 
     internal async Task ArmHeartbeats(CancellationToken cancellation)
     {
