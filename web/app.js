@@ -1,4 +1,4 @@
-'use strict';
+import { createApi, reply } from './api.mjs';
 
 const $ = id => document.getElementById(id);
 
@@ -15,6 +15,10 @@ const owner = crypto.randomUUID();
 let server = { token: '', host: false };
 
 function identify(next) { server = { token: next.token || '', host: typeof next.backend === 'string' }; return server; }
+
+// Every request this page sends goes through the generated client (web/api.mjs).
+
+const api = createApi({ token: () => server.token, fetcher: (route, init) => fetch(route, init) });
 
 let state, device, selectedJoint = 1, lastPoll = 0, selectedId = '';
 
@@ -156,19 +160,17 @@ const attestations = Object.freeze({
 
 });
 
-function values() { return { speed_percent: Number($('speed').value), tolerance_deg: Number($('tolerance').value) }; }
+// The selected arm as this page last saw it, and this page as the requester.
 
-async function post(route, body = {}) {
+function arm() { return { device_id: device?.id, generation: device?.generation, owner }; }
+
+// Sends one arm control and answers its result; a refusal is thrown.
+
+async function send(operation, fields) {
 
   if (!state) throw Error('The controller server is unavailable.');
 
-  const response = await fetch(route, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Piper-Token': server.token }, body: JSON.stringify({ device_id: device?.id, generation: device?.generation, owner, ...body }), signal: AbortSignal.timeout(1500) });
-
-  const result = await response.json();
-
-  if (!response.ok) throw Error(result.error || 'Request failed.');
-
-  return result;
+  return reply(await operation(fields, { timeout: 1500 }));
 
 }
 
@@ -212,11 +214,11 @@ function release(request_id, device_id) {
 
   if (!server.token) return;
 
-  fetch('/api/stop', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Piper-Token': server.token }, body: JSON.stringify({ request_id, owner, device_id }), keepalive: true }).catch(() => {});
+  api.stop({ request_id, owner, device_id }, { keepalive: true }).catch(() => {});
 
 }
 
-async function perform(route, body = {}) {
+async function perform(operation, fields = arm()) {
 
   if (lease.phase === 'pending' || lease.phase === 'stopping') return;
 
@@ -224,7 +226,7 @@ async function perform(route, body = {}) {
 
   try {
 
-    const result = await post(route, body);
+    const result = await send(operation, fields);
 
     if (lease === attempt) setLease(result.request_id || attempt.request_id ? 'leased' : 'none', result.request_id || attempt.request_id);
 
@@ -254,7 +256,7 @@ async function perform(route, body = {}) {
 
 async function sendStop(identity) {
 
-  const response = await fetch(identity.host ? '/api/stop/coordinated' : '/api/stop', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Piper-Token': identity.token }, body: JSON.stringify({ owner }), keepalive: true, signal: AbortSignal.timeout(identity.host ? 5000 : 1500) });
+  const response = await (identity.host ? api.coordinatedStop : api.stop)({ owner }, { token: identity.token, keepalive: true, timeout: identity.host ? 5000 : 1500 });
 
   return { status: response.status, ok: response.ok, result: await response.json().catch(() => ({})) };
 
@@ -262,7 +264,7 @@ async function sendStop(identity) {
 
 async function readIdentity() {
 
-  const response = await fetch('/api/state', { signal: AbortSignal.timeout(1000), cache: 'no-store' });
+  const response = await api.state({}, { timeout: 1000 });
 
   if (!response.ok) throw Error('The controller server did not answer.');
 
@@ -298,11 +300,11 @@ async function stopAll() {
 
     // once against the server's current identity (it may have restarted).
 
-    let reply = server.token ? await sendStop(server).catch(() => null) : null;
+    let stopped = server.token ? await sendStop(server).catch(() => null) : null;
 
-    if (!reply || reply.status === 403 || reply.status === 404) reply = await sendStop(await readIdentity());
+    if (!stopped || stopped.status === 403 || stopped.status === 404) stopped = await sendStop(await readIdentity());
 
-    $('message').textContent = stopOutcome(reply);
+    $('message').textContent = stopOutcome(stopped);
 
   } catch (error) { showError(`STOP was not confirmed: ${error.message} Use the physical stop if motion continues.`); }
 
@@ -316,7 +318,7 @@ async function command(action, fields = {}) {
 
   if (!await (statement ? ask(statement) : approveMotion())) return;
 
-  return perform('/api/command', { ...values(), ...(statement ? statement.flags : motionFlags), action, ...fields });
+  return perform(api.command, { ...arm(), speed_percent: Number($('speed').value), tolerance_deg: Number($('tolerance').value), ...(statement ? statement.flags : motionFlags), action, ...fields });
 
 }
 
@@ -610,9 +612,9 @@ for (const id of Object.keys(settingRanges)) $(id).addEventListener('input', () 
 
 $('speed').addEventListener('input', render);
 
-$('device').onchange = () => perform('/api/select', { device_id: $('device').value });
+$('device').onchange = () => perform(api.select, { device_id: $('device').value, owner });
 
-$('query').onclick = () => perform('/api/query'); $('reconnect').onclick = () => perform('/api/reconnect');
+$('query').onclick = () => perform(api.query); $('reconnect').onclick = () => perform(api.reconnect);
 
 $('stop').onclick = stopAll;
 
@@ -701,7 +703,7 @@ setInterval(async () => {
 
   const beating = lease;
 
-  try { await post('/api/heartbeat', { request_id: beating.request_id }); } catch (error) {
+  try { await send(api.heartbeat, { ...arm(), request_id: beating.request_id }); } catch (error) {
 
     if (lease.request_id === beating.request_id && lease.phase !== 'stopping') setLease('none');
 
@@ -719,7 +721,7 @@ async function poll() {
 
   try {
 
-    const response = await fetch('/api/state', { signal: AbortSignal.timeout(1000), cache: 'no-store' });
+    const response = await api.state({}, { timeout: 1000 });
 
     if (!response.ok) throw Error('State request failed.');
 

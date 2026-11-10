@@ -4,7 +4,19 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import vm from 'node:vm';
 import { randomUUID } from 'node:crypto';
-const source = await readFile(new URL('../web/app.js', import.meta.url), 'utf8');
+// app.js is a module; the vm runs it as a script, so its one import (the generated API
+
+// client) is handed to it as a value instead.
+
+const generatedClient = await import('../web/api.mjs');
+
+const module = await readFile(new URL('../web/app.js', import.meta.url), 'utf8');
+
+const source = module.replace(/^import \{([^}]+)\} from '\.\/api\.mjs';$/m, (_, names) => `'use strict'; const {${names}} = generatedClient;`);
+
+assert.notEqual(source, module, 'app.js must import the generated API client');
+
+assert.doesNotMatch(source, /^import /m, 'app.js imports only the generated API client');
 const html = await readFile(new URL('../web/index.html', import.meta.url), 'utf8');
 assert.doesNotMatch(html, /type="checkbox"/, 'Dashboard must not retain confirmation checkboxes');
 assert.doesNotMatch(html, /id="recover"/, 'The always-hidden recover button is gone');
@@ -47,7 +59,7 @@ function boot(served = serverState()) {
   page.app = vm.createContext({
     window: { addEventListener: (name, fn) => listen(`window:${name}`, fn), dispatchEvent: event => page.dispatched.push(event) },
     document: { getElementById: page.byId, createElement: () => fake(), addEventListener: (name, fn) => listen(`document:${name}`, fn), querySelector: () => fake(), querySelectorAll: () => [], hidden: false, hasFocus: () => true, activeElement: null },
-    crypto: { randomUUID }, performance, AbortSignal, JSON, Number, Math, Object, Set, Error, Promise, Date,
+    generatedClient, crypto: { randomUUID }, performance, AbortSignal, JSON, Number, Math, Object, Set, Error, Promise, Date,
     CustomEvent: class { constructor(type, init) { this.type = type; this.detail = init?.detail; } },
     Event: class { constructor(type) { this.type = type; } },
     Option: class {},
