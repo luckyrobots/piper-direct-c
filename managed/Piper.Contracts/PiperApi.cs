@@ -24,6 +24,20 @@ public readonly record struct ApiOptional<T>(bool Present, T Value)
     public static implicit operator ApiOptional<T>(T value) => new(true, value);
 }
 
+/// <summary>A request field that is one number or a list of numbers, e.g. the degrees of one
+/// joint or of all six.</summary>
+public readonly struct ApiNumbers
+{
+    private readonly double one;
+    private readonly double[]? list;
+    private ApiNumbers(double one, double[]? list) { this.one = one; this.list = list; }
+
+    public static implicit operator ApiNumbers(double value) => new(value, null);
+    public static implicit operator ApiNumbers(double[] values) => new(0, values);
+
+    public JsonNode ToNode() => list is null ? JsonValue.Create(one) : new JsonArray([.. list.Select(value => (JsonNode)JsonValue.Create(value))]);
+}
+
 /// <summary>A request built by <see cref="PiperApi.Requests"/>: the route and its JSON body.</summary>
 public readonly record struct ApiRequest(ApiRoute Route, JsonObject Body)
 {
