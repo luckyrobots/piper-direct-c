@@ -152,7 +152,8 @@ internal sealed class PikaSession(TimeSpan backoff)
     public void Report(string text) => Apply(seen => seen with { Outcome = new(seen.Observation, text) });
 
     /// <summary>Runs <paramref name="body"/> on the thread pool unless stopped,
-    /// already connecting or still inside the backoff after the previous attempt.</summary>
+    /// already connecting or still inside the backoff. The backoff is measured from the
+    /// end of the previous attempt, however long that attempt took.</summary>
     public bool TryStart(CancellationToken lifetime, Func<CancellationToken, Task> body)
     {
         PikaMonitorAttempt? candidate = null;
@@ -163,18 +164,29 @@ internal sealed class PikaSession(TimeSpan backoff)
             if (seen.Stopped || seen.Connecting || seen.BackingOff(now, backoff)) { candidate?.Abandon(); return false; }
             candidate ??= new(lifetime);
             if (!Swap(seen, seen with { Attempt = candidate, AttemptAt = now })) continue;
-            candidate.Start(body);
+            var attempt = candidate;
+            candidate.Start(async cancellation =>
+            {
+                try { await body(cancellation).ConfigureAwait(false); }
+                finally { RestartBackoff(attempt); }
+            });
             return true;
         }
     }
 
-    /// <summary>Cancels a running attempt and waits for it; the backoff restarts now.</summary>
+    /// <summary>Measures the backoff from now, while <paramref name="attempt"/> is still
+    /// the latest. An attempt calls this before its worker completes, so no reader
+    /// sees it ended with the pause it started under already spent.</summary>
+    private void RestartBackoff(PikaMonitorAttempt attempt)
+    {
+        long now = Stopwatch.GetTimestamp();
+        Apply(seen => ReferenceEquals(seen.Attempt, attempt) ? seen with { AttemptAt = now } : seen);
+    }
+
+    /// <summary>Cancels a running attempt and waits for it; the backoff restarts as it ends.</summary>
     public async Task CancelAsync()
     {
-        if (Current.Attempt is not { Running: true } running) return;
-        long now = Stopwatch.GetTimestamp();
-        Apply(seen => ReferenceEquals(seen.Attempt, running) ? seen with { AttemptAt = now } : seen);
-        await running.CancelAsync();
+        if (Current.Attempt is { Running: true } running) await running.CancelAsync();
     }
 
     /// <summary>Refuses every later attempt; a running one continues until cancelled.</summary>

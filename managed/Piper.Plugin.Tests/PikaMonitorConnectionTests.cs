@@ -103,9 +103,12 @@ internal static class PikaMonitorConnectionTests
         Check(session.TryStart(lifetime.Token, _ => release.Task) && session.Phase == PikaSessionPhase.Connecting, "A started attempt was not Connecting");
         Check(session.Observe() == beforeConnect, "Starting an attempt invalidated a role observation");
         Check(!session.TryStart(lifetime.Token, _ => Task.CompletedTask), "A second attempt started while one was connecting");
+        long startedAt = session.Current.AttemptAt;
         release.SetResult();
         await session.Attempt!.Worker.WaitAsync(TimeSpan.FromSeconds(5));
         Check(session.Phase == PikaSessionPhase.Backoff, "A finished attempt with no role did not back off");
+        // A connect can outlast the backoff, so the pause is measured from the attempt's end.
+        Check(session.Current.AttemptAt > startedAt, "The backoff was measured from the attempt's start, not its end");
         Check(session.TryAdvance(beforeConnect, PikaSessionRole.Monitoring) && session.Phase == PikaSessionPhase.Monitoring,
             "The monitor's own connect did not reach Monitoring");
         session.ExpireBackoff();
