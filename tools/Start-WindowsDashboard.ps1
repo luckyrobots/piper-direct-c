@@ -8,7 +8,7 @@ $ErrorActionPreference='Stop'
 . (Join-Path $PSScriptRoot 'WindowsDashboardDefaults.ps1')
 $taskRoot=Split-Path $PSScriptRoot -Parent
 $taskHost=Join-Path $taskRoot 'build/publish-windows/Piper.Host.exe'
-$taskUsb=Join-Path $env:ProgramFiles 'usbipd-win/usbipd.exe'
+$taskUsb=Get-PiperUsbipdPath
 $taskStateDir=Join-Path $taskRoot 'data-windows-managed'
 if (!(Test-Path $taskHost) -or !(Test-Path $taskUsb)) { throw 'Build the Windows host and install usbipd-win first. See managed/README.md.' }
 $taskDefaults=Get-PiperDashboardDefaults $taskStateDir
