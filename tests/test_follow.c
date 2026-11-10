@@ -73,6 +73,9 @@ static void scenarios(void)
 
     char second[FIXTURE_DIRECTORY]; fixture_directory(second,sizeof second,"piper-follow-expiry"); setup(&c,second);
     send_command(&c,command(&c,"follow-update",1,8),202);
+    /* Feedback is as fresh as the update, so the expiry below is the only
+       thing that has aged however long this process was descheduled. */
+    controller_tick(&c,LANE(&c)->follow_updated);
     double expired=LANE(&c)->follow_updated+.251;
     controller_tick(&c,expired);
     CHECK(LANE(&c)->op==OP_IDLE&&LANE(&c)->follow!=FOLLOW_LIVE&&c.bus.sim_enabled==63);

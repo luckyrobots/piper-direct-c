@@ -20,6 +20,28 @@ internal static class TestKit
         if (!condition) throw new CheckFailedException(message);
     }
 
+    /// <summary>How long <see cref="Eventually"/> waits. It bounds a hung test and is
+    /// never a timing assertion, so it is far longer than any loaded runner needs.</summary>
+    public static readonly TimeSpan LivenessLimit = TimeSpan.FromSeconds(30);
+
+    /// <summary>Waits for work on another thread to make <paramref name="condition"/> true.
+    /// <paramref name="failure"/> is evaluated only on failure, so it can report the state it found.</summary>
+    public static Task Eventually(Func<bool> condition, Func<string> failure) =>
+        Eventually(() => Task.FromResult(condition()), failure);
+
+    /// <summary>As above, for a condition that has to drive the code under test on each attempt.</summary>
+    public static async Task Eventually(Func<Task<bool>> condition, Func<string> failure)
+    {
+        long began = System.Diagnostics.Stopwatch.GetTimestamp();
+        while (!await condition())
+        {
+            if (System.Diagnostics.Stopwatch.GetElapsedTime(began) > LivenessLimit) throw new TimeoutException(failure());
+            await Task.Delay(5);
+        }
+    }
+
+    public static Task Eventually(Func<bool> condition, string failure) => Eventually(condition, () => failure);
+
     /// <summary>Checks that <paramref name="action"/> is refused with an <see cref="InvalidOperationException"/>.</summary>
     public static void Reject(Action action, string message) => Reject<InvalidOperationException>(action, message);
 

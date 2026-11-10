@@ -12,12 +12,7 @@ internal static partial class SimulationFollowingTests
 {
     public static async Task RunGroupFollow()
     {
-        static async Task WaitFor(Func<bool> condition, string description)
-        {
-            long began = Stopwatch.GetTimestamp();
-            while (!condition())
-            { if (Stopwatch.GetElapsedTime(began).TotalSeconds > 3) throw new InvalidOperationException(description); await Task.Delay(10); }
-        }
+        static Task WaitFor(Func<bool> condition, string description) => Eventually(condition, description);
         foreach (var (profile, name, transport) in new[] { ("piper-1", "First", SimulationTrajectoryTransport.StreamedPosition),
             ("piper-2", "Second", SimulationTrajectoryTransport.StreamedPosition), ("piper-2", "Second", "unknown-wire-mode") })
         {
@@ -25,10 +20,12 @@ internal static partial class SimulationFollowingTests
             unsupported.SetProfileTransport(profile, transport);
             // A backend capability advertisement cannot qualify a transport
             // that this coordinator deliberately does not support.
-            unsupported.Snapshot["streamed_position_transport_supported"] = true;
-            unsupported.Snapshot["streamed_position_wire_validation_supported"] = true;
-            foreach (var device in unsupported.Snapshot["devices"]!.AsArray()) device!["streamed_position_supported"] = true;
-            unsupported.Refresh();
+            unsupported.Edit(snapshot =>
+            {
+                snapshot["streamed_position_transport_supported"] = true;
+                snapshot["streamed_position_wire_validation_supported"] = true;
+                foreach (var device in snapshot["devices"]!.AsArray()) device!["streamed_position_supported"] = true;
+            });
             Check(unsupported.Preparation().Issues.Any(i => i.ProfileId == profile && i.Code == "transport") &&
                 unsupported.SidebarStatus().Contains(name + ": Select position-velocity"),
                 "A selected robot's saved unsupported transport was silently ignored");
@@ -116,7 +113,7 @@ internal static partial class SimulationFollowingTests
             ("scene-binding", f => f.Plugin.scene!["robots"]![0]!["joints"]!.AsArray().RemoveAt(8)),
         })
         {
-            await using var invalid = new Fixture(); invalid.ConfigureGroup(); change(invalid); invalid.Refresh();
+            await using var invalid = new Fixture(); invalid.ConfigureGroup(); invalid.Edit(_ => change(invalid));
             var report = invalid.Preparation();
             Check(!report.Ready && report.Issues.Any(i => i.ProfileId == "piper-2" && i.RobotName == "Second" && i.Code == code),
                 "Group preparation hid a nonselected robot's named " + code + " blocker");
@@ -125,9 +122,11 @@ internal static partial class SimulationFollowingTests
         {
             blocked.ConfigureGroup(); blocked.UseUiDispatcher();
             var arm = blocked.Snapshot["devices"]![0]!;
-            arm["status"]!["control"] = 2; arm["status"]!["teach_state"] = 2;
-            blocked.Snapshot["pikas"]![0]!["enabled"] = false;
-            blocked.Refresh();
+            blocked.Edit(snapshot =>
+            {
+                arm["status"]!["control"] = 2; arm["status"]!["teach_state"] = 2;
+                snapshot["pikas"]![0]!["enabled"] = false;
+            });
             Check(blocked.SidebarStatus().Contains("First: Use Resume controls") && blocked.SidebarStatus().Contains("Pika gripper"),
                 "The sidebar claimed the selected group was ready while its first arm and Pika were not");
             await blocked.Click("group.follow.toggle");
@@ -135,7 +134,7 @@ internal static partial class SimulationFollowingTests
             Check(!blocked.GroupActive && blocked.SidebarStatus().Contains("Follow not armed") && blocked.SidebarStatus().Contains("First: Use Resume controls") &&
                 blocked.SidebarStatus().Contains("Pika gripper") && blocked.Rpc.Requests.IsEmpty && !blocked.EngineRequests.Any(r => r.Action == "arm-next-play"),
                 "A public Follow click hid setup failure, armed an unready group or emitted a hardware command");
-            arm["status"]!["control"] = 1; arm["status"]!["teach_state"] = 0; blocked.Snapshot["pikas"]![0]!["enabled"] = true; blocked.Refresh();
+            blocked.Edit(snapshot => { arm["status"]!["control"] = 1; arm["status"]!["teach_state"] = 0; snapshot["pikas"]![0]!["enabled"] = true; });
             Check(blocked.SidebarStatus().Contains("Follow not armed"), "Telemetry erased the retained setup error before an explicit retry");
             await blocked.Click("group.follow.toggle");
             await WaitFor(() => blocked.GroupPhase == GroupFollowPhase.Armed || blocked.EngineRequests.Any(r => r.Action == "arm-next-play"), "The ready retry never reached the engine arm latch");
@@ -146,8 +145,11 @@ internal static partial class SimulationFollowingTests
         {
             stopped.ConfigureGroup(); stopped.UseUiDispatcher();
             stopped.SetGroupSceneEvidence(null);
-            stopped.Snapshot["devices"]![1]!["status"]!["arm_status"] = 1;
-            stopped.Snapshot["devices"]![1]!["recovery_required"] = true; stopped.Refresh();
+            stopped.Edit(snapshot =>
+            {
+                snapshot["devices"]![1]!["status"]!["arm_status"] = 1;
+                snapshot["devices"]![1]!["recovery_required"] = true;
+            });
             await stopped.Click("group.follow.toggle");
             await WaitFor(() => stopped.GroupSetupFailure().Length > 0, "The stopped partner's public Follow event did not finish");
             Check(stopped.SidebarStatus().Contains("Second: Open recovery") && stopped.Rpc.Requests.IsEmpty &&
@@ -158,9 +160,11 @@ internal static partial class SimulationFollowingTests
         await using (var idle = new Fixture())
         {
             idle.ConfigureGroup();
-            idle.Snapshot["devices"]![0]!["status"]!["stationary_s"] = 0d;
-            idle.Snapshot["devices"]![0]!["teaching"] = new JsonObject { ["can_return"] = false };
-            idle.Refresh();
+            idle.Edit(snapshot =>
+            {
+                snapshot["devices"]![0]!["status"]!["stationary_s"] = 0d;
+                snapshot["devices"]![0]!["teaching"] = new JsonObject { ["can_return"] = false };
+            });
             Check(idle.Preparation().Ready && idle.SidebarFollowEnabled(), "Transient encoder stillness disabled the explicit global Follow action");
         }
         await using (var armed = new Fixture())
@@ -188,11 +192,7 @@ internal static partial class SimulationFollowingTests
             f.EngineRequests.Count(r => r.Action == "arm-next-play") == 1 && !f.EngineRequests.Any(r => r.Action == "prepare-start"),
             "The global arm button entered Play or moved hardware before the user pressed Play");
         f.RequestGroupPlay();
-        async Task Until(Func<bool> test, string why)
-        {
-            long began = Stopwatch.GetTimestamp();
-            while (!test()) { if (Stopwatch.GetElapsedTime(began).TotalSeconds > 8) throw new InvalidOperationException(why + " / " + f.Plugin.groupFollowStatus); await Task.Delay(10); }
-        }
+        Task Until(Func<bool> test, string why) => Eventually(test, () => why + " / " + f.Plugin.groupFollowStatus);
         await Until(() => f.GroupPhase == GroupFollowPhase.Following || !f.GroupActive, "The grouped preparation never activated");
         Check(f.GroupActive && f.Mode == "play", "The group did not activate one shared user-requested Play run: " + f.Plugin.groupFollowStatus);
         Check(f.Rpc.Requests.Where(r => r.Body["action"]?.GetValue<string>() == "follow-start").Select(r => r.Body["device_id"]!.GetValue<string>()).Order().SequenceEqual(new[] { "can-a", "can-b" }),
@@ -213,7 +213,7 @@ internal static partial class SimulationFollowingTests
             r.Body["afterFrameCursor"]?.GetValue<string>() == f.LostReplyCursor) >= 2 &&
             f.Rpc.Requests.Count(r => r.Body["action"]?.GetValue<string>() == "follow-start") == 2,
             "A150ms grouped read retry skipped its retained cursor, restarted admissions or retired healthy lanes");
-        f.Snapshot["devices"]![1]!["status"]!["pose_stationary_s"] = 0d; f.TerminalFrame = true; f.Refresh();
+        f.TerminalFrame = true; f.Edit(snapshot => snapshot["devices"]![1]!["status"]!["pose_stationary_s"] = 0d);
         await Task.Delay(250);
         Check(!f.EngineRequests.Any(r => r.Action == "ack-episode"), "The shared episode advanced while the second physical arm was not settled");
         await f.Click("profiles.select.piper-2");
@@ -225,11 +225,11 @@ internal static partial class SimulationFollowingTests
         Check(f.Plugin.preferences.ActiveRobotId == "piper-2" && f.GroupActive &&
             f.EngineRequests.Count(r => r.Action == "arm-next-play") == 1 && f.Rpc.Requests.Count(r => r.Body["action"]?.GetValue<string>() == "follow-start") == 2,
             "The public profile-selection event changed group ownership or restarted either physical follower");
-        f.Snapshot["devices"]![1]!["status"]!["pose_stationary_s"] = 10d; f.Refresh();
+        f.Edit(snapshot => snapshot["devices"]![1]!["status"]!["pose_stationary_s"] = 10d);
         await Until(() => f.EngineRequests.Any(r => r.Action == "ack-episode"), "All-lane arrival never released its shared episode");
         Check(f.EngineRequests.Count(r => r.Action == "ack-episode") == 1, "The same whole episode was acknowledged separately per arm");
         f.Rpc.HoldFailure = true;
-        f.Snapshot["devices"]![1]!["generation"] = 9L; f.Refresh();
+        f.Edit(snapshot => snapshot["devices"]![1]!["generation"] = 9L);
         await Until(() => !f.GroupActive, "A replacement CAN generation did not retire all group workers");
         Check(f.Mode == "pause" && f.Rpc.Requests.Any(r => r.Body["action"]?.GetValue<string>() == "hold" && r.Body["device_id"]?.GetValue<string>() == "can-a") &&
             f.Rpc.Requests.Where(r => r.Route == "/api/pika/hold").Select(r => r.Body["pika_device"]!.GetValue<string>()).Distinct().Count() == 2,
@@ -240,19 +240,16 @@ internal static partial class SimulationFollowingTests
         var expiryClock = new FollowTestClock();
         await using var expired = new Fixture(followClock: expiryClock); expired.ConfigureGroup();
         await expired.GroupEvent("toggle"); expired.RequestGroupPlay();
-        long started = Stopwatch.GetTimestamp();
-        while (expired.GroupPhase != GroupFollowPhase.Following)
-        { if (!expired.GroupActive || Stopwatch.GetElapsedTime(started).TotalSeconds > 5) throw new InvalidOperationException("Group expiry fixture did not activate"); await Task.Delay(10); }
+        await Eventually(() => expired.GroupPhase == GroupFollowPhase.Following || !expired.GroupActive, "Group expiry fixture did not activate");
+        Check(expired.GroupActive, "Group expiry fixture retired before it activated: " + expired.Plugin.groupFollowStatus);
         expired.LoseNextOrderedReply = true;
-        await expired.OrderedReplyLost.Task.WaitAsync(TimeSpan.FromSeconds(3));
+        await expired.OrderedReplyLost.Task.WaitAsync(LivenessLimit);
         expired.RuntimeReadTimeout = true;
         expiryClock.Advance(TimeSpan.FromMilliseconds(250));
         expired.Refresh();
-        started = Stopwatch.GetTimestamp();
-        while (expired.GroupActive)
-        { if (Stopwatch.GetElapsedTime(started).TotalSeconds > 3) throw new InvalidOperationException("Repeated read deadlines kept an expired grouped source alive"); await Task.Delay(10); }
+        await Eventually(() => !expired.GroupActive, "Repeated read deadlines kept an expired grouped source alive");
         Check(expired.Plugin.uiActionError.Contains("expired after 250 ms", StringComparison.Ordinal) && expired.Mode == "pause",
-            "Repeated grouped retries renewed the original source lease or hid its 250ms expiry");
+            $"Repeated grouped retries renewed the original source lease or hid its 250ms expiry: mode {expired.Mode}, error '{expired.Plugin.uiActionError}'");
         Check(expired.Rpc.Requests.Where(r => r.Body["action"]?.GetValue<string>() == "hold").Select(r => r.Body["device_id"]!.GetValue<string>()).Distinct().Count() == 2 &&
             expired.Rpc.Requests.Count(r => r.Route == "/api/pika/hold") == 2,
             "Grouped source expiry did not independently hold all original arm and gripper lanes");
