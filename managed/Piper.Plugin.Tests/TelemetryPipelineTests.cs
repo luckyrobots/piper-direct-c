@@ -216,9 +216,10 @@ internal static class TelemetryPipelineTests
             var recoveryFinished = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             using var registration = recoveryCancellation.Token.Register(() => recoveryCancelled.TrySetResult());
             var shutdown = plugin.shutdown;
-            var recovery = new PipersPlugin.RecoveryOperation(PipersPlugin.RecoveryKind.ReturnToZero, commandScope,
-                authority.Epoch, recoveryCancellation) { Worker = recoveryFinished.Task };
-            plugin.recoveryOperation = recovery;
+            var recovery = new RecoveryOperation(RecoveryKind.ReturnToZero, commandScope,
+                authority.Epoch, recoveryCancellation);
+            recovery.Attach(recoveryFinished.Task);
+            plugin.recovery.TryAdmit(recovery);
             Task disposal = plugin.DisposeAsync().AsTask();
             try
             {

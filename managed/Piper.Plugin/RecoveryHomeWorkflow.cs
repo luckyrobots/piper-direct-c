@@ -7,8 +7,6 @@ namespace LuckyRobots.Piper.Plugin;
 
 public sealed partial class PipersPlugin
 {
-    private string recoveryHomeProgress = "";
-
     private RecoveryHomeSnapshot HomeSnapshot(RecoveryOperation? operation = null)
     {
         // The runner checks cancellation before each ordinary read and write.
@@ -50,14 +48,14 @@ public sealed partial class PipersPlugin
         // This labelled action acknowledges a securely resting arm and a clear
         // zero path. It does not infer support from joint angles or power bits.
         var operation = BeginRecovery(RecoveryKind.ReturnToZero, current.Device, permissionEpoch, cancellation);
-        recoveryHomeProgress = "Preparing recovery to zero · previous movement discarded";
+        recovery.ReportHomeProgress("Preparing recovery to zero · previous movement discarded");
         var (profile, backend, deviceId, generation) = operation.Scope;
         string runId = Guid.NewGuid().ToString("N");
         string report = Path.Combine(engine.Start.SettingsDirectory, "recovery", profile, "last-recovery-to-zero.json");
         DateTimeOffset started = DateTimeOffset.UtcNow;
         async Task SaveProgress(string stage, string? error = null)
         {
-            if (operation.Epoch == CommandAuthority.Epoch) recoveryHomeProgress = message = stage;
+            if (operation.Epoch == CommandAuthority.Epoch) { recovery.ReportHomeProgress(stage); message = stage; }
             Directory.CreateDirectory(Path.GetDirectoryName(report)!);
             string temporary = report + "." + runId + ".tmp";
             await File.WriteAllTextAsync(temporary, JsonSerializer.Serialize(new {
@@ -67,7 +65,7 @@ public sealed partial class PipersPlugin
             }, PluginProtocol.Json));
             File.Move(temporary, report, overwrite: true);
         }
-        operation.Worker = Task.Run(async () =>
+        operation.Attach(Task.Run(async () =>
         {
             bool entered = false;
             bool completed = false;
@@ -75,12 +73,12 @@ public sealed partial class PipersPlugin
             try
             {
                 await commands.WaitAsync(operation.Token); entered = true;
-                await SaveProgress(recoveryHomeProgress);
+                await SaveProgress(recovery.HomeProgress);
                 outcome = await RecoveryHome.Run(deviceId, generation, owner, () => HomeSnapshot(operation),
                     async (step, stepCancellation) =>
                     {
                         var before = HomeSnapshot(operation);
-                        Volatile.Write(ref operation.ResetAt, step == "reset" ? Stopwatch.GetTimestamp() : 0);
+                        operation.BeginStep(step == "reset" ? Stopwatch.GetTimestamp() : 0);
                         if (step is "enable" or "move-to-zero") GrantRecoveryHolding(operation, stepCancellation);
                         var reply = await Command(step, null, stepCancellation,
                             step is "reset" or "verify-current" ? CommandPurpose.Recovery : CommandPurpose.Control,
@@ -122,7 +120,7 @@ public sealed partial class PipersPlugin
                 if (outcome == RecoveryHomeOutcome.ResetConfirmationRequired) RequestResetCompletion(operation.Scope, operation.Epoch);
                 try { await Update(shutdown.Token); } catch (Exception error) { Trace.TraceWarning("Recovery view: {0}", error.Message); }
             }
-        }, CancellationToken.None);
+        }, CancellationToken.None));
         await Update(cancellation);
     }
 
@@ -133,8 +131,8 @@ public sealed partial class PipersPlugin
             ["enabled"] = blocked is null, ["hint"] = blocked ??
             "Rest the arm securely on a support and clear its path to zero. The controller verifies recovery and moves at 10%." };
         if (!RecoveryHomeBusy) return;
-        patches["recovery.next"]["text"] = recoveryHomeProgress;
-        patches["status"] = new() { ["text"] = recoveryHomeProgress };
+        patches["recovery.next"]["text"] = recovery.HomeProgress;
+        patches["status"] = new() { ["text"] = recovery.HomeProgress };
         foreach (string id in patches.Keys.Where(id => id != "recovery.home" &&
             (WorkspaceCommandPolicy.RequiresControls(id) || id is "link" or "recovery.run" or "motion.hold" ||
             id.StartsWith("profiles.", StringComparison.Ordinal) || id.StartsWith("teaching.", StringComparison.Ordinal) ||

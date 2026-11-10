@@ -61,7 +61,7 @@ public sealed partial class PipersPlugin
 
         workspace.PrimaryAction.EnterResume();
         approved = linkCommandsEnabled = false;
-        teachingSession.InvalidateReturn();
+        recovery.Teaching.InvalidateReturn();
         try
         {
             await PrimaryActionProgress("waiting-for-stillness", "Hold the arm still · reconnecting controls at this pose…", cancellation);
@@ -133,7 +133,7 @@ public sealed partial class PipersPlugin
             }
             TeachingResumeCheck.CommitApproval(() => { _ = Current(); }, () =>
             {
-                teachingSession.Release();
+                recovery.Teaching.Release();
                 RememberControlApproval(expectedPermission, activate: true);
             }, () =>
             {

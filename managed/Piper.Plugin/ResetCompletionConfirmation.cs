@@ -13,8 +13,7 @@ internal sealed record ResetCompletionPrompt(RobotCommandScope Scope, long Epoch
 public sealed partial class PipersPlugin
 {
     internal const string ResetCompletionQuestion = "Has the controller reset or power cycle completed?";
-    internal ResetCompletionPrompt? resetCompletionPrompt;
-    private ResetCompletionPrompt? PendingResetCompletion => Volatile.Read(ref resetCompletionPrompt);
+    private ResetCompletionPrompt? PendingResetCompletion => recovery.ResetPrompt;
 
     /// <summary>True while the prompt still belongs to this backend, robot and
     /// permission epoch. STOP or a connection change makes it inert and hidden.</summary>
@@ -34,7 +33,7 @@ public sealed partial class PipersPlugin
     /// <summary>Stops at the operator question instead of verifying the reset.</summary>
     internal void RequestResetCompletion(RobotCommandScope scope, long epoch)
     {
-        if (!CommandAuthority.TryInEpoch(epoch, () => Volatile.Write(ref resetCompletionPrompt, new ResetCompletionPrompt(scope, epoch))))
+        if (!CommandAuthority.TryInEpoch(epoch, () => recovery.AskResetCompletion(new(scope, epoch))))
             return; // STOP already retired the recovery that asked.
         message = "Controller reset pending · " + ResetCompletionQuestion + " Confirm or Cancel above.";
     }
@@ -43,7 +42,7 @@ public sealed partial class PipersPlugin
     /// that carries the operator's reset attestation.</summary>
     internal async Task ConfirmResetCompletion(CancellationToken cancellation)
     {
-        if (Interlocked.Exchange(ref resetCompletionPrompt, null) is not { } prompt)
+        if (recovery.TakeResetCompletion() is not { } prompt)
             throw new InvalidOperationException("No reset confirmation is pending. Use the recovery card for the current step.");
         if (!ResetCompletionCurrent(prompt))
             throw new InvalidOperationException("STOP or a connection change retired the reset confirmation. Nothing was sent; use the recovery card again.");
@@ -61,7 +60,7 @@ public sealed partial class PipersPlugin
     /// <summary>Cancel closes the question and sends nothing.</summary>
     internal void CancelResetCompletion()
     {
-        if (Interlocked.Exchange(ref resetCompletionPrompt, null) is not null)
+        if (recovery.TakeResetCompletion() is not null)
             message = "Reset confirmation cancelled. No recovery command was sent.";
     }
 }

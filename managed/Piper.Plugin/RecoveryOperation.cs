@@ -5,28 +5,9 @@ namespace LuckyRobots.Piper.Plugin;
 
 public sealed partial class PipersPlugin
 {
-    internal enum RecoveryKind { HoldHere, ReturnToZero }
-
-    internal sealed class RecoveryOperation(RecoveryKind kind, RobotCommandScope scope, long epoch, CancellationTokenSource cancellation) : IDisposable
-    {
-        public RecoveryKind Kind { get; } = kind;
-        public RobotCommandScope Scope { get; } = scope;
-        public long Epoch { get; } = epoch;
-        public CancellationToken Token { get; } = cancellation.Token;
-        public Task? Worker;
-        public long ResetAt;
-
-        public void Cancel()
-        {
-            try { cancellation.Cancel(); }
-            catch (ObjectDisposedException) { } // Retirement may have completed concurrently.
-        }
-
-        public void Dispose() => cancellation.Dispose();
-    }
-
-    internal RecoveryOperation? recoveryOperation;
-    private RecoveryOperation? CurrentRecovery => Volatile.Read(ref recoveryOperation);
+    /// <summary>Recovery state and its transitions; see <see cref="RecoveryComponent"/>.</summary>
+    internal readonly RecoveryComponent recovery = new();
+    private RecoveryOperation? CurrentRecovery => recovery.Operation;
     private bool SupportedRecoveryBusy => CurrentRecovery?.Kind == RecoveryKind.HoldHere;
     private bool RecoveryHomeBusy => CurrentRecovery?.Kind == RecoveryKind.ReturnToZero;
 
@@ -43,10 +24,18 @@ public sealed partial class PipersPlugin
         var lifetime = CancellationTokenSource.CreateLinkedTokenSource(cancellation, shutdown.Token);
         if (kind == RecoveryKind.ReturnToZero) lifetime.CancelAfter(TimeSpan.FromSeconds(90));
         var operation = new RecoveryOperation(kind, scope, epoch, lifetime);
-        if (!CommandAuthority.TryInEpoch(epoch, () => Volatile.Write(ref recoveryOperation, operation)))
+        // Admitted under the authority's gate: a STOP either came first and the
+        // slot stays free, or comes later and finds this operation to cancel.
+        bool admitted = false;
+        if (!CommandAuthority.TryInEpoch(epoch, () => admitted = recovery.TryAdmit(operation)))
         {
             operation.Dispose();
             throw new InvalidOperationException("STOP cancelled the recovery before it started.");
+        }
+        if (!admitted)
+        {
+            operation.Dispose();
+            throw new InvalidOperationException("Finish the current recovery or stop following before starting recovery.");
         }
         StopViewportDrag();
         return operation;
@@ -65,7 +54,7 @@ public sealed partial class PipersPlugin
     {
         if (CurrentRecovery is not { } operation || !RecoveryScopeCurrent(operation) || receipt is null ||
             receipt.BackendToken != operation.Scope.Backend || !receipt.IsFresh(Stopwatch.GetTimestamp())) return false;
-        long resetAt = Volatile.Read(ref operation.ResetAt);
+        long resetAt = operation.ResetAt;
         var scope = operation.Scope;
         if (resetAt == 0) return false;
         if (operation.Kind == RecoveryKind.ReturnToZero)
@@ -91,7 +80,7 @@ public sealed partial class PipersPlugin
         {
             operation.Token.ThrowIfCancellationRequested();
             RememberControlApproval(operation.Epoch, activate: true);
-            teachingSession.Release();
+            recovery.Teaching.Release();
         }))
             throw new InvalidOperationException("STOP or a connection change retired the recovery result.");
     }
@@ -105,7 +94,7 @@ public sealed partial class PipersPlugin
         // Only the operation that owns the slot may clear it. Anything else is a
         // broken invariant: it must not free the slot under a different recovery,
         // so every recovery is cancelled and motion permission is withdrawn.
-        if (!ReferenceEquals(Interlocked.CompareExchange(ref recoveryOperation, null, operation), operation))
+        if (!recovery.TryRetire(operation))
         {
             operation.Cancel();
             DisarmTelemetryTargets("Recovery bookkeeping mismatch", clearLink: false, forgetApproval: operation.Scope.ProfileId);

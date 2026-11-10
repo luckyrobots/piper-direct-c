@@ -43,8 +43,8 @@ public sealed partial class PipersPlugin
         var widgets = new List<Widget> {
             new Widget("checkbox", "group.follow.selected") { Text = "Follow simulation with this robot", Value = ActiveProfile.FollowSimulationSelected ? 1 : 0,
                 Enabled = !GroupFollowActive, Hint = "Select this robot, then use Follow simulation in the left sidebar. Checking this does not start Play or move hardware." },
-            Widget.Column("teaching", Widget.Label("teaching.label", teaching.Label) with { Height = 28 },
-                Widget.Label("teaching.next", teaching.NextStep) with { Height = 48 }, PikaTeachingControls()) with { Visible = teaching.BlocksTargets || PikaTeachingControlsVisible },
+            Widget.Column("teaching", Widget.Label("teaching.label", recovery.ObservedTeaching.Label) with { Height = 28 },
+                Widget.Label("teaching.next", recovery.ObservedTeaching.NextStep) with { Height = 48 }, PikaTeachingControls()) with { Visible = recovery.ObservedTeaching.BlocksTargets || PikaTeachingControlsVisible },
             Widget.Row("cameras", Camera("gripper", "Gripper fisheye"), Camera("depth", "Depth")) with { Spacing = 14 },
             Widget.Row("pika", Widget.Label("pika.name", "Pika") with { Width = 28 },
                 Widget.Label("pika.value", "— mm") with { Width = 64, Appearance = "numeric", Hint = "Measured jaw opening. Enabled together with this robot." },
