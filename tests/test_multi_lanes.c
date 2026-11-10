@@ -20,6 +20,8 @@ static double clock_now=100;
 static unsigned receives;
 static int injected_fault=-1;
 static int failed_stop=-1;
+static const char *watched_state;
+static unsigned watched_stops;
 static const char *owner="two-lane-native-test";
 FIXTURE_WRAP_PIPER_NOW(clock_now)
 void __real_can_bus_receive(struct can_bus *bus,double now);
@@ -32,6 +34,13 @@ bool __real_can_bus_send(struct can_bus *bus,struct can_device *device,unsigned 
 bool __wrap_can_bus_send(struct can_bus *bus,struct can_device *device,unsigned generation,const struct can_frame *frames,size_t count)
 {
     CHECK(bus->simulated);
+    if (frames[0].can_id==0x150&&watched_state) {
+        /* No arm's incident has reached the disk while a STOP frame is still to be sent. */
+        cJSON *disk=fixture_read_json(watched_state);
+        cJSON *record;
+        cJSON_ArrayForEach(record,cJSON_GetObjectItem(disk,"devices")) CHECK(!cJSON_IsTrue(cJSON_GetObjectItem(record,"stop_event_active")));
+        cJSON_Delete(disk); ++watched_stops;
+    }
     if (failed_stop>=0&&device==&bus->devices[failed_stop]&&frames[0].can_id==0x150) return false;
     bool sent=__real_can_bus_send(bus,device,generation,frames,count);
     /* The simulator's same-object piper_now calls cannot be linker-wrapped.
@@ -150,12 +159,6 @@ int main(void)
     }
     cJSON_Delete(snapshot);
     double previous_a=lane(c,0)->heartbeat,previous_b=lane(c,1)->heartbeat;
-    unsigned long long before_a=c->bus.devices[0].tx,before_b=c->bus.devices[1].tx;
-    cJSON *stale_stop=cJSON_CreateObject();cJSON_AddStringToObject(stale_stop,"owner",owner);cJSON_AddNumberToObject(stale_stop,"request_id",a);
-    cJSON_Delete(request(c,"/api/stop",stale_stop,409));
-    stale_stop=cJSON_CreateObject();cJSON_AddNumberToObject(stale_stop,"generation",c->bus.devices[0].generation);
-    cJSON_Delete(request(c,"/api/stop",stale_stop,409));
-    CHECK(c->bus.devices[0].tx==before_a&&c->bus.devices[1].tx==before_b&&lane(c,0)->request_id==a&&lane(c,1)->request_id==b&&lane(c,0)->op==OP_MOVE&&lane(c,1)->op==OP_MOVE);
     cJSON *wrong=identity(c,1);cJSON_AddNumberToObject(wrong,"request_id",a);
     cJSON_Delete(request(c,"/api/heartbeat",wrong,409));
     CHECK(lane(c,0)->heartbeat==previous_a&&lane(c,1)->heartbeat==previous_b);
@@ -223,6 +226,39 @@ int main(void)
        into a successful global result, or suppress the partner's attempt. */
     CHECK(c->bus.devices[0].tx>tx0&&c->bus.devices[1].tx>tx1);
     cJSON_Delete(snapshot);failed_stop=-1;cleanup(c,directory);
+
+    /* A STOP for every arm sends every frame before the first record is
+       saved, and saves them all before it replies. */
+    path_for(directory,sizeof directory,5);setup(c,directory);
+    command(c,0,"joint",20);command(c,1,"joint",-20);
+    snprintf(state,sizeof state,"%s/control-state.json",directory);
+    watched_state=state;watched_stops=0;
+    snapshot=request(c,"/api/stop",cJSON_CreateObject(),200);watched_state=NULL;
+    CHECK(watched_stops==2&&!strcmp(field(snapshot,"stop_scope")->valuestring,"all")&&!cJSON_IsTrue(field(snapshot,"stop_scope_degraded")));
+    cJSON_Delete(snapshot);
+    snapshot=fixture_read_json(state);
+    for (unsigned i=0;i<2;++i) CHECK(cJSON_IsTrue(field(field(field(snapshot,"devices"),c->bus.devices[i].id),"stop_event_active")));
+    cJSON_Delete(snapshot);cleanup(c,directory);
+
+    /* A cleanup STOP that names no arm cannot be scoped: both moving arms
+       stop, and the reply says the scope was widened. */
+    path_for(directory,sizeof directory,6);setup(c,directory);
+    a=command(c,0,"joint",20);command(c,1,"joint",-20);
+    tx0=c->bus.devices[0].tx;tx1=c->bus.devices[1].tx;
+    cJSON *unscoped=cJSON_CreateObject();cJSON_AddStringToObject(unscoped,"owner",owner);cJSON_AddNumberToObject(unscoped,"request_id",a);
+    snapshot=request(c,"/api/stop",unscoped,409);
+    CHECK(c->bus.devices[0].tx==tx0+1&&c->bus.devices[1].tx==tx1+1&&!controller_any_motion_active(c));
+    CHECK(cJSON_IsTrue(field(snapshot,"stop_scope_degraded"))&&!strcmp(field(snapshot,"stop_scope")->valuestring,"all")&&cJSON_GetArraySize(field(snapshot,"stops"))==2);
+    CHECK(strstr(field(snapshot,"error")->valuestring,"every known arm"));
+    cJSON_Delete(snapshot);
+    /* A scoped STOP for one arm leaves the partner's action alone. */
+    cleanup(c,directory);path_for(directory,sizeof directory,7);setup(c,directory);
+    command(c,0,"joint",20);b=command(c,1,"joint",-20);tx1=c->bus.devices[1].tx;
+    cJSON *scoped=identity(c,0);cJSON_ReplaceItemInObjectCaseSensitive(scoped,"generation",cJSON_CreateNumber(c->bus.devices[0].generation+1));
+    snapshot=request(c,"/api/stop",scoped,409);
+    CHECK(lane(c,0)->op==OP_IDLE&&lane(c,1)->op==OP_MOVE&&lane(c,1)->request_id==b&&c->bus.devices[1].tx==tx1);
+    CHECK(!strcmp(field(snapshot,"stop_scope")->valuestring,"device")&&cJSON_GetArraySize(field(snapshot,"stops"))==1);
+    cJSON_Delete(snapshot);cleanup(c,directory);
     free(c);
     puts("PASS multi-device lanes: two independent simulators and simultaneous motions; selection-independent routing; unique requests; heartbeat/generation/hold isolation; local fault isolation; one receive per tick; global STOP, persisted incidents and shutdown cover every arm.");
     return 0;

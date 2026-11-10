@@ -51,10 +51,13 @@ static double tick(struct controller *c,double now,double dt)
 int main(void)
 {
     struct controller c; char directory[]="/tmp/piper-trajectory-XXXXXX"; setup(&c,directory);
-    /* The removed streamed-position transport is still rejected before any intent or TX. */
+    /* The removed streamed-position transport is no longer a known name: it is
+       a malformed request like any other unknown transport, before any intent or TX. */
     unsigned long long tx_before=c.bus.devices[0].tx;
     cJSON *streamed=request(&c,"follow-start",true); cJSON_AddStringToObject(streamed,"trajectory_transport","streamed-position");
-    action(&c,streamed,409); CHECK(LANE(&c)->op==OP_IDLE&&c.bus.devices[0].tx==tx_before);
+    action(&c,streamed,400); CHECK(LANE(&c)->op==OP_IDLE&&c.bus.devices[0].tx==tx_before);
+    cJSON *unknown=request(&c,"follow-start",true); cJSON_AddStringToObject(unknown,"trajectory_transport","other");
+    action(&c,unknown,400); CHECK(LANE(&c)->op==OP_IDLE&&c.bus.devices[0].tx==tx_before);
     action(&c,request(&c,"follow-start",true),202); CHECK((LANE(&c)->stage==STAGE_MOVE_TRAJECTORY)&&LANE(&c)->follow==FOLLOW_LIVE);
     cJSON *update=request(&c,"follow-update",false);
     cJSON_AddNumberToObject(update,"sequence",1); double goal[6]={8,-8,8,-8,8,-8};

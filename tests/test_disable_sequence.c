@@ -190,5 +190,28 @@ int main(void)
     for(unsigned i=0;i<10;++i)tick(c,true,false);
     CHECK(lane(c,0)->op==OP_DISABLE&&!lane(c,0)->power_acknowledged[5]);
     mcu[0].freeze_low_mask=0;complete(c);CHECK(!strcmp(lane(c,0)->phase,"complete")&&!mcu[0].stops);cleanup(c,directory);
+
+    /* An operator STOP after an obstruction latches the stricter kind. Power
+       cleanup, completed or failed, keeps the first evidence but must not turn
+       the record back into a recoverable obstruction. */
+    for(unsigned failing=0;failing<2;++failing) {
+        fixture(c,directory,sizeof directory,8+failing,false);lane(c,0)->obstruction_joint=1;
+        controller_stop_obstruction(c,"Possible obstruction at J1: no measured progress for 0.5 seconds.");
+        CHECK(!strcmp(cJSON_GetObjectItemCaseSensitive(saved(c,0),"kind")->valuestring,"obstruction"));
+        cJSON *operator_stop=cJSON_CreateObject();cJSON_AddStringToObject(operator_stop,"device_id",c->bus.devices[0].id);
+        request(c,"/api/stop",operator_stop,200);
+        CHECK(!strcmp(cJSON_GetObjectItemCaseSensitive(saved(c,0),"kind")->valuestring,"stop"));
+        if(failing)mcu[0].blocked_mask=1u<<4;
+        start(c,0);
+        CHECK(!strcmp(cJSON_GetObjectItemCaseSensitive(saved(c,0),"kind")->valuestring,"stop"));
+        complete(c);CHECK(failing?strstr(lane(c,0)->message,"Disable timed out")!=NULL:!strcmp(lane(c,0)->phase,"complete"));
+        CHECK(!strcmp(cJSON_GetObjectItemCaseSensitive(saved(c,0),"kind")->valuestring,"stop"));
+        cJSON *event=cJSON_GetObjectItemCaseSensitive(saved(c,0),"stop_event");
+        CHECK(!strcmp(cJSON_GetObjectItemCaseSensitive(event,"kind")->valuestring,"obstruction")&&cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(saved(c,0),"stop_event_active")));
+        /* The on-disk record a restart would load says the same. */
+        char path[600];snprintf(path,sizeof path,"%s/control-state.json",directory);cJSON *disk=fixture_read_json(path);
+        CHECK(!strcmp(cJSON_GetObjectItemCaseSensitive(cJSON_GetObjectItemCaseSensitive(cJSON_GetObjectItemCaseSensitive(disk,"devices"),c->bus.devices[0].id),"kind")->valuestring,"stop"));
+        cJSON_Delete(disk);cleanup(c,directory);
+    }
     free(c);puts("PASS staged disable: per-driver paced OFF/ACK and bounded missing-ACK retries, fresh all-off settlement, independent lanes, timeout/TX failure/lease/generation/STOP isolation and original incident preservation; no enable/reset/mode/pose packets.");
 }
