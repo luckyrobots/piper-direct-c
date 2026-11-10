@@ -171,56 +171,48 @@ public sealed class PikaProcessService : IPikaSession
         finally { operations.Release(); }
     }
 
+    // P4: what a snapshot needs, taken under stateGate as references to values
+    // that are replaced and never changed in place. The JSON is built from it
+    // after the gate is released, so a slow or stalled reader cannot delay the
+    // pump, an ACK or a hold.
+    private readonly record struct SnapshotView(JsonObject? State, PikaSessionFields Session,
+        PikaDriverFaultEvidence[] DriverFaults, PikaFollowAudit? FollowAudit);
+
     public JsonObject Snapshot(bool includeRawEvidence = false)
     {
-        lock (stateGate)
-        {
-            double age = EvidenceAgeSeconds();
-            bool connected = slot is ReadySlot;
-            var snapshot = state?.DeepClone().AsObject() ?? new JsonObject();
-            snapshot.Remove("driver_fault_evidence_raw");
-            if (driverFaultEvidence.LastOrDefault() is { } fault)
-                snapshot["driver_fault_evidence"] = JsonSerializer.SerializeToNode(fault.Summary);
-            if (includeRawEvidence) snapshot["driver_fault_evidence_raw"] = JsonSerializer.SerializeToNode(driverFaultEvidence.ToArray());
-            if (followAudit is not null) snapshot["follow_audit"] = JsonSerializer.SerializeToNode(followAudit);
-            WriteSessionFields(snapshot, device, distribution, commandPeriodSeconds);
-            snapshot["owner"] = Owner;
-            snapshot["power_requested"] = PowerRequested;
-            snapshot["power_uncertain"] = UnresolvedOwner is not null;
-            // A retained power reservation also exists during a healthy enabled
-            // session. Maintenance must distinguish that from an unresolved
-            // request, using private ACK identity and post-request feedback.
-            snapshot["post_request_feedback_verified"] = HasPostRequestEvidence();
-            snapshot["configuration_blocked"] = ConfigurationBlocked();
-            snapshot["agent_phase"] = slot.Phase.ToString().ToLowerInvariant();
-            snapshot["connected"] = connected;
-            // A client may adopt only this privately verified dead, unpowered
-            // observer. ExecuteAsync rechecks this under the mutation lock.
-            snapshot["read_only_adoptable"] = ReadOnlyAdoptable();
-            // The agent's age is relative to its last emission. Do not leave
-            // that cached value looking current after its process has exited.
-            snapshot["age_s"] = double.IsFinite(age) ? age : null;
-            snapshot["fresh"] = connected && age < PikaProtocol.FeedbackFreshSeconds && agentState?.Fresh == true;
-            snapshot["message"] = connected ? agentState?.Message ?? "Waiting for telemetry" : error;
-            return snapshot;
-        }
+        SnapshotView view;
+        lock (stateGate) view = View();
+        return Compose(view, includeRawEvidence);
     }
 
-    /// <summary>The service-owned snapshot fields, shared with the registry's
-    /// placeholder for a device that has no session yet.</summary>
-    internal static void WriteSessionFields(JsonObject snapshot, string device, string? distribution, double commandPeriodSeconds)
+    // Caller holds stateGate.
+    private SnapshotView View()
     {
-        bool configured = !string.IsNullOrWhiteSpace(device);
-        snapshot["configured"] = configured;
-        snapshot["device"] = device;
-        snapshot["distribution"] = distribution;
-        snapshot["transport"] = configured ? PikaDistribution.Transport(distribution) : OperatingSystem.IsWindows() ? "disabled" : "browser";
-        // Transport cadence is not a measured/verified physical opening rate.
-        snapshot["follow_minimum_command_period_s"] = commandPeriodSeconds;
-        snapshot["follow_maximum_command_hz"] = 1 / commandPeriodSeconds;
-        snapshot["verified_maximum_opening_speed_mm_s"] = null;
-        snapshot["physical_replay_available"] = false;
-        snapshot["measured_hold_resume_supported"] = true;
+        double age = EvidenceAgeSeconds();
+        bool connected = slot is ReadySlot;
+        return new(state, new PikaSessionFields(device, distribution, commandPeriodSeconds)
+        {
+            Owner = Owner, PowerRequested = PowerRequested, PowerUncertain = UnresolvedOwner is not null,
+            PostRequestFeedbackVerified = HasPostRequestEvidence(), ConfigurationBlocked = ConfigurationBlocked(),
+            Phase = slot.Phase, ReadOnlyAdoptable = ReadOnlyAdoptable(),
+            // The agent's age is relative to its last emission. Do not leave
+            // that cached value looking current after its process has exited.
+            AgeSeconds = double.IsFinite(age) ? age : null,
+            Fresh = connected && age < PikaProtocol.FeedbackFreshSeconds && agentState?.Fresh == true,
+            Message = connected ? agentState?.Message ?? "Waiting for telemetry" : error
+        }, driverFaultEvidence.ToArray(), followAudit);
+    }
+
+    private static JsonObject Compose(SnapshotView view, bool includeRawEvidence)
+    {
+        var snapshot = view.State?.DeepClone().AsObject() ?? new JsonObject();
+        snapshot.Remove("driver_fault_evidence_raw");
+        if (view.DriverFaults.LastOrDefault() is { } fault)
+            snapshot["driver_fault_evidence"] = JsonSerializer.SerializeToNode(fault.Summary);
+        if (includeRawEvidence) snapshot["driver_fault_evidence_raw"] = JsonSerializer.SerializeToNode(view.DriverFaults);
+        if (view.FollowAudit is not null) snapshot["follow_audit"] = JsonSerializer.SerializeToNode(view.FollowAudit);
+        view.Session.WriteTo(snapshot);
+        return snapshot;
     }
 
     public async Task<JsonObject> ExecuteAsync(string action, JsonElement input, CancellationToken cancellation)
@@ -371,14 +363,18 @@ public sealed class PikaProcessService : IPikaSession
         // disabled feedback with no power evidence is the same verified result.
         string? disabledMessage = null;
         if (action == "hold")
+        {
+            SnapshotView? disabled = null; bool unpowered = false;
             lock (stateGate)
-                if (KnownDisabled())
-                {
-                    var current = Snapshot();
-                    disabledMessage = PikaDisabledEvidence.Confirmed(current, requestedOwner) ? "Pika already verified disabled; no motor command sent." :
-                        power is NoPower && PikaDisabledEvidence.NeverPowered(current, requestedOwner)
-                            ? "Pika was never powered by this session and reports disabled; no motor command sent." : null;
-                }
+                if (KnownDisabled()) { disabled = View(); unpowered = power is NoPower; }
+            if (disabled is { } view)
+            {
+                var current = Compose(view, includeRawEvidence: false);
+                disabledMessage = PikaDisabledEvidence.Confirmed(current, requestedOwner) ? "Pika already verified disabled; no motor command sent." :
+                    unpowered && PikaDisabledEvidence.NeverPowered(current, requestedOwner)
+                        ? "Pika was never powered by this session and reports disabled; no motor command sent." : null;
+            }
+        }
         if (disabledMessage is not null)
             return new JsonObject { ["ok"] = true, ["state"] = "disabled", ["message"] = disabledMessage };
         string id = Guid.NewGuid().ToString("N");

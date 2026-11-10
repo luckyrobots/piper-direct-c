@@ -49,31 +49,45 @@ public sealed class PikaSessionRegistry : IAsyncDisposable
         get { lock (gate) return (defaultDevice, defaultDistribution); }
     }
 
+    // P4: the registry gate guards identities only. What it knows about one
+    // identity is copied under the gate; the session is asked for its snapshot
+    // after the gate is released. A snapshot that is slow, or never returns,
+    // then delays only its own reader: routing, a heartbeat and the emergency
+    // hold of every gripper never wait behind it.
+    private readonly record struct Selected(string Device, string? Distribution, IPikaSession? Session, string[] Aliases);
+
     public JsonObject Snapshot(bool includeRawEvidence = false)
     {
-        lock (gate) return Snapshot(defaultDevice, defaultDistribution, includeRawEvidence);
+        Selected selected;
+        lock (gate) selected = Select(defaultDevice, defaultDistribution);
+        return Sample(selected, includeRawEvidence);
     }
 
     public JsonArray Snapshots()
     {
-        lock (gate) return new JsonArray(sessions.Values.Select(entry => (JsonNode)Decorate(entry, raw: false)).ToArray());
+        Selected[] all;
+        lock (gate) all = sessions.Values.Select(Select).ToArray();
+        return new JsonArray(all.Select(selected => (JsonNode)Sample(selected, raw: false)).ToArray());
     }
 
+    /// <summary>The default gripper and the inventory from one sample of each session.</summary>
     internal (JsonObject Default, JsonArray Sessions) SnapshotPair()
     {
+        Selected[] all; Selected selected;
         lock (gate)
         {
-            var selected = Find(defaultDevice, defaultDistribution);
-            JsonObject? defaultSample = null;
-            var inventory = new JsonArray();
-            foreach (var entry in sessions.Values)
-            {
-                var sample = Decorate(entry, raw: false);
-                if (ReferenceEquals(entry, selected)) defaultSample = sample.DeepClone().AsObject();
-                inventory.Add(sample);
-            }
-            return (defaultSample ?? MissingSnapshot(defaultDevice, defaultDistribution), inventory);
+            all = sessions.Values.Select(Select).ToArray();
+            selected = Select(defaultDevice, defaultDistribution);
         }
+        JsonObject? defaultSample = null;
+        var inventory = new JsonArray();
+        foreach (var item in all)
+        {
+            var sample = Sample(item, raw: false);
+            if (ReferenceEquals(item.Session, selected.Session)) defaultSample = sample.DeepClone().AsObject();
+            inventory.Add(sample);
+        }
+        return (defaultSample ?? Sample(selected, raw: false), inventory);
     }
 
     /// <summary>The gripper leg of an emergency STOP: every session, whoever owns it.</summary>
@@ -102,7 +116,9 @@ public sealed class PikaSessionRegistry : IAsyncDisposable
 
     public JsonObject Snapshot(string device, string? distribution, bool includeRawEvidence = false)
     {
-        lock (gate) return Find(device, distribution) is { } entry ? Decorate(entry, includeRawEvidence) : MissingSnapshot(device, distribution);
+        Selected selected;
+        lock (gate) selected = Select(device, distribution);
+        return Sample(selected, includeRawEvidence);
     }
 
     // Registry gate must be held. Resolves a bound alias to its canonical entry.
@@ -112,15 +128,35 @@ public sealed class PikaSessionRegistry : IAsyncDisposable
         return sessions.GetValueOrDefault(SessionKey.Of(path, distribution));
     }
 
-    private JsonObject MissingSnapshot(string device, string? distribution)
+    // Registry gate must be held.
+    private Selected Select(string device, string? distribution) =>
+        Find(device, distribution) is { } entry ? Select(entry) : new(device, distribution, null, []);
+
+    // Registry gate must be held.
+    private Selected Select(Entry entry) => new(entry.Device, entry.Distribution, entry.Session, boundAliases
+        .Where(pair => pair.Value == entry.Device && pair.Key.Distribution == entry.Key.Distribution)
+        .Select(pair => pair.Key.Device).ToArray());
+
+    // Must not be called under the registry gate: this is where a session is read.
+    private JsonObject Sample(Selected selected, bool raw)
     {
-        var snapshot = new JsonObject
+        var snapshot = selected.Session?.Snapshot(raw) ?? Unopened(selected.Device, selected.Distribution);
+        snapshot["device"] = selected.Device; snapshot["distribution"] = selected.Distribution;
+        snapshot["aliases"] = new JsonArray(selected.Aliases.Select(alias => (JsonNode)JsonValue.Create(alias)!).ToArray());
+        return snapshot;
+    }
+
+    // An identity this backend holds no session for. The session fields are the
+    // one definition at its never-opened defaults. This backend has enabled
+    // nothing and has nothing pending for it; that is not proof of a disabled
+    // motor, which always needs fresh feedback as well (PikaDisabledEvidence).
+    private JsonObject Unopened(string device, string? distribution)
+    {
+        var snapshot = new JsonObject { ["enabled"] = false, ["pending"] = false };
+        new PikaSessionFields(device, distribution, commandPeriodSeconds)
         {
-            ["connected"] = false, ["fresh"] = false, ["owner"] = null, ["enabled"] = false, ["pending"] = false,
-            ["power_requested"] = false, ["power_uncertain"] = false, ["configuration_blocked"] = false,
-            ["age_s"] = null, ["message"] = device.Length == 0 ? "No Pika assigned." : "Connect to read this gripper's telemetry."
-        };
-        PikaProcessService.WriteSessionFields(snapshot, device, distribution, commandPeriodSeconds);
+            Message = device.Length == 0 ? PikaSessionFields.Unassigned : PikaSessionFields.Unopened
+        }.WriteTo(snapshot);
         return snapshot;
     }
 
@@ -131,13 +167,14 @@ public sealed class PikaSessionRegistry : IAsyncDisposable
     {
         var result = await discovery.DiscoverAsync(distribution, cancellation);
         if (result["devices"] is not JsonArray devices) return result;
-        lock (gate)
-            foreach (var item in devices.OfType<JsonObject>())
-            {
-                var status = sessions.GetValueOrDefault(SessionKey.Of(item["device"]?.GetValue<string>() ?? "", item["distribution"]?.GetValue<string>()))?.Session.Status;
-                item["connected"] = status?.Connected == true;
-                item["owner"] = status?.Owner;
-            }
+        Dictionary<SessionKey, Entry> registered;
+        lock (gate) registered = new(sessions);
+        foreach (var item in devices.OfType<JsonObject>())
+        {
+            var status = registered.GetValueOrDefault(SessionKey.Of(item["device"]?.GetValue<string>() ?? "", item["distribution"]?.GetValue<string>()))?.Session.Status;
+            item["connected"] = status?.Connected == true;
+            item["owner"] = status?.Owner;
+        }
         return result;
     }
 
@@ -218,9 +255,8 @@ public sealed class PikaSessionRegistry : IAsyncDisposable
             bool clear = path.Length == 0;
             if (!explicitDevice)
             {
-                var current = Snapshot();
-                if (current["configuration_blocked"]?.GetValue<bool>() == true &&
-                    (clear || current["device"]?.GetValue<string>() != path || current["distribution"]?.GetValue<string>() != distribution))
+                if (Find(defaultDevice, defaultDistribution) is { } current && current.Session.Status.ConfigurationBlocked &&
+                    (clear || current.Device != path || current.Distribution != distribution))
                     throw new InvalidOperationException(clear
                         ? "Verify disabled feedback and disconnect the assigned Pika before clearing its assignment."
                         : "Verify disabled feedback and disconnect the assigned Pika before changing its serial device.");
@@ -284,16 +320,6 @@ public sealed class PikaSessionRegistry : IAsyncDisposable
         if (value.ValueKind == JsonValueKind.Null) return null;
         if (value.ValueKind != JsonValueKind.String) throw new ArgumentException(key + " must be a distribution name or null.");
         return value.GetString();
-    }
-
-    private JsonObject Decorate(Entry entry, bool raw)
-    {
-        var result = entry.Session.Snapshot(raw);
-        result["device"] = entry.Device; result["distribution"] = entry.Distribution;
-        result["aliases"] = new JsonArray(boundAliases
-            .Where(pair => pair.Value == entry.Device && pair.Key.Distribution == entry.Key.Distribution)
-            .Select(pair => (JsonNode)JsonValue.Create(pair.Key.Device)!).ToArray());
-        return result;
     }
 
     public async ValueTask DisposeAsync()
