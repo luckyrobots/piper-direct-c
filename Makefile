@@ -4,7 +4,11 @@ LDLIBS += -lm
 CFLAGS ?= -O2 -g
 CFLAGS += -std=c17 -Wall -Wextra -Wpedantic -Werror
 
-.PHONY: all test test-vcan test-record clean
+ifeq ($(OS),Windows_NT)
+LDLIBS += -lsetupapi -lcfgmgr32
+endif
+
+.PHONY: all test test-windows test-vcan test-record clean
 all: build/piper-can build/piper-control build/piper-record build/piper-trace
 
 build:
@@ -90,6 +94,25 @@ test: all $(TESTS:%=build/test-%)
 	node tests/test_control_prompt.mjs
 	node tests/test_camera_profiles.mjs
 	node tests/test_api.mjs
+
+# Windows transport fixtures, built with MinGW on Windows only. Every USB and
+# process boundary is a fake callback: nothing enumerates or opens an adapter,
+# starts a server or sends a robot command. The shared controller fixtures in
+# the list are the ones that also run on Windows.
+WINDOWS_TESTS = candle-tx-pump-windows can-windows-pump can-windows-hotplug 	idle-reconnect multi-lanes pose-entry-order disable-sequence
+CANDLE = vendor/candle/candle.c vendor/candle/candle.h vendor/candle/candle_defs.h vendor/candle/candle_ctrl_req.c vendor/candle/candle_ctrl_req.h
+
+build/test-candle-tx-pump-windows: tests/test_candle_tx_pump_windows.c $(CANDLE) tests/check.h | build
+	$(CC) -std=c17 -O2 -g -DCANDLE_API_LIBRARY -DUNICODE -D_UNICODE -Ivendor/candle tests/test_candle_tx_pump_windows.c vendor/candle/candle_ctrl_req.c -o $@ -lsetupapi -lwinusb -lole32
+
+build/test-can-windows-pump: tests/test_can_windows_pump.c src/canbus.c src/canbus_windows.inc src/protocol.c $(HEADERS) | build
+	$(CC) $(CPPFLAGS) $(CFLAGS) tests/test_can_windows_pump.c src/protocol.c -o $@ $(LDLIBS)
+
+build/test-can-windows-hotplug: tests/test_can_windows_hotplug.c src/controller.c src/canbus.c src/canbus_windows.inc src/protocol.c vendor/cJSON.c $(HEADERS) | build
+	$(CC) $(CPPFLAGS) $(CFLAGS) tests/test_can_windows_hotplug.c src/controller.c src/protocol.c vendor/cJSON.c -o $@ $(LDLIBS)
+
+test-windows: $(WINDOWS_TESTS:%=build/test-%)
+	for t in $(WINDOWS_TESTS); do ./build/test-$$t || { echo "FAILED: build/test-$$t"; exit 1; }; done
 
 clean:
 	rm -rf build
