@@ -8,7 +8,7 @@ ifeq ($(OS),Windows_NT)
 LDLIBS += -lsetupapi -lcfgmgr32
 endif
 
-.PHONY: all test test-windows test-vcan test-record clean
+.PHONY: all test test-web test-windows test-vcan test-record clean
 all: build/piper-can build/piper-control build/piper-record build/piper-trace
 
 build:
@@ -72,28 +72,29 @@ $(CONTROLLER_TESTS:%=build/test-%): build/test-%: tests/test_$$(subst -,_,$$*).c
 	$(CC) $(CPPFLAGS) $(CFLAGS) $< $(CORE) $(patsubst %,-Wl$(comma)--wrap=%,$(WRAP_$*)) -o $@ $(LDLIBS)
 
 TESTS = $(CONTROLLER_TESTS) can-lost obstruction protocol camera
+# NO_SKIPS=1 (CI) turns a skipped native check into a failure.
 test: all $(TESTS:%=build/test-%)
 	@rm -f build/test-skips.log
 	for t in $(TESTS); do ./build/test-$$t >build/test-$$t.log 2>&1; rc=$$?; cat build/test-$$t.log; \
 		grep "^SKIP" build/test-$$t.log >>build/test-skips.log; \
 		[ $$rc -eq 0 ] || { echo "FAILED: build/test-$$t"; exit 1; }; done
 	@# A skipped check still exits 0, so machines without its tool pass; say so loudly.
-	@if [ -s build/test-skips.log ]; then echo "==== SKIPPED native checks ===="; cat build/test-skips.log; echo "==============================="; fi
+	@if [ -s build/test-skips.log ]; then echo "==== SKIPPED native checks ===="; cat build/test-skips.log; echo "==============================="; \
+		[ -z "$(NO_SKIPS)" ] || { echo "FAILED: NO_SKIPS is set and native checks were skipped"; exit 1; }; fi
 	./build/piper-can --help >/dev/null
 	! ./build/piper-can --query-firmware >/dev/null 2>&1
 	! ./build/piper-can --seconds nonsense >/dev/null 2>&1
 	! ./build/piper-can --interface lo --query-firmware --seconds 1 >/dev/null 2>&1
-	node --check web/app.js
-	node --check web/bench.mjs
-	node --check web/pika.mjs
-	node --check web/pika_remote.mjs
-	node tests/test_pika_remote.mjs
-	node tests/test_pika_windows_block.mjs
-	node tests/test_pika.mjs
-	node tests/test_pika_ui.mjs
-	node tests/test_control_prompt.mjs
-	node tests/test_camera_profiles.mjs
+	$(MAKE) test-web
 	node tests/test_api.mjs
+
+# Dashboard modules and their fixtures: Node only, no server and no compiler,
+# so the same list runs on Linux and on Windows.
+WEB_MODULES = web/app.js web/bench.mjs web/pika.mjs web/pika_remote.mjs
+WEB_TESTS = pika_remote pika_windows_block pika pika_ui control_prompt camera_profiles
+test-web:
+	for m in $(WEB_MODULES); do node --check $$m || exit 1; done
+	for t in $(WEB_TESTS); do node tests/test_$$t.mjs || { echo "FAILED: tests/test_$$t.mjs"; exit 1; }; done
 
 # Windows transport fixtures, built with MinGW on Windows only. Every USB and
 # process boundary is a fake callback: nothing enumerates or opens an adapter,
