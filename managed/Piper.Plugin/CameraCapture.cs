@@ -66,23 +66,39 @@ internal static class CameraRuntime
     }
 }
 
-/// <summary>Preview acquisition via the bundled C# camera worker. Timestamps are host receipt times, not exposure triggers.</summary>
+/// <summary>Cal-G: where one capture worker is in its life.
+/// <code>
+///   NotStarted -> Running     Start, once; a second Start throws
+///   Running -> Retrying       the worker process failed or could not be launched
+///   Retrying -> Running       the next launch attempt, three seconds later
+///   any -> Stopping           DisposeAsync: the process is being killed and joined
+///   Stopping -> Disposed      the worker task has ended; Start throws from here on
+/// </code>
+/// A capture whose preview is switched off is Running without a process.</summary>
+internal enum CaptureWorkerPhase { NotStarted, Running, Retrying, Stopping, Disposed }
+
+/// <summary>Preview acquisition via the bundled C# camera worker. Timestamps are host receipt times, not exposure triggers.
+/// <code>
+///   field           written by                                       readers see
+///   phase           Start and DisposeAsync (their callers), and the  one volatile value
+///                   worker task (Retrying, back to Running), all
+///                   under phaseGate; the worker never leaves
+///                   Stopping or Disposed
+///   latestFrame     the worker task                                  one volatile reference to an
+///   publishedFrame  the worker's publisher                           immutable frame each
+/// </code></summary>
 public sealed class CameraCapture(PluginContext engine, string imageId,
     CameraPreferences settings, Action<string, string> status, string depthSerial = "",
     Action<string, int, int>? dimensions = null, Action<string, JsonObject>? profile = null, string? outputImageId = null) : IAsyncDisposable
 {
-    // Lifecycle: NotStarted -> Running -> Disposed, or NotStarted -> Disposed.
-    // Start() runs once; a second Start() or a Start() after dispose throws.
-    // Retrying after a worker failure stays inside Running.
-    private enum Phase { NotStarted, Running, Disposed }
-
+    internal CaptureWorkerPhase Phase => phase;
     public CameraFrame? LatestFrame => Volatile.Read(ref latestFrame);
     public CameraFrame? PublishedFrame => Volatile.Read(ref publishedFrame);
     private CameraFrame? latestFrame;
     private CameraFrame? publishedFrame;
     private readonly CancellationTokenSource stopping = new();
     private readonly object phaseGate = new();
-    private Phase phase;
+    private volatile CaptureWorkerPhase phase;
     private Task? worker;
     private long sequence;
 
@@ -90,11 +106,18 @@ public sealed class CameraCapture(PluginContext engine, string imageId,
     {
         lock (phaseGate)
         {
-            if (phase != Phase.NotStarted)
-                throw new InvalidOperationException(phase == Phase.Disposed ? "This camera capture was disposed." : "This camera capture is already running.");
-            phase = Phase.Running;
+            if (phase != CaptureWorkerPhase.NotStarted)
+                throw new InvalidOperationException(phase is CaptureWorkerPhase.Stopping or CaptureWorkerPhase.Disposed
+                    ? "This camera capture was disposed." : "This camera capture is already running.");
+            phase = CaptureWorkerPhase.Running;
             worker = Task.Run(() => Run(stopping.Token));
         }
+    }
+
+    /// <summary>The worker's own transitions. A capture being stopped keeps its phase.</summary>
+    private void Advance(CaptureWorkerPhase from, CaptureWorkerPhase to)
+    {
+        lock (phaseGate) if (phase == from) phase = to;
     }
 
     private async Task Run(CancellationToken cancellation)
@@ -104,6 +127,7 @@ public sealed class CameraCapture(PluginContext engine, string imageId,
         {
             try
             {
+                Advance(CaptureWorkerPhase.Retrying, CaptureWorkerPhase.Running);
                 string[] arguments = imageId == "depth"
                     ? ["d405", "--serial", depthSerial, "--view", D405View.Mode(settings)]
                     : ["color", "--device", settings.Device, "--size", settings.VideoSize,
@@ -163,6 +187,7 @@ public sealed class CameraCapture(PluginContext engine, string imageId,
             }
             catch (Exception error) when (!cancellation.IsCancellationRequested)
             {
+                Advance(CaptureWorkerPhase.Running, CaptureWorkerPhase.Retrying);
                 status(imageId, (error.Message.Length > 120 ? error.Message[..120] + "…" : error.Message) + " · retrying");
                 await Task.Delay(3000, cancellation);
             }
@@ -214,11 +239,16 @@ public sealed class CameraCapture(PluginContext engine, string imageId,
     {
         lock (phaseGate)
         {
-            if (phase == Phase.Disposed) return;
-            phase = Phase.Disposed;
+            if (phase is CaptureWorkerPhase.Stopping or CaptureWorkerPhase.Disposed) return;
+            phase = CaptureWorkerPhase.Stopping;
         }
         await stopping.CancelAsync();
-        if (worker is not null) { try { await worker; } catch (OperationCanceledException) { } }
-        stopping.Dispose();
+        try { if (worker is not null) await worker; }
+        catch (OperationCanceledException) { }
+        finally
+        {
+            lock (phaseGate) phase = CaptureWorkerPhase.Disposed;
+            stopping.Dispose();
+        }
     }
 }

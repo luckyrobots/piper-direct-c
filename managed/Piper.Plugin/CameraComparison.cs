@@ -144,7 +144,7 @@ public sealed partial class PipersPlugin
         {
             var saved = preferences.SimulationCameras?.GetValueOrDefault(id);
             bool available = SimulationCameraRouting.IsAvailable(saved, simulationCameras);
-            var size = cameraDimensions.GetValueOrDefault(id, (Width: 640, Height: 480));
+            var size = calibration.Capture.Size(id) ?? new(640, 480);
             var profile = calibration.Lens.Profile(id);
             bool metricDepth = D405View.MetricDepth(id, CameraSettings(id));
             string streamKind = metricDepth ? "depth" : "color";

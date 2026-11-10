@@ -297,4 +297,61 @@ internal static class CalibrationComponentTests
         Check(cameras.Retired && token.IsCancellationRequested && cameras.Shutdown.IsCancellationRequested && !cameras.DeviceProbe.HasPending,
             "Retiring did not cancel the token and drop the unapplied read");
     }
+
+    /// <summary>Cal-G: one worker per camera, its phases, and no start after retirement.</summary>
+    public static async Task RunCaptureWorkers()
+    {
+        var capture = new CalibrationComponent().Capture;
+        Check(capture.Phase("bench") == CaptureWorkerPhase.NotStarted && capture.LatestFrame("bench") is null && capture.PublishedFrame("bench") is null &&
+            capture.Status("bench") is null && capture.Size("bench") is null, "A camera with no worker had a phase, a frame, a status or a size");
+
+        // A preview that is switched off runs no process, so no camera is needed.
+        var off = new CameraPreferences("none", Enabled: false);
+        CameraCapture? first = null, second = null;
+        await capture.Restart("bench", () => first = new CameraCapture(null!, "bench", off, capture.Report, dimensions: capture.Sized));
+        Check(first is { Phase: CaptureWorkerPhase.Running } && capture.Phase("bench") == CaptureWorkerPhase.Running, "Restart did not start the worker it built");
+        Check(Throws(first!.Start), "A started worker started twice");
+
+        capture.Sized("bench", 640, 480);
+        var size = capture.Size("bench");
+        capture.Sized("bench", 1920, 1080);
+        Check(size is { Width: 640, Height: 480 } && capture.Size("bench") is { Width: 1920, Height: 1080 }, "A new frame size changed the size a reader held");
+        capture.Connecting("bench", "Connecting…");
+        Check(capture.Size("bench") is null && capture.Status("bench") == "Connecting…", "A reconnecting camera kept its old frame size or status");
+        capture.Report("bench", "live");
+        Check(capture.Status("bench") == "live" && capture.Status("depth") is null, "A camera's report was lost or reached another camera");
+
+        await capture.Restart("bench", () =>
+        {
+            Check(first.Phase == CaptureWorkerPhase.Disposed, "A replacement was built before the earlier worker had ended");
+            return second = new CameraCapture(null!, "bench", off, capture.Report);
+        });
+        Check(second is { Phase: CaptureWorkerPhase.Running } && Throws(first.Start), "The replacement did not run, or the replaced worker could start again");
+        await capture.Stop("bench");
+        Check(second!.Phase == CaptureWorkerPhase.Disposed && capture.Phase("bench") == CaptureWorkerPhase.NotStarted, "Stop left a worker in the slot");
+
+        // A worker whose camera runtime is missing retries; stopping it ends the wait.
+        string empty = Path.Combine(Path.GetTempPath(), "piper-capture-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(empty);
+        try
+        {
+            var engine = Fixtures.Context(new LuckyEngine.PluginSdk.PluginStart("fixture", empty, empty), (_, _) => Task.CompletedTask,
+                (_, _, _) => Task.FromResult(default(System.Text.Json.JsonElement)));
+            var failed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            await capture.Restart("gripper", () => new CameraCapture(engine, "gripper", new CameraPreferences("none"),
+                (camera, text) => { capture.Report(camera, text); failed.TrySetResult(); }));
+            await failed.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            Check(capture.Phase("gripper") == CaptureWorkerPhase.Retrying && capture.Status("gripper")!.EndsWith(" · retrying", StringComparison.Ordinal),
+                "A worker that could not launch was not retrying: " + capture.Phase("gripper") + " / " + capture.Status("gripper"));
+
+            await capture.Restart("depth", () => new CameraCapture(null!, "depth", off, capture.Report));
+            await capture.Retire().WaitAsync(TimeSpan.FromSeconds(5));
+            int built = 0;
+            await capture.Restart("bench", () => { built++; return new CameraCapture(null!, "bench", off, capture.Report); });
+            Check(built == 0 && capture.Phase("gripper") == CaptureWorkerPhase.NotStarted && capture.Phase("depth") == CaptureWorkerPhase.NotStarted &&
+                capture.Phase("bench") == CaptureWorkerPhase.NotStarted, "Retired camera workers kept a worker or started another");
+            await capture.Retire();
+        }
+        finally { Directory.Delete(empty, recursive: true); }
+    }
 }

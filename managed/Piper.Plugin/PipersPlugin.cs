@@ -1,5 +1,4 @@
 using System.Diagnostics;
-using System.Collections.Concurrent;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using Grpc.Core;
@@ -46,9 +45,6 @@ public sealed partial class PipersPlugin : ILuckyPlugin
     internal JsonObject? scene;
     private Task? worker;
     internal UiEventDispatch? uiEvents;
-    private readonly CameraPreviewSlots<CameraCapture> cameras = new();
-    private readonly ConcurrentDictionary<string, string> cameraStatus = new();
-    private readonly ConcurrentDictionary<string, (int Width, int Height)> cameraDimensions = new();
 
     public PipersPlugin(string address = ControllerEndpoint.GrpcAddress) : this(address, TimeProvider.System) { }
 
@@ -566,20 +562,18 @@ public sealed partial class PipersPlugin : ILuckyPlugin
         _ => throw new ArgumentException("Unknown camera")
     };
 
-    private Task RestartCamera(string id) => cameras.ReplaceAsync(id, () =>
+    private Task RestartCamera(string id) => calibration.Capture.Restart(id, () =>
     {
         if (id == "depth")
         {
             // Color and depth can share a serial/resolution but not intrinsics.
             // Keep cached images hidden until this new worker publishes its frame.
-            calibration.Lens.RemoveProfile(id); cameraDimensions.TryRemove(id, out _);
-            cameraStatus[id] = "Connecting D405 " + D405View.Mode(CameraSettings(id)) + " view…";
+            calibration.Lens.RemoveProfile(id);
+            calibration.Capture.Connecting(id, "Connecting D405 " + D405View.Mode(CameraSettings(id)) + " view…");
         }
-        var camera = new CameraCapture(engine, id, CameraSettings(id), (key, value) => cameraStatus[key] = value, preferences.DepthSerial,
-            (key, width, height) => cameraDimensions[key] = (width, height),
+        return new CameraCapture(engine, id, CameraSettings(id), calibration.Capture.Report, preferences.DepthSerial,
+            calibration.Capture.Sized,
             (key, profile) => { Materialize(profile); calibration.Lens.InstallProfile(key, profile); }, CameraImageId(id));
-        camera.Start();
-        return camera;
     });
 
     private bool ManualPikaControlAllowed(JsonObject? device) => approved && device?["fresh"]?.GetValue<bool>() == true &&
@@ -676,7 +670,7 @@ public sealed partial class PipersPlugin : ILuckyPlugin
         foreach (string id in new[] { "bench", "gripper", "depth" })
         {
             patches["camera." + id + ".image"] = new() { ["visible"] = CameraFrameReady(id) };
-            patches["camera." + id + ".info"] = new() { ["text"] = cameraStatus.GetValueOrDefault(id, "Waiting for a fresh frame…") };
+            patches["camera." + id + ".info"] = new() { ["text"] = calibration.Capture.Status(id) ?? "Waiting for a fresh frame…" };
         }
         patches["camera.gripper.calibration.status"] = new() { ["text"] = lens.Status };
         AddTeachingPatches(patches, device);
@@ -693,7 +687,7 @@ public sealed partial class PipersPlugin : ILuckyPlugin
 
     public async ValueTask DisposeAsync()
     {
-        var cameraRetirement = cameras.DisposeAsync().AsTask();
+        var cameraRetirement = calibration.Capture.Retire();
         passiveMeasuredTrackingStarted = false;
         await Quietly(ct => StopGroupSimulationFollowing("Plugin closed · following stopped", ct), TimeSpan.FromSeconds(8), "Group following");
         if (uiEvents is { } dispatch) await Quietly(dispatch.DisposeAsync().AsTask(), "UI actions");

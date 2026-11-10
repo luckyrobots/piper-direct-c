@@ -14,6 +14,7 @@ namespace LuckyRobots.Piper.Plugin;
 ///   Markers  Cal-C marker ownership           CalibrationMarkers
 ///   Lens     Cal-E lens calibration           LensCalibration
 ///   Cameras  Cal-F camera discovery           CameraDiscovery
+///   Capture  Cal-G camera workers             CaptureWorkers
 /// </code>
 /// <b>Relation to <see cref="RobotCommandAuthority"/>.</b> The authority stays
 /// the only owner of permission epochs. No calibration state grants motion and
@@ -32,4 +33,5 @@ internal sealed class CalibrationComponent
     public CalibrationMarkers Markers { get; } = new();
     public LensCalibration Lens { get; } = new();
     public CameraDiscovery Cameras { get; } = new();
+    public CaptureWorkers Capture { get; } = new();
 }
