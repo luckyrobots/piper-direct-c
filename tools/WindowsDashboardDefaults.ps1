@@ -18,6 +18,11 @@ function Get-PiperDashboardDefaults([Parameter(Mandatory=$true)][string]$StateDi
     }
 }
 
+# usbipd-win installs under Program Files. PIPER_USBIPD names another copy;
+# a child process cannot be given a different Program Files, so this is also
+# how the supervisor fixture supplies its stand-in.
+function Get-PiperUsbipdPath { if($env:PIPER_USBIPD){$env:PIPER_USBIPD}else{Join-Path $env:ProgramFiles 'usbipd-win/usbipd.exe'} }
+
 # One supervisor per port. The launcher holds this mutex for its whole life,
 # so the name is defined once for the launcher and for whoever waits on it.
 function Get-PiperSupervisorMutexName([Parameter(Mandatory=$true)][int]$Port) { "Local\LuckyRobotsPiperDashboard.$Port" }
