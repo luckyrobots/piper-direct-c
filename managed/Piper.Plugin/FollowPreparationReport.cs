@@ -1,9 +1,10 @@
 using System.Text.Json.Nodes;
+using LuckyRobots.Piper.Pika;
 
 namespace LuckyRobots.Piper.Plugin;
 
 public sealed record FollowControlApproval(string Backend, string Device, long Generation, string SceneRobot,
-    string JointPrefix, string PikaDevice, string Distribution);
+    string JointPrefix, string PikaDevice, string? Distribution);
 
 public sealed record FollowPreparationIssue(string ProfileId, string RobotName, string Code, string Action)
 {
@@ -50,7 +51,7 @@ public sealed record FollowPreparationReport(IReadOnlyList<FollowPreparationIssu
             else if (profiles.Any(other => other.Id != p.Id && other.CanDeviceId == p.CanDeviceId))
                 Add(p, "can-assignment", "Assign a different CAN adapter; another selected robot uses this one.");
             if (p.PikaDevice.Length == 0) Add(p, "pika-assignment", "Assign this robot's Pika gripper in Settings.");
-            else if (profiles.Any(other => other.Id != p.Id && other.PikaDevice == p.PikaDevice && other.WslDistribution == p.WslDistribution))
+            else if (profiles.Any(other => other.Id != p.Id && other.PikaDevice == p.PikaDevice && PikaDistribution.Same(other.PikaDistribution, p.PikaDistribution)))
                 Add(p, "pika-assignment", "Assign a different Pika; another selected robot uses this one.");
             if (p.RobotId.Length == 0) Add(p, "scene-binding", "Assign this robot's simulation arm in Settings.");
             else if (p.RobotId != world) Add(p, "scene-world", "Use an arm in the same simulation world as the other selected robots.");

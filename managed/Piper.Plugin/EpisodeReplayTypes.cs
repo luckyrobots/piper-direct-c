@@ -33,25 +33,5 @@ public sealed record EpisodeReplayJointTiming(double SpeedTimeScale, double Acce
 {
     public double RequiredTimeScale => Math.Max(SpeedTimeScale, AccelerationTimeScale);
 }
-public sealed record EpisodeReplayHardware(string DeviceId, long Generation, string RobotModel, string JointConvention,
-    string GripperConvention, bool FeedbackFresh, bool LimitsFresh, bool GripperFresh, bool GripperLimitsVerified,
-    IReadOnlyList<EpisodeReplayJointLimit> JointLimits, IReadOnlyList<double> JointDegrees,
-    double GripperOpeningMm, double MaximumGripperOpeningMm, double MaximumGripperSpeedMmPerSecond);
-public sealed record EpisodeReplayOptions(bool AllowTimeScaling = false, double MaximumTimeScale = 100,
-    double StartJointToleranceDegrees = .5, double StartGripperToleranceMm = 1,
-    double InitialCommandJointToleranceDegrees = .5, double InitialCommandGripperToleranceMm = 1);
-public sealed record EpisodeReplayStartDifference(string Axis, double Actual, double Required, double Tolerance, string Unit)
-{
-    public double Difference => Actual - Required;
-}
-public sealed record EpisodeReplayPlan(EpisodeReplayArtifact Artifact, string DeviceId, long Generation,
-    IReadOnlyList<EpisodeReplayTarget> Samples, double TimeScale, IReadOnlyList<EpisodeReplayStartDifference> StartDifferences,
-    IReadOnlyList<EpisodeReplayStartDifference> InitialCommandDifferences, EpisodeReplayOptions Options, IReadOnlyList<string> Notes)
-{
-    /// <summary>Position-plan checks only. An executor must independently verify live controller mode, faults and ownership.</summary>
-    public bool ReadyToStart => Artifact.HasPositionCommands && StartDifferences.Count == 0 && InitialCommandDifferences.Count == 0;
-    public bool TimingChanged => TimeScale != 1;
-    public double DurationSeconds => Samples[^1].TimeSeconds;
-}
 public sealed record EpisodeReplayTarget(double TimeSeconds, IReadOnlyList<double> JointDegrees, double GripperOpeningMm,
     ulong SyncIndex, string Source);

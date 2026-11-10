@@ -1,4 +1,5 @@
 using System.Text.Json.Nodes;
+using LuckyRobots.Piper.Pika;
 
 namespace LuckyRobots.Piper.Plugin;
 
@@ -22,7 +23,7 @@ public static class ProfilePikaRouting
     internal static bool Matches(RobotProfile profile, JsonObject? pika) => profile.PikaDevice.Length > 0 && pika is not null &&
         (pika["device"]?.GetValue<string>() == profile.PikaDevice ||
             pika["aliases"] is JsonArray aliases && aliases.OfType<JsonValue>().Any(a => a.TryGetValue<string>(out var alias) && alias == profile.PikaDevice)) &&
-        (!OperatingSystem.IsWindows() || pika["distribution"]?.GetValue<string>() == profile.PikaDistribution);
+        (!OperatingSystem.IsWindows() || PikaDistribution.Same(pika["distribution"]?.GetValue<string>(), profile.PikaDistribution));
 }
 
 public sealed partial class PipersPlugin
@@ -35,7 +36,7 @@ public sealed partial class PipersPlugin
         var selected = ProfilePikaRouting.Find(snapshot, profile);
         if (snapshot["pikas"] is JsonArray || selected is not null)
             snapshot["pika"] = selected?.DeepClone() ?? new JsonObject { ["device"] = profile.PikaDevice,
-                ["distribution"] = profile.WslDistribution, ["configured"] = false, ["connected"] = false, ["fresh"] = false };
+                ["distribution"] = profile.PikaDistribution, ["configured"] = false, ["connected"] = false, ["fresh"] = false };
     }
 
     private JsonObject[] OwnedPikaSessions(JsonObject snapshot) => (snapshot["pikas"] is JsonArray sessions
@@ -59,10 +60,11 @@ public sealed partial class PipersPlugin
 
     private void ForgetControlApproval() => CommandAuthority.ForgetApproval(ActiveProfile.Id);
 
-    private void RestoreControlApproval()
+    internal void RestoreControlApproval()
     {
         var permission = CommandAuthority.Current;
         var profile = ActiveProfile;
+        var role = ObservePikaRole();
         if (switchingProfile || calibrationOpen || CurrentRecovery is not null || !HasFreshControlTelemetry(out var receipt) ||
             !permission.Approvals.TryGetValue(profile.Id, out var saved)) return;
         var d = Device(sourceReceipt: receipt);
@@ -72,19 +74,19 @@ public sealed partial class PipersPlugin
         // A previously approved operator can use the physical button to recover
         // from an obstruction directly. Actual movement remains blocked until
         // the native controller verifies the new same-pose handoff.
-        if (d["recovery_required"]?.GetValue<bool>() == true && teaching.HandGuiding && handGuideRecovery is null)
+        if (d["recovery_required"]?.GetValue<bool>() == true && teaching.HandGuiding && CurrentGuide?.HandGuideGate is null)
             BeginHandGuideRecovery(d);
         if (d["recovery_required"]?.GetValue<bool>() == true || d["reset_pending"]?.GetValue<bool>() == true || teaching.BlocksTargets ||
             !RobotPowerState.Inspect(d).AllEnabled || !string.IsNullOrEmpty(d["blocker"]?.GetValue<string>())) return;
         var pika = receipt.State["pika"] as JsonObject;
-        bool monitoring = PikaMatchesProfile(profile, pika) && pika?["owner"]?.GetValue<string>() == owner;
+        bool monitoring = ProfilePikaRouting.Matches(profile, pika) && pika?["owner"]?.GetValue<string>() == owner;
         bool owns = monitoring && pika?["armed"]?.GetValue<bool>() == true;
         CommandAuthority.TryRestoreApproval(permission.Epoch, profile.Id, saved, () =>
         {
             approved = true;
             linkCommandsEnabled = link is not null;
-            pikaOwned = owns;
-            pikaMonitoring = monitoring;
+            // A release since the observation above wins over this restore.
+            TryAdvancePikaRole(role, owns ? PikaSessionRole.Owned : monitoring ? PikaSessionRole.Monitoring : PikaSessionRole.None);
         });
     }
 
@@ -116,7 +118,7 @@ public sealed partial class PipersPlugin
         } while (await timer.WaitForNextTickAsync(cancellation));
     }
 
-    private async Task ReleaseOwnedPikas(CancellationToken cancellation)
+    internal async Task ReleaseOwnedPikas(CancellationToken cancellation)
     {
         var receipt = telemetry.Latest;
         if (receipt is null || receipt.BackendToken != token) return;
@@ -155,7 +157,7 @@ public sealed partial class PipersPlugin
                     {
                         cancellation.ThrowIfCancellationRequested();
                         if (ReadOwned() is not { } current) return;
-                        if (current.Receipt.HasFreshPika(current.Gripper, System.Diagnostics.Stopwatch.GetTimestamp(), 500) &&
+                        if (current.Receipt.HasFreshPika(current.Gripper, System.Diagnostics.Stopwatch.GetTimestamp(), TelemetryReceipt.MaximumAgeMilliseconds) &&
                             current.Gripper["last_motor_request"]?.GetValue<string>() == request &&
                             Pika.PikaDisabledEvidence.Confirmed(current.Gripper, owner)) break;
                         await Task.Delay(25, cancellation);

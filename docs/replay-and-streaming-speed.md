@@ -33,8 +33,9 @@ Evidence: workspace outputs `native-replay-speed-summary-20261103.json` and
 * `managed/Piper.Plugin/OrderedSimulationExecution.cs`, `Step`, waits for
   stationary encoders and 100 ms of distinct settled feedback at each phase
   endpoint. The current native stationary condition itself requires 400 ms.
-* `managed/Piper.Plugin/QueuedSimulationFollowing.cs`, `PublishOrderedTargets`,
-  previously waited for both arm and Pika acknowledgements and then slept
+* `managed/Piper.Plugin/GroupSimulationFollowingRuntime.cs`,
+  `PublishGroupTargets`, publishes ordered targets. Its predecessor
+  (`QueuedSimulationFollowing.cs`, since removed) waited for both arm and Pika acknowledgements and then slept
   another 30 ms. A sampled sequence estimate from the normal run gives a
   typical publication period around 36.2 ms, rather than 30 ms. The new
   `SimulationPublishCadence` schedules a monotonic 30 ms deadline grid, counts
@@ -85,96 +86,33 @@ Primary references, pinned to the inspected vendor revision:
 * [PiPER control modes and move_js semantics](https://github.com/agilexrobotics/pyAgxArm/blob/d90e234ba8e408cfa964b38aa9120b3131fc9f85/docs/piper/piper_api.md)
 * [PiPER default driver: move_j, move_js and set_motion_mode](https://github.com/agilexrobotics/pyAgxArm/blob/d90e234ba8e408cfa964b38aa9120b3131fc9f85/pyAgxArm/protocols/can_protocol/drivers/piper/default/driver.py)
 
-### Laboratory streamed-position transport — disabled after physical qualification
+### Streamed-position transport — removed after failed physical qualification
 
-**Physical qualification failed. Shipping builds disable this transport at
-compile time.** There is no runtime preference, environment variable or API
-request that enables it in the normal build. Ordinary position-velocity
-following remains the supported execution path.
+**The experimental streamed-position (JS) transport has been deleted.** The
+native `PIPER_ENABLE_EXPERIMENTAL_STREAMED_POSITION` code, its laboratory
+fixtures and the plugin's streamed branches no longer exist. Ordinary
+position-velocity following is the only execution path.
 
-In the 2026-11-05 controlled comparison, all three ordinary PV wrist cycles
-completed. JS then failed during its initial stationary zero hold, before any
-J6 motion: every transmitted reference remained zero, but measured J5 moved
-past 1.3 degrees in roughly 0.1 seconds. The fixed-other-joint guard retired
-following. A subsequent measured hold could not be encoded because J3 had
-drifted to +0.215 degrees, beyond its reported 0-degree upper limit; the
-controller requested STOP. No physical JS cycle was qualified. This is
-consistent with the vendor's documented stiffness/force difference, but the
-capture does not identify the firmware's internal gain or gravity behavior.
-No gain, torque or protection limit was changed to compensate.
+The 2026-11-05 controlled comparison led to that decision. All three
+ordinary PV wrist cycles completed. JS then failed during its initial
+stationary zero hold, before any J6 motion: every transmitted reference
+remained zero, but measured J5 moved past 1.3 degrees in roughly 0.1 seconds.
+The fixed-other-joint guard retired following. A subsequent measured hold
+could not be encoded because J3 had drifted to +0.215 degrees, beyond its
+reported 0-degree upper limit; the controller requested STOP. No physical JS
+cycle was qualified. This is consistent with the vendor's documented
+stiffness/force difference, but the capture does not identify the firmware's
+internal gain or gravity behavior. No gain, torque or protection limit was
+changed to compensate.
 
 The local raw qualification receipt is
 `outputs/lucky-engine/j6-pv-js-comparison-20261105.json`. It records four JS
 stationary-hold observations, no moving JS leg, and the scoped hold rejection.
 Its receipt-time measurements do not establish firmware servo dynamics.
 
-`PIPER_ENABLE_EXPERIMENTAL_STREAMED_POSITION` defaults to **0** in
-`src/protocol.h`. In that build both JS capabilities and per-device support
-are false, the API rejects a JS request before action intent, and the actual
-CAN allowlist rejects its mode batch. The normal Windows build does not set
-the macro. Only explicitly compiled, hardware-disabled laboratory fixtures
-set it to 1 to retain protocol/validator regression coverage. The following
-contract describes that laboratory code, not a usable shipping control mode.
-
-Native admission is explicitly scoped to:
-
-```json
-{
-  "action": "follow-start",
-  "trajectory": true,
-  "trajectory_transport": "streamed-position"
-}
-```
-
-The remaining existing identity, owner, generation, workspace, limits and
-motor-state fields are still required. A request without this field keeps
-ordinary position-velocity behavior. The field is rejected on manual commands,
-ordinary non-trajectory following, updates and non-admission actions. Only
-reviewed `H-V1.2-1` with exact `S-V1.9-0` or `S-V1.9-1` firmware is admitted.
-Unknown revisions do not inherit support.
-
-The backend must also advertise
-`streamed_position_wire_validation_supported`. Before recording action intent
-or admitting following, it runs the initial four-frame transaction through
-the **same production `can_bus_batch_allowed` validator** used by
-`can_bus_send`. JS is admitted only as an ordered complete
-`0x151/0x155/0x156/0x157` batch, with reviewed firmware and zero reserved bytes.
-A wire-validation rejection returns before any action or motor command starts.
-The admission acknowledgement includes `trajectory_transport_validated=true`;
-the plugin and comparison harness require that proof. The shipping capability
-is false, so they reject JS before any physical admission.
-
-An admitted streamed-position trajectory sends CAN `0x151` with control=1,
-motion=1 and byte3=`0xAD`; joint angles remain the same millidegree
-`0x155`–`0x157` messages. No impedance/torque/gain command is introduced.
-The wire-pose cache includes this mode byte. The host percentage still shapes
-the reference clock and speed even though the firmware's JS mode does not
-apply the ordinary speed ratio.
-
-All current reported velocity/acceleration bounds, 2-degree soft lead wall,
-3-degree hard tracking fault, fresh-feedback/owner/generation checks and
-0.5-second obstruction behavior remain. This experiment can remove the second
-firmware planner; it does not remove the remaining host lead-wall speed cap or
-add a jerk-qualified profile.
-
-Follow-end, input expiry and verified software-boundary cancellation issue
-the existing measured-pose hold in the **same JS transport**, including while
-the arm is moving. The idle controller does not repeatedly switch modes. A
-subsequent ordinary pose action requires the existing measured stationary gate
-before admitting position-velocity control again. Genuine faults and failed
-holds still use STOP. The transport field in state records the requested
-native transport; normal `0x2A1` MoveJ feedback does not independently prove
-the firmware's MIT/pass-through flag.
-
-The shared simulation follower accepts only the qualified `position-velocity`
-transport. If any selected profile has a saved `streamed-position` or unknown
-`simulationTransport`, the sidebar names that robot and arming is rejected
-before any engine arm latch or hardware target. Explicitly change that saved
-profile choice to `position-velocity` before retrying. It is never silently
-ignored, rewritten or enabled based on a backend capability advertisement.
-Profiles lacking the field default to PV. The native experimental gate remains
-disabled; ordinary controls, matching and homing do not opt into JS. The failed
-physical qualification has not been replaced by another physical JS test.
+The shared simulation follower accepts only the `position-velocity`
+transport. Profiles lacking `simulationTransport` default to it. A new JS
+attempt would need a new implementation and a new physical qualification.
 
 ## Where to tune speed
 

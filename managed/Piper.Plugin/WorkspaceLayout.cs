@@ -1,17 +1,18 @@
 using System.Text.Json.Nodes;
 using LuckyEngine.PluginSdk;
+using LuckyRobots.Piper.Pika;
 
 namespace LuckyRobots.Piper.Plugin;
 
 public sealed partial class PipersPlugin
 {
-    private Task Render(CancellationToken cancellation) => PublishWorkspaceView(cancellation);
+    internal Task Render(CancellationToken cancellation) => PublishWorkspaceView(cancellation);
 
     private Widget BuildWorkspaceView(bool showClearanceConfirmation, SimulationCameraChoices cameraChoices)
     {
-        Widget body = workspacePage switch {
-            "settings" => SettingsPage(cameraChoices),
-            "recording" => RecordingPage(), "replay" => ReplayPage(), "camera" => CameraDetailPage(), _ => ControlsPage() };
+        Widget body = Navigation.Page switch {
+            WorkspacePage.Settings => SettingsPage(cameraChoices),
+            WorkspacePage.Recording => RecordingPage(), WorkspacePage.Replay => ReplayPage(), WorkspacePage.Camera => CameraDetailPage(), _ => ControlsPage() };
         var content = Widget.Column("controls",
             Widget.Column("header", Widget.Row("header.title", Widget.Label("workspace.robot-name", ActiveProfile.Name) with { Appearance = "heading", Height = 30 },
                 Widget.Label("workspace.connection", "Connecting…") with { Height = 30 }),
@@ -20,11 +21,12 @@ public sealed partial class PipersPlugin
                     Widget.Button("stop", "STOP") with { Appearance = "danger", Width = 72 })),
             Widget.Label("workspace.primary-action", "") with { Height = 48, Visible = false },
             Widget.Label("workspace.action-error", "") with { Height = 64, Visible = false, Appearance = "danger" },
-            Widget.Row("workspace.tabs", Nav("controls", "Controls"), Nav("recording", "Recording")) with { Spacing = 10 },
+            Widget.Row("workspace.tabs", Nav(WorkspacePage.Controls, "controls", "Controls"), Nav(WorkspacePage.Recording, "recording", "Recording")) with { Spacing = 10 },
                 new Widget("checkbox", "global.ghosts") { Text = "Show real robot ghosts", Value = preferences.ShowMeasuredGhosts ? 1 : 0,
                     Hint = "Measured hardware pose, visible in Edit and Play. Ghosts are excluded from camera recordings." },
             Widget.Row("safety", Widget.Label("safety.text", "Make sure it is safe to move the robot."),
                 Widget.Button("safety.accept", "Enable robot") with { Appearance = "primary" }, Widget.Button("safety.cancel", "Cancel")) with { Visible = showClearanceConfirmation, Padding = 12, Appearance = "panel" },
+            ResetCompletionConfirmation(),
             Widget.Column("workspace.incident", Widget.Label("incident", "") with { Height = 56 },
                 Widget.Label("recovery.next", "") with { Height = 88 },
                 Widget.Label("recovery.requirements", "") with { Height = 96 },
@@ -36,7 +38,7 @@ public sealed partial class PipersPlugin
         return Widget.Row("workspace", RobotSidebar(), content) with { Spacing = 0 };
     }
 
-    private Widget ControlsPage()
+    internal Widget ControlsPage()
     {
         var widgets = new List<Widget> {
             new Widget("checkbox", "group.follow.selected") { Text = "Follow simulation with this robot", Value = ActiveProfile.FollowSimulationSelected ? 1 : 0,
@@ -46,7 +48,7 @@ public sealed partial class PipersPlugin
             Widget.Row("cameras", Camera("gripper", "Gripper fisheye"), Camera("depth", "Depth")) with { Spacing = 14 },
             Widget.Row("pika", Widget.Label("pika.name", "Pika") with { Width = 28 },
                 Widget.Label("pika.value", "— mm") with { Width = 64, Appearance = "numeric", Hint = "Measured jaw opening. Enabled together with this robot." },
-                Widget.Button("pika.minus", "−") with { Width = 28 }, Widget.Slider("pika.target", 0, 0, 90, .1) with { Enabled = false, Hint = "Absolute opening, 0–90 mm" },
+                Widget.Button("pika.minus", "−") with { Width = 28 }, Widget.Slider("pika.target", PikaProtocol.MinimumOpeningMm, PikaProtocol.MinimumOpeningMm, PikaProtocol.MaximumOpeningMm, .1) with { Enabled = false, Hint = $"Absolute opening, {PikaProtocol.MinimumOpeningMm}–{PikaProtocol.MaximumOpeningMm} mm" },
                 Widget.Button("pika.plus", "+") with { Width = 28 }, Widget.Button("pika.zero", "0") with { Width = 36 }),
             Widget.Row("joint.headings", Widget.Label("joint.name.heading", "") with { Width = 28, Appearance = "muted" },
                 Widget.Label("joint.measured.heading", "Angle °") with { Width = 64, Appearance = "muted" },
@@ -73,24 +75,23 @@ public sealed partial class PipersPlugin
 
     private Widget SettingsPage(SimulationCameraChoices cameraChoices)
     {
-        Widget section = settingsCategory switch {
-            "cameras" => Widget.Column("global.cameras", SettingsRobotPicker("cameras"), CameraSettingsPage(cameraChoices)),
-            "bench" => Widget.Column("global.bench", Widget.Label("global.bench.shared", "Shared desk reference · each arm keeps its own mounting alignment") with { Height = 32, Appearance = "muted" },
+        Widget section = Navigation.Category switch {
+            SettingsCategory.Cameras => Widget.Column("global.cameras", SettingsRobotPicker("cameras"), CameraSettingsPage(cameraChoices)),
+            SettingsCategory.Bench => Widget.Column("global.bench", Widget.Label("global.bench.shared", "Shared desk reference · each arm keeps its own mounting alignment") with { Height = 32, Appearance = "muted" },
                 SettingsRobotPicker("bench"), CalibrationSheetControls()),
-            "controller" => BackendSetup(),
-            "diagnostics" => Widget.Column("global.diagnostics", SettingsRobotPicker("diagnostics"),
+            SettingsCategory.Diagnostics => Widget.Column("global.diagnostics", SettingsRobotPicker("diagnostics"),
                 Widget.Label("workspace.power", "Power unavailable") with { Appearance = "numeric" }, Widget.Label("link.status", "") with { Height = 50 },
-                Widget.Label("pika.monitor", pikaMonitorStatus) with { Height = 42 }, BackendSetup(),
+                Widget.Label("pika.monitor", PikaMonitorStatus) with { Height = 42 }, BackendSetup(),
                 Widget.Button("workspace.connection-details", connectionDetailsOpen ? "Hide advanced controller actions" : "Advanced controller actions") with { Appearance = "quiet" },
                 Widget.Column("global.advanced", Widget.Button("recovery.run", "Verify controller state"),
                     Widget.Label("profiles.can.status", "") with { Height = 42 }, PikaReferenceControls()) with { Visible = connectionDetailsOpen }),
             _ => GlobalRobotsSettings()
         };
-        Widget Category(string id, string text) => Widget.Button("workspace.settings." + id, text) with { Appearance = settingsCategory == id ? "selected" : "quiet" };
+        Widget Category(SettingsCategory category, string id, string text) => Widget.Button("workspace.settings." + id, text) with { Appearance = Navigation.Category == category ? "selected" : "quiet" };
         return Widget.Column("workspace.settings.body", Widget.Row("global.settings.heading", Widget.Label("workspace.settings.title", "Bench settings") with { Appearance = "heading" },
             Widget.Button("workspace.controls@settings", "Back to controls")),
-            Widget.Row("workspace.settings.categories", Category("robot", "Robots & devices"), Category("cameras", "Cameras")) with { Spacing = 8 },
-            Widget.Row("workspace.settings.categories.more", Category("bench", "Bench & calibration"), Category("diagnostics", "Diagnostics")) with { Spacing = 8 },
+            Widget.Row("workspace.settings.categories", Category(SettingsCategory.Robot, "robot", "Robots & devices"), Category(SettingsCategory.Cameras, "cameras", "Cameras")) with { Spacing = 8 },
+            Widget.Row("workspace.settings.categories.more", Category(SettingsCategory.Bench, "bench", "Bench & calibration"), Category(SettingsCategory.Diagnostics, "diagnostics", "Diagnostics")) with { Spacing = 8 },
             section with { Spacing = 12 }) with { Spacing = 16 };
     }
 }

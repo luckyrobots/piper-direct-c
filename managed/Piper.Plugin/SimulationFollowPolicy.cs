@@ -2,6 +2,7 @@ using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json.Nodes;
+using LuckyRobots.Piper.Pika;
 
 namespace LuckyRobots.Piper.Plugin;
 
@@ -9,9 +10,6 @@ public sealed record SimulationFollowIdentity(string SourceSceneId, string RunId
 public sealed record SimulationFollowHardware(string DeviceId, long Generation, bool FeedbackFresh, bool LimitsFresh, bool GripperFresh,
     IReadOnlyList<double> JointDegrees, IReadOnlyList<EpisodeReplayJointLimit> JointLimits, double GripperOpeningMm,
     SimulationFollowNativeReference? NativeReference = null);
-public sealed record SimulationFollowTarget(IReadOnlyList<double> JointDegrees, double GripperOpeningMm,
-    IReadOnlyList<double> MeasuredJointDegrees, double MeasuredGripperOpeningMm, double SimulationTimeSeconds);
-public sealed class SimulationFollowAlignmentException(string message) : InvalidOperationException(message);
 
 /// <summary>Validated native runtime observation. Actuator controls and measured qpos remain distinct.</summary>
 public sealed class SimulationFollowSample
@@ -97,10 +95,10 @@ public sealed class SimulationFollowSample
         if (Math.Abs(gripMin - firstMin) > 1e-6 || Math.Abs(gripMax - firstMax) > 1e-6)
             throw new InvalidOperationException("Simulated Pika actuator range does not match joint7.");
         double gap = 2000 * secondMax;
-        double maximumOpening = Math.Min(90, gap + 1000 * (firstMax - secondMin));
+        double maximumOpening = Math.Min(PikaProtocol.MaximumOpeningMm, gap + 1000 * (firstMax - secondMin));
         double opening = gap + 1000 * (q7 - q8), commandOpening = gap + 2000 * gripCtrl;
         if (maximumOpening <= 0 || opening < -.25 || opening > maximumOpening + .25 || commandOpening < -.0001 || commandOpening > maximumOpening + .0001)
-            throw new InvalidOperationException("Simulated Pika opening is outside its 0–90 mm model range.");
+            throw new InvalidOperationException($"Simulated Pika opening is outside its {PikaProtocol.MinimumOpeningMm}–{PikaProtocol.MaximumOpeningMm} mm model range.");
         Signature(signature, jointPrefix + "gripper", firstMin, firstMax, secondMin, secondMax, gripMin, gripMax, NumberAt(grip, "gain", 0), NumberAt(grip, "bias", 2));
         return new SimulationFollowSample
         {
@@ -163,49 +161,22 @@ public sealed class SimulationFollowSample
     private static void Signature(StringBuilder target, string name, params double[] values) => target.Append(name).Append(':').AppendJoin(',', values.Select(v => v.ToString("R", CultureInfo.InvariantCulture))).Append(';');
 }
 
-/// <summary>One explicit follow session; any failed runtime validation permanently stops this instance.</summary>
-public sealed class SimulationFollowPolicy
+/// <summary>Stateless admission checks for one grouped follow start. The paused
+/// first frame is validated at Matching; activation must then present that
+/// exact frame, in order, on the same physical connection and limits.</summary>
+public static class SimulationFollowPolicy
 {
     public const double MaximumTimeScale = .2;
     public const double MaximumSourceAgeMilliseconds = 250;
     public const double MaximumRequestMilliseconds = 150;
+    public const double MaximumActivationRequestMilliseconds = 400;
+    /// <summary>A source capture may lead the host receive clock by this much.</summary>
+    public const double MaximumSourceLeadMilliseconds = 50;
     public const double MaximumGripperFeedbackAgeMilliseconds = Pika.PikaFollowSession.InputDeadlineSeconds * 1000;
     public const double StartJointToleranceDegrees = 1;
     public const double StartGripperToleranceMm = 2;
     public const double TrackingJointToleranceDegrees = 5;
     public const double TrackingGripperToleranceMm = 10;
-    private SimulationFollowSample previous;
-    private readonly string deviceId;
-    private readonly long generation;
-    private readonly string hardwareLimits;
-    private double[]? previousVelocity;
-    private double previousInterval;
-    private double previousSimulationInterval;
-    private long lastObservedSequence, lastObservedMonotonicNs, lastObservedSceneTimeNs;
-    private bool pauseTracking;
-    private SimulationFollowSample? pausedReference;
-    private SimulationFollowSample? latestPaused;
-    public bool Stopped { get; private set; }
-    public string StopReason { get; private set; } = "";
-    public bool IsPauseTracking => pauseTracking;
-
-    public static bool ReadyObservationFresh(SimulationFollowSample sample, long now, double requestDuration) =>
-        sample.Ready && double.IsFinite(requestDuration) && requestDuration is >= 0 and <= MaximumRequestMilliseconds &&
-        now - sample.CapturedAtUnixMicroseconds / 1000d is >= -50 and <= MaximumSourceAgeMilliseconds;
-
-    private SimulationFollowPolicy(SimulationFollowSample sample, SimulationFollowHardware hardware)
-    {
-        previous = sample; deviceId = hardware.DeviceId; generation = hardware.Generation; hardwareLimits = LimitSignature(hardware);
-        Observe(sample);
-    }
-
-    public static SimulationFollowPolicy Start(SimulationFollowSample sample, SimulationFollowIdentity expectedIdentity, SimulationFollowHardware hardware,
-        long receivedAtUnixMilliseconds, double requestDurationMilliseconds)
-    {
-        ValidateCandidate(sample, expectedIdentity, hardware, receivedAtUnixMilliseconds, requestDurationMilliseconds);
-        ValidatePose(sample, hardware, start: true);
-        return new SimulationFollowPolicy(sample, hardware);
-    }
 
     /// <summary>Checks a possible Match target without authorizing or performing that physical move.</summary>
     public static void ValidateCandidate(SimulationFollowSample sample, SimulationFollowIdentity expectedIdentity, SimulationFollowHardware hardware,
@@ -220,10 +191,36 @@ public sealed class SimulationFollowPolicy
         ValidateCommandRanges(sample, hardware);
     }
 
+    /// <summary>The matched first frame: a valid candidate whose controls and
+    /// measurements agree with the physical arm and Pika within start tolerance.</summary>
+    public static void ValidateStart(SimulationFollowSample sample, SimulationFollowIdentity expectedIdentity, SimulationFollowHardware hardware,
+        long receivedAtUnixMilliseconds, double requestDurationMilliseconds)
+    {
+        ValidateCandidate(sample, expectedIdentity, hardware, receivedAtUnixMilliseconds, requestDurationMilliseconds);
+        ValidateStartPose(sample, hardware);
+    }
+
     public static void ValidatePausedStart(SimulationFollowSample sample, SimulationFollowSample reference)
     {
         if (sample.Mode != "pause") throw new InvalidOperationException("The prepared simulation must remain paused.");
         ValidateStartFrame(sample, reference);
+    }
+
+    /// <summary>The activation ACK is captured on the native action thread before
+    /// its first physics step. Paused admission latency is not active trajectory
+    /// time; require that exact unchanged frame before starting the active clock.
+    /// The ordered source may play at its authored 1x rate.</summary>
+    public static void ValidateActivation(SimulationFollowSample prepared, SimulationFollowHardware preparedHardware,
+        SimulationFollowSample activation, SimulationFollowHardware hardware, long now, double requestDuration)
+    {
+        ValidateFresh(activation, now, requestDuration, MaximumActivationRequestMilliseconds, maximumTimeScale: 1);
+        ValidateHardware(hardware);
+        if (activation.Mode != "play" || hardware.DeviceId != preparedHardware.DeviceId || hardware.Generation != preparedHardware.Generation ||
+            LimitSignature(hardware) != LimitSignature(preparedHardware) ||
+            activation.Sequence <= prepared.Sequence || activation.CapturedMonotonicNs <= prepared.CapturedMonotonicNs)
+            throw new InvalidOperationException("The prepared activation acknowledgement changed its scope or order.");
+        ValidateStartFrame(activation, prepared);
+        ValidateStartPose(activation, hardware);
     }
 
     private static void ValidateStartFrame(SimulationFollowSample sample, SimulationFollowSample reference)
@@ -233,204 +230,24 @@ public sealed class SimulationFollowPolicy
             !sample.CommandDegrees.SequenceEqual(reference.CommandDegrees) || !sample.MeasuredDegrees.SequenceEqual(reference.MeasuredDegrees) ||
             sample.CommandOpeningMm != reference.CommandOpeningMm || sample.MeasuredOpeningMm != reference.MeasuredOpeningMm)
             throw new InvalidOperationException("The prepared first frame changed. Stop following and prepare a new start.");
-        if (sample.CommandDegrees.Zip(sample.MeasuredDegrees, (target, measured) => Math.Abs(target - measured)).Any(error => error > StartJointToleranceDegrees) ||
-            Math.Abs(sample.CommandOpeningMm - sample.MeasuredOpeningMm) > StartGripperToleranceMm)
+        if (!MatchesStart(sample.CommandDegrees, sample.MeasuredDegrees, sample.CommandOpeningMm, sample.MeasuredOpeningMm))
             throw new InvalidOperationException("The simulation's first-frame measurements do not match its actuator targets. Fix the simulated start pose before moving the real robot.");
     }
 
-    /// <summary>The activation ACK is captured on the native action thread before
-    /// its first physics step. Paused admission latency is not active trajectory
-    /// time; require that exact unchanged frame before starting the active clock.</summary>
-    public void ActivatePreparedStart(SimulationFollowSample sample, SimulationFollowHardware hardware, long now, double requestDuration, bool orderedSource = false)
-    {
-        if (Stopped) throw new InvalidOperationException("Simulation following is stopped: " + StopReason);
-        try
-        {
-            ValidateFresh(sample, now, requestDuration, maximumRequestMilliseconds: 400, maximumTimeScale: orderedSource ? 1 : MaximumTimeScale);
-            ValidateHardware(hardware);
-            if (sample.Mode != "play" || hardware.DeviceId != deviceId || hardware.Generation != generation || LimitSignature(hardware) != hardwareLimits ||
-                sample.Sequence <= lastObservedSequence || sample.CapturedMonotonicNs <= lastObservedMonotonicNs)
-                throw new InvalidOperationException("The prepared activation acknowledgement changed its scope or order.");
-            ValidateStartFrame(sample, previous);
-            ValidatePose(sample, hardware, start: true);
-            previous = sample; previousVelocity = null; previousInterval = previousSimulationInterval = 0;
-            Observe(sample);
-        }
-        catch (InvalidOperationException error) { Stop(error.Message); throw; }
-    }
+    /// <summary>Every joint within 1° and the jaws within 2 mm of a reference pose.</summary>
+    public static bool MatchesStart(IReadOnlyList<double> joints, IReadOnlyList<double> reference, double openingMm, double referenceOpeningMm) =>
+        JointsMatchStart(joints, reference) && OpeningMatchesStart(openingMm, referenceOpeningMm);
+    public static bool JointsMatchStart(IReadOnlyList<double> joints, IReadOnlyList<double> reference) =>
+        joints.Zip(reference, (a, b) => Math.Abs(a - b)).All(error => error <= StartJointToleranceDegrees);
+    public static bool OpeningMatchesStart(double openingMm, double referenceOpeningMm) =>
+        Math.Abs(openingMm - referenceOpeningMm) <= StartGripperToleranceMm;
 
-    /// <summary>Keep an unchanged prepared frame ready indefinitely, rebasing its
-    /// wall-clock baseline without advancing simulation or relaxing pose checks.</summary>
-    public void ValidateReady(SimulationFollowSample sample, SimulationFollowHardware hardware, long now, double requestDuration)
-    {
-        if (Stopped) throw new InvalidOperationException("Simulation following is stopped: " + StopReason);
-        try
-        {
-            ValidateFresh(sample, now, requestDuration);
-            ValidateHardware(hardware);
-            if (hardware.DeviceId != deviceId || hardware.Generation != generation || LimitSignature(hardware) != hardwareLimits ||
-                sample.Sequence <= lastObservedSequence || sample.CapturedMonotonicNs <= lastObservedMonotonicNs)
-                throw new InvalidOperationException("Prepared start feedback or hardware scope changed.");
-            ValidatePausedStart(sample, previous);
-            ValidatePose(sample, hardware, start: true);
-            previous = sample; previousVelocity = null; previousInterval = previousSimulationInterval = 0;
-            Observe(sample);
-        }
-        catch (InvalidOperationException error) { Stop(error.Message); throw; }
-    }
-
-    public SimulationFollowTarget Advance(SimulationFollowSample sample, SimulationFollowHardware hardware, long receivedAtUnixMilliseconds,
-        double requestDurationMilliseconds)
-    {
-        if (Stopped) throw new InvalidOperationException("Simulation following is stopped: " + StopReason);
-        try
-        {
-            if (pauseTracking) throw new InvalidOperationException("Following is waiting for its explicitly owned simulation pause to finish.");
-            ValidateFresh(sample, receivedAtUnixMilliseconds, requestDurationMilliseconds);
-            ValidateHardware(hardware);
-            if (hardware.DeviceId != deviceId || hardware.Generation != generation || LimitSignature(hardware) != hardwareLimits)
-                throw new InvalidOperationException("The physical robot connection or reported limits changed.");
-            if (!sample.BindsTo(previous) || sample.SceneId != sample.RunId || sample.Mode != "play")
-                throw new InvalidOperationException("The simulation session/model changed, paused or stopped. Start a new follow session explicitly.");
-            if (sample.Sequence <= lastObservedSequence) throw ClockFailure("observation sequence did not advance", sample);
-            if (sample.CapturedMonotonicNs <= lastObservedMonotonicNs) throw ClockFailure("host capture clock did not advance", sample);
-            if (sample.SimulationTimeNs < lastObservedSceneTimeNs) throw ClockFailure("scene clock regressed", sample);
-            if (sample.SimTimeSeconds <= previous.SimTimeSeconds) throw ClockFailure("MuJoCo physics clock did not advance", sample);
-            double interval = (sample.CapturedMonotonicNs - previous.CapturedMonotonicNs) / 1e9;
-            double simInterval = sample.SimTimeSeconds - previous.SimTimeSeconds;
-            if (interval > .25 || simInterval > interval * MaximumTimeScale + .025)
-                throw new InvalidOperationException("Simulation timing advanced too quickly or its follow stream was interrupted.");
-            ValidatePose(sample, hardware, start: false);
-            var velocity = new double[6];
-            for (int i = 0; i < 6; i++)
-            {
-                var limit = hardware.JointLimits.Single(l => l.JointNumber == i + 1);
-                velocity[i] = (sample.CommandDegrees[i] - previous.CommandDegrees[i]) / interval;
-                double acceleration = Math.Abs(velocity[i] - (previousVelocity?[i] ?? 0)) / (previousVelocity is null ? interval : (interval + previousInterval) * .5);
-                if (Math.Abs(velocity[i]) > limit.MaximumDegreesPerSecond + 1e-6 || acceleration > limit.MaximumDegreesPerSecondSquared + 1e-5)
-                {
-                    double phaseVelocity = (sample.CommandDegrees[i] - previous.CommandDegrees[i]) / simInterval;
-                    double previousPhaseVelocity = previousVelocity is not null && previousSimulationInterval > 0
-                        ? previousVelocity[i] * previousInterval / previousSimulationInterval : 0;
-                    double phaseAcceleration = Math.Abs(phaseVelocity - previousPhaseVelocity) /
-                        (previousVelocity is null ? simInterval : (simInterval + previousSimulationInterval) * .5);
-                    throw new InvalidOperationException(FormattableString.Invariant($"""
-                        Simulation J{i + 1} target exceeds the robot's reported speed or acceleration limit.
-                        Observed v={velocity[i]:R} deg/s (limit {limit.MaximumDegreesPerSecond:R}), a={acceleration:R} deg/s² (limit {limit.MaximumDegreesPerSecondSquared:R});
-                        q {previous.CommandDegrees[i]:R} → {sample.CommandDegrees[i]:R} deg; host interval {interval:R}s, previous {previousInterval:R}s;
-                        MuJoCo {previous.SimTimeSeconds:R} → {sample.SimTimeSeconds:R}s, phase interval {simInterval:R}s, previous {previousSimulationInterval:R}s;
-                        previous observed v={previousVelocity?[i] ?? 0:R}; fixed-scale phase estimate v={phaseVelocity * sample.TimeScale:R}, a={phaseAcceleration * sample.TimeScale * sample.TimeScale:R};
-                        scale={sample.TimeScale:R}, host ns {previous.CapturedMonotonicNs} → {sample.CapturedMonotonicNs}.
-                        """));
-                }
-            }
-            previous = sample; previousVelocity = velocity; previousInterval = interval; previousSimulationInterval = simInterval;
-            Observe(sample);
-            return new SimulationFollowTarget(sample.CommandDegrees, sample.CommandOpeningMm, sample.MeasuredDegrees, sample.MeasuredOpeningMm, sample.SimTimeSeconds);
-        }
-        catch (InvalidOperationException error) { Stop(error.Message); throw; }
-    }
-
-    /// <summary>A fresh poll can observe the same native physics step. It may renew only
-    /// the identical target, without resetting the derivative or stalled-step deadline.</summary>
-    public bool TryValidateUnchanged(SimulationFollowSample sample, SimulationFollowHardware hardware, long receivedAtUnixMilliseconds,
-        double requestDurationMilliseconds)
-    {
-        if (Stopped) throw new InvalidOperationException("Simulation following is stopped: " + StopReason);
-        // Scene time advances for camera/other runner events between Robot
-        // physics ticks. Only mjData.time identifies a new physical state.
-        bool sameTime = sample.SimTimeSeconds == previous.SimTimeSeconds;
-        if (!sameTime) return false;
-        try
-        {
-            if (pauseTracking) throw new InvalidOperationException("Simulation follow is awaiting explicit catch-up resume.");
-            ValidateFresh(sample, receivedAtUnixMilliseconds, requestDurationMilliseconds);
-            ValidateHardware(hardware);
-            if (hardware.DeviceId != deviceId || hardware.Generation != generation || LimitSignature(hardware) != hardwareLimits ||
-                !sample.BindsTo(previous) || sample.SceneId != sample.RunId || sample.Mode != "play")
-                throw new InvalidOperationException("The unchanged runtime sample has a different scene, model, mode or physical connection.");
-            if (sample.Sequence <= lastObservedSequence) throw ClockFailure("unchanged physics observation sequence did not advance", sample);
-            if (sample.CapturedMonotonicNs <= lastObservedMonotonicNs) throw ClockFailure("unchanged physics host capture clock did not advance", sample);
-            if (sample.SimulationTimeNs < lastObservedSceneTimeNs)
-                throw ClockFailure("scene clock regressed between unchanged physics observations", sample);
-            if (sample.CapturedMonotonicNs - previous.CapturedMonotonicNs > 250_000_000L)
-                throw new InvalidOperationException("Simulation physics did not advance within 250 ms.");
-            if (!sample.CommandDegrees.SequenceEqual(previous.CommandDegrees) || !sample.MeasuredDegrees.SequenceEqual(previous.MeasuredDegrees) ||
-                sample.CommandOpeningMm != previous.CommandOpeningMm || sample.MeasuredOpeningMm != previous.MeasuredOpeningMm)
-                throw new InvalidOperationException("Simulation controls or position changed without advancing physics time.");
-            ValidatePose(sample, hardware, start: false);
-            Observe(sample); // Deliberately do not replace previous: it anchors the physics stall and derivatives.
-            return true;
-        }
-        catch (InvalidOperationException error) { Stop(error.Message); throw; }
-    }
-
-    /// <summary>Called only for the plugin's explicit catch-up pause, never an arbitrary user pause.</summary>
-    public void PauseTracking()
-    {
-        if (Stopped) throw new InvalidOperationException("Simulation following is stopped: " + StopReason);
-        if (pauseTracking) return;
-        pauseTracking = true; pausedReference = null; latestPaused = null;
-    }
-
-    public void ValidatePaused(SimulationFollowSample sample, SimulationFollowHardware hardware, long receivedAtUnixMilliseconds, double requestDurationMilliseconds)
-    {
-        if (Stopped) throw new InvalidOperationException("Simulation following is stopped: " + StopReason);
-        try
-        {
-            if (!pauseTracking) throw new InvalidOperationException("This simulation pause does not belong to the follow session.");
-            ValidateFresh(sample, receivedAtUnixMilliseconds, requestDurationMilliseconds);
-            ValidateHardware(hardware);
-            if (hardware.DeviceId != deviceId || hardware.Generation != generation || LimitSignature(hardware) != hardwareLimits ||
-                !sample.BindsTo(previous) || sample.SceneId != sample.RunId || sample.Mode != "pause")
-                throw new InvalidOperationException("Simulation catch-up scope, connection or paused runtime changed.");
-            var last = latestPaused ?? previous;
-            if (sample.Sequence < Math.Max(last.Sequence, lastObservedSequence) || sample.CapturedMonotonicNs < Math.Max(last.CapturedMonotonicNs, lastObservedMonotonicNs) ||
-                sample.SimulationTimeNs < Math.Max(last.SimulationTimeNs, lastObservedSceneTimeNs) || sample.SimTimeSeconds < last.SimTimeSeconds)
-                throw new InvalidOperationException("Simulation catch-up sample went backwards.");
-            if (pausedReference is not null && (sample.SimulationTimeNs != pausedReference.SimulationTimeNs || sample.SimTimeSeconds != pausedReference.SimTimeSeconds ||
-                !sample.CommandDegrees.SequenceEqual(pausedReference.CommandDegrees) || !sample.MeasuredDegrees.SequenceEqual(pausedReference.MeasuredDegrees) ||
-                sample.CommandOpeningMm != pausedReference.CommandOpeningMm || sample.MeasuredOpeningMm != pausedReference.MeasuredOpeningMm))
-                throw new InvalidOperationException("The paused simulation pose or command changed during catch-up.");
-            if (pausedReference is not null && sample.CapturedMonotonicNs - pausedReference.CapturedMonotonicNs > 3_000_000_000L)
-                throw new InvalidOperationException("The real robot did not catch up within three seconds.");
-            ValidatePose(sample, hardware, start: false);
-            pausedReference ??= sample;
-            latestPaused = sample;
-            Observe(sample);
-        }
-        catch (InvalidOperationException error) { Stop(error.Message); throw; }
-    }
-
-    /// <summary>Reseeds only timing validation after catch-up; issues no robot or engine command.</summary>
-    public void ResumeAfterPause(SimulationFollowSample sample, SimulationFollowHardware hardware, long receivedAtUnixMilliseconds, double requestDurationMilliseconds)
-    {
-        ValidatePaused(sample, hardware, receivedAtUnixMilliseconds, requestDurationMilliseconds);
-        previous = sample; previousVelocity = null; previousInterval = previousSimulationInterval = 0;
-        pauseTracking = false; pausedReference = null; latestPaused = null;
-    }
-
-    public void Stop(string reason)
-    {
-        Stopped = true; pauseTracking = false; pausedReference = null; latestPaused = null;
-        StopReason = string.IsNullOrWhiteSpace(reason) ? "Stopped by user." : reason;
-    }
-
-    private void Observe(SimulationFollowSample sample)
-    {
-        lastObservedSequence = sample.Sequence; lastObservedMonotonicNs = sample.CapturedMonotonicNs;
-        lastObservedSceneTimeNs = sample.SimulationTimeNs;
-    }
-
-    private InvalidOperationException ClockFailure(string reason, SimulationFollowSample sample) => new(
-        $"Simulation timing invalid: {reason}; sequence {lastObservedSequence} → {sample.Sequence}, " +
-        $"host ns {lastObservedMonotonicNs} → {sample.CapturedMonotonicNs}, scene ns {lastObservedSceneTimeNs} → {sample.SimulationTimeNs}, " +
-        $"MuJoCo seconds {previous.SimTimeSeconds.ToString("R", CultureInfo.InvariantCulture)} → {sample.SimTimeSeconds.ToString("R", CultureInfo.InvariantCulture)}.");
-
-    private static void ValidateFresh(SimulationFollowSample sample, long now, double requestDuration, double maximumRequestMilliseconds = MaximumRequestMilliseconds, double maximumTimeScale = MaximumTimeScale)
+    private static void ValidateFresh(SimulationFollowSample sample, long now, double requestDuration,
+        double maximumRequestMilliseconds = MaximumRequestMilliseconds, double maximumTimeScale = MaximumTimeScale)
     {
         double age = now - sample.CapturedAtUnixMicroseconds / 1000d;
-        if (!sample.Ready || !double.IsFinite(requestDuration) || requestDuration < 0 || requestDuration > maximumRequestMilliseconds || age < -50 || age > MaximumSourceAgeMilliseconds)
+        if (!sample.Ready || !double.IsFinite(requestDuration) || requestDuration < 0 || requestDuration > maximumRequestMilliseconds ||
+            age < -MaximumSourceLeadMilliseconds || age > MaximumSourceAgeMilliseconds)
             throw new InvalidOperationException("Runtime sample is stale, delayed or has an invalid source timestamp.");
         // Native time scale is stored as float; 0.2f widens to 0.20000000298.
         if (sample.TimeScale <= 0 || sample.TimeScale > maximumTimeScale + 1e-6)
@@ -440,7 +257,7 @@ public sealed class SimulationFollowPolicy
     private static void ValidateHardware(SimulationFollowHardware hardware)
     {
         if (string.IsNullOrWhiteSpace(hardware.DeviceId) || hardware.Generation <= 0 || !hardware.FeedbackFresh || !hardware.LimitsFresh || !hardware.GripperFresh ||
-            hardware.JointDegrees.Count != 6 || hardware.JointDegrees.Any(v => !double.IsFinite(v)) || !double.IsFinite(hardware.GripperOpeningMm) || hardware.GripperOpeningMm < 0 || hardware.GripperOpeningMm > 90 || hardware.JointLimits.Count != 6)
+            hardware.JointDegrees.Count != 6 || hardware.JointDegrees.Any(v => !double.IsFinite(v)) || !double.IsFinite(hardware.GripperOpeningMm) || !PikaProtocol.ValidOpening(hardware.GripperOpeningMm) || hardware.JointLimits.Count != 6)
             throw new InvalidOperationException("Fresh physical arm, reported limits and assigned Pika measurements are required.");
         for (int i = 1; i <= 6; i++)
         {
@@ -452,24 +269,18 @@ public sealed class SimulationFollowPolicy
         }
     }
 
-    private static void ValidatePose(SimulationFollowSample sample, SimulationFollowHardware hardware, bool start)
+    private static void ValidateStartPose(SimulationFollowSample sample, SimulationFollowHardware hardware)
     {
         ValidateCommandRanges(sample, hardware);
-        double jointTolerance = start ? StartJointToleranceDegrees : TrackingJointToleranceDegrees;
-        double gripperTolerance = start ? StartGripperToleranceMm : TrackingGripperToleranceMm;
         for (int i = 0; i < 6; i++)
-        {
-            if (Math.Abs(sample.CommandDegrees[i] - hardware.JointDegrees[i]) > jointTolerance || Math.Abs(sample.MeasuredDegrees[i] - hardware.JointDegrees[i]) > jointTolerance)
-            {
-                if (start) throw new SimulationFollowAlignmentException($"J{i + 1} does not match the simulation start pose within 1°. Match the poses before following.");
-                throw new InvalidOperationException($"Real J{i + 1} is more than 5° from the simulation. Following stopped.");
-            }
-        }
-        if (Math.Abs(sample.CommandOpeningMm - hardware.GripperOpeningMm) > gripperTolerance || Math.Abs(sample.MeasuredOpeningMm - hardware.GripperOpeningMm) > gripperTolerance)
-        {
-            if (start) throw new SimulationFollowAlignmentException("Pika does not match the simulation start opening within 2 mm. Match it before following.");
-            throw new InvalidOperationException("Real Pika is more than 10 mm from the simulation. Following stopped.");
-        }
+            if (Math.Abs(sample.CommandDegrees[i] - hardware.JointDegrees[i]) > StartJointToleranceDegrees ||
+                Math.Abs(sample.MeasuredDegrees[i] - hardware.JointDegrees[i]) > StartJointToleranceDegrees)
+                throw new InvalidOperationException(FormattableString.Invariant(
+                    $"J{i + 1} does not match the simulation start pose within {StartJointToleranceDegrees}°. Match the poses before following."));
+        if (Math.Abs(sample.CommandOpeningMm - hardware.GripperOpeningMm) > StartGripperToleranceMm ||
+            Math.Abs(sample.MeasuredOpeningMm - hardware.GripperOpeningMm) > StartGripperToleranceMm)
+            throw new InvalidOperationException(FormattableString.Invariant(
+                $"Pika does not match the simulation start opening within {StartGripperToleranceMm} mm. Match it before following."));
     }
 
     private static void ValidateCommandRanges(SimulationFollowSample sample, SimulationFollowHardware hardware)

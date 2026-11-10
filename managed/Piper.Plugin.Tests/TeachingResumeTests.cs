@@ -3,7 +3,7 @@ using LuckyRobots.Piper.Plugin;
 
 internal static class TeachingResumeTests
 {
-    public static void Run(Action<bool, string> check)
+    public static void Run()
     {
         JsonObject Device() => new()
         {
@@ -20,13 +20,13 @@ internal static class TeachingResumeTests
         {
             device["teaching"]!["can_return"] = eligible;
             var readiness = RobotReadiness.Inspect(device, false, false, false, false);
-            check(readiness is { Action: "Resume controls", Enabled: true, Label: "Hand guiding off" },
+            Check(readiness is { Action: "Resume controls", Enabled: true, Label: "Hand guiding off" },
                 "A transient stillness gate changed the primary Resume click target");
             var state = TeachingState.Inspect(device);
             text ??= state.NextStep;
-            check(state.NextStep == text && !state.NextStep.Contains("Turn the teach light off", StringComparison.Ordinal),
+            Check(state.NextStep == text && !state.NextStep.Contains("Turn the teach light off", StringComparison.Ordinal),
                 "Completed hand guiding alternated its instructions with raw stillness telemetry");
-            check(TeachingResumeCheck.Ready(device) == eligible, "Resume eligibility bypassed or hid native stillness admission");
+            Check(TeachingResumeCheck.Ready(device) == eligible, "Resume eligibility bypassed or hid native stillness admission");
         }
         foreach (Action<JsonObject> fault in new Action<JsonObject>[]
         {
@@ -41,7 +41,7 @@ internal static class TeachingResumeTests
             var failed = Device(); fault(failed);
             bool rejected = false;
             try { TeachingResumeCheck.Ready(failed); } catch (InvalidOperationException) { rejected = true; }
-            check(rejected, "A stale, faulted, unpowered, active teaching or range-blocked resume was treated as a stillness wait");
+            Check(rejected, "A stale, faulted, unpowered, active teaching or range-blocked resume was treated as a stillness wait");
         }
         foreach (bool failInsideGrant in new[] { false, true })
         {
@@ -56,7 +56,7 @@ internal static class TeachingResumeTests
                 }, () => { approved = remembered = false; rolledBack = true; });
             }
             catch (InvalidOperationException) { rejected = true; }
-            check(rejected && rolledBack && !approved && !remembered,
+            Check(rejected && rolledBack && !approved && !remembered,
                 "Concurrent permission revocation or grant failure resurrected resume approval");
         }
     }

@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text.Json.Nodes;
@@ -13,7 +14,8 @@ public sealed class ControllerService : IDisposable
     private readonly Task worker;
     private IntPtr core;
     public string Token { get; } = Convert.ToHexString(RandomNumberGenerator.GetBytes(32)).ToLowerInvariant();
-    public string? WorkerError { get; private set; }
+    private volatile string? workerError;
+    private int disposed;
 
     public ControllerService(bool simulated, string stateDirectory, int simulatedRobotCount = 1)
     {
@@ -28,17 +30,21 @@ public sealed class ControllerService : IDisposable
             {
                 while (!cancellation.IsCancellationRequested)
                 {
-                    lock (gate) { if (core != IntPtr.Zero) Native.Tick(core); }
+                    // Dispose joins this loop before it destroys the core.
+                    lock (gate) { Debug.Assert(core != IntPtr.Zero); Native.Tick(core); }
                     cancellation.Token.WaitHandle.WaitOne(5);
                 }
             }
-            catch (Exception e) { WorkerError = e.Message; }
+            catch (Exception e) { workerError = e.Message; }
         }, CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default);
     }
     public string Snapshot()
     {
         lock (gate) { Check(); return Take(Native.State(core, Token)); }
     }
+
+    /// <summary>The native state parsed into a fresh, caller-owned object.</summary>
+    public JsonObject SnapshotJson() => JsonNode.Parse(Snapshot())!.AsObject();
 
     // Only a prepared, synchronous routing commit belongs here. Discovery and
     // other transport waits must finish before taking the native action gate.
@@ -47,8 +53,7 @@ public sealed class ControllerService : IDisposable
         lock (gate)
         {
             requestCancellation.ThrowIfCancellationRequested();
-            Check();
-            if (ControllerActivity.AnyMotion(JsonNode.Parse(Take(Native.State(core, Token)))))
+            if (ControllerActivity.AnyMotion(SnapshotJson())) // re-enters gate; Check() runs there
                 throw new InvalidOperationException(activeMessage);
             requestCancellation.ThrowIfCancellationRequested();
             return commit();
@@ -71,7 +76,7 @@ public sealed class ControllerService : IDisposable
     private void Check()
     {
         ObjectDisposedException.ThrowIf(core == IntPtr.Zero, this);
-        if (WorkerError is not null) throw new InvalidOperationException($"Controller loop stopped: {WorkerError}");
+        if (workerError is { } failure) throw new InvalidOperationException($"Controller loop stopped: {failure}");
     }
     private static string Take(IntPtr value)
     {
@@ -81,6 +86,7 @@ public sealed class ControllerService : IDisposable
     }
     public void Dispose()
     {
+        if (Interlocked.Exchange(ref disposed, 1) != 0) return;
         cancellation.Cancel(); worker.GetAwaiter().GetResult();
         lock (gate) { if (core != IntPtr.Zero) { Native.Destroy(core); core = IntPtr.Zero; } }
         cancellation.Dispose();

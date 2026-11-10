@@ -1,6 +1,5 @@
 using System.Collections.Concurrent;
 using System.Diagnostics;
-using System.Reflection;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using Grpc.Core;
@@ -10,20 +9,20 @@ using LuckyRobots.Piper.Plugin;
 
 internal static class EmergencyStopTests
 {
-    public static async Task Run(Action<bool, string> check)
+    public static async Task Run()
     {
         foreach (string invalidation in new[] { "cancel", "stop", "profile", "generation" })
         {
             using var fixture = new Fixture();
-            await fixture.Invoke("Render", CancellationToken.None);
-            string Wire(string action) => WorkspaceEventScope.Wrap(fixture.Get<long>("workspaceViewEpoch"), "piper-1", action);
+            await fixture.Plugin.Render(CancellationToken.None);
+            string Wire(string action) => WorkspaceEventScope.Wrap(fixture.Plugin.workspaceViewEpoch, "piper-1", action);
             await fixture.Event(Wire("safety.accept"), default);
-            check(!fixture.Get<bool>("approved") && fixture.Rpc.Routes.IsEmpty,
+            Check(!fixture.Plugin.approved && fixture.Rpc.Routes.IsEmpty,
                 "An Enable acknowledgement without a presented prompt reached the hardware transport");
             await fixture.Event(Wire("enable"), default);
             var opened = fixture.Authority.Current.Confirmation;
             string oldAccept = Wire("safety.accept");
-            check(opened is not null && !fixture.Get<bool>("approved") && fixture.Rpc.Routes.IsEmpty,
+            Check(opened is not null && !fixture.Plugin.approved && fixture.Rpc.Routes.IsEmpty,
                 "Opening a clearance prompt approved or sent an action");
             switch (invalidation)
             {
@@ -34,65 +33,65 @@ internal static class EmergencyStopTests
                     await fixture.Event("robot.piper-1.stop", default);
                     break;
                 case "profile":
-                    var preferences = fixture.Get<Preferences>("preferences");
+                    var preferences = fixture.Plugin.preferences;
                     var second = new RobotProfile("piper-2", "Second", "can-two");
-                    fixture.Set("preferences", RobotProfileRouting.Activate(preferences with { Robots = [.. preferences.Robots!, second] }, second.Id));
-                    await fixture.Invoke("Render", CancellationToken.None);
+                    fixture.Plugin.preferences = RobotProfileRouting.Activate(preferences with { Robots = [.. preferences.Robots!, second] }, second.Id);
+                    await fixture.Plugin.Render(CancellationToken.None);
                     break;
                 case "generation":
                     const string backend = "fake-backend-session";
-                    var telemetry = fixture.Get<LatestTelemetry>("telemetry");
+                    var telemetry = fixture.Plugin.telemetry;
                     var first = telemetry.Latest!;
                     var next = first.State.DeepClone().AsObject();
                     next["devices"]![0]!["generation"] = 2L;
                     var replacementReceipt = first with { State = next, Sequence = 2 };
-                    fixture.Set("telemetryScope", new TelemetryScope(backend, "can-one", 1));
-                    fixture.InvokeSync("ApplyIncomingScope", replacementReceipt);
-                    fixture.Set("state", next);
+                    fixture.Plugin.telemetryScope = new TelemetryScope(backend, "can-one", 1);
+                    fixture.Plugin.ApplyIncomingScope(replacementReceipt);
+                    fixture.Plugin.state = next;
                     telemetry.Publish(replacementReceipt);
                     break;
             }
             await fixture.Event(oldAccept, default);
-            check(fixture.Authority.Current.Confirmation is null && !fixture.Get<bool>("approved") &&
+            Check(fixture.Authority.Current.Confirmation is null && !fixture.Plugin.approved &&
                 fixture.Rpc.Routes.All(route => route == "/api/stop/coordinated"),
                 "An old workspace confirmation survived " + invalidation);
             if (invalidation != "cancel") continue;
             await fixture.Event(Wire("enable"), default);
             var reopened = fixture.Authority.Current.Confirmation;
             await fixture.Event(oldAccept, default);
-            check(reopened is not null && !ReferenceEquals(opened, reopened) &&
-                ReferenceEquals(reopened, fixture.Authority.Current.Confirmation) && !fixture.Get<bool>("approved") && fixture.Rpc.Routes.IsEmpty,
+            Check(reopened is not null && !ReferenceEquals(opened, reopened) &&
+                ReferenceEquals(reopened, fixture.Authority.Current.Confirmation) && !fixture.Plugin.approved && fixture.Rpc.Routes.IsEmpty,
                 "A delayed Accept consumed a newly opened prompt");
         }
 
         var authority = new RobotCommandAuthority();
         var original = new RobotCommandScope("piper-1", "original-backend", "can-one", 1);
         long originalEpoch = authority.Epoch;
-        check(authority.TryAcknowledge(originalEpoch, original, 17), "A current acknowledgement could not publish its lease");
+        Check(authority.TryAcknowledge(originalEpoch, original, 17), "A current acknowledgement could not publish its lease");
         var previous = authority.Current.Lease!;
         long nextEpoch = authority.Revoke();
         var replacement = original with { Backend = "replacement-backend", Generation = 2 };
-        check(!authority.TryAcknowledge(originalEpoch, original, 17) && authority.Current is { Lease: null, LastCommand: null },
+        Check(!authority.TryAcknowledge(originalEpoch, original, 17) && authority.Current is { Lease: null, LastCommand: null },
             "An acknowledgement for a retired epoch republished a command");
-        check(authority.TryAcknowledge(nextEpoch, replacement, 17), "A new scoped request could not reuse the controller's request number");
+        Check(authority.TryAcknowledge(nextEpoch, replacement, 17), "A new scoped request could not reuse the controller's request number");
         authority.EndLease(previous);
         authority.EndStatus(previous);
-        check(authority.Current.Lease?.Scope == replacement && authority.Current.LastCommand?.Scope == replacement,
+        Check(authority.Current.Lease?.Scope == replacement && authority.Current.LastCommand?.Scope == replacement,
             "Retiring the old command cleared a different connection's reused request number");
         var approved = new FollowControlApproval(replacement.Backend, replacement.Device, replacement.Generation, "sim", "", "pika-a", "");
         var partner = approved with { Device = "can-two", PikaDevice = "pika-b" };
-        check(authority.TryOpenConfirmation(nextEpoch, "piper-1", approved), "Current authority could not open a workspace confirmation");
+        Check(authority.TryOpenConfirmation(nextEpoch, "piper-1", approved), "Current authority could not open a workspace confirmation");
         var confirmation = authority.Current.Confirmation!;
         int activations = 0;
-        check(!authority.TryConsumeConfirmation(confirmation, "piper-2", partner, () => activations++) &&
+        Check(!authority.TryConsumeConfirmation(confirmation, "piper-2", partner, () => activations++) &&
             authority.TryConsumeConfirmation(confirmation, "piper-1", approved, () => activations++) &&
             !authority.TryConsumeConfirmation(confirmation, "piper-1", approved, () => activations++) && activations == 1,
             "Workspace clearance was accepted for another scope or consumed more than once");
-        check(authority.TrySaveApproval(nextEpoch, "piper-1", approved) && authority.TrySaveApproval(nextEpoch, "piper-2", partner),
+        Check(authority.TrySaveApproval(nextEpoch, "piper-1", approved) && authority.TrySaveApproval(nextEpoch, "piper-2", partner),
             "Approvals for independent robots could not coexist");
         authority.Revoke("piper-1");
         bool restored = false;
-        check(!authority.TrySaveApproval(nextEpoch, "piper-1", approved) &&
+        Check(!authority.TrySaveApproval(nextEpoch, "piper-1", approved) &&
             !authority.TryRestoreApproval(authority.Epoch, "piper-1", approved, () => restored = true) &&
             !restored && authority.Current.Approvals.TryGetValue("piper-2", out var retained) && retained == partner,
             "A revoked robot approval returned, or revocation removed a different robot's approval");
@@ -100,37 +99,37 @@ internal static class EmergencyStopTests
         using (var fixture = new Fixture())
         {
             const string backend = "fake-backend-session";
-            var telemetry = fixture.Get<LatestTelemetry>("telemetry");
+            var telemetry = fixture.Plugin.telemetry;
             var first = telemetry.Latest!;
-            var profile = RobotProfileRouting.Active(fixture.Get<Preferences>("preferences"));
-            fixture.Set("telemetryScope", new TelemetryScope(backend, "can-one", 1));
+            var profile = RobotProfileRouting.Active(fixture.Plugin.preferences);
+            fixture.Plugin.telemetryScope = new TelemetryScope(backend, "can-one", 1);
             fixture.Authority.TrySaveApproval(fixture.Authority.Epoch, profile.Id,
                 new(backend, "can-one", 1, profile.RobotId, profile.RobotJointPrefix, profile.PikaDevice, profile.WslDistribution));
-            fixture.Set("approved", true);
+            fixture.Plugin.approved = true;
             var next = first.State.DeepClone().AsObject();
             next["devices"]![0]!["generation"] = 2L;
             var replacementReceipt = first with { State = next, Sequence = 2 };
-            fixture.InvokeSync("ApplyIncomingScope", replacementReceipt);
-            fixture.InvokeSync("RestoreControlApproval");
-            check(telemetry.Latest?.Connected == false && !fixture.Get<bool>("approved"),
+            fixture.Plugin.ApplyIncomingScope(replacementReceipt);
+            fixture.Plugin.RestoreControlApproval();
+            Check(telemetry.Latest?.Connected == false && !fixture.Plugin.approved,
                 "Old measured evidence restored approval between scope revocation and telemetry publication");
-            fixture.Set("state", next);
+            fixture.Plugin.state = next;
             telemetry.Publish(replacementReceipt);
-            fixture.InvokeSync("RestoreControlApproval");
-            check(!fixture.Get<bool>("approved") && fixture.Authority.Current.Approvals.Count == 0,
+            fixture.Plugin.RestoreControlApproval();
+            Check(!fixture.Plugin.approved && fixture.Authority.Current.Approvals.Count == 0,
                 "The replacement CAN generation inherited the old approval");
         }
 
         using (var fixture = new Fixture())
         {
-            await fixture.Invoke("Render", CancellationToken.None);
-            var preferences = fixture.Get<Preferences>("preferences");
+            await fixture.Plugin.Render(CancellationToken.None);
+            var preferences = fixture.Plugin.preferences;
             var captured = RobotProfileRouting.Active(preferences);
             var second = new RobotProfile("piper-2", "Second", "can-two", PikaDevice: "/dev/pika-two");
-            fixture.Set("preferences", RobotProfileRouting.Activate(preferences with { Robots = [captured, second] }, second.Id));
+            fixture.Plugin.preferences = RobotProfileRouting.Activate(preferences with { Robots = [captured, second] }, second.Id);
             await fixture.Event("robot.piper-1.stop", default);
             var body = JsonNode.Parse(fixture.Rpc.RequestBodies.Single());
-            check(fixture.Rpc.Routes.SequenceEqual(new[] { "/api/stop/coordinated" }) &&
+            Check(fixture.Rpc.Routes.SequenceEqual(new[] { "/api/stop/coordinated" }) &&
                 body?["device_id"]?.GetValue<string>() == "can-one" && body?["pika_device"]?.GetValue<string>() == "/dev/pika-one",
                 "STOP mixed captured arm/gripper identity with a newly selected profile");
         }
@@ -139,18 +138,18 @@ internal static class EmergencyStopTests
         {
             await fixture.Commands.WaitAsync();
             long before = fixture.Authority.Epoch;
-            fixture.Set("approved", true);
+            fixture.Plugin.approved = true;
             fixture.Authority.TryAcknowledge(before, new("piper-1", "fake-backend-session", "can-one", 1), 17);
             using var cancelledCaller = new CancellationTokenSource(); cancelledCaller.Cancel();
             try
             {
                 await fixture.Event("robot.piper-1.stop", cancelledCaller.Token).WaitAsync(TimeSpan.FromSeconds(1));
-                check(fixture.Commands.CurrentCount == 0 && fixture.Rpc.Routes.SequenceEqual(new[] { "/api/stop/coordinated" }),
+                Check(fixture.Commands.CurrentCount == 0 && fixture.Rpc.Routes.SequenceEqual(new[] { "/api/stop/coordinated" }),
                     "Priority STOP waited for or released the ordinary UI command semaphore");
-                check(fixture.Rpc.RequestTokensWereLive && fixture.Authority.Epoch > before &&
-                    !fixture.Get<bool>("approved") && fixture.Authority.Current.Lease is null,
+                Check(fixture.Rpc.RequestTokensWereLive && fixture.Authority.Epoch > before &&
+                    !fixture.Plugin.approved && fixture.Authority.Current.Lease is null,
                     "Caller cancellation or an old permission/lease defeated a requested STOP");
-                check(fixture.Get<string>("message").Contains("Arm STOP acknowledged") && fixture.Get<string>("message").Contains("Pika hold unverified"),
+                Check(fixture.Plugin.message.Contains("Arm STOP acknowledged") && fixture.Plugin.message.Contains("Pika hold unverified"),
                     "Partial coordinated STOP reported failure of one channel as failure of both, or claimed an unverified gripper hold");
             }
             finally { fixture.Commands.Release(); }
@@ -163,19 +162,19 @@ internal static class EmergencyStopTests
             long before = fixture.Authority.Epoch;
             Task foreign = fixture.Event(wire, default);
             await Task.Delay(20);
-            check(fixture.Rpc.Routes.IsEmpty && fixture.Authority.Epoch == before,
+            Check(fixture.Rpc.Routes.IsEmpty && fixture.Authority.Epoch == before,
                 "A foreign, unscoped or malformed STOP entered the priority hardware path: " + wire);
             fixture.Commands.Release();
             await foreign.WaitAsync(TimeSpan.FromSeconds(1));
-            check(fixture.Rpc.Routes.IsEmpty, "A rejected STOP reached transport after the UI gate became available");
+            Check(fixture.Rpc.Routes.IsEmpty, "A rejected STOP reached transport after the UI gate became available");
         }
 
         using (var fixture = new Fixture())
         {
-            fixture.Set("approved", true);
+            fixture.Plugin.approved = true;
             fixture.Rpc.DelayCommand = true;
-            Task pending = fixture.Invoke("Command", "jog", new JsonObject { ["joint"] = 6, ["delta_deg"] = 1.0 },
-                CancellationToken.None, false, false, null, null, null, null, null);
+            Task pending = fixture.Plugin.Command("jog", new JsonObject { ["joint"] = 6, ["delta_deg"] = 1.0 },
+                CancellationToken.None, CommandPurpose.Control, null, null, null);
             try
             {
                 await fixture.Rpc.CommandReached.Task.WaitAsync(TimeSpan.FromSeconds(1));
@@ -183,7 +182,7 @@ internal static class EmergencyStopTests
                 fixture.Rpc.CommandReply.TrySetResult(new ControlReply { Status = 202, Json = "{\"request_id\":17}" });
                 bool rejected = false;
                 try { await pending; } catch (InvalidOperationException) { rejected = true; }
-                check(rejected && fixture.Authority.Current is { Lease: null, LastCommand: null } &&
+                Check(rejected && fixture.Authority.Current is { Lease: null, LastCommand: null } &&
                     fixture.Rpc.Routes.SequenceEqual(new[] { "/api/command", "/api/stop/coordinated" }),
                     "A motion acknowledgement received after priority STOP revived its local lease or retried the command");
             }
@@ -193,9 +192,9 @@ internal static class EmergencyStopTests
         using (var fixture = new Fixture())
         {
             fixture.Rpc.DelayConnect = true;
-            fixture.Set("approved", true);
+            fixture.Plugin.approved = true;
             await fixture.Commands.WaitAsync();
-            Task enable = fixture.Invoke("Enable", CancellationToken.None, true, null, null, null, null);
+            Task enable = fixture.Plugin.Enable(CancellationToken.None, true, null, null);
             try
             {
                 await fixture.Rpc.ConnectReached.Task.WaitAsync(TimeSpan.FromSeconds(1));
@@ -203,9 +202,9 @@ internal static class EmergencyStopTests
                 fixture.Rpc.ConnectReply.TrySetResult(new ControlReply { Status = 200, Json = "{\"ok\":true}" });
                 bool rejected = false;
                 try { await enable; } catch (InvalidOperationException) { rejected = true; }
-                check(rejected && !fixture.Rpc.Routes.Contains("/api/pika/enable") && !fixture.Get<bool>("approved"),
+                Check(rejected && !fixture.Rpc.Routes.Contains("/api/pika/enable") && !fixture.Plugin.approved,
                     "A delayed Enable continuation powered Pika after priority STOP invalidated its permission epoch");
-                check(fixture.Rpc.Routes.Contains("/api/stop/coordinated"), "Blocked Enable suppressed the real priority STOP request");
+                Check(fixture.Rpc.Routes.Contains("/api/stop/coordinated"), "Blocked Enable suppressed the real priority STOP request");
             }
             finally
             {
@@ -218,35 +217,35 @@ internal static class EmergencyStopTests
         {
             fixture.Rpc.CoordinatedMissing = true;
             await fixture.Event("robot.piper-1.stop", default).WaitAsync(TimeSpan.FromSeconds(1));
-            check(fixture.Rpc.Routes.SequenceEqual(new[] { "/api/stop/coordinated", "/api/stop" }),
+            Check(fixture.Rpc.Routes.SequenceEqual(new[] { "/api/stop/coordinated", "/api/stop" }),
                 "Missing coordinated-stop support prevented the independent arm STOP fallback");
-            check(fixture.Get<string>("message").Contains("Arm STOP acknowledged") && fixture.Get<string>("message").Contains("gripper state unverified"),
+            Check(fixture.Plugin.message.Contains("Arm STOP acknowledged") && fixture.Plugin.message.Contains("gripper state unverified"),
                 "Legacy fallback claimed a verified Pika hold");
         }
         foreach (string change in new[] { "physical STOP", "hand guiding" })
         {
             using var fixture = new Fixture();
             fixture.Rpc.DelayConnect = true;
-            await fixture.Invoke("Render", CancellationToken.None);
-            string Wire(string action) => WorkspaceEventScope.Wrap(fixture.Get<long>("workspaceViewEpoch"), "piper-1", action);
+            await fixture.Plugin.Render(CancellationToken.None);
+            string Wire(string action) => WorkspaceEventScope.Wrap(fixture.Plugin.workspaceViewEpoch, "piper-1", action);
             await fixture.Event(Wire("enable"), default);
             Task accept = fixture.Event(Wire("safety.accept"), default);
             try
             {
                 await fixture.Rpc.ConnectReached.Task.WaitAsync(TimeSpan.FromSeconds(2));
-                var telemetry = fixture.Get<LatestTelemetry>("telemetry");
+                var telemetry = fixture.Plugin.telemetry;
                 var receipt = telemetry.Latest!;
                 var changed = receipt.State.DeepClone().AsObject();
                 var status = changed["devices"]![0]!["status"]!;
                 if (change == "physical STOP") status["arm_status"] = 1;
                 else status["teach_state"] = 1;
                 var newReceipt = receipt with { State = changed, Sequence = 2 };
-                fixture.InvokeSync("ApplyIncomingScope", newReceipt);
+                fixture.Plugin.ApplyIncomingScope(newReceipt);
                 telemetry.Publish(newReceipt);
-                fixture.Set("state", changed);
+                fixture.Plugin.state = changed;
                 fixture.Rpc.ConnectReply.TrySetResult(new ControlReply { Status = 200, Json = "{\"ok\":true}" });
                 await accept.WaitAsync(TimeSpan.FromSeconds(2));
-                check(fixture.Rpc.Routes.SequenceEqual(new[] { "/api/pika/connect" }) &&
+                Check(fixture.Rpc.Routes.SequenceEqual(new[] { "/api/pika/connect" }) &&
                     fixture.Authority.Current.Confirmation is null && fixture.Authority.Current.Approvals.Count == 0,
                     "A delayed Enable powered Pika after fresh feedback showed " + change);
             }
@@ -254,85 +253,131 @@ internal static class EmergencyStopTests
         }
         using (var fixture = new Fixture())
         {
-            var telemetry = fixture.Get<LatestTelemetry>("telemetry");
+            var telemetry = fixture.Plugin.telemetry;
             var receipt = telemetry.Latest!;
             var snapshot = receipt.State.DeepClone().AsObject();
             var gripper = snapshot["pika"]!.AsObject();
             gripper["aliases"] = new JsonArray("/dev/pika-one");
             gripper["device"] = "/dev/pika/by-host/fixture";
             snapshot["pikas"] = new JsonArray(gripper.DeepClone());
-            fixture.Set("state", snapshot);
+            fixture.Plugin.state = snapshot;
             telemetry.Publish(receipt with { State = snapshot, Sequence = 2 });
-            fixture.Set("approved", true);
-            fixture.Set("pikaOwned", true);
-            await fixture.Invoke("Enable", CancellationToken.None, true, null, null, null, null);
-            check(fixture.Rpc.Routes.IsEmpty && fixture.Authority.Current.Approvals.Count == 1,
+            fixture.Plugin.approved = true;
+            fixture.Plugin.pikaRole = (long)PikaSessionRole.Owned;
+            await fixture.Plugin.Enable(CancellationToken.None, true, null, null);
+            Check(fixture.Rpc.Routes.IsEmpty && fixture.Authority.Current.Approvals.Count == 1,
                 "An assigned Pika alias was found in telemetry but Enable reconfigured the already-owned canonical gripper");
+        }
+        {
+            // Deterministic interleavings: a STOP lands between a gesture writer's
+            // observation and its transition. STOP must win every time.
+            var plugin = new PipersPlugin();
+            var teleoperating = new ViewportDrag(ViewportDragPhase.Teleoperating, "joint3");
+            plugin.viewportDrag = teleoperating;
+            plugin.StopViewportDrag();
+            Check(!plugin.TryBeginViewportFollowing(teleoperating, 7, "joint3") && plugin.viewportDrag.Phase == ViewportDragPhase.Off,
+                "A follow-start acknowledgement observed before STOP revived Following after it");
+            var following = new ViewportDrag(ViewportDragPhase.Following, "joint3", Request: 7);
+            plugin.viewportDrag = following;
+            plugin.StopViewportDrag();
+            plugin.EndViewportGesture(following);
+            Check(plugin.viewportDrag is { Phase: ViewportDragPhase.Off, Joint: "joint3" },
+                "A gesture end observed before STOP turned Off back into Teleoperating");
+            plugin.viewportDrag = teleoperating;
+            Check(plugin.TryBeginViewportFollowing(teleoperating, 7, "joint4") &&
+                plugin.viewportDrag is { Phase: ViewportDragPhase.Following, Request: 7, FollowJoint: "joint4" },
+                "An undisturbed follow-start did not enter Following");
+            plugin.EndViewportGesture(plugin.viewportDrag);
+            Check(plugin.viewportDrag is { Phase: ViewportDragPhase.Teleoperating, Request: 0 }, "An undisturbed gesture end did not keep teleoperation selected");
+        }
+        {
+            // Pika role interleavings through the observation seam: a stale writer
+            // never clobbers a newer role, and a release always survives.
+            var plugin = new PipersPlugin();
+            var monitorSnapshot = plugin.ObservePikaRole();
+            Check(plugin.TryAdvancePikaRole(plugin.ObservePikaRole(), PikaSessionRole.Owned) &&
+                !plugin.TryAdvancePikaRole(monitorSnapshot, PikaSessionRole.None) && plugin.PikaRole == PikaSessionRole.Owned,
+                "A monitor release decided from a stale snapshot overwrote the Owned role Enable set");
+            plugin.ReleasePikaRole();
+            var enableSnapshot = plugin.ObservePikaRole();
+            plugin.ReleasePikaRole();
+            Check(!plugin.TryAdvancePikaRole(enableSnapshot, PikaSessionRole.Owned) && plugin.PikaRole == PikaSessionRole.None,
+                "An Enable that observed None before a same-role revocation still upgraded to Owned");
+        }
+        using (var fixture = new Fixture())
+        {
+            fixture.Rpc.DelayConnect = true;
+            fixture.Plugin.approved = true;
+            Task enable = fixture.Plugin.Enable(CancellationToken.None, true, null, null);
+            try
+            {
+                await fixture.Rpc.ConnectReached.Task.WaitAsync(TimeSpan.FromSeconds(1));
+                fixture.Plugin.ReleasePikaRole(); // The telemetry thread revokes while connect is in flight.
+                fixture.Rpc.ConnectReply.TrySetResult(new ControlReply { Status = 200, Json = "{\"ok\":true}" });
+                bool refused = false;
+                try { await enable; } catch (InvalidOperationException error) { refused = error.Message.Contains("Pika session was released"); }
+                Check(refused && fixture.Plugin.PikaRole == PikaSessionRole.None && !fixture.Rpc.Routes.Contains("/api/pika/enable"),
+                    "Enable's Owned write overwrote a revocation that landed during its connect");
+            }
+            finally { fixture.Rpc.ConnectReply.TrySetResult(new ControlReply { Status = 200, Json = "{\"ok\":true}" }); }
+        }
+        foreach (bool resetPending in new[] { true, false })
+        {
+            using var fixture = new Fixture();
+            var telemetry = fixture.Plugin.telemetry;
+            var receipt = telemetry.Latest!;
+            var snapshot = receipt.State.DeepClone().AsObject();
+            snapshot["devices"]![0]!["recovery_required"] = true;
+            snapshot["devices"]![0]!["reset_pending"] = resetPending;
+            fixture.Plugin.state = snapshot;
+            telemetry.Publish(receipt with { State = snapshot, Sequence = 2 });
+            fixture.Plugin.approved = true;
+            bool refused = false;
+            try { await fixture.Plugin.Enable(CancellationToken.None, true, null, null); }
+            catch (InvalidOperationException error) { refused = error.Message.Contains("Recover robot on Controls"); }
+            Check(refused && fixture.Rpc.Routes.IsEmpty,
+                "Enable sent a control-purpose recovery verification instead of routing to the Controls recovery card (reset_pending=" + resetPending + ")");
         }
         foreach (StatusCode status in new[] { StatusCode.InvalidArgument, StatusCode.Unimplemented })
         {
             using var fixture = new Fixture();
             fixture.Rpc.CoordinatedRpcFailure = status;
             await fixture.Event("robot.piper-1.stop", default).WaitAsync(TimeSpan.FromSeconds(1));
-            check(fixture.Rpc.Routes.SequenceEqual(new[] { "/api/stop/coordinated", "/api/stop" }),
+            Check(fixture.Rpc.Routes.SequenceEqual(new[] { "/api/stop/coordinated", "/api/stop" }),
                 "A legacy gRPC coordinator rejection prevented the arm STOP fallback: " + status);
         }
     }
 
     private sealed class Fixture : IDisposable
     {
-        private const BindingFlags Fields = BindingFlags.Instance | BindingFlags.NonPublic;
         private readonly PipersPlugin plugin = new();
+        public PipersPlugin Plugin => plugin;
         public FakeCalls Rpc { get; } = new();
         public RobotCommandAuthority Authority => plugin.CommandAuthority;
-        public SemaphoreSlim Commands => Get<SemaphoreSlim>("commands");
-        public T Get<T>(string field) => (T)typeof(PipersPlugin).GetField(field, Fields)!.GetValue(plugin)!;
-        public void Set(string field, object? value) => typeof(PipersPlugin).GetField(field, Fields)!.SetValue(plugin, value);
-        public Task Invoke(string method, params object?[] arguments) => (Task)typeof(PipersPlugin).GetMethod(method, Fields)!.Invoke(plugin, arguments)!;
-        public void InvokeSync(string method, params object?[] arguments) => typeof(PipersPlugin).GetMethod(method, Fields)!.Invoke(plugin, arguments);
+        public SemaphoreSlim Commands => plugin.commands;
         public Task Event(string wire, CancellationToken cancellation) => plugin.HandleEventAsync(new("fixture", wire, "click", JsonSerializer.SerializeToElement(true)), cancellation);
 
         public Fixture()
         {
-            Set("client", new PiperControl.PiperControlClient(Rpc));
-            Set("preferences", RobotProfileRouting.Normalize(new Preferences(Robots:
-                [new("piper-1", "Fixture", "can-one", PikaDevice: "/dev/pika-one")], ActiveRobotId: "piper-1")));
-            Set("token", "fake-backend-session");
-            var snapshot = new JsonObject
-            {
-                ["token"] = "fake-backend-session", ["selected"] = "can-one", ["motion"] = new JsonObject { ["active"] = false, ["request_id"] = 0L },
-                ["devices"] = new JsonArray(new JsonObject
-                {
-                    ["id"] = "can-one", ["name"] = "Fixture", ["generation"] = 1L, ["present"] = true, ["up"] = true, ["fresh"] = true,
-                    ["recovery_required"] = false, ["reset_pending"] = false, ["blocker"] = "", ["firmware_supported"] = true,
-                    ["status"] = new JsonObject { ["control"] = 1, ["teach_state"] = 0, ["arm_status"] = 0, ["error"] = 0, ["age_s"] = .001 },
-                    ["joints"] = new JsonArray(Enumerable.Range(1, 6).Select(i => (JsonNode)new JsonObject
-                    {
-                        ["index"] = i, ["fresh"] = true, ["enabled"] = true, ["fault"] = 0, ["actual_deg"] = 0.0,
-                        ["age_s"] = .001, ["limits_fresh"] = true, ["min_deg"] = -180.0, ["max_deg"] = 180.0, ["max_speed_rad_s"] = .3
-                    }).ToArray())
-                }),
-                ["pika"] = new JsonObject
-                {
-                    ["configured"] = true, ["device"] = "/dev/pika-one", ["distribution"] = "Ubuntu", ["owner"] = Get<string>("owner"),
-                    ["fresh"] = true, ["connected"] = true, ["armed"] = true, ["enabled"] = true, ["pending"] = false,
-                    ["telemetry"] = new JsonObject { ["motor"] = new JsonObject { ["Position"] = .1, ["Speed"] = 0.0 } }
-                }
-            };
-            Set("state", snapshot);
-            Get<LatestTelemetry>("telemetry").Publish(new(snapshot, "fake-backend-session", 1, Stopwatch.GetTimestamp(), 0));
-            var context = (PluginContext)Activator.CreateInstance(typeof(PluginContext), Fields, null,
-                [new PluginStart("fixture", Path.Combine(Path.GetTempPath(), "piper-emergency-" + Guid.NewGuid().ToString("N")), Path.GetTempPath()),
+            plugin.client = new PiperControl.PiperControlClient(Rpc);
+            plugin.preferences = RobotProfileRouting.Normalize(new Preferences(Robots:
+                [new("piper-1", "Fixture", "can-one", PikaDevice: "/dev/pika-one")], ActiveRobotId: "piper-1"));
+            plugin.token = "fake-backend-session";
+            var snapshot = Fixtures.Snapshot("fake-backend-session", Fixtures.Arm("can-one", generation: 1),
+                Fixtures.Pika("/dev/pika-one", RobotProfileRouting.Active(plugin.preferences).PikaDistribution, plugin.owner, enabled: true, position: .1));
+            plugin.state = snapshot;
+            plugin.telemetry.Publish(new(snapshot, "fake-backend-session", 1, Stopwatch.GetTimestamp(), 0));
+            var context = Fixtures.Context(new PluginStart("fixture", Path.Combine(Path.GetTempPath(), "piper-emergency-" + Guid.NewGuid().ToString("N")), Path.GetTempPath()),
                     (Func<object, CancellationToken, Task>)((_, _) => Task.CompletedTask),
-                    (Func<string, JsonObject, CancellationToken, Task<JsonElement>>)((_, _, _) => Task.FromResult(JsonSerializer.SerializeToElement(new { applied = false })))], null)!;
-            Set("engine", context);
+                    (Func<string, JsonObject, CancellationToken, Task<JsonElement>>)((_, _, _) => Task.FromResult(JsonSerializer.SerializeToElement(new { applied = false }))));
+            plugin.engine = context;
         }
 
         public void Dispose()
         {
             // StartAsync is never called: no workers or cameras exist. Dispose
             // only the inert channel/gate, without invoking shutdown commands.
-            ((IDisposable)typeof(PipersPlugin).GetField("channel", Fields)!.GetValue(plugin)!).Dispose();
+            plugin.channel.Dispose();
             Commands.Dispose();
         }
     }

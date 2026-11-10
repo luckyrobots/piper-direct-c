@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Runtime.CompilerServices;
 using System.Text.Json.Nodes;
 
@@ -18,7 +19,7 @@ internal sealed class FollowLaneTelemetry(RobotProfile profile, long generation,
         // scale as the telemetry receipt's monotonic clock.
         if (receipt.BackendToken != backend || !receipt.IsFresh(clock.GetTimestamp()))
             throw new InvalidOperationException("Controller feedback is stale or belongs to another session.");
-        lock (gate) return observations.GetValue(receipt, current => new(current, profile, generation, closedReference));
+        lock (gate) return observations.GetValue(receipt, current => new(current, profile, generation, closedReference, clock.TimestampFrequency));
     }
 }
 
@@ -27,7 +28,7 @@ internal sealed class FollowLaneObservation
     // Only receipt timing metadata is used after construction.
     private readonly TelemetryReceipt receipt;
     private readonly RobotProfile profile;
-    private readonly long generation;
+    private readonly long generation, timestampFrequency;
     private readonly bool armSamplesFresh, armHealthy, armReady, armSettled;
     private readonly bool pikaSamplesFresh, pikaReady;
     private readonly double armSampleAge, pikaSampleAge;
@@ -41,9 +42,14 @@ internal sealed class FollowLaneObservation
     public double PikaSpeed => pikaSpeed ?? throw new InvalidOperationException("Pika did not provide a finite telemetry.motor.Speed.");
     public double PikaFeedbackTime => pikaFeedbackTime ?? throw new InvalidOperationException("Pika did not provide a finite feedback_time_s.");
 
-    public FollowLaneObservation(TelemetryReceipt receipt, RobotProfile profile, long generation, double? closedReference)
+    public FollowLaneObservation(TelemetryReceipt receipt, RobotProfile profile, long generation, double? closedReference,
+        long timestampFrequency)
     {
         this.receipt = receipt;
+        this.timestampFrequency = timestampFrequency;
+        // Receipts always carry a backend token, and preparation admits only
+        // assigned CAN devices on a positive generation.
+        Debug.Assert(receipt.BackendToken.Length > 0 && profile.CanDeviceId.Length > 0 && generation > 0);
         this.profile = profile;
         this.generation = generation;
         var (device, motion, pika) = GroupSimulationLaneTelemetry.Resolve(receipt, profile, generation);
@@ -89,7 +95,7 @@ internal sealed class FollowLaneObservation
 
     private static double? ReadNumber(JsonNode? node) => node is JsonValue value && value.TryGetValue<double>(out double number) ? number : null;
 
-    private bool HasFreshArm(long now) => receipt.IsFresh(now) && armSamplesFresh && receipt.AgeMilliseconds(now) + armSampleAge <= 500;
+    private bool HasFreshArm(long now) => receipt.IsFresh(now) && armSamplesFresh && receipt.AgeMilliseconds(now) + armSampleAge <= TelemetryReceipt.MaximumAgeMilliseconds;
 
     public bool ArmStationary(long now) => armHealthy && armSettled && HasFreshArm(now);
 
@@ -99,7 +105,8 @@ internal sealed class FollowLaneObservation
             throw new InvalidOperationException(profile.Name + ": fresh healthy CAN control, six enabled motors and reported limits are required.");
         if (Motion.Active && Motion.Owner != owner)
             throw new InvalidOperationException(profile.Name + ": another controller owns its active motion.");
-        if (!receipt.IsFresh(now) || !pikaSamplesFresh || receipt.AgeMilliseconds(now) + pikaSampleAge > 250 ||
+        // HasFreshArm above already required a fresh receipt.
+        if (!pikaSamplesFresh || receipt.AgeMilliseconds(now) + pikaSampleAge > SimulationFollowPolicy.MaximumGripperFeedbackAgeMilliseconds ||
             pikaOwner != owner || !pikaReady)
             throw new InvalidOperationException(profile.Name + ": its enabled Pika needs fresh owned, fault-free feedback (250 ms limit).");
         var result = hardware ?? throw new InvalidOperationException(profile.Name + ": the controller did not provide measured joints and numeric limits.");
@@ -111,12 +118,12 @@ internal sealed class FollowLaneObservation
     public bool AdmissionReady(string owner, long request, long publishedSequence, long acknowledgementTicks, long acknowledgementSequence, long now)
     {
         RequireNativeScope(now);
-        return Motion.AdmissionReady(receipt, profile.CanDeviceId, generation, owner, request, publishedSequence, acknowledgementTicks, acknowledgementSequence);
+        return Motion.AdmissionReady(receipt, profile.CanDeviceId, generation, owner, request, publishedSequence, acknowledgementTicks, acknowledgementSequence, timestampFrequency);
     }
 
     private void RequireNativeScope(long now)
     {
-        if (receipt.BackendToken.Length == 0 || profile.CanDeviceId.Length == 0 || generation <= 0 || !HasFreshArm(now) ||
+        if (!HasFreshArm(now) ||
             receipt.AgeMilliseconds(now) > SimulationFollowPolicy.MaximumSourceAgeMilliseconds)
             throw new InvalidOperationException("The native trajectory reference is stale or belongs to a different backend or robot; no queued target was sent.");
     }

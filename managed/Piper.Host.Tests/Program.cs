@@ -114,6 +114,7 @@ finally
 }
 
 await BackendRestartIntegrationTests.Run();
+Console.WriteLine($"Host tests passed ({Checks} checks).");
 
 async Task<string> ReadLogs()
 {

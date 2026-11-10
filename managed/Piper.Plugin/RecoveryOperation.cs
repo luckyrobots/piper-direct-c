@@ -25,12 +25,12 @@ public sealed partial class PipersPlugin
         public void Dispose() => cancellation.Dispose();
     }
 
-    private RecoveryOperation? recoveryOperation;
+    internal RecoveryOperation? recoveryOperation;
     private RecoveryOperation? CurrentRecovery => Volatile.Read(ref recoveryOperation);
-    private bool supportedRecoveryBusy => CurrentRecovery?.Kind == RecoveryKind.HoldHere;
-    private bool recoveryHomeBusy => CurrentRecovery?.Kind == RecoveryKind.ReturnToZero;
+    private bool SupportedRecoveryBusy => CurrentRecovery?.Kind == RecoveryKind.HoldHere;
+    private bool RecoveryHomeBusy => CurrentRecovery?.Kind == RecoveryKind.ReturnToZero;
 
-    private RecoveryOperation BeginRecovery(RecoveryKind kind, JsonObject device, long expectedEpoch, CancellationToken cancellation)
+    internal RecoveryOperation BeginRecovery(RecoveryKind kind, JsonObject device, long expectedEpoch, CancellationToken cancellation)
     {
         if (CurrentRecovery is not null || GroupFollowActive)
             throw new InvalidOperationException("Finish the current recovery or stop following before starting recovery.");
@@ -38,7 +38,7 @@ public sealed partial class PipersPlugin
         // The actor retires queued targets by epoch. Revoke under the original
         // admission epoch so STOP cannot turn this click into a fresh grant.
         long epoch = CommandAuthority.Revoke(forgetApproval: scope.ProfileId,
-            revokeLocalApproval: () => approved = linkCommandsEnabled = teleoperating = recoveryInProgress = false,
+            revokeLocalApproval: () => { approved = linkCommandsEnabled = false; StopViewportDrag(); },
             expectedEpoch: expectedEpoch);
         var lifetime = CancellationTokenSource.CreateLinkedTokenSource(cancellation, shutdown.Token);
         if (kind == RecoveryKind.ReturnToZero) lifetime.CancelAfter(TimeSpan.FromSeconds(90));
@@ -48,7 +48,7 @@ public sealed partial class PipersPlugin
             operation.Dispose();
             throw new InvalidOperationException("STOP cancelled the recovery before it started.");
         }
-        followRequest = 0; followInput.End();
+        StopViewportDrag();
         return operation;
     }
 
@@ -61,7 +61,7 @@ public sealed partial class PipersPlugin
 
     private bool RecoveryScopeCurrent(RecoveryOperation operation) => !operation.Token.IsCancellationRequested && RecoveryScopeMatches(operation);
 
-    private bool RecoveryExpectedGap(TelemetryReceipt? receipt)
+    internal bool RecoveryExpectedGap(TelemetryReceipt? receipt)
     {
         if (CurrentRecovery is not { } operation || !RecoveryScopeCurrent(operation) || receipt is null ||
             receipt.BackendToken != operation.Scope.Backend || !receipt.IsFresh(Stopwatch.GetTimestamp())) return false;
@@ -69,7 +69,7 @@ public sealed partial class PipersPlugin
         var scope = operation.Scope;
         if (resetAt == 0) return false;
         if (operation.Kind == RecoveryKind.ReturnToZero)
-            return TeachingResetAssisted.ExpectedFeedbackGap(true, receipt.State, scope.Device, scope.Generation);
+            return TeachingResetAssisted.ExpectedFeedbackGap(receipt.State, scope.Device, scope.Generation);
         if (Stopwatch.GetElapsedTime(resetAt).TotalSeconds > 5 || receipt.State["selected"]?.GetValue<string>() != scope.Device) return false;
         var device = receipt.State["devices"]?.AsArray().OfType<JsonObject>().SingleOrDefault(d => d["id"]?.GetValue<string>() == scope.Device);
         return device?["generation"]?.GetValue<long>() == scope.Generation && device["present"]?.GetValue<bool>() == true &&
@@ -78,7 +78,7 @@ public sealed partial class PipersPlugin
             joints.All(j => j?["fault"]?.GetValue<int>() == 0) && !receipt.HasFreshDevice(device, Stopwatch.GetTimestamp());
     }
 
-    private void GrantRecoveryHolding(RecoveryOperation operation, CancellationToken cancellation)
+    internal void GrantRecoveryHolding(RecoveryOperation operation, CancellationToken cancellation)
     {
         cancellation.ThrowIfCancellationRequested();
         if (!RecoveryScopeCurrent(operation) || !CommandAuthority.TryInEpoch(operation.Epoch, () => approved = true))
@@ -91,12 +91,12 @@ public sealed partial class PipersPlugin
         {
             operation.Token.ThrowIfCancellationRequested();
             RememberControlApproval(operation.Epoch, activate: true);
-            teachingSeen = approvalBeforeTeaching = false;
+            teachingSession.Release();
         }))
             throw new InvalidOperationException("STOP or a connection change retired the recovery result.");
     }
 
-    private void RetireRecovery(RecoveryOperation operation)
+    internal void RetireRecovery(RecoveryOperation operation)
     {
         Debug.Assert(ReferenceEquals(CurrentRecovery, operation));
         // On an interrupted native step, independently stop renewing the exact

@@ -4,7 +4,7 @@ using LuckyRobots.Piper.Plugin;
 
 internal static class FollowLaneTelemetryTests
 {
-    public static void Run(Action<bool, string> check)
+    public static void Run()
     {
         var clock = new ManualClock();
         var profile = new RobotProfile("second", "Piper 2", CanDeviceId: "can-b", Speed: 35, Tolerance: .75,
@@ -15,16 +15,16 @@ internal static class FollowLaneTelemetryTests
         var reader = new FollowLaneTelemetry(profile, 7, null, () => latest, clock);
         var observation = reader.Read("backend");
         var hardware = observation.Hardware("owner", receivedAt, 77, 12);
-        check(hardware.DeviceId == "can-b" && hardware.Generation == 7 && hardware.JointDegrees[0] == 1 &&
+        Check(hardware.DeviceId == "can-b" && hardware.Generation == 7 && hardware.JointDegrees[0] == 1 &&
             hardware.NativeReference is { RequestId: 77, Sequence: 12 } native && native.JointDegrees[0] == 21 &&
             observation.PikaSpeed == 0 && observation.PikaFeedbackTime == 4 && observation.PikaIdle && observation.ArmStationary(receivedAt),
             "Typed Follow observation mixed a selected display lane, its measured pose, or its native reference");
 
         state["devices"]![1]!["joints"]![0]!["actual_deg"] = 42d;
         state["pikas"]![0]!["telemetry"]!["motor"]!["Speed"] = .08d;
-        check(ReferenceEquals(reader.Read("backend"), observation) && observation.Hardware("owner", receivedAt).JointDegrees[0] == 1 &&
+        Check(ReferenceEquals(reader.Read("backend"), observation) && observation.Hardware("owner", receivedAt).JointDegrees[0] == 1 &&
             observation.PikaSpeed == 0, "Cached lane observation retained mutable joint or Pika telemetry");
-        check(observation.AdmissionReady("owner", 77, 12, receivedAt - clock.TimestampFrequency / 25, 10, receivedAt) &&
+        Check(observation.AdmissionReady("owner", 77, 12, receivedAt - clock.TimestampFrequency / 25, 10, receivedAt) &&
             !observation.AdmissionReady("owner", 77, 12, receivedAt - clock.TimestampFrequency / 100, 10, receivedAt) &&
             !observation.AdmissionReady("owner", 77, 12, receivedAt - clock.TimestampFrequency / 25, 11, receivedAt),
             "Typed admission confused delayed source evidence or a cached sequence with post-ACK proof");
@@ -37,11 +37,11 @@ internal static class FollowLaneTelemetryTests
         });
         clock.AdvanceMilliseconds(199);
         _ = reader.Read("backend").Hardware("owner", clock.GetTimestamp());
-        controller.Arm(FollowArmAction.Update, new() { ["request_id"] = 77L, ["sequence"] = 13L }).GetAwaiter().GetResult();
-        controller.Pika(FollowPikaAction.Hold, null).GetAwaiter().GetResult();
+        controller.Arm(FollowOp.Update, new() { ["request_id"] = 77L, ["sequence"] = 13L }).GetAwaiter().GetResult();
+        controller.Pika(FollowOp.Hold, null).GetAwaiter().GetResult();
         using var cancellation = new CancellationTokenSource();
         controller.Heartbeat(77, cancellation.Token).GetAwaiter().GetResult();
-        check(sent.Count == 3 && sent.All(s => s.Backend == "backend" && s.Body["owner"]?.GetValue<string>() == "owner") &&
+        Check(sent.Count == 3 && sent.All(s => s.Backend == "backend" && s.Body["owner"]?.GetValue<string>() == "owner") &&
             sent[0] is { Route: "/api/command", Cancelable: false } && sent[0].Body["action"]?.GetValue<string>() == "follow-update" &&
             sent[0].Body["device_id"]?.GetValue<string>() == "can-b" && sent[0].Body["generation"]?.GetValue<long>() == 7 &&
             sent[0].Body["sequence"]?.GetValue<long>() == 13 && sent[0].Body["speed_percent"]?.GetValue<double>() == 35 &&
@@ -49,13 +49,23 @@ internal static class FollowLaneTelemetryTests
             sent[1].Body["pika_distribution"]?.GetValue<string>() == (OperatingSystem.IsWindows() ? "Pika-WSL" : null) &&
             sent[2] is { Route: "/api/heartbeat", Cancelable: true } &&
             sent[2].Body["request_id"]?.GetValue<long>() == 77, "Typed controller changed lane routing, request sequence or cancellation policy");
+        Check(sent[0].Body["standalone"]?.GetValue<bool>() == true && !sent[0].Body.ContainsKey("clear") &&
+            !sent[0].Body.ContainsKey("supported") && !sent[0].Body.ContainsKey("reset_completed"),
+            "Follow update carried safety declarations that only other actions read");
+        sent.Clear();
+        foreach (var action in new[] { FollowOp.Match, FollowOp.Start, FollowOp.Hold })
+            controller.Arm(action, null).GetAwaiter().GetResult();
+        Check(sent.All(s => s.Body["standalone"]?.GetValue<bool>() == true && !s.Body.ContainsKey("supported") &&
+                !s.Body.ContainsKey("reset_completed")) &&
+            sent[0].Body["clear"]?.GetValue<bool>() == true && sent[1].Body["clear"]?.GetValue<bool>() == true &&
+            !sent[2].Body.ContainsKey("clear"), "Follow sent clear, supported or reset_completed beyond the actions that read them");
 
         clock.AdvanceMilliseconds(2);
         Reject(() => _ = reader.Read("backend").Hardware("owner", clock.GetTimestamp()), "Cached Pika evidence gained a new 250 ms window");
         var previous = latest;
         latest = new(Snapshot(), "backend", 12, clock.GetTimestamp(), 0);
         var replacement = reader.Read("backend");
-        check(!ReferenceEquals(replacement, observation) && ReferenceEquals(reader.Read("backend", previous), observation) &&
+        Check(!ReferenceEquals(replacement, observation) && ReferenceEquals(reader.Read("backend", previous), observation) &&
             ReferenceEquals(reader.Read("backend"), replacement), "Interleaved reads did not reuse the immutable observation for each receipt");
         Reject(() => _ = reader.Read("different-backend"), "Typed observer accepted a replacement backend under the previous scope");
         Reject(() => _ = replacement.Hardware("other-owner", clock.GetTimestamp()), "Typed observation accepted an unrelated motion owner");
@@ -74,21 +84,15 @@ internal static class FollowLaneTelemetryTests
         clock.AdvanceMilliseconds(12); // The acknowledgement consumed part of the period.
         Task wait = cadence.WaitAfterPublication(clock, CancellationToken.None);
         clock.AdvanceMilliseconds(16);
-        check(!wait.IsCompleted, "Follow cadence published before the remaining deadline");
+        Check(!wait.IsCompleted, "Follow cadence published before the remaining deadline");
         clock.AdvanceMilliseconds(2);
-        check(wait.IsCompletedSuccessfully, "Follow cadence ignored its injected clock at the deadline");
+        Check(wait.IsCompletedSuccessfully, "Follow cadence ignored its injected clock at the deadline");
         clock.AdvanceMilliseconds(85);
         wait = cadence.WaitAfterPublication(clock, CancellationToken.None);
-        check(cadence.SkippedDeadlines == 2 && !wait.IsCompleted, "Follow cadence attempted to replay missed publication deadlines");
+        Check(cadence.SkippedDeadlines == 2 && !wait.IsCompleted, "Follow cadence attempted to replay missed publication deadlines");
         clock.AdvanceMilliseconds(5);
-        check(wait.IsCompletedSuccessfully, "Follow cadence failed to resume at the next real deadline");
+        Check(wait.IsCompletedSuccessfully, "Follow cadence failed to resume at the next real deadline");
 
-        void Reject(Action action, string reason)
-        {
-            try { action(); }
-            catch (InvalidOperationException) { check(true, reason); return; }
-            check(false, reason);
-        }
     }
 
     private static JsonObject Snapshot() => new()

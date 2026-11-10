@@ -64,21 +64,16 @@ public sealed partial class PipersPlugin
 {
     private sealed record CameraDeviceInventory(ColorCameraDevice[]? Color, DepthCameraDevice[]? Depth);
     private CameraDeviceChoice[] cameraDeviceChoices = [], depthDeviceChoices = [];
-    private Task? cameraDeviceDiscoveryWorker;
-    private CameraDeviceInventory? pendingCameraDeviceInventory;
-    private long cameraDeviceDiscoveryAttempt;
+    private readonly ThrottledProbe<CameraDeviceInventory> cameraDeviceProbe = new(TimeSpan.FromSeconds(15));
     private string cameraDeviceDiscoveryStatus = "Camera inventory is loading…";
 
     private void QueueCameraDeviceRefresh(CancellationToken cancellation, bool force = false)
     {
-        if (!passiveMeasuredTrackingStarted || cameraDiscoveryShutdown.IsCancellationRequested || cameraDeviceDiscoveryWorker is { IsCompleted: false } ||
-            !force && cameraDeviceDiscoveryAttempt != 0 && System.Diagnostics.Stopwatch.GetElapsedTime(cameraDeviceDiscoveryAttempt).TotalSeconds < 15)
-            return;
-        cameraDeviceDiscoveryAttempt = System.Diagnostics.Stopwatch.GetTimestamp();
-        cameraDeviceDiscoveryWorker = ReadCameraDevices(cancellation);
+        if (!CameraDiscoveryRunning) return;
+        cameraDeviceProbe.Queue(() => ReadCameraDevices(cancellation), force);
     }
 
-    private async Task ReadCameraDevices(CancellationToken cancellation)
+    private async Task<CameraDeviceInventory?> ReadCameraDevices(CancellationToken cancellation)
     {
         using var lifetime = CancellationTokenSource.CreateLinkedTokenSource(cancellation, cameraDiscoveryShutdown.Token);
         cancellation = lifetime.Token;
@@ -88,19 +83,19 @@ public sealed partial class PipersPlugin
             var depth = RunCameraTool(["d405-profiles"], TimeSpan.FromSeconds(8), cancellation);
             await Task.WhenAll(color, depth);
             if (color.Result.ExitCode != 0 && depth.Result.ExitCode != 0) throw new IOException(color.Result.Error + " " + depth.Result.Error);
-            var inventory = new CameraDeviceInventory(
+            return new CameraDeviceInventory(
                 color.Result.ExitCode == 0 ? JsonSerializer.Deserialize<ColorCameraDevice[]>(color.Result.Output, PluginProtocol.Json) ?? [] : null,
                 depth.Result.ExitCode == 0 ? JsonSerializer.Deserialize<DepthCameraDevice[]>(depth.Result.Output, PluginProtocol.Json) ?? [] : null);
-            Interlocked.Exchange(ref pendingCameraDeviceInventory, inventory);
         }
         catch (Exception error) when (!cancellation.IsCancellationRequested)
         { cameraDeviceDiscoveryStatus = "Camera discovery: " + error.Message; }
         catch (OperationCanceledException) when (cancellation.IsCancellationRequested) { }
+        return null;
     }
 
     private async Task<bool> ApplyCameraDeviceInventory(CancellationToken cancellation)
     {
-        var inventory = Interlocked.Exchange(ref pendingCameraDeviceInventory, null);
+        var inventory = cameraDeviceProbe.Take();
         if (inventory is null) return false;
         cancellation.ThrowIfCancellationRequested();
         string previous = JsonSerializer.Serialize(cameraDeviceChoices, PluginProtocol.Json) + JsonSerializer.Serialize(depthDeviceChoices, PluginProtocol.Json);
@@ -124,12 +119,11 @@ public sealed partial class PipersPlugin
             Bench = bench with { Device = CameraDeviceChoices.ResolveSaved(bench.Device, "", inventory.Color ?? []) } };
         if (previousPreferences != JsonSerializer.Serialize(preferences, PluginProtocol.Json))
             await Save(cancellation);
-        if (oldGripper != CameraSettings("gripper").Device || oldBench != CameraSettings("bench").Device)
+        foreach (var (id, old) in new[] { ("gripper", oldGripper), ("bench", oldBench) })
         {
+            if (old == CameraSettings(id).Device) continue;
             cancellation.ThrowIfCancellationRequested();
-            if (oldGripper != CameraSettings("gripper").Device) await RestartCamera("gripper");
-            cancellation.ThrowIfCancellationRequested();
-            if (oldBench != CameraSettings("bench").Device) await RestartCamera("bench");
+            await RestartCamera(id);
         }
         string current = JsonSerializer.Serialize(cameraDeviceChoices, PluginProtocol.Json) + JsonSerializer.Serialize(depthDeviceChoices, PluginProtocol.Json);
         return current != previous;

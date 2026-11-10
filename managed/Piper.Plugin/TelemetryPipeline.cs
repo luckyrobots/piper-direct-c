@@ -8,9 +8,14 @@ namespace LuckyRobots.Piper.Plugin;
 public sealed record TelemetryReceipt(JsonObject State, string BackendToken, long Sequence,
     long ReceivedTicks, double SourceAgeMilliseconds, bool Connected = true)
 {
+    /// <summary>Controller evidence older than this never authorizes control.</summary>
+    public const double MaximumAgeMilliseconds = 500;
     public double AgeMilliseconds(long nowTicks) => SourceAgeMilliseconds +
         Math.Max(0, Stopwatch.GetElapsedTime(ReceivedTicks, nowTicks).TotalMilliseconds);
-    public bool IsFresh(long nowTicks) => Connected && nowTicks >= ReceivedTicks && AgeMilliseconds(nowTicks) <= 500;
+    public bool IsFresh(long nowTicks) => Connected && nowTicks >= ReceivedTicks && AgeMilliseconds(nowTicks) <= MaximumAgeMilliseconds;
+    /// <summary>Source capture time on the receipt clock. Pass the frequency of the
+    /// clock that stamped <see cref="ReceivedTicks"/> and the compared value.</summary>
+    public double CapturedTicks(long timestampFrequency) => ReceivedTicks - SourceAgeMilliseconds * timestampFrequency / 1000;
     public double DeviceEvidenceAgeMilliseconds(JsonObject device, long nowTicks)
     {
         if (device["joints"] is not JsonArray { Count: 6 } joints) return double.PositiveInfinity;
@@ -18,7 +23,6 @@ public sealed record TelemetryReceipt(JsonObject State, string BackendToken, lon
     }
     public double PikaEvidenceAgeMilliseconds(long nowTicks) => PikaEvidenceAgeMilliseconds(State["pika"] as JsonObject, nowTicks);
     public double PikaEvidenceAgeMilliseconds(JsonObject? pika, long nowTicks) => AgeMilliseconds(nowTicks) + SampleAgeMilliseconds(pika);
-    public bool HasFreshPika(long nowTicks, double maximumAgeMilliseconds) => HasFreshPika(State["pika"] as JsonObject, nowTicks, maximumAgeMilliseconds);
     public bool HasFreshPika(JsonObject? pika, long nowTicks, double maximumAgeMilliseconds) => IsFresh(nowTicks) &&
         double.IsFinite(maximumAgeMilliseconds) && maximumAgeMilliseconds > 0 &&
         pika?["connected"]?.GetValue<bool>() == true && pika["fresh"]?.GetValue<bool>() == true &&
@@ -28,7 +32,7 @@ public sealed record TelemetryReceipt(JsonObject State, string BackendToken, lon
         ? seconds * 1000 : double.PositiveInfinity;
     public bool HasFreshDevice(JsonObject device, long nowTicks) => IsFresh(nowTicks) && device["fresh"]?.GetValue<bool>() == true &&
         device["joints"] is JsonArray { Count: 6 } joints && joints.All(j => j?["fresh"]?.GetValue<bool>() == true) &&
-        DeviceEvidenceAgeMilliseconds(device, nowTicks) <= 500;
+        DeviceEvidenceAgeMilliseconds(device, nowTicks) <= MaximumAgeMilliseconds;
 }
 
 /// <summary>Single-reader publication, with no queue of old robot states.</summary>
@@ -48,8 +52,8 @@ public sealed class LatestTelemetry
         double age = (receivedUnixMicroseconds - (double)sourceUnixMicroseconds) / 1000;
         if (backend.Length == 0 || sequence <= 0 || sourceUnixMicroseconds <= 0 || clockDomain != "host-utc")
         { reason = "Controller feedback has no verified source clock/sequence; update the backend."; return false; }
-        if (!double.IsFinite(age) || age < -100 || age > 500)
-        { reason = "Controller feedback arrived outside its 500 ms freshness window."; return false; }
+        if (!double.IsFinite(age) || age < -100 || age > TelemetryReceipt.MaximumAgeMilliseconds)
+        { reason = $"Controller feedback arrived outside its {TelemetryReceipt.MaximumAgeMilliseconds:F0} ms freshness window."; return false; }
         if (streamBackend == backend && sequence <= streamSequence)
         { reason = "Discarded duplicate or out-of-order controller feedback."; return false; }
         receipt = new(state, backend, sequence, receivedTicks, Math.Max(0, age));
@@ -81,29 +85,26 @@ public sealed record TelemetryScope(string BackendToken, string DeviceId, long G
 
 public sealed partial class PipersPlugin
 {
-    private readonly LatestTelemetry telemetry = new();
-    private TelemetryScope? telemetryScope;
-    private string telemetryIssue = "Waiting for controller feedback", sceneTrackingStatus = "";
+    internal readonly LatestTelemetry telemetry = new();
+    internal TelemetryScope? telemetryScope;
+    internal string telemetryIssue = "Waiting for controller feedback", sceneTrackingStatus = "";
     private string telemetryConnectionUiIssue = "";
-    private string linkBackendToken = "";
+    internal string linkBackendToken = "";
     private long scenePermissionEpoch;
-    private long recoveryRequestId, recoveryAcknowledgedTicks, recoveryAcknowledgedSequence;
 
     private bool TelemetryIsFresh() => telemetry.Latest is { } receipt && receipt.BackendToken == token && receipt.IsFresh(Stopwatch.GetTimestamp());
-    private void DisarmTelemetryTargets(string reason, bool clearLink, string? forgetApproval = null, bool forgetAllApprovals = false)
+    internal void DisarmTelemetryTargets(string reason, bool clearLink, string? forgetApproval = null, bool forgetAllApprovals = false)
     {
         CommandAuthority.Revoke(forgetApproval, () =>
         {
             approved = linkCommandsEnabled = false;
-            teachingSeen = approvalBeforeTeaching = false;
+            teachingSession.Release();
         }, forgetAllApprovals);
         CurrentRecovery?.Cancel();
         CancelGroupSimulationFollowingInput(reason);
-        teachingReturnGate.Invalidate();
-        teleoperating = false;
-        followRequest = 0; followInput.End();
+        StopViewportDrag();
         acknowledgedScenePose = null; linkErrorDegrees = null;
-        if (clearLink) { link = null; recoveryInProgress = false; }
+        if (clearLink) link = null;
     }
 
     private void PauseSceneFollowing()
@@ -112,13 +113,14 @@ public sealed partial class PipersPlugin
         // viewport-follow permission/gestures are discarded; ordinary controller
         // heartbeats and fresh measured joint controls remain independent.
         Interlocked.Increment(ref scenePermissionEpoch);
-        teleoperating = false; followInput.End();
-        if (CommandAuthority.Current.Lease is { } lease && lease.Request == followRequest) CommandAuthority.EndLease(lease);
-        followRequest = 0; linkCommandsEnabled = false;
+        long request = followRequest;
+        StopViewportDrag();
+        if (CommandAuthority.Current.Lease is { } lease && lease.Request == request) CommandAuthority.EndLease(lease);
+        linkCommandsEnabled = false;
         acknowledgedScenePose = null; linkErrorDegrees = null;
     }
 
-    private void ApplyIncomingScope(TelemetryReceipt receipt)
+    internal void ApplyIncomingScope(TelemetryReceipt receipt)
     {
         var next = receipt.State;
         var scope = TelemetryScope.Read(next, ActiveProfile.CanDeviceId);
@@ -129,7 +131,7 @@ public sealed partial class PipersPlugin
             {
                 telemetry.Disconnect();
                 DisarmTelemetryTargets("Controller backend changed · all previous targets discarded", clearLink: true);
-                pikaOwned = pikaMonitoring = false;
+                ReleasePikaRole();
             }
             token = receipt.BackendToken; telemetryScope = scope;
             return; // The group validates every captured lane, independently of the visible profile/selected projection.
@@ -139,9 +141,8 @@ public sealed partial class PipersPlugin
             // Keep the old receipt from granting control under the new epoch
             // between invalidation and publication of the replacement frame.
             telemetry.Disconnect();
-            DisarmTelemetryTargets("Controller session or assigned CAN connection changed", clearLink: true);
-            teachingSeen = approvalBeforeTeaching = false;
-            if (backendChanged) pikaOwned = pikaMonitoring = false;
+            DisarmTelemetryTargets("Controller session or assigned CAN connection changed", clearLink: true); // Also releases the teaching session.
+            if (backendChanged) ReleasePikaRole();
         }
         token = receipt.BackendToken;
         telemetryScope = scope;
@@ -158,24 +159,23 @@ public sealed partial class PipersPlugin
         {
             // Observe the transition on the reader even if the editor is busy,
             // so a short teaching interval cannot leave an old drag armed.
-            if (!teachingSeen)
+            var linkedScope = new TeachingScope(linked.DeviceId, linked.Generation);
+            if (teachingSession.Current is not { Owned: true } owned || owned.Scope != linkedScope)
             {
                 telemetry.Disconnect();
                 CommandAuthority.Revoke(revokeLocalApproval: () =>
                 {
-                    approvalBeforeTeaching = approved;
+                    teachingSession.ObserveHandOver(linkedScope, approved);
                     approved = linkCommandsEnabled = false;
                 });
-                teachingSeen = true;
-                teachingDevice = linked.DeviceId; teachingGeneration = linked.Generation;
             }
-            approved = linkCommandsEnabled = teleoperating = false;
+            approved = linkCommandsEnabled = false;
+            StopViewportDrag();
             CommandAuthority.ClearTracked();
-            followRequest = 0; followInput.End();
         }
     }
 
-    private async Task ReadTelemetry(CancellationToken cancellation)
+    internal async Task ReadTelemetry(CancellationToken cancellation)
     {
         while (!cancellation.IsCancellationRequested)
         {
@@ -204,9 +204,9 @@ public sealed partial class PipersPlugin
             {
                 telemetry.Disconnect();
                 PikaTeachingTelemetryInterrupted();
-                DisarmTelemetryTargets("Controller telemetry interrupted", clearLink: false); pikaOwned = pikaMonitoring = false;
+                DisarmTelemetryTargets("Controller telemetry interrupted", clearLink: false); ReleasePikaRole();
                 telemetryIssue = error is RpcException { StatusCode: StatusCode.Unavailable }
-                    ? "Controller unavailable on 127.0.0.1:8766; reconnecting automatically."
+                    ? $"Controller unavailable on {ControllerEndpoint.Loopback}:{ControllerEndpoint.GrpcPort}; reconnecting automatically."
                     : "Controller telemetry interrupted: " + error.Message;
                 message = telemetryIssue;
                 await Task.Delay(1000, cancellation);
@@ -224,7 +224,7 @@ public sealed partial class PipersPlugin
         return receipt.HasFreshDevice(device, Stopwatch.GetTimestamp());
     }
 
-    private void ObserveTelemetryConnectionPresentation(TelemetryReceipt receipt)
+    internal void ObserveTelemetryConnectionPresentation(TelemetryReceipt receipt)
     {
         long now = Stopwatch.GetTimestamp();
         if (receipt.BackendToken != token || !receipt.IsFresh(now) || ActiveProfile.CanDeviceId.Length == 0) return;
@@ -261,7 +261,7 @@ public sealed partial class PipersPlugin
             value.StartsWith("Controller telemetry interrupted", StringComparison.Ordinal);
     }
 
-    private async Task ArmHeartbeats(CancellationToken cancellation)
+    internal async Task ArmHeartbeats(CancellationToken cancellation)
     {
         using var timer = new PeriodicTimer(TimeSpan.FromMilliseconds(200));
         do
@@ -270,7 +270,7 @@ public sealed partial class PipersPlugin
             var receipt = telemetry.Latest;
             if (group is null && !HasFreshControlTelemetry(out receipt))
             {
-                if (!RecoveryExpectedGap(receipt)) DisarmTelemetryTargets("Measured robot feedback exceeded the 500 ms freshness window", clearLink: false);
+                if (!RecoveryExpectedGap(receipt)) DisarmTelemetryTargets($"Measured robot feedback exceeded the {TelemetryReceipt.MaximumAgeMilliseconds:F0} ms freshness window", clearLink: false);
                 continue;
             }
             if (CommandAuthority.Current.Lease is not { } lease) continue;
@@ -311,7 +311,7 @@ public sealed partial class PipersPlugin
         } while (await timer.WaitForNextTickAsync(cancellation));
     }
 
-    private async Task PikaHeartbeats(CancellationToken cancellation)
+    internal async Task PikaHeartbeats(CancellationToken cancellation)
     {
         using var timer = new PeriodicTimer(TimeSpan.FromMilliseconds(200));
         var pending = new Dictionary<(string Backend, string Device, string? Distribution), Task>();
@@ -327,7 +327,7 @@ public sealed partial class PipersPlugin
                 foreach (var session in OwnedPikaSessions(receipt.State))
                 {
                     var key = (receipt.BackendToken, session["device"]!.GetValue<string>(), session["distribution"]?.GetValue<string>());
-                    if (!pending.ContainsKey(key)) pending.Add(key, Renew(key, PikaMatchesProfile(profile, session) ? profile : null));
+                    if (!pending.ContainsKey(key)) pending.Add(key, Renew(key, ProfilePikaRouting.Matches(profile, session) ? profile : null));
                 }
             } while (await timer.WaitForNextTickAsync(cancellation));
         }
@@ -346,7 +346,7 @@ public sealed partial class PipersPlugin
                 if (selected is not null && token == key.Backend && ActiveProfile is { } current && current.Id == selected.Id &&
                     current.PikaDevice == selected.PikaDevice && current.WslDistribution == selected.WslDistribution)
                 {
-                    pikaOwned = pikaMonitoring = false;
+                    ReleasePikaRole();
                     message = "Pika connection: " + error.Message;
                 }
                 else Trace.TraceWarning("Independent Pika heartbeat unavailable: {0}", error.Message);
@@ -365,6 +365,7 @@ public sealed partial class PipersPlugin
                 if (receipt is null || !receipt.IsFresh(Stopwatch.GetTimestamp()) || receipt.BackendToken != token)
                 {
                     sceneTrackingStatus = "Measured scene paused · waiting for fresh controller feedback";
+                    ObserveReplayScope(null);
                     message = telemetryIssue.Length > 0 ? telemetryIssue : "Controller feedback delayed · motion permission cleared; waiting for fresh telemetry";
                     QueueHeightMaintenance();
                     await Update(cancellation);
@@ -377,6 +378,7 @@ public sealed partial class PipersPlugin
                 await ObserveHandGuideRecovery(cancellation);
                 await RestoreMeasuredTracking(cancellation);
                 ObserveTelemetryConnectionPresentation(receipt);
+                ObserveReplayScope(receipt);
                 RetryLinkedPikaMonitor();
                 if (CommandAuthority.Current.LastCommand is { } last && last.Scope.Backend == receipt.BackendToken &&
                     last.Scope.ProfileId == ActiveProfile.Id && next["selected"]?.GetValue<string>() == last.Scope.Device &&
@@ -388,7 +390,6 @@ public sealed partial class PipersPlugin
                 await PublishMeasuredGhosts(cancellation);
                 await PublishMeasuredScene(cancellation);
                 QueueWizardHighlight();
-                await ObserveRecovery(cancellation);
                 await Update(cancellation);
             }
             catch (Exception error) when (!cancellation.IsCancellationRequested)
@@ -404,38 +405,7 @@ public sealed partial class PipersPlugin
         }
     }
 
-    private async Task ObserveRecovery(CancellationToken cancellation)
-    {
-        if (recoveryHomeBusy) return;
-        if (!recoveryInProgress || !HasFreshControlTelemetry(out var receipt)) return;
-        var device = Device(expectedToken: receipt!.BackendToken, sourceReceipt: receipt);
-        if (device["recovery_required"]?.GetValue<bool>() != true && device["reset_pending"]?.GetValue<bool>() != true)
-        {
-            recoveryInProgress = false;
-            message = "Recovery verified. The interrupted move was discarded. Enable robot when ready; measured scene tracking continues.";
-            return;
-        }
-        var plan = RecoveryPlan.Inspect(device, receipt.State["motion"]?["active"]?.GetValue<bool>() == true);
-        if (plan.RetryFailedReset)
-        {
-            long acknowledged = Interlocked.Read(ref recoveryAcknowledgedTicks);
-            if (acknowledged > 0 && (receipt.Sequence <= Interlocked.Read(ref recoveryAcknowledgedSequence) ||
-                receipt.ReceivedTicks - receipt.SourceAgeMilliseconds * Stopwatch.Frequency / 1000 <= acknowledged ||
-                receipt.State["motion"]?["request_id"]?.GetValue<long>() != Interlocked.Read(ref recoveryRequestId))) return;
-            // A failed native reset has retired. Release only the UI's waiting
-            // latch; a supported retry remains an explicit operator action.
-            recoveryInProgress = false;
-            message = "The previous reset did not clear STOP. Keep supporting the arm and use Retry failed reset when ready.";
-        }
-        else if (plan.Action == "verify-reset" && await commands.WaitAsync(0, cancellation))
-        {
-            try { await Command("verify-reset", null, cancellation, recoveryAcknowledged: true); recoveryInProgress = false; }
-            catch (InvalidOperationException error) { message = error.Message; recoveryInProgress = false; }
-            finally { commands.Release(); }
-        }
-    }
-
-    private async Task PublishMeasuredScene(CancellationToken cancellation)
+    internal async Task PublishMeasuredScene(CancellationToken cancellation)
     {
         var group = Volatile.Read(ref groupSimulation);
         if (group is not null && !GroupWaitingForUserPlay(group)) return;
@@ -483,7 +453,7 @@ public sealed partial class PipersPlugin
             if (reply.TryGetProperty("applied", out var applied) && applied.GetBoolean())
             {
                 double age = receipt.DeviceEvidenceAgeMilliseconds(device, Stopwatch.GetTimestamp());
-                if (age > 500)
+                if (age > TelemetryReceipt.MaximumAgeMilliseconds)
                 {
                     PauseSceneFollowing(); sceneTrackingStatus = $"Scene view catching up · measured pose {age:F0} ms old"; return;
                 }

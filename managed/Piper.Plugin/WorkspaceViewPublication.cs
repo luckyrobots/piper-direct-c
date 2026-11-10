@@ -11,12 +11,17 @@ public sealed partial class PipersPlugin
     private sealed record SimulationCameraChoices(string SceneId, (string Id, string Name)[] Cameras);
     private sealed record PublishedWorkspaceView(long Epoch, WorkspaceViewContext Context, RobotProfile StopProfile,
         WorkspaceClearConfirmation? Confirmation, SimulationCameraChoices CameraChoices);
-    private readonly record struct WorkspaceViewContext(string Profile, string Page, string SettingsCategory,
-        string SettingsCamera, string CameraDetail, bool Calibration);
+    private readonly record struct WorkspaceViewContext(string Profile, WorkspaceNavigation Navigation)
+    {
+        public WorkspacePage Page => Navigation.Page;
+        public SettingsCategory SettingsCategory => Navigation.Category;
+        public string SettingsCamera => Navigation.SettingsCamera;
+        public bool Calibration => Navigation.CalibrationOpen;
+    }
     private sealed record WorkspacePatchScope(PublishedWorkspaceView? View, long Epoch, WorkspaceViewContext Context, Preferences Preferences);
     private sealed record WorkspacePatchEvidence(TelemetryReceipt? Receipt, JsonObject? State, string Backend, long PermissionEpoch);
     private PublishedWorkspaceView? publishedWorkspaceView;
-    private WorkspaceViewContext CurrentWorkspaceViewContext => new(ActiveProfile.Id, workspacePage, settingsCategory, settingsCamera, cameraDetail, calibrationOpen);
+    private WorkspaceViewContext CurrentWorkspaceViewContext => new(ActiveProfile.Id, Navigation);
     private long PublishedWorkspaceEpoch => Volatile.Read(ref publishedWorkspaceView)?.Epoch ?? Interlocked.Read(ref workspaceViewEpoch);
 
     private RobotProfile? CaptureStopProfile(string wireId, RobotProfile selected)
@@ -96,7 +101,7 @@ public sealed partial class PipersPlugin
         finally { workspacePublicationGate.Release(); }
     }
 
-    private string UnscopePublishedWorkspaceEvent(string wireId, string? profileId = null)
+    internal string UnscopePublishedWorkspaceEvent(string wireId, string? profileId = null)
     {
         var published = Volatile.Read(ref publishedWorkspaceView);
         string id = WorkspaceEventScope.Unwrap(published?.Epoch ?? Interlocked.Read(ref workspaceViewEpoch), profileId ?? ActiveProfile.Id, wireId);
@@ -143,7 +148,7 @@ public sealed partial class PipersPlugin
             var context = CurrentWorkspaceViewContext;
             var profile = ActiveProfile;
             var confirmation = CommandAuthority.Current.Confirmation;
-            if (confirmation is not null && (context.Page != "controls" || context.Calibration || confirmation.ProfileId != profile.Id))
+            if (confirmation is not null && (context.Page != WorkspacePage.Controls || confirmation.ProfileId != profile.Id))
             {
                 CommandAuthority.DismissConfirmation(confirmation);
                 confirmation = null;

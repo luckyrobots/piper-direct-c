@@ -13,8 +13,7 @@ public sealed partial class PipersPlugin
     {
         string Redact(string text)
         {
-            foreach (string secret in new[] { group.Backend, owner })
-                if (secret.Length > 0) text = text.Replace(secret, "[redacted]", StringComparison.Ordinal);
+            text = RedactSecrets(text, group.Backend, owner);
             return text.Length <= 2000 ? text : text[..2000];
         }
         string reason = Redact(error.Message);
@@ -26,9 +25,8 @@ public sealed partial class PipersPlugin
         if (ReferenceEquals(Volatile.Read(ref groupSimulation), group))
         {
             uiActionError = "Following stopped: " + reason;
-            GroupFollowStatus = "Following stopped · " + reason;
-            groupFollowFailure = "Following stopped\n" + reason;
-            GroupFollowDetail = "All selected targets are discarded. The simulation remains paused; restore feedback or fix the reported issue before arming again.";
+            groupFollowStatus = "Following stopped · " + reason;
+            groupFollowDetail = "All selected targets are discarded. The simulation remains paused; restore feedback or fix the reported issue before arming again.";
         }
         var receipt = telemetry.Latest;
         long now = Stopwatch.GetTimestamp();
@@ -76,7 +74,7 @@ public sealed partial class PipersPlugin
                         ordered = SimulationFollowFailureOrdered.Capture(execution, observed, lane.LastStationary, lane.LastGripperSpeed, lane.LastGripperFeedback);
                 string phase = group.Phase.ToString().ToLowerInvariant();
                 lane.Diagnostics?.Capture(new(DateTimeOffset.UtcNow, phase, "group:" + phase,
-                    error.GetType().Name, reason, lane.ArmRequest, Interlocked.Read(ref lane.Sequence),
+                    error.GetType().Name, reason, lane.Arm.CurrentRequest, Interlocked.Read(ref lane.Sequence),
                     new(group.Scene, group.RunId, group.Entity, group.Asset, group.Revision, lane.Robot.DeviceId,
                         lane.Robot.Generation, lane.Profile.PikaDevice, receipt?.State["backend_process_id"]?.GetValue<long>(), lane.Robot.JointPrefix),
                     runtime, hardware, lane.Publications.Snapshot(), ordered));

@@ -109,13 +109,13 @@ static bool windows_load(void) {
 #undef BIND
     win.dll=dll; return true;
 }
-static void lost(struct can_device *d,const char *why) {
+/* On Windows present/up exist only while a handle is open; the next scan
+   re-derives them, so loss clears them here. */
+static void transport_close(struct can_device *d) {
     if (d->fd>=0&&d->fd<CANBUS_MAX&&win.handles[d->fd]) {
         win.stop(win.handles[d->fd]); win.close(win.handles[d->fd]); win.free(win.handles[d->fd]); win.handles[d->fd]=NULL;
     }
-    d->fd=-1; d->up=false; d->present=false; d->link_verified=false;
-    memset(&d->feedback,0,sizeof d->feedback); d->stationary_since=0;
-    snprintf(d->problem,sizeof d->problem,"%s",why);
+    d->up=false; d->present=false;
 }
 static void windows_check_connections(struct can_bus *b,bool (*connection)(const char *,uint64_t *)) {
     for (unsigned i=0;i<CANBUS_MAX;i++) {
@@ -172,13 +172,14 @@ static void windows_scan_inventory(struct can_bus *b,
            Classic CAN uses one-shot only; receive filters transmit echoes.
            No enable/motion/reset frame is sent during transport setup. */
         if (!win.stop(handle)||!win.timing(handle,&timing)||!win.start(handle,1u<<3)) {
+            DWORD error=GetLastError(); int transport=win.last_error(handle);
+            d->up=d->link_verified=false;
+            snprintf(d->problem,sizeof d->problem,"Windows USB-CAN timing/start failed (transport error %d, WinUSB error %lu)",transport,(unsigned long)error);
             win.close(handle); win.free(handle); continue;
         }
         win.handles[slot]=handle; win.arrivals[slot]=arrival; d->fd=(int)slot; d->index=i;
-        snprintf(d->id,sizeof d->id,"%s",id); snprintf(d->name,sizeof d->name,"Cando %u",slot);
-        snprintf(d->path,sizeof d->path,"Windows USB-CAN %s",name);
         d->present=d->up=d->stable=d->link_verified=true; d->bitrate=1000000; d->bus_state=0; d->control_flags=0;
-        d->generation=++b->sequence; d->problem[0]=0; memset(&d->feedback,0,sizeof d->feedback);
+        d->generation=++b->sequence; d->problem[0]=0; memset(&d->feedback,0,sizeof d->feedback); can_bus_forget_stationary(d);
     }
     win.list_free(list);
 }

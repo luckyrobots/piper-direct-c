@@ -40,9 +40,9 @@ public sealed class PikaDriverFaultRecorder
             truncated ? Convert.ToBase64String(bytes[^128..]) : "", truncated));
         while (reads.Count > 16) reads.Dequeue();
     }
-    public WriteAttempt BeginWrite(double now, int command, double value, ReadOnlySpan<byte> packet)
+    public WriteAttempt BeginWrite(double now, PikaCommand command, double value, ReadOnlySpan<byte> packet)
     {
-        var attempt = new WriteAttempt(now, command, value, Convert.ToBase64String(packet));
+        var attempt = new WriteAttempt(now, (int)command, value, Convert.ToBase64String(packet));
         writes.Enqueue(attempt); while (writes.Count > 16) writes.Dequeue(); return attempt;
     }
     public static void FinishWrite(WriteAttempt attempt, double now, Exception? error = null)
@@ -50,14 +50,22 @@ public sealed class PikaDriverFaultRecorder
 
     public PikaDriverFaultEvidence? Observe(double now, JsonElement data, double angle, double speed, bool enabled)
     {
+        string rawStatus = data.GetProperty("motorstatus").GetProperty("Status").GetString()!;
+        return PikaDriverStatus.TryRead(rawStatus, out var driver) ? Observe(now, data, angle, speed, enabled, driver!, rawStatus) : null;
+    }
+
+    /// <summary>Records one accepted packet whose status the caller already decoded.</summary>
+    public PikaDriverFaultEvidence? Observe(double now, JsonElement data, in PikaTelemetrySample telemetry) =>
+        Observe(now, data, telemetry.Position, telemetry.Speed, telemetry.Enabled, telemetry.Driver, telemetry.RawStatus);
+
+    private PikaDriverFaultEvidence? Observe(double now, JsonElement data, double angle, double speed, bool enabled, PikaDriverStatus driver, string rawStatus)
+    {
         static double? Number(JsonElement obj, string key) => obj.TryGetProperty(key, out var value) && value.ValueKind == JsonValueKind.Number && value.TryGetDouble(out double number) && double.IsFinite(number) ? number : null;
         var status = data.GetProperty("motorstatus"); var motor = data.GetProperty("motor");
-        string rawStatus = status.GetProperty("Status").GetString()!;
-        if (!PikaDriverStatus.TryRead(rawStatus, out var driver)) return null;
         var sample = new PikaMotorEvidence(now, angle, speed, rawStatus, enabled, Number(status, "Voltage"), Number(status, "DriverTemp"),
             Number(status, "MotorTemp"), Number(motor, "Current"), Number(status, "BusCurrent"));
         feedback.Enqueue(sample); while (feedback.Count > 4) feedback.Dequeue();
-        bool transition = driver!.HasFault && !previouslyFaulted; previouslyFaulted = driver.HasFault;
+        bool transition = driver.HasFault && !previouslyFaulted; previouslyFaulted = driver.HasFault;
         if (!transition) return null;
         string raw = data.GetRawText();
         LastSummary = new(++ordinal, now, rawStatus, driver.Text, driver.FaultMask, sample.Voltage,

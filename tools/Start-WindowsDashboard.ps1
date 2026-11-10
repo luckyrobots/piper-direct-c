@@ -1,20 +1,22 @@
+# Omitted arguments come from WindowsDashboardDefaults.ps1.
 param(
-    [string]$Distribution='Ubuntu',
+    [string]$Distribution='',
     [string]$PikaDevice='',
-    [int]$Port=8765
+    [int]$Port=0
 )
 $ErrorActionPreference='Stop'
+. (Join-Path $PSScriptRoot 'WindowsDashboardDefaults.ps1')
 $taskRoot=Split-Path $PSScriptRoot -Parent
 $taskHost=Join-Path $taskRoot 'build/publish-windows/Piper.Host.exe'
 $taskUsb=Join-Path $env:ProgramFiles 'usbipd-win/usbipd.exe'
 $taskStateDir=Join-Path $taskRoot 'data-windows-managed'
 if (!(Test-Path $taskHost) -or !(Test-Path $taskUsb)) { throw 'Build the Windows host and install usbipd-win first. See managed/README.md.' }
+$taskDefaults=Get-PiperDashboardDefaults $taskStateDir
+if(!$PSBoundParameters.ContainsKey('Port')){$Port=$taskDefaults.Port}
+if(!$PSBoundParameters.ContainsKey('Distribution')){$Distribution=$taskDefaults.Distribution}
 if(!$PSBoundParameters.ContainsKey('PikaDevice')) {
-    $taskPikaDefault=Join-Path $taskStateDir 'pika-default.json'
-    if(Test-Path -LiteralPath $taskPikaDefault) {
-        $taskSavedPika=Get-Content -LiteralPath $taskPikaDefault -Raw | ConvertFrom-Json
-        $PikaDevice=[string]$taskSavedPika.device
-        if(!$PSBoundParameters.ContainsKey('Distribution') -and $taskSavedPika.distribution){$Distribution=[string]$taskSavedPika.distribution}
+    if($null -ne $taskDefaults.PikaDevice) {
+        $PikaDevice=$taskDefaults.PikaDevice
     } else {
         # One unambiguous already-shared Pika is safe to discover. With several
         # identical units the user must save a default/assign robot profiles.
@@ -26,6 +28,7 @@ if(!$PSBoundParameters.ContainsKey('PikaDevice')) {
 }
 if($PikaDevice -and ($PikaDevice.Length -gt 1024 -or $PikaDevice -notlike '/dev/*' -or $PikaDevice -match '["\x00-\x1f]')){throw 'Invalid saved Pika Linux device identity.'}
 if(!$Distribution -or $Distribution.Length -gt 128 -or $Distribution -match '["\x00-\x1f]'){throw 'Invalid saved WSL distribution.'}
+if($Port -lt 1 -or $Port -gt 65535){throw 'Invalid dashboard port.'}
 # Windows can retain ownerless Listen records briefly after process exit.
 # The supervisor mutex and the server's exclusive bind remain authoritative.
 if (Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue | Where-Object {$_.OwningProcess -gt 0}) { throw 'A dashboard is already running on this port.' }

@@ -4,7 +4,7 @@ namespace LuckyRobots.Piper.Plugin;
 
 public sealed partial class PipersPlugin
 {
-    private int sheetEditingRow = -1;
+    internal int sheetEditingRow = -1;
     private bool SheetCanCorrect => calibrationIdentity is not null && link is not null && calibrationIdentity == CurrentCalibrationIdentity() &&
         calibrationApplied is null && !calibrationPlacementUnverified && SheetContactCompatible;
 

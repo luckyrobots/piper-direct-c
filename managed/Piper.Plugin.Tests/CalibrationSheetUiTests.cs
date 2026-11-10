@@ -1,5 +1,4 @@
 using System.Diagnostics;
-using System.Reflection;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using LuckyEngine.PluginSdk;
@@ -7,13 +6,9 @@ using LuckyRobots.Piper.Plugin;
 
 internal static class CalibrationSheetUiTests
 {
-    public static async Task Run(Action<bool, string> check)
+    public static async Task Run()
     {
-        const BindingFlags hidden = BindingFlags.Instance | BindingFlags.NonPublic;
         var plugin = new PipersPlugin();
-        void Set(string name, object? value) => typeof(PipersPlugin).GetField(name, hidden)!.SetValue(plugin, value);
-        T Get<T>(string name) => (T)typeof(PipersPlugin).GetField(name, hidden)!.GetValue(plugin)!;
-        Task Invoke(string name, params object[] args) => (Task)typeof(PipersPlugin).GetMethod(name, hidden)!.Invoke(plugin, args)!;
         var folder = Path.Combine(Path.GetTempPath(), "piper-sheet-events-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(folder);
         var prefs = RobotProfileRouting.Normalize(new Preferences(Robots: [new("piper-1", "Fixture", "can-a")], ActiveRobotId: "piper-1"));
@@ -38,8 +33,7 @@ internal static class CalibrationSheetUiTests
         int views = 0;
         JsonObject? lastPatch = null;
         var requests = new List<string>();
-        var context = (PluginContext)Activator.CreateInstance(typeof(PluginContext), hidden, null,
-            [new PluginStart("fixture", folder, folder),
+        var context = Fixtures.Context(new PluginStart("fixture", folder, folder),
                 (Func<object, CancellationToken, Task>)((message, _) =>
                 {
                     var json = JsonSerializer.SerializeToNode(message, PluginProtocol.Json)!;
@@ -57,24 +51,24 @@ internal static class CalibrationSheetUiTests
                         ["markerId"] = arguments["markerId"]?.DeepClone()
                     };
                     return Task.FromResult(JsonSerializer.SerializeToElement(result));
-                })], null)!;
-        Set("preferences", prefs); Set("engine", context); Set("state", state); Set("token", "fixture-session");
-        Set("calibrationProfile", "piper-1"); Set("wizardProfile", "piper-1"); Set("workspacePage", "settings"); Set("settingsCategory", "bench"); Set("calibrationOpen", true);
-        Set("link", new RobotLink("scene-a", "robot-a", joints, device));
-        Get<LatestTelemetry>("telemetry").Publish(new(state, "fixture-session", 1, Stopwatch.GetTimestamp(), 0));
+                }));
+        plugin.preferences = prefs; plugin.engine = context; plugin.state = state; plugin.token = "fixture-session";
+        plugin.calibrationProfile = "piper-1"; plugin.wizardProfile = "piper-1"; plugin.Navigation = WorkspaceNavigation.Calibration;
+        plugin.link = new RobotLink("scene-a", "robot-a", joints, device);
+        plugin.telemetry.Publish(new(state, "fixture-session", 1, Stopwatch.GetTimestamp(), 0));
         var draft = CalibrationWizardFlow.New("piper-1", 10) with { Step = CalibrationWizardStep.DeskBack, ModelAssetId = "asset-a", ModelRevision = "revision-a" };
-        foreach (var pair in new Dictionary<string, string> { ["tool"] = "calibration_jaw_tips", ["width"] = "1400", ["depth"] = "700", ["precision"] = "5", ["leftedgeconfirmed"] = "proof", ["frame"] = "proof", ["sceney"] = "750", ["sceneconfirmed"] = "confirmed" }) draft.Answers[pair.Key] = pair.Value;
+        foreach (var pair in new Dictionary<string, string> { ["tool"] = "calibration_jaw_tips", ["width"] = "1400", ["depth"] = "700", ["precision"] = "5", ["sceney"] = "750" }) draft.Answers[pair.Key] = pair.Value;
         var identity = new CalibrationIdentity("piper-1", "can-a", 1L, CalibrationCapture.Fingerprint("fixture-session"), "scene-a", "robot-a", "asset-a", "revision-a");
         var root = CalibrationPlacement.At(new(0, .75, 0), 0);
-        draft.Answers["edgeroot"] = root.Json().ToJsonString();
-        draft.Answers["leftedgeconfirmed"] = draft.Answers["frame"] = WizardReferenceHighlightScope.DeskFingerprint(identity, 1400, 700, 750, root);
+        string proof = WizardReferenceHighlightScope.DeskFingerprint(identity, 1400, 700, 750, root);
+        draft = draft with { Setup = new(root.Json().ToJsonString(), proof, proof, SurfaceConfirmed: true) };
         foreach (var pair in new Dictionary<string, string> { ["p0back"] = "200", ["p0left"] = "697", ["p1back"] = "450", ["p1left"] = "800", ["p2back"] = "120", ["p2left"] = "900", ["p3back"] = "450", ["p3left"] = "800" }) draft.Answers[pair.Key] = pair.Value;
-        Set("calibrationWizard", draft);
+        plugin.calibrationWizard = draft;
         try
         {
-            await Invoke("Render", CancellationToken.None);
-            long page = Get<long>("workspaceViewEpoch"), sheet = Get<CalibrationWizardDraft>("calibrationWizard").Epoch;
-            void Fresh() => Get<LatestTelemetry>("telemetry").Publish(new(state, "fixture-session", 1, Stopwatch.GetTimestamp(), 0));
+            await plugin.Render(CancellationToken.None);
+            long page = plugin.workspaceViewEpoch, sheet = plugin.calibrationWizard.Epoch;
+            void Fresh() => plugin.telemetry.Publish(new(state, "fixture-session", 1, Stopwatch.GetTimestamp(), 0));
             async Task Click(string action)
             {
                 Fresh();
@@ -84,49 +78,49 @@ internal static class CalibrationSheetUiTests
             }
             string Wire(string action) => WorkspaceEventScope.Wrap(page, "piper-1", "wizard." + sheet + ".sheet." + action);
             string Fixed(string id) => WorkspaceEventScope.Wrap(page, "piper-1", id);
-            async Task Patches() { Fresh(); await Invoke("Update", CancellationToken.None); }
+            async Task Patches() { Fresh(); await plugin.Update(CancellationToken.None); }
             await Patches();
-            check(lastPatch![Wire("tool.confirm")]?["enabled"]?.GetValue<bool>() == false,
+            Check(lastPatch![Wire("tool.confirm")]?["enabled"]?.GetValue<bool>() == false,
                 "Jaw-tip confirmation was available before its marker was acknowledged");
             int beforeViews = views;
             await Click("tool.show");
-            check(Get<long>("workspaceViewEpoch") == page && Get<CalibrationWizardDraft>("calibrationWizard").Epoch == sheet && views == beforeViews,
+            Check(plugin.workspaceViewEpoch == page && plugin.calibrationWizard.Epoch == sheet && views == beforeViews,
                 "Showing jaw tips rebuilt the calibration page or invalidated the next visible button ID");
-            check(Get<WizardHighlightScope?>("wizardHighlightScope") is not null, "Showing jaw tips did not retain its confirmation scope");
-            await Invoke("MaintainWizardHighlight", CancellationToken.None);
-            check(Get<WizardHighlightScope?>("wizardHighlightScope") is not null, "Background maintenance replaced the displayed jaw-tip marker");
+            Check(plugin.wizardMarker is MarkerState.Tool, "Showing jaw tips did not retain its confirmation scope");
+            await plugin.MaintainWizardHighlight(CancellationToken.None);
+            Check(plugin.wizardMarker is MarkerState.Tool, "Background maintenance replaced the displayed jaw-tip marker");
             await Click("tool.confirm");
-            check(Get<CalibrationWizardDraft>("calibrationWizard").OperatorSaysTcpMatches,
+            Check(plugin.calibrationWizard.Setup.JawTipsConfirmed,
                 "The visible Marker matches jaw tips click was lost after Show jaw-tip marker");
             await Click("tool.show");
-            check(Get<CalibrationWizardDraft>("calibrationWizard").OperatorSaysTcpMatches,
+            Check(plugin.calibrationWizard.Setup.JawTipsConfirmed,
                 "Showing an unchanged jaw-tip site silently revoked the user's existing confirmation");
             await Patches();
-            check(lastPatch![Fixed("sheet.row.status.3")]?["text"]?.GetValue<string>().Contains("overlaps P2") == true,
+            Check(lastPatch![Fixed("sheet.row.status.3")]?["text"]?.GetValue<string>().Contains("overlaps P2") == true,
                 "Duplicate P4/P2 measurements did not show a visible row error before capture");
-            Get<CalibrationWizardDraft>("calibrationWizard").Answers["precision"] = "0";
+            plugin.calibrationWizard.Answers["precision"] = "0";
             await Patches();
-            check(lastPatch![Fixed("sheet.next")]?["text"]?.GetValue<string>().Contains("accuracy cannot be 0") == true &&
+            Check(lastPatch![Fixed("sheet.next")]?["text"]?.GetValue<string>().Contains("accuracy cannot be 0") == true &&
                 lastPatch[Wire("capture.0")]?["enabled"]?.GetValue<bool>() == false,
                 "Invalid precision zero did not show its visible blocker and disable Capture P1");
             await Click("capture.0");
-            check(Get<CalibrationIdentity?>("calibrationIdentity") is null,
+            Check(plugin.calibrationIdentity is null,
                 "Invalid precision zero reached capture despite the visible capture gate");
             // Error feedback must retain the same page, so correcting an input
             // does not require the operator to discover fresh button IDs.
-            check(Get<long>("workspaceViewEpoch") == page, "A rejected capture rebuilt the page and invalidated visible controls");
-            Get<CalibrationWizardDraft>("calibrationWizard").Answers["precision"] = "5";
-            Get<CalibrationWizardDraft>("calibrationWizard").Answers["leftedgeconfirmed"] = "stale-proof";
+            Check(plugin.workspaceViewEpoch == page, "A rejected capture rebuilt the page and invalidated visible controls");
+            plugin.calibrationWizard.Answers["precision"] = "5";
+            plugin.calibrationWizard = plugin.calibrationWizard with { Setup = plugin.calibrationWizard.Setup with { LeftProof = "stale-proof" } };
             await Patches();
-            check(lastPatch![Wire("tool.confirm")]?["enabled"]?.GetValue<bool>() == false &&
+            Check(lastPatch![Wire("tool.confirm")]?["enabled"]?.GetValue<bool>() == false &&
                 lastPatch[Fixed("sheet.setup")]?["text"]?.GetValue<string>().Contains("LEFT pending") == true,
                 "Stale desk-edge proof was presented as confirmed or permitted a dependent jaw-tip confirmation");
-            check(requests.All(method => method is "robot.read" or "robot.highlightToolSite" or "robot.highlightReference"),
+            Check(requests.All(method => method is "robot.read" or "robot.highlightToolSite" or "robot.highlightReference"),
                 "Passive calibration preview sent an engine motion or hardware operation");
         }
         finally
         {
-            Get<Grpc.Net.Client.GrpcChannel>("channel").Dispose();
+            plugin.channel.Dispose();
             Directory.Delete(folder, true);
         }
     }

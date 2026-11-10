@@ -2,9 +2,9 @@ using LuckyRobots.Piper.Plugin;
 
 internal static class OrderedContactLossTests
 {
-    public static void Run(Action<bool, string> check)
+    public static void Run()
     {
-        var first = SimulationFollowSample.Read(SimulationFollowTests.Pose());
+        var first = SimulationFollowSample.Read(Fixtures.SimulationPose());
         var limits = Enumerable.Range(1, 6).Select(j => new EpisodeReplayJointLimit(j, -180, 180, 30, 20, true)).ToArray();
         double[] Joints(double q) => [q, 0, 0, 0, 0, 0];
         SimulationFollowHardware Real(double opening, double q = 0) => new("can-a", 7, true, true, true, Joints(q), limits, opening,
@@ -25,12 +25,10 @@ internal static class OrderedContactLossTests
             now = execution.ActivePhase!.DurationSeconds + .001;
             execution.Step(now, Real(38), true, 0, 2); now += .11;
             execution.Step(now, Real(38), true, 0, 3); now += .01;
-            check(execution.QualifiedContactOpeningMm == 38 && !execution.PhysicalGraspMissed,
+            Check(execution.QualifiedContactOpeningMm == 38 && !execution.PhysicalGraspMissed,
                 "Loss fixture never established its original qualified contact");
             return execution;
         }
-        void Reject(Action action, string reason)
-        { try { action(); } catch (InvalidOperationException) { check(true, reason); return; } check(false, reason); }
         void Finish(OrderedSimulationExecution execution, ref double now, double opening, double q)
         {
             execution.Step(now, Real(opening, q), true, 0, 100 + now);
@@ -41,40 +39,40 @@ internal static class OrderedContactLossTests
 
         var value = Qualified(out double time);
         var firstTarget = value.Step(time, Real(35.5), false, -.05, 4);
-        check(value.QualifyingLostContact && !value.PhysicalGraspMissed && value.QualifiedContactOpeningMm == 38 && firstTarget.OpeningMm == 30,
+        Check(value.QualifyingLostContact && !value.PhysicalGraspMissed && value.QualifiedContactOpeningMm == 38 && firstTarget.OpeningMm == 30,
             "Loss qualification changed the existing close command or claimed a miss before endpoint evidence");
         value.Step(time + .04, Real(30, .1), false, 0, 5);
         var afterLoss = value.Step(time + .15, Real(30, .3), false, 0, 6);
-        check(!value.QualifyingLostContact && value.PhysicalGraspMissed && value.QualifiedContactOpeningMm is null &&
+        Check(!value.QualifyingLostContact && value.PhysicalGraspMissed && value.QualifiedContactOpeningMm is null &&
             value.ExpectedMeasuredOpeningMm == 30 && value.CompletedCursor == 2 && afterLoss.OpeningMm == 30,
             "A fresh settled empty close while the arm was moving failed to reanchor as a non-contact missed trial");
         time += .16;
         Finish(value, ref time, 30, 1); Finish(value, ref time, 30, 1);
         Finish(value, ref time, 80, 1); Finish(value, ref time, 80, 0); Finish(value, ref time, 80, 0);
-        check(value.Path.Drained && value.ReturnedHome(Real(80), true, 0), "A qualified physical drop did not finish the unchanged ordered release/home path");
+        Check(value.Path.Drained && value.ReturnedHome(Real(80), true, 0), "A qualified physical drop did not finish the unchanged ordered release/home path");
 
         value = Qualified(out time); value.Step(time, Real(35), false, -.05, 4);
-        Reject(() => value.Step(time + .01, Real(37.01), false, 0, 5), "A reversal greater than2mm was treated as monotonic closing");
+        Reject(() => value.Step(time + .01, Real(37.01), false, 0, 5), "A reversal greater than 2mm was treated as monotonic closing");
         value = Qualified(out time);
-        Reject(() => value.Step(time, Real(40.01), false, 0, 4), "Opening away from contact beyond2mm entered the soft-loss path");
+        Reject(() => value.Step(time, Real(40.01), false, 0, 4), "Opening away from contact beyond 2mm entered the soft-loss path");
         value = Qualified(out time);
-        Reject(() => value.Step(time, Real(28.99), false, 0, 4), "A sample below the close endpoint minus1mm entered soft-loss qualification");
+        Reject(() => value.Step(time, Real(28.99), false, 0, 4), "A sample below the close endpoint minus 1mm entered soft-loss qualification");
         value = Qualified(out time);
         Reject(() => value.Step(time, Real(35), false, .03, 4), "Reported opening velocity was accepted as motion toward the close endpoint");
 
         value = Qualified(out time); value.Step(time, Real(30), false, 0, 4);
         value.Step(time + .11, Real(30), false, 0, 4);
         value.Step(time + .249, Real(30), false, 0, 4);
-        check(value.QualifyingLostContact && !value.PhysicalGraspMissed && value.QualifiedContactOpeningMm == 38,
+        Check(value.QualifyingLostContact && !value.PhysicalGraspMissed && value.QualifiedContactOpeningMm == 38,
             "Repeated cached jaw feedback qualified lost contact without a second fresh observation");
-        Reject(() => value.Step(time + .251, Real(30), false, 0, 5), "The250ms loss-qualification deadline was renewed by repeated observations");
+        Reject(() => value.Step(time + .251, Real(30), false, 0, 5), "The 250ms loss-qualification deadline was renewed by repeated observations");
         value = Qualified(out time); value.Step(time, Real(35), false, -.05, 4);
         Reject(() => value.Step(time + .251, Real(35), false, 0, 5), "A partial close that never reached its endpoint became a soft miss");
         value = Qualified(out time); value.Step(time, Real(30), false, -.03, 4);
         value.Step(time + .04, Real(30), false, 0, 5); value.Step(time + .13, Real(30), false, 0, 6);
-        check(value.QualifyingLostContact && !value.PhysicalGraspMissed, "Moving jaws were included in the100ms settled endpoint dwell");
+        Check(value.QualifyingLostContact && !value.PhysicalGraspMissed, "Moving jaws were included in the 100ms settled endpoint dwell");
         value.Step(time + .15, Real(30), false, 0, 7);
-        check(value.PhysicalGraspMissed && !value.QualifyingLostContact, "The same bounded qualification could not finish after the jaw stopped moving");
+        Check(value.PhysicalGraspMissed && !value.QualifyingLostContact, "The same bounded qualification could not finish after the jaw stopped moving");
 
         foreach (string failure in new[] { "arm-stale", "jaw-stale", "native-tracking", "command-change" })
         {
@@ -86,7 +84,7 @@ internal static class OrderedContactLossTests
             {
                 // The source phase is immutable in production. Corrupt its
                 // retained command here to exercise the invariant directly.
-                typeof(OrderedSimulationExecution).GetField("resolvedCommand", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!.SetValue(value, 31d);
+                value.jaw = value.jaw with { Command = 31 };
                 Reject(() => value.Step(time + .05, Real(30), false, 0, 5), "A changed close-command identity retained the old loss qualification");
             }
         }
@@ -94,25 +92,25 @@ internal static class OrderedContactLossTests
         value = Qualified(out time); value.Step(time, Real(38), false, 0, 4);
         time += value.ActivePhase!.DurationSeconds + .001;
         value.Step(time, Real(30, 1), true, 0, 5);
-        check(value.CompletedCursor == 2 && value.Target.OpeningMm == 30 && value.QualifyingLostContact,
+        Check(value.CompletedCursor == 2 && value.Target.OpeningMm == 30 && value.QualifyingLostContact,
             "A phase endpoint started the next jaw operation before its pending contact loss resolved");
         value.Step(time + .11, Real(30, 1), true, 0, 6);
         value.Step(time + .22, Real(30, 1), true, 0, 7);
-        check(value.CompletedCursor == 4 && value.PhysicalGraspMissed && !value.QualifyingLostContact,
+        Check(value.CompletedCursor == 4 && value.PhysicalGraspMissed && !value.QualifyingLostContact,
             "Confirmed empty closure never released its preceding arm endpoint barrier");
 
         foreach (double opening in new[] { 29d, 31, 31.5, 32 })
         {
             value = Qualified(out time); value.Step(time, Real(opening), false, 0, 4);
             value.Step(time + .11, Real(opening), false, 0, 5);
-            check(value.PhysicalGraspMissed && !value.QualifyingLostContact && value.QualifiedContactOpeningMm is null &&
+            Check(value.PhysicalGraspMissed && !value.QualifyingLostContact && value.QualifiedContactOpeningMm is null &&
                 value.ExpectedMeasuredOpeningMm == opening && value.Target.OpeningMm == 30,
-                "The carry-loss1–2mm gray band could neither qualify contact nor finish as an unconfirmed trial");
+                "The carry-loss 1–2mm gray band could neither qualify contact nor finish as an unconfirmed trial");
         }
         value = Qualified(out time); value.Step(time, Real(32.0001), false, 0, 4);
         value.Step(time + .11, Real(32.0001), false, 0, 5);
-        check(!value.PhysicalGraspMissed && value.QualifyingLostContact, "Loss handling widened the existing2mm unconfirmed-contact threshold");
+        Check(!value.PhysicalGraspMissed && value.QualifyingLostContact, "Loss handling widened the existing 2mm unconfirmed-contact threshold");
         Reject(() => value.Step(time + .251, Real(32.0001), false, 0, 6),
-            "The widened gray band renewed the bounded250ms carry-loss deadline");
+            "The widened gray band renewed the bounded 250ms carry-loss deadline");
     }
 }

@@ -9,7 +9,9 @@ internal static class HostPikaBoundaryTests
     internal static async Task Run()
     {
         const string first = "/dev/pika/by-host/11-4", peer = "/dev/pika/by-host/12-4", replacement = "/dev/pika/by-host/13-4";
-        const string alias = "/dev/ttyUSB5", distribution = "Ubuntu", arm = "simulation:one";
+        const string alias = "/dev/ttyUSB5", arm = "simulation:one";
+        // The platform's own distribution: a WSL name on Windows, native Linux (null) elsewhere.
+        string? distribution = OperatingSystem.IsWindows() ? "Ubuntu" : null;
         string owner = Guid.NewGuid().ToString();
         var directory = Directory.CreateTempSubdirectory("piper-host-pika-boundaries-");
         try
@@ -27,7 +29,7 @@ internal static class HostPikaBoundaryTests
             var context = new PiperRpcContext(controller, registry, false, owner, maintenance) { Clock = clock };
             var initial = ArmState();
             Check(initial["simulated"]?.GetValue<bool>() == true, "Host/Pika boundary fixture is not simulated.");
-            await registry.ExecuteAsync("configure", JsonSerializer.SerializeToElement(new { owner, device = first }), default);
+            await registry.ConfigureAsync(JsonSerializer.SerializeToElement(new { owner, device = first }), default, commit => commit());
             await registry.ExecuteAsync("connect", JsonSerializer.SerializeToElement(new { owner, pika_device = peer }), default);
 
             DateTimeOffset beforeSample = clock.Utc;
@@ -72,7 +74,7 @@ internal static class HostPikaBoundaryTests
             Check(rejected.Status == 409 && rejected.Error == "Finish active arm movements before changing Pika assignment" &&
                 registry.Snapshot()["device"]?.GetValue<string>() == first && !agents.ContainsKey(replacement),
                 "Pika configuration committed after an arm started moving.");
-            var stopped = await Send(CoordinatedStopRequest.Route, new { owner });
+            var stopped = await Send(HostRoutes.CoordinatedStop, new { owner });
             Check(stopped.Status == 200 && stopped.Payload is CoordinatedStopResult { Ok: true } &&
                 agents[peer].Actions.Count(action => action == "hold") == 1 && !agents[first].Actions.Contains("hold"),
                 "Coordinated STOP after denied configuration did not hold only the owned gripper.");
@@ -80,16 +82,27 @@ internal static class HostPikaBoundaryTests
             var accepted = await Send("/api/pika/configure", new { owner, device = alias });
             Check(accepted.Status == 200 && registry.Snapshot()["device"]?.GetValue<string>() == replacement &&
                 agents[replacement].Actions.Count == 0, "Idle configuration did not register without opening or writing to the gripper.");
+            var moved = await Send("/api/pika/configure", new { owner, device = replacement, distribution = "Debian" });
+            if (OperatingSystem.IsWindows())
+                Check(moved.Status == 200 && context.Control.PikaState(replacement, null)["distribution"]?.GetValue<string>() == "Debian" &&
+                    context.Control.PikaState(replacement, distribution)["distribution"]?.GetValue<string>() == distribution,
+                    "HTTP Pika state ignored the current registry distribution after configure.");
+            else
+                Check(moved.Status == 409 && moved.Error?.Contains("only on Windows", StringComparison.Ordinal) == true &&
+                    registry.DefaultAssignment == (replacement, null) && context.Control.PikaState(replacement, null)["distribution"] is null,
+                    "A WSL distribution was configured on a non-Windows host: " + moved.Error);
+            _ = await context.Control.DiscoverPikaAsync(null, deadline.Token);
+            Check(discovery.Distributions[^1] == (OperatingSystem.IsWindows() ? "Debian" : null),
+                "HTTP Pika inventory did not use the current registry distribution after configure.");
             Console.WriteLine("Host Pika boundaries passed: same-sample snapshot, source clock, idle commit, and independent STOP/peer writes.");
 
-            JsonObject ArmState() => JsonNode.Parse(controller.Snapshot())!.AsObject();
+            JsonObject ArmState() => controller.SnapshotJson();
 
             async Task<HostControlResult> Send(string route, object body)
             {
                 var input = JsonSerializer.SerializeToElement(body);
-                using var admission = context.Control.Admit(route, input, HostControlTransport.Http);
-                if (admission.Error is { } error) return new(409, Error: error);
-                return await context.Control.ExecuteAsync(route, input.GetRawText(), input, HostControlTransport.Http, deadline.Token);
+                using var admission = context.Control.Admit(route, input);
+                return admission.Reply ?? await context.Control.ExecuteAsync(route, input.GetRawText(), input, deadline.Token);
             }
 
             async Task Poll(Func<JsonObject, bool> ready, long? requestId = null)
@@ -117,11 +130,28 @@ internal static class HostPikaBoundaryTests
             }
         }
         finally { directory.Delete(recursive: true); }
+        await ControllerFailureIsConflict();
     }
 
-    private static void Check(bool condition, string failure)
+    // B23: a controller-operation exception maps to 409 in the dispatcher,
+    // which HTTP and gRPC share; HTTP previously reported it as 500.
+    private static async Task ControllerFailureIsConflict()
     {
-        if (!condition) throw new InvalidOperationException(failure);
+        var directory = Directory.CreateTempSubdirectory("piper-host-disposed-");
+        try
+        {
+            var controller = new ControllerService(simulated: true, directory.FullName);
+            await using var registry = new PikaSessionRegistry("", "never-launched");
+            var maintenance = new BackendMaintenance(() => new JsonObject(), () => [], () => { }, Environment.ProcessId);
+            var context = new PiperRpcContext(controller, registry, false, "", maintenance);
+            controller.Dispose();
+            controller.Dispose(); // idempotent
+            var input = JsonSerializer.SerializeToElement(new { action = "hold" });
+            var result = await context.Control.ExecuteAsync("/api/command", input.GetRawText(), input, default);
+            Check(result.Status == 409 && result.Error is { Length: > 0 } &&
+                JsonNode.Parse(result.ToJson())?["ok"]?.GetValue<bool>() == false, "A disposed controller was not a 409 control error.");
+        }
+        finally { directory.Delete(recursive: true); }
     }
 
     private sealed class FixtureClock : TimeProvider
@@ -134,9 +164,11 @@ internal static class HostPikaBoundaryTests
     {
         internal TaskCompletionSource Entered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         internal TaskCompletionSource Release { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        internal List<string?> Distributions { get; } = [];
 
         public async Task<JsonObject> DiscoverAsync(string? distribution, CancellationToken cancellation)
         {
+            Distributions.Add(distribution);
             Entered.TrySetResult();
             await Release.Task.WaitAsync(cancellation);
             return new JsonObject { ["devices"] = new JsonArray(new JsonObject { ["device"] = device,

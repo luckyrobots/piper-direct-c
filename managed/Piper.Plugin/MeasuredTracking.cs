@@ -13,9 +13,9 @@ public static class MeasuredTrackingPolicy
 public sealed partial class PipersPlugin
 {
     // StartAsync sets this only for the running application, never test fixtures.
-    private bool passiveMeasuredTrackingStarted;
-    private long measuredTrackingAttemptAt;
-    private bool measuredTrackingSceneUnverified;
+    internal bool passiveMeasuredTrackingStarted;
+    internal long measuredTrackingAttemptAt;
+    internal bool measuredTrackingSceneUnverified;
 
     private void RememberMeasuredTracking(bool enabled)
     {
@@ -23,7 +23,7 @@ public sealed partial class PipersPlugin
         preferences = preferences with { Robots = preferences.Robots!.Select(p => p.Id == profile.Id ? profile : p).ToArray() };
     }
 
-    private async Task RestoreMeasuredTracking(CancellationToken cancellation)
+    internal async Task RestoreMeasuredTracking(CancellationToken cancellation)
     {
         if (GroupFollowActive || !passiveMeasuredTrackingStarted || !MeasuredTrackingPolicy.Enabled(ActiveProfile) || switchingProfile || CurrentRecovery is not null ||
             teleoperating || followRequest != 0 || state?["motion"]?["active"]?.GetValue<bool>() == true ||
@@ -130,7 +130,7 @@ public sealed partial class PipersPlugin
             // handshake after an otherwise healthy first reply.
             using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellation);
             deadline.CancelAfter(TimeSpan.FromMilliseconds(400));
-            if (primaryActionBusy) await WritePrimaryActionReceipt("link-scene." + method);
+            if (PrimaryActionBusy) await WritePrimaryActionReceipt("link-scene." + method);
             return JsonNode.Parse((await engine.RequestAsync(method, body, deadline.Token)).GetRawText())!.AsObject();
         }
 

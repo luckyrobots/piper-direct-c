@@ -5,13 +5,8 @@ using LuckyRobots.Piper.Plugin;
 
 internal static class HeightValidationTests
 {
-    public static void Run(Action<bool, string> check)
+    public static void Run()
     {
-        void Reject(Action action, string message)
-        {
-            try { action(); } catch (InvalidOperationException) { check(true, message); return; }
-            check(false, message);
-        }
         var identity = new CalibrationIdentity("robot-a", "can-a", 1, "backend-a", "scene-a", "entity-a", "asset-a", "model-a");
         var desk = new CalibrationDesk(1.4, .7, .75, 5, "calibration_jaw_tips");
         var placement = CalibrationPlacement.At(new(0, .75, 0), 0);
@@ -25,19 +20,19 @@ internal static class HeightValidationTests
                 ["name"] = "joint" + i, ["unit"] = "rad", ["position"] = i * 10 * Math.PI / 180 }).ToArray()),
             ["toolSites"] = new JsonArray(new JsonObject { ["name"] = desk.ToolPoint, ["unit"] = "m", ["position"] = new JsonArray(.1, 1.05, .15) }) };
         var capture = HeightValidation.ReadPreview(identity, desk, placement, device, pose, 250);
-        check(HeightValidation.FreshAge(400, 100), "A preview still inside the 500ms evidence window was hidden");
-        check(!HeightValidation.FreshAge(400, 101), "A delayed scene acknowledgement reset the source evidence age");
-        check(!HeightValidation.FreshAge(1, double.NaN), "An invalid live clock age was treated as fresh");
+        Check(HeightValidation.FreshAge(400, 100), "A preview still inside the 500ms evidence window was hidden");
+        Check(!HeightValidation.FreshAge(400, 101), "A delayed scene acknowledgement reset the source evidence age");
+        Check(!HeightValidation.FreshAge(1, double.NaN), "An invalid live clock age was treated as fresh");
         var observed = new HeightObservation(identity, desk, capture, DateTimeOffset.UtcNow, "report.json");
-        check(Math.Abs(observed.PredictedMm - 300) < 1e-9, "Height preview used floor/root height instead of tabletop-relative site height");
-        check(!HeightValidation.SameHeldPose(observed, identity, device), "Moving live preview was saved as a stationary measurement");
+        Check(Math.Abs(observed.PredictedMm - 300) < 1e-9, "Height preview used floor/root height instead of tabletop-relative site height");
+        Check(!HeightValidation.SameHeldPose(observed, identity, device), "Moving live preview was saved as a stationary measurement");
         device["status"]!["stationary_s"] = 1.0;
-        check(HeightValidation.SameHeldPose(observed, identity, device), "Stationary fresh frozen pose was rejected");
-        check(!HeightValidation.SameHeldPose(observed, identity with { ProfileId = "robot-b" }, device), "Frozen pose leaked to another profile");
-        check(!HeightValidation.SameHeldPose(observed, identity with { BackendSessionFingerprint = "other" }, device), "Frozen pose survived backend identity replacement");
-        check(!HeightValidation.SameHeldPose(observed, identity with { SceneId = "other" }, device), "Frozen pose silently rebound to another scene session");
+        Check(HeightValidation.SameHeldPose(observed, identity, device), "Stationary fresh frozen pose was rejected");
+        Check(!HeightValidation.SameHeldPose(observed, identity with { ProfileId = "robot-b" }, device), "Frozen pose leaked to another profile");
+        Check(!HeightValidation.SameHeldPose(observed, identity with { BackendSessionFingerprint = "other" }, device), "Frozen pose survived backend identity replacement");
+        Check(!HeightValidation.SameHeldPose(observed, identity with { SceneId = "other" }, device), "Frozen pose silently rebound to another scene session");
         device["joints"]![2]!["actual_deg"] = 31.0;
-        check(!HeightValidation.SameHeldPose(observed, identity, device), "Entered measurement silently followed a newly moved physical pose");
+        Check(!HeightValidation.SameHeldPose(observed, identity, device), "Entered measurement silently followed a newly moved physical pose");
         device["joints"]![2]!["actual_deg"] = 30.0;
         foreach (double age in new[] { -1, 501, double.NaN, double.PositiveInfinity })
             Reject(() => HeightValidation.ReadPreview(identity, desk, placement, device, pose, age), "Stale/invalid source age produced a live height");
@@ -70,15 +65,15 @@ internal static class HeightValidationTests
         }
         foreach (string text in new[] { "NaN", "Infinity", "-1", "2001", "cm", "", new string('9', 33) })
             Reject(() => HeightValidation.ParseMeasurement(text), "Invalid tape measurement was accepted: " + text);
-        check(HeightValidation.ParseMeasurement("590.5") == 590.5, "Millimetre decimal tape reading changed");
+        Check(HeightValidation.ParseMeasurement("590.5") == 590.5, "Millimetre decimal tape reading changed");
         var result = new HeightCheck(observed, 304, DateTimeOffset.UtcNow);
-        check(Math.Abs(result.ErrorMm - 4) < 1e-9, "Height discrepancy direction was reversed");
+        Check(Math.Abs(result.ErrorMm - 4) < 1e-9, "Height discrepancy direction was reversed");
         var draft = new HeightCheckDocument(1, identity.ProfileId, [result], new(observed, "3e"));
         var restored = JsonSerializer.Deserialize<HeightCheckDocument>(JsonSerializer.Serialize(draft, PluginProtocol.Json), PluginProtocol.Json)!;
         HeightValidation.ValidateDocument(restored, identity.ProfileId);
-        check(restored.Draft?.MeasuredText == "3e" && restored.Draft.Observation!.Capture.PoseFingerprint == observed.Capture.PoseFingerprint,
+        Check(restored.Draft?.MeasuredText == "3e" && restored.Draft.Observation!.Capture.PoseFingerprint == observed.Capture.PoseFingerprint,
             "Draft persistence lost partially typed measurement or frozen pose evidence");
-        check(restored.Checks[0].Observation.Identity == identity && restored.Checks[0].Observation.Capture.JointDegrees.SequenceEqual(capture.JointDegrees),
+        Check(restored.Checks[0].Observation.Identity == identity && restored.Checks[0].Observation.Capture.JointDegrees.SequenceEqual(capture.JointDegrees),
             "Saved height check did not preserve profile/model/scene and joint evidence");
         Reject(() => HeightValidation.ValidateDocument(restored, "other"), "Height checks loaded into a different profile");
         Reject(() => HeightValidation.ValidateDocument(restored with { Checks = Enumerable.Repeat(result, 257).ToArray() }, identity.ProfileId), "Unbounded saved height history was accepted");
@@ -90,7 +85,7 @@ internal static class HeightValidationTests
             "Missing restored pose fingerprint was accepted");
         Reject(() => HeightValidation.ValidateDocument(restored with { Checks = [result with { Observation = null! }] }, identity.ProfileId),
             "Null restored height observation was accepted");
-        check(restored.Checks[0].Observation.Desk == desk && restored.Checks[0].Observation.CalibrationReport == "report.json",
+        Check(restored.Checks[0].Observation.Desk == desk && restored.Checks[0].Observation.CalibrationReport == "report.json",
             "Height history lost its tabletop/report provenance");
     }
 }

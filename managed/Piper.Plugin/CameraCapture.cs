@@ -17,19 +17,69 @@ public static class D405View
         : throw new ArgumentOutOfRangeException(nameof(index), "Choose Color or Depth.");
 }
 
+/// <summary>Launches the bundled camera worker, the only process that opens cameras.</summary>
+internal static class CameraRuntime
+{
+    public static Process Start(string packageDirectory, IEnumerable<string> arguments)
+    {
+        string folder = Path.Combine(packageDirectory, "camera-runtime");
+        string executable = Path.Combine(folder, OperatingSystem.IsWindows() ? "LuckyRobots.Piper.Camera.exe" : "LuckyRobots.Piper.Camera");
+        if (!File.Exists(executable)) throw new FileNotFoundException("The bundled camera runtime is missing. Reinstall the Pipers package.", executable);
+        if (OperatingSystem.IsLinux()) File.SetUnixFileMode(executable, File.GetUnixFileMode(executable) | UnixFileMode.UserExecute);
+        // Separate stdin avoids sharing the engine's live plugin-protocol pipe.
+        var info = new ProcessStartInfo(executable) { WorkingDirectory = folder, UseShellExecute = false, CreateNoWindow = true,
+            RedirectStandardInput = true, RedirectStandardOutput = true, RedirectStandardError = true };
+        foreach (string argument in arguments) info.ArgumentList.Add(argument);
+        var process = Process.Start(info) ?? throw new IOException("Could not start the bundled camera runtime.");
+        process.StandardInput.Close();
+        return process;
+    }
+
+    /// <summary>Stops the worker and its children. Safe to call from any path, including after it exited.</summary>
+    public static void Kill(Process process)
+    {
+        try { if (!process.HasExited) process.Kill(true); }
+        catch (InvalidOperationException) { }
+    }
+
+    /// <summary>Kills the worker and waits for it, so no camera handle outlives the caller.</summary>
+    public static async Task Retire(Process process)
+    {
+        Kill(process);
+        await process.WaitForExitAsync(CancellationToken.None);
+    }
+}
+
 /// <summary>Preview acquisition via the bundled C# camera worker. Timestamps are host receipt times, not exposure triggers.</summary>
 public sealed class CameraCapture(PluginContext engine, string imageId,
     CameraPreferences settings, Action<string, string> status, string depthSerial = "",
     Action<string, int, int>? dimensions = null, Action<string, JsonObject>? profile = null, string? outputImageId = null) : IAsyncDisposable
 {
+    // Lifecycle: NotStarted -> Running -> Disposed, or NotStarted -> Disposed.
+    // Start() runs once; a second Start() or a Start() after dispose throws.
+    // Retrying after a worker failure stays inside Running.
+    private enum Phase { NotStarted, Running, Disposed }
+
     public CameraFrame? LatestFrame => Volatile.Read(ref latestFrame);
     public CameraFrame? PublishedFrame => Volatile.Read(ref publishedFrame);
     private CameraFrame? latestFrame;
     private CameraFrame? publishedFrame;
     private readonly CancellationTokenSource stopping = new();
+    private readonly object phaseGate = new();
+    private Phase phase;
     private Task? worker;
     private long sequence;
-    public void Start() => worker = Task.Run(() => Run(stopping.Token));
+
+    public void Start()
+    {
+        lock (phaseGate)
+        {
+            if (phase != Phase.NotStarted)
+                throw new InvalidOperationException(phase == Phase.Disposed ? "This camera capture was disposed." : "This camera capture is already running.");
+            phase = Phase.Running;
+            worker = Task.Run(() => Run(stopping.Token));
+        }
+    }
 
     private async Task Run(CancellationToken cancellation)
     {
@@ -38,16 +88,12 @@ public sealed class CameraCapture(PluginContext engine, string imageId,
         {
             try
             {
-                bool depth = imageId == "depth";
-                var info = CameraWorker.StartInfo(engine.Start.PackageDirectory);
-                string[] arguments = depth
+                string[] arguments = imageId == "depth"
                     ? ["d405", "--serial", depthSerial, "--view", D405View.Mode(settings)]
                     : ["color", "--device", settings.Device, "--size", settings.VideoSize,
                         "--fps", settings.FrameRate.ToString(System.Globalization.CultureInfo.InvariantCulture), "--codec", settings.InputCodec];
-                foreach (string argument in arguments) info.ArgumentList.Add(argument);
-                using var process = Process.Start(info) ?? throw new IOException("Could not start camera capture.");
-                process.StandardInput.Close();
-                using var stop = cancellation.Register(() => { try { if (!process.HasExited) process.Kill(true); } catch (InvalidOperationException) { } });
+                using var process = CameraRuntime.Start(engine.Start.PackageDirectory, arguments);
+                using var stop = cancellation.Register(() => CameraRuntime.Kill(process));
                 var errors = DrainErrors(process.StandardError, cancellation);
                 // Capture must keep draining even if the engine's pipe is busy. There is one
                 // replaceable pending preview, never a queue of old camera frames.
@@ -57,10 +103,8 @@ public sealed class CameraCapture(PluginContext engine, string imageId,
                 var publish = PublishLatest(latest.Reader, publishing.Token);
                 // A broken output pipe must also release the camera; otherwise capture can
                 // run indefinitely after its only consumer has failed.
-                var stopCapture = publish.ContinueWith(_ =>
-                {
-                    try { if (!process.HasExited) process.Kill(true); } catch (InvalidOperationException) { }
-                }, CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+                var stopCapture = publish.ContinueWith(_ => CameraRuntime.Kill(process),
+                    CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
                 try
                 {
                     byte[] block = new byte[16384];
@@ -95,8 +139,7 @@ public sealed class CameraCapture(PluginContext engine, string imageId,
                 {
                     latest.Writer.TryComplete();
                     await publishing.CancelAsync();
-                    if (!process.HasExited) process.Kill(true);
-                    await process.WaitForExitAsync(CancellationToken.None);
+                    await CameraRuntime.Retire(process);
                     try { await publish; } catch (OperationCanceledException) { }
                     await stopCapture;
                     try { await errors; } catch (OperationCanceledException) { }
@@ -153,6 +196,11 @@ public sealed class CameraCapture(PluginContext engine, string imageId,
 
     public async ValueTask DisposeAsync()
     {
+        lock (phaseGate)
+        {
+            if (phase == Phase.Disposed) return;
+            phase = Phase.Disposed;
+        }
         await stopping.CancelAsync();
         if (worker is not null) { try { await worker; } catch (OperationCanceledException) { } }
         stopping.Dispose();

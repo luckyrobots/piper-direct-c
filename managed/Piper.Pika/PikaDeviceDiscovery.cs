@@ -42,7 +42,7 @@ public sealed class PikaDeviceDiscovery(string agentPath) : IPikaDeviceDiscovery
         foreach (var usb in entries.EnumerateArray())
         {
             string instance = Text(usb, "InstanceId");
-            if (!instance.StartsWith("USB\\VID_1A86&PID_7522\\", StringComparison.OrdinalIgnoreCase)) continue;
+            if (!instance.StartsWith(PikaProtocol.WindowsInstanceIdPrefix, StringComparison.OrdinalIgnoreCase)) continue;
             string bus = Text(usb, "BusId");
             var matching = linux.Where(item => item.HostBusId == bus && bus.Length > 0).ToArray();
             var found = matching.Length == 1 ? matching[0] : null;
@@ -80,24 +80,9 @@ public sealed class PikaDeviceDiscovery(string agentPath) : IPikaDeviceDiscovery
 
     private static async Task<string> RunAsync(string executable, string[] arguments, CancellationToken cancellation)
     {
-        var start = new ProcessStartInfo(executable) { UseShellExecute = false, CreateNoWindow = true,
-            RedirectStandardOutput = true, RedirectStandardError = true, RedirectStandardInput = true };
-        foreach (string argument in arguments) start.ArgumentList.Add(argument);
-        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellation);
-        deadline.CancelAfter(TimeSpan.FromSeconds(10));
-        using var process = Process.Start(start) ?? throw new IOException("Could not read Pika USB inventory.");
-        process.StandardInput.Close();
-        using var stop = deadline.Token.Register(() => { try { if (!process.HasExited) process.Kill(true); } catch (InvalidOperationException) { } });
-        Task<string> output = process.StandardOutput.ReadToEndAsync(deadline.Token), errors = process.StandardError.ReadToEndAsync(deadline.Token);
-        try
-        {
-            await process.WaitForExitAsync(deadline.Token);
-            string text = await output, error = await errors;
-            if (process.ExitCode != 0) throw new IOException(error.Trim().Length > 0 ? error.Trim() : "Pika inventory process failed.");
-            if (text.Length > 1024 * 1024) throw new IOException("Pika inventory exceeds its size limit.");
-            return text;
-        }
-        catch (OperationCanceledException) when (!cancellation.IsCancellationRequested)
-        { throw new TimeoutException("Pika USB inventory timed out."); }
+        var result = await BoundedProcess.RunAsync(executable, arguments, "Could not read Pika USB inventory.", "Pika USB inventory timed out.", cancellation);
+        if (result.ExitCode != 0) throw new IOException(result.Error.Trim().Length > 0 ? result.Error.Trim() : "Pika inventory process failed.");
+        if (result.Output.Length > 1024 * 1024) throw new IOException("Pika inventory exceeds its size limit.");
+        return result.Output;
     }
 }

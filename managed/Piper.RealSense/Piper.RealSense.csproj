@@ -6,5 +6,14 @@
     <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
     <NoWarn>SYSLIB0003;SYSLIB0004</NoWarn>
   </PropertyGroup>
-  <ItemGroup><Compile Include="../../vendor/realsense/Intel.RealSense/**/*.cs" /></ItemGroup>
+  <!-- Compile only the wrapper types the camera worker uses (context, devices,
+       pipeline, frames, stream profiles) and what they depend on. The rest of
+       the vendored SDK stays on disk unchanged. -->
+  <PropertyGroup><RealSense>../../vendor/realsense/Intel.RealSense</RealSense></PropertyGroup>
+  <ItemGroup>
+    <Compile Include="$(RealSense)/**/*.cs" />
+    <Compile Remove="$(RealSense)/Processing/**/*.cs" />
+    <Compile Remove="$(RealSense)/Devices/*.cs;$(RealSense)/Sensors/SoftwareSensor.cs;$(RealSense)/Types/FwLog.cs;$(RealSense)/Types/FwParsedLog.cs;$(RealSense)/Types/TerminalParser.cs" />
+    <Compile Include="$(RealSense)/Devices/Device.cs;$(RealSense)/Devices/DeviceList.cs;$(RealSense)/Devices/PlaybackDevice.cs;$(RealSense)/Processing/ProcessingBlock.cs;$(RealSense)/Processing/ProcessingBlockList.cs" />
+  </ItemGroup>
 </Project>

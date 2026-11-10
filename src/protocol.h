@@ -14,13 +14,26 @@ struct can_frame { uint32_t can_id; uint8_t len, pad[3]; uint8_t data[8]; };
 #endif
 
 #define PIPER_FRESH_SECONDS 0.35
+#define PIPER_PI 3.141592653589793
+/* Same evaluation order as the original inline (rad*180)/pi expressions, so
+   admitted and re-checked trajectory limits stay bit-identical. */
+#define RAD2DEG(rad) ((rad)*180/PIPER_PI)
 
-/* Physical JS qualification failed on the supported arm. Shipping builds
-   cannot enable it through JSON, preferences or an environment setting.
-   Only explicitly compiled offline/laboratory fixtures may opt in. */
-#ifndef PIPER_ENABLE_EXPERIMENTAL_STREAMED_POSITION
-#define PIPER_ENABLE_EXPERIMENTAL_STREAMED_POSITION 0
-#endif
+/* 0x2A1 status codes used by the controller guards. */
+enum {
+    PIPER_ARM_STATUS_NORMAL=0, PIPER_ARM_STATUS_STOPPED=1, PIPER_ARM_STATUS_JOINT_COMMUNICATION=5,
+    PIPER_ARM_STATUS_TEACHING=11, PIPER_ARM_STATUS_PLAYBACK=12, PIPER_ARM_STATUS_PLAYBACK_PAUSED=13
+};
+enum { PIPER_CONTROL_STANDBY=0, PIPER_CONTROL_CAN=1, PIPER_CONTROL_TEACH=2 };
+/* Teach byte: 1 records (hand-guiding), 3/5/7 play back, 4 pauses playback;
+   0, 2 and 6 are the idle/ended/terminated states. */
+enum { PIPER_TEACH_RECORDING=1, PIPER_TEACH_PLAYBACK_PAUSED=4, PIPER_TEACH_LAST_KNOWN=7 };
+static inline bool piper_teach_playback(uint8_t teach) { return teach==3||teach==5||teach==7; }
+static inline bool piper_teach_active(uint8_t teach) { return teach==PIPER_TEACH_RECORDING||teach==PIPER_TEACH_PLAYBACK_PAUSED||piper_teach_playback(teach); }
+static inline bool piper_teach_idle(uint8_t teach) { return teach==0||teach==2||teach==6; }
+/* Another controller's command IDs seen on this bus (motion 0x150-0x18F,
+   power 0x471, zeroing 0x470). */
+static inline bool piper_foreign_command(uint32_t id) { return (id>=0x150&&id<=0x18f)||id==0x471||id==0x470; }
 
 struct piper_sample {
     double deg[6], joint_at[6], status_at;
@@ -64,15 +77,16 @@ bool piper_fresh(const struct piper_sample *state, double now);
 bool piper_recent(double at, double now);
 bool piper_targets(const double degrees[6], struct can_frame frames[3]);
 struct can_frame piper_mode(unsigned speed_percent);
-/* JS position-streaming uses the same 0x155-157 position packets, not the
-   separate 0x15A-15F single-motor impedance protocol. */
-struct can_frame piper_streamed_position_mode(unsigned speed_percent);
 struct can_frame piper_power(unsigned joint, bool enabled);
+/* Read-only configuration requests. */
+struct can_frame piper_firmware_query(void);
+struct can_frame piper_gripper_config_query(void);
+/* joint is 1..6; acceleration selects the 0x47C reply instead of 0x473. */
+struct can_frame piper_limit_query(unsigned joint, bool acceleration);
 struct can_frame piper_stop_frame(void);
 struct can_frame piper_reset_frame(void);
 bool piper_gripper(double mm, double effort_nm, bool enabled, struct can_frame *frame);
 bool piper_supported(const struct piper_feedback *state);
 bool piper_seamless_teach_supported(const struct piper_feedback *state);
-bool piper_streamed_position_supported(const struct piper_feedback *state);
 
 #endif

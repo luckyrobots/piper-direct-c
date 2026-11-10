@@ -3,7 +3,7 @@
   "info": {
     "title": "PiPer Direct C position-control API",
     "version": "1.0.0",
-    "description": "Loopback-only C/SocketCAN controller. No Python or robot SDK. Read /api/state for the per-process token, stable selected device_id and current connection generation. Every POST requires X-Piper-Token and application/json. Accepted actions are asynchronous: poll state and renew the matching owner/request_id lease every 200 ms. Lease expires at 800 ms. Commands never resume automatically after reconnect or restart. A single-joint command sends a six-angle MoveJ pose, holding other joints at their initial measured positions. This API does not bypass the onboard MCU or expose raw torque/MIT/calibration/firmware writes. State includes controller teach_state, fault masks, persisted last_fault and per-joint max_acceleration_rad_s2/acceleration_fresh/acceleration_age_s. New motion and enable require valid angle, speed and acceleration limits read on this connection. Static configuration remains valid while the connection is uninterrupted; there is no periodic refresh or 60-second expiry. USB/CAN reconnection, a robot status-stream gap or an explicit information query invalidates the cache. Live position, motor and fault feedback still use the normal short freshness checks. Acceleration limits must be finite, greater than zero and at most 5 rad/s\u00b2. Queries are read-only and preserve unresolved recovery locks. The limits_fresh, acceleration_fresh and gripper configuration_fresh fields mean valid for this connection; their age fields report elapsed time without imposing an expiry. Missing optional standard CAN gripper settings do not block the arm or Pika."
+    "description": "Loopback-only Piper arm controller, served by two backends that share this native control core and dashboard: the C server (SocketCAN) and the managed .NET host (Windows or Linux), which adds a gRPC port, independent Pika gripper sessions and maintenance routes. No Python or robot SDK. Each path's x-piper-backend names the backends that serve it: c, managed or both. Read /api/state for the per-process token, stable selected device_id and current connection generation. Every POST requires X-Piper-Token and application/json. Accepted actions are asynchronous: poll state and renew the matching owner/request_id lease every 200 ms. Lease expires at 800 ms. Commands never resume automatically after reconnect or restart. A single-joint command sends a six-angle MoveJ pose, holding other joints at their initial measured positions. This API does not bypass the onboard MCU or expose raw torque/MIT/calibration/firmware writes. State includes controller teach_state, fault masks, persisted last_fault and per-joint max_acceleration_rad_s2/acceleration_fresh/acceleration_age_s. New motion and enable require valid angle, speed and acceleration limits read on this connection. Static configuration remains valid while the connection is uninterrupted; there is no periodic refresh or 60-second expiry. USB/CAN reconnection, a robot status-stream gap or an explicit information query invalidates the cache. Live position, motor and fault feedback still use the normal short freshness checks. Acceleration limits must be finite, greater than zero and at most 5 rad/s\u00b2. Queries are read-only and preserve unresolved recovery locks. The limits_fresh, acceleration_fresh and gripper configuration_fresh fields mean valid for this connection; their age fields report elapsed time without imposing an expiry. Missing optional standard CAN gripper settings do not block the arm or Pika."
   },
   "servers": [
     {
@@ -19,7 +19,7 @@
     "/api/camera": {
       "post": {
         "summary": "Start or stop the configured local bench webcam",
-        "description": "Independent of robot motion. Simulation never opens a real webcam. No microphone or recording.",
+        "description": "Independent of robot motion. Simulation never opens a real webcam. No microphone or recording. Served only by the C server; the managed host uses local browser camera selection and has no camera routes.",
         "requestBody": {
           "required": true,
           "content": {
@@ -49,7 +49,8 @@
             "description": "Camera unavailable or not configured"
           }
         }
-      }
+      },
+      "x-piper-backend": "c"
     },
     "/api/camera/frame": {
       "get": {
@@ -69,8 +70,10 @@
           "409": {
             "description": "No fresh frame"
           }
-        }
-      }
+        },
+        "description": "Served only by the C server; the managed host uses local browser camera selection and has no camera routes."
+      },
+      "x-piper-backend": "c"
     },
     "/api/state": {
       "get": {
@@ -88,7 +91,8 @@
             }
           }
         }
-      }
+      },
+      "x-piper-backend": "both"
     },
     "/api/select": {
       "post": {
@@ -122,7 +126,8 @@
             "description": "Action active"
           }
         }
-      }
+      },
+      "x-piper-backend": "both"
     },
     "/api/query": {
       "post": {
@@ -139,7 +144,8 @@
             "description": "Unavailable, busy or stale selection"
           }
         }
-      }
+      },
+      "x-piper-backend": "both"
     },
     "/api/reconnect": {
       "post": {
@@ -163,12 +169,13 @@
             "description": "Action active"
           }
         }
-      }
+      },
+      "x-piper-backend": "both"
     },
     "/api/command": {
       "post": {
         "summary": "Control joints, a pose, motor power, gripper or recovery",
-        "description": "enable requires all six drivers disabled and supported=true. joint sets one absolute degree target; jog adds a signed increment to the current measured angle; zero sets one target to 0 degrees without calibration writes. pose takes six absolute angles; synchronized=true uses one shared interpolation fraction so joints follow the planned straight line in joint space. gripper sets opening from 0 to the freshly queried hardware maximum (70 or 100 mm), at 5 mm/s and effort_nm 0.02\u20130.5 N\u00b7m (default 0.1). If raw closed feedback is between \u22122 and 0 mm, allow_closed_offset=true permits an explicit opening to at least 5 mm with a bounded 1 mm entry target; no encoder calibration is changed. Configuration is checked throughout motion. disable/reset require physical support, known firmware and fresh status. reset powers motors off, sends once and verifies fresh disabled, stationary feedback. A pending reset cannot be resent. verify-reset requires reset_completed=true after an operator reset/power cycle. hold is accepted from the owner during an active joint/pose move or gripper ramp. For a gripper it ends the ramp while retaining the last sent target and effort; it does not certify contact or a secure grasp. New moves require a stationary arm and fresh limits. All asynchronous actions require heartbeats. Enable transmits only driver power commands, without a position target or mode change. align explicitly moves resting joints at most 3 degrees to 0.5 degrees inside their command ranges, at 1% MCU speed, retaining all other targets. Larger corrections are rejected. verify-disabled clears a recovery record without CAN transmission only when all drivers are healthy, stationary and disabled; pending resets still require verify-reset. A successful normal disable clears only its own in-flight record; earlier stops remain latched. cycle requires enabled motors and a starting pose within limits. It captures that measured pose, raises toward [start J1,82,-160,0,-7,start J6] degrees, pauses for two seconds after verified arrival, and returns to the captured pose. Cycle speed is fixed at up to 3 degrees/second with 0.2-degree feedback tolerance; it uses synchronized joint interpolation and a 180-second deadline. Stop, Hold, lease loss, faults or disconnection cancel the remaining cycle; return is never automatic after interruption. Motion remains supervised by the existing heartbeat. motion.sequence_stage is raising/upright/returning while active; motion.return_degrees contains the captured pose.",
+        "description": "enable requires all six drivers disabled and supported=true. joint sets one absolute degree target; jog adds a signed increment to the current measured angle; zero sets one target to 0 degrees without calibration writes. pose takes six absolute angles; synchronized=true uses one shared interpolation fraction so joints follow the planned straight line in joint space. gripper sets opening from 0 to the freshly queried hardware maximum (70 or 100 mm), at 5 mm/s and effort_nm 0.02\u20130.5 N\u00b7m (default 0.1). If raw closed feedback is between \u22122 and 0 mm, allow_closed_offset=true permits an explicit opening to at least 5 mm with a bounded 1 mm entry target; no encoder calibration is changed. Configuration is checked throughout motion. disable/reset require physical support, known firmware and fresh status. reset powers motors off, sends once and verifies fresh disabled, stationary feedback. A pending reset cannot be resent. verify-reset requires supported=true and reset_completed=true; send reset_completed only after the operator confirms that this reset or power cycle completed. Each confirmation flag is read only by the actions listed in the Command schema's x-piper-confirmations; do not send it on others. hold is accepted from the owner during an active joint/pose move or gripper ramp. For a gripper it ends the ramp while retaining the last sent target and effort; it does not certify contact or a secure grasp. New moves require a stationary arm and fresh limits. All asynchronous actions require heartbeats. Enable transmits only driver power commands, without a position target or mode change. align explicitly moves resting joints at most 3 degrees to 0.5 degrees inside their command ranges, at 1% MCU speed, retaining all other targets. Larger corrections are rejected. verify-disabled clears a recovery record without CAN transmission only when all drivers are healthy, stationary and disabled; pending resets still require verify-reset. A successful normal disable clears only its own in-flight record; earlier stops remain latched. cycle requires enabled motors and a starting pose within limits. It captures that measured pose, raises toward [start J1,82,-160,0,-7,start J6] degrees, pauses for two seconds after verified arrival, and returns to the captured pose. Cycle speed is fixed at up to 3 degrees/second with 0.2-degree feedback tolerance; it uses synchronized joint interpolation and a 180-second deadline. Stop, Hold, lease loss, faults or disconnection cancel the remaining cycle; return is never automatic after interruption. Motion remains supervised by the existing heartbeat. motion.sequence_stage is raising/upright/returning while active; motion.return_degrees contains the captured pose.",
         "requestBody": {
           "required": true,
           "content": {
@@ -208,6 +215,27 @@
                     "standalone": true,
                     "clear": true
                   }
+                },
+                "verify-reset": {
+                  "value": {
+                    "device_id": "usb:YOUR_ADAPTER_SERIAL",
+                    "generation": 1,
+                    "owner": "YOUR_UNIQUE_CLIENT_ID",
+                    "action": "verify-reset",
+                    "standalone": true,
+                    "supported": true,
+                    "reset_completed": true
+                  }
+                },
+                "disable": {
+                  "value": {
+                    "device_id": "usb:YOUR_ADAPTER_SERIAL",
+                    "generation": 1,
+                    "owner": "YOUR_UNIQUE_CLIENT_ID",
+                    "action": "disable",
+                    "standalone": true,
+                    "supported": true
+                  }
                 }
               }
             }
@@ -237,7 +265,8 @@
             "description": "Persistent intent could not be saved; no action started"
           }
         }
-      }
+      },
+      "x-piper-backend": "both"
     },
     "/api/heartbeat": {
       "post": {
@@ -273,7 +302,8 @@
             "description": "No matching active lease or already expired"
           }
         }
-      }
+      },
+      "x-piper-backend": "both"
     },
     "/api/stop": {
       "post": {
@@ -286,8 +316,14 @@
               "schema": {
                 "type": "object",
                 "properties": {
-                  "device_id": { "type": "string" },
-                  "generation": { "type": "integer", "minimum": 1, "maximum": 4294967295 }
+                  "device_id": {
+                    "type": "string"
+                  },
+                  "generation": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 4294967295
+                  }
                 }
               }
             }
@@ -299,6 +335,351 @@
           },
           "409": {
             "description": "Adapter identity, optional generation or automatic-stop action no longer matches"
+          }
+        }
+      },
+      "x-piper-backend": "both"
+    },
+    "/api/stop/coordinated": {
+      "x-piper-backend": "managed",
+      "post": {
+        "summary": "Stop arms and hold Pika grippers as two independent attempts",
+        "description": "Runs the arm STOP and the Pika hold concurrently, each with its own bounded attempt; a failure, timeout or block in one never suppresses the other. Admitted during maintenance like /api/stop. With a non-empty device_id the STOP is scoped to that arm and pika_device is required. Without it every arm is stopped and every Pika owned by owner is held; generation and request_id are rejected there.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "owner": {
+                    "type": "string",
+                    "description": "Dashboard client ID. A session-owned managed host requires its plugin owner."
+                  },
+                  "device_id": {
+                    "type": "string",
+                    "description": "Empty or omitted stops all arms"
+                  },
+                  "generation": {
+                    "type": "integer",
+                    "minimum": 1
+                  },
+                  "request_id": {
+                    "type": "integer",
+                    "minimum": 1
+                  },
+                  "pika_device": {
+                    "type": "string",
+                    "description": "Linux Pika device identity, e.g. /dev/pika/by-host/1-2"
+                  },
+                  "pika_distribution": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "description": "WSL distribution; null means native Linux serial. Omitted means the current assignment."
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Both channels acknowledged",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoordinatedStop"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "At least one channel is unverified; read both results",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoordinatedStop"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/shutdown": {
+      "x-piper-backend": "managed",
+      "post": {
+        "summary": "Close USB transports and exit the managed host",
+        "description": "HTTP only. Freezes new controls (STOP stays available), requires idle arms and Pika grippers, replies, then rechecks before exiting. A failed recheck cancels the shutdown and is reported in state.backend_restart.last_failure.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "owner": {
+                    "type": "string",
+                    "description": "Dashboard client ID. A session-owned managed host requires its plugin owner."
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Shutdown accepted; the process exits after this response"
+          },
+          "409": {
+            "description": "A control request, arm motion, query or gripper movement is active, or maintenance is already in progress"
+          }
+        }
+      }
+    },
+    "/api/maintenance/restart": {
+      "x-piper-backend": "managed",
+      "post": {
+        "summary": "Restart a supervised or plugin-owned managed host in monitoring mode",
+        "description": "Requires the exact backend_process_id and backend_instance_id from state, the current owner, and release_grippers=true because restart releases Pika holding torque. Arm power is unchanged and STOP/recovery stays latched. The host freezes new controls, verifies idle stationary hardware, replies 202, rechecks after the response drains and exits with code 75. No target is replayed.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "owner",
+                  "backend_process_id",
+                  "backend_instance_id",
+                  "release_grippers"
+                ],
+                "properties": {
+                  "owner": {
+                    "type": "string",
+                    "description": "Dashboard client ID. A session-owned managed host requires its plugin owner."
+                  },
+                  "backend_process_id": {
+                    "type": "integer"
+                  },
+                  "backend_instance_id": {
+                    "type": "string"
+                  },
+                  "release_grippers": {
+                    "const": true
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Restart accepted"
+          },
+          "409": {
+            "description": "Unsupported, stale identity, missing acknowledgement, or hardware not idle"
+          }
+        }
+      }
+    },
+    "/api/pika/state": {
+      "x-piper-backend": "managed",
+      "get": {
+        "summary": "Read one Pika session snapshot with raw evidence",
+        "security": [],
+        "parameters": [
+          {
+            "name": "pika_device",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "description": "Omitted means the assigned default gripper"
+          },
+          {
+            "name": "pika_distribution",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "description": "Omitted means the current assignment"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Session snapshot; an unregistered device reports connected=false"
+          }
+        }
+      }
+    },
+    "/api/pika/devices": {
+      "x-piper-backend": "managed",
+      "get": {
+        "summary": "List attached Pika grippers without opening them",
+        "responses": {
+          "200": {
+            "description": "Inventory; empty in simulation"
+          },
+          "409": {
+            "description": "Discovery failed"
+          }
+        },
+        "security": [],
+        "parameters": [
+          {
+            "name": "distribution",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "description": "Omitted means the current assignment"
+          }
+        ]
+      },
+      "post": {
+        "summary": "List attached Pika grippers without opening them",
+        "responses": {
+          "200": {
+            "description": "Inventory; empty in simulation"
+          },
+          "409": {
+            "description": "Discovery failed"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "pika_distribution": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "description": "WSL distribution; null means native Linux serial. Omitted means the current assignment."
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/pika/{action}": {
+      "x-piper-backend": "managed",
+      "post": {
+        "summary": "Configure, connect or command one Pika gripper session",
+        "description": "Each physical gripper has its own session; selecting an arm never changes another gripper. configure registers an assignment without opening the port and is refused while an arm moves. Motor actions require the owner that connected. In simulation every action except devices is rejected with 409.",
+        "parameters": [
+          {
+            "name": "action",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "configure",
+                "connect",
+                "disconnect",
+                "heartbeat",
+                "enable",
+                "disable",
+                "position",
+                "hold",
+                "resume-hold",
+                "follow-start",
+                "follow-update"
+              ]
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "owner"
+                ],
+                "properties": {
+                  "owner": {
+                    "type": "string",
+                    "description": "Dashboard client ID. A session-owned managed host requires its plugin owner."
+                  },
+                  "pika_device": {
+                    "type": "string",
+                    "description": "Linux Pika device identity, e.g. /dev/pika/by-host/1-2"
+                  },
+                  "pika_distribution": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "description": "WSL distribution; null means native Linux serial. Omitted means the current assignment."
+                  },
+                  "device": {
+                    "type": "string",
+                    "description": "configure: the new assignment; empty clears it"
+                  },
+                  "distribution": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "description": "configure: the new distribution"
+                  },
+                  "value": {
+                    "type": "number",
+                    "description": "position: target opening"
+                  },
+                  "clear": {
+                    "type": "boolean"
+                  },
+                  "take_over": {
+                    "type": "boolean"
+                  },
+                  "read_only_adopt": {
+                    "type": "boolean"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Action result"
+          },
+          "400": {
+            "description": "Invalid input"
+          },
+          "409": {
+            "description": "Ownership, power evidence, assignment or transport prerequisite failed"
+          }
+        }
+      }
+    },
+    "/api/openapi.json": {
+      "x-piper-backend": "both",
+      "get": {
+        "summary": "Read this API description",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "OpenAPI 3.1 document",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
           }
         }
       }
@@ -352,13 +733,12 @@
             "type": "object",
             "required": [
               "action",
-              "owner",
-              "standalone"
+              "owner"
             ],
             "properties": {
               "action": {
                 "type": "string",
-                "description": "teach-return explicitly returns completed physical teaching to CAN. Qualified H-V1.2-1 with S-V1.8-5 through S-V1.8-9 or S-V1.9-0/1 firmware uses a frozen measured-pose hold: confirm button_off, same_pose_confirmed, supported and clear. Fresh healthy joint/motor encoders, current configuration, all six motors already enabled and a stationary pose are required. Three measured position packets seed the hold, then a fresh receive observation precedes CAN MoveJ plus the same six measured angles at 1% speed; completion requires fresh same-pose status, joint and motor acknowledgement. Other supported firmware requires zero_pose_confirmed, all joints within 1 degree of zero and within limits, then acknowledged standby/CAN mode packets. recover-at-pose uses only the qualified measured-pose path to clear a saved software obstruction after the backend observes a new physical hand-guiding-to-off cycle on this device/generation within 120 seconds. Reset-pending, real fault/transport evidence, stale feedback, out-of-range pose or missing cycle reject without transmission. The incident stays latched until the hold is acknowledged and saved. Neither action resets, changes motor power, homes or replays an old target. Both return 202/request_id and require the normal control heartbeat during the bounded handoff. Connection/lease/mode changes cancel; unexpected movement requests protective STOP. device.teaching exposes can_return/return_reason and can_recover_at_pose/recover_at_pose_reason.",
+                "description": "teach-return explicitly returns completed physical teaching to CAN. Qualified H-V1.2-1 with S-V1.8-5 through S-V1.8-9 or S-V1.9-0/1 firmware uses a frozen measured-pose hold: confirm button_off, same_pose_confirmed, supported and clear. Fresh healthy joint/motor encoders, current configuration, all six motors already enabled and a stationary pose are required. Three measured position packets seed the hold, then a fresh receive observation precedes CAN MoveJ plus the same six measured angles at 1% speed; completion requires fresh same-pose status, joint and motor acknowledgement. Other supported firmware requires zero_pose_confirmed, all joints within 1 degree of zero and within limits, then acknowledged standby/CAN mode packets. recover-at-pose uses only the qualified measured-pose path to clear a saved software obstruction after the backend observes a new physical hand-guiding-to-off cycle on this device/generation within 120 seconds. Reset-pending, real fault/transport evidence, stale feedback, out-of-range pose or missing cycle reject without transmission. The incident stays latched until the hold is acknowledged and saved. Neither action resets, changes motor power, homes or replays an old target. Both return 202/request_id and require the normal control heartbeat during the bounded handoff. Connection/lease/mode changes cancel; unexpected movement requests protective STOP. device.teaching exposes can_return/return_reason and can_recover_at_pose/recover_at_pose_reason. verify-current requires clear=true and supported=true; it clears the recovery record without CAN transmission only when the drivers are healthy, stationary and in one consistent power state, and never clears a pending reset. move-to-zero moves all six joints to 0 degrees under the normal move checks. follow-start opens a leased following session at fresh measurements without replaying any target. follow-update sends the latest six-angle target with an increasing sequence and the session request_id; input older than 250 ms holds the measured pose. follow-commit moves to its final target, and follow-end holds the measured pose with motors enabled.",
                 "enum": [
                   "enable",
                   "disable",
@@ -374,7 +754,13 @@
                   "verify-disabled",
                   "cycle",
                   "teach-return",
-                  "recover-at-pose"
+                  "recover-at-pose",
+                  "verify-current",
+                  "move-to-zero",
+                  "follow-start",
+                  "follow-update",
+                  "follow-commit",
+                  "follow-end"
                 ]
               },
               "owner": {
@@ -384,19 +770,19 @@
               },
               "standalone": {
                 "type": "boolean",
-                "description": "Operator confirms no linked leader or competing controller"
+                "description": "Operator confirms no linked leader or competing controller. Required true on every action admitted from idle. hold, follow-update, follow-commit and follow-end on the caller's active lane do not read it."
               },
               "clear": {
                 "type": "boolean",
-                "description": "Operator confirms full path clear and attended; required for enable/moves"
+                "description": "Operator confirms the full motion path is clear and the arm is attended. Required true on enable, joint, jog, zero, pose, gripper, align, cycle, move-to-zero, follow-start, reset, verify-current, teach-return and recover-at-pose. disable, verify-reset and verify-disabled do not read it."
               },
               "supported": {
                 "type": "boolean",
-                "description": "Operator confirms physical support; required for power/recovery"
+                "description": "Operator confirms the arm is physically supported. Required true on enable, disable, reset, verify-reset, verify-disabled, verify-current, teach-return and recover-at-pose. Motion and gripper actions do not read it."
               },
               "reset_completed": {
                 "type": "boolean",
-                "description": "Operator confirms manual reset/power-cycle completed"
+                "description": "Read only by verify-reset, where it is required true. Send it only after an explicit operator confirmation, for that verify-reset request, that the controller reset or power cycle has completed. It is never a default: every other action ignores it."
               },
               "button_off": {
                 "type": "boolean",
@@ -471,8 +857,201 @@
                 "description": "Percentage of the slowest fresh reported joint speed limit. Mutually exclusive with legacy speed_deg_s. Zero blocks new joint moves; it does not stop an active move. Alignment and scripted cycle retain explicit rates."
               }
             }
+          },
+          {
+            "if": {
+              "not": {
+                "properties": {
+                  "action": {
+                    "enum": [
+                      "hold",
+                      "follow-update",
+                      "follow-commit",
+                      "follow-end"
+                    ]
+                  }
+                },
+                "required": [
+                  "action"
+                ]
+              }
+            },
+            "then": {
+              "properties": {
+                "standalone": {
+                  "const": true
+                }
+              },
+              "required": [
+                "standalone"
+              ]
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "action": {
+                  "enum": [
+                    "enable",
+                    "joint",
+                    "jog",
+                    "zero",
+                    "pose",
+                    "gripper",
+                    "align",
+                    "cycle",
+                    "move-to-zero",
+                    "follow-start",
+                    "reset",
+                    "verify-current",
+                    "teach-return",
+                    "recover-at-pose"
+                  ]
+                }
+              },
+              "required": [
+                "action"
+              ]
+            },
+            "then": {
+              "allOf": [
+                {
+                  "properties": {
+                    "clear": {
+                      "const": true
+                    }
+                  },
+                  "required": [
+                    "clear"
+                  ]
+                }
+              ]
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "action": {
+                  "enum": [
+                    "enable",
+                    "disable",
+                    "reset",
+                    "verify-reset",
+                    "verify-disabled",
+                    "verify-current",
+                    "teach-return",
+                    "recover-at-pose"
+                  ]
+                }
+              },
+              "required": [
+                "action"
+              ]
+            },
+            "then": {
+              "allOf": [
+                {
+                  "properties": {
+                    "supported": {
+                      "const": true
+                    }
+                  },
+                  "required": [
+                    "supported"
+                  ]
+                }
+              ]
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "action": {
+                  "const": "verify-reset"
+                }
+              },
+              "required": [
+                "action"
+              ]
+            },
+            "then": {
+              "allOf": [
+                {
+                  "properties": {
+                    "reset_completed": {
+                      "const": true
+                    }
+                  },
+                  "required": [
+                    "reset_completed"
+                  ]
+                }
+              ]
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "action": {
+                  "enum": [
+                    "teach-return",
+                    "recover-at-pose"
+                  ]
+                }
+              },
+              "required": [
+                "action"
+              ]
+            },
+            "then": {
+              "allOf": [
+                {
+                  "properties": {
+                    "button_off": {
+                      "const": true
+                    }
+                  },
+                  "required": [
+                    "button_off"
+                  ]
+                }
+              ]
+            }
           }
-        ]
+        ],
+        "x-piper-confirmations": {
+          "description": "Operator attestations that lane_action() in src/controller.c reads for each action. A client sends a flag only on the actions listed for it. teach-return and recover-at-pose also need button_off and, by firmware, same_pose_confirmed or zero_pose_confirmed.",
+          "standalone": "every action except hold, follow-update, follow-commit, follow-end",
+          "clear": [
+            "enable",
+            "joint",
+            "jog",
+            "zero",
+            "pose",
+            "gripper",
+            "align",
+            "cycle",
+            "move-to-zero",
+            "follow-start",
+            "reset",
+            "verify-current",
+            "teach-return",
+            "recover-at-pose"
+          ],
+          "supported": [
+            "enable",
+            "disable",
+            "reset",
+            "verify-reset",
+            "verify-disabled",
+            "verify-current",
+            "teach-return",
+            "recover-at-pose"
+          ],
+          "reset_completed": [
+            "verify-reset"
+          ]
+        }
       },
       "Result": {
         "type": "object",
@@ -597,9 +1176,114 @@
                       }
                     }
                   }
+                },
+                "recovery_required": {
+                  "type": "boolean",
+                  "description": "The persisted recovery record is not clear (or a legacy stop is unacknowledged) and no action is running."
+                },
+                "reset_pending": {
+                  "type": "boolean",
+                  "description": "The persisted record state is reset_pending; only reset retry or verify-reset can proceed."
+                },
+                "stop_reason": {
+                  "type": "string",
+                  "description": "Display text for the latched reason. Clients must not branch on it; use stop_event.kind and reset_pending."
+                },
+                "stop_event": {
+                  "type": [
+                    "object",
+                    "null"
+                  ],
+                  "description": "First unacknowledged STOP evidence, kept until recovery clears the record. The persisted control-state.json record also carries state (clear, latched, reset_pending) and kind (intent, stop, obstruction, power, reset); recovery eligibility reads those fields, never reason text.",
+                  "properties": {
+                    "kind": {
+                      "enum": [
+                        "stop",
+                        "obstruction"
+                      ],
+                      "description": "Why the STOP was latched. obstruction makes the incident eligible for recover-at-pose."
+                    },
+                    "reason": {
+                      "type": "string",
+                      "description": "Display text only"
+                    },
+                    "joint": {
+                      "type": "integer",
+                      "description": "Joint (1-6) recorded by a joint-specific stop such as an obstruction; 0 when none was recorded"
+                    },
+                    "request_id": {
+                      "type": "integer"
+                    },
+                    "unix_time": {
+                      "type": "number"
+                    },
+                    "phase_before_stop": {
+                      "type": "string"
+                    },
+                    "following": {
+                      "type": "boolean"
+                    },
+                    "finishing_target": {
+                      "type": "boolean"
+                    },
+                    "trajectory_follow": {
+                      "type": "boolean"
+                    },
+                    "arm_status": {
+                      "type": "number"
+                    },
+                    "error": {
+                      "type": "number"
+                    },
+                    "transport": {
+                      "type": "object"
+                    },
+                    "joints": {
+                      "type": "array",
+                      "items": {
+                        "type": "object"
+                      }
+                    }
+                  }
+                },
+                "last_fault": {
+                  "type": [
+                    "object",
+                    "null"
+                  ],
+                  "description": "Robot fault captured before the STOP changed the reported state"
+                },
+                "last_cleanup_error": {
+                  "type": "string",
+                  "description": "Latest power-cleanup failure; the primary stop_event is kept"
                 }
               }
             }
+          }
+        }
+      },
+      "CoordinatedStop": {
+        "type": "object",
+        "properties": {
+          "ok": {
+            "type": "boolean"
+          },
+          "arm": {
+            "$ref": "#/components/schemas/StopChannel"
+          },
+          "pika": {
+            "$ref": "#/components/schemas/StopChannel"
+          }
+        }
+      },
+      "StopChannel": {
+        "type": "object",
+        "properties": {
+          "ok": {
+            "type": "boolean"
+          },
+          "message": {
+            "type": "string"
           }
         }
       }

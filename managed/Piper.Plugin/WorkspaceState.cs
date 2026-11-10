@@ -48,67 +48,97 @@ public static class WorkspaceCommandPolicy
         id.StartsWith("joint.", StringComparison.Ordinal) || id.StartsWith("teleoperate.joint.", StringComparison.Ordinal) || id is "simulation.toggle" or "simulation.match";
 }
 
+/// <summary>Plugin-1 workspace navigation, one immutable value per published view.
+/// States: Controls · Recording · Replay · Camera(detail, return page) ·
+/// Settings(category, settings camera). Calibration is not a page: it is open
+/// exactly while bench settings, or a camera enlarged from them, are visible.
+/// <see cref="Navigate"/> is the only transition; PipersPlugin commits its
+/// result inside the view publication gate.</summary>
+internal readonly record struct WorkspaceNavigation(WorkspacePage Page, SettingsCategory Category,
+    string SettingsCamera, string CameraDetail, WorkspacePage CameraReturn)
+{
+    public static readonly WorkspaceNavigation Initial = new(WorkspacePage.Controls, SettingsCategory.Robot, "bench", "bench", WorkspacePage.Controls);
+    public static readonly WorkspaceNavigation Calibration = Initial with { Page = WorkspacePage.Settings, Category = SettingsCategory.Bench };
+
+    public bool CalibrationOpen => Category == SettingsCategory.Bench &&
+        (Page == WorkspacePage.Settings || Page == WorkspacePage.Camera && CameraReturn == WorkspacePage.Settings);
+
+    public static WorkspaceNavigation At(WorkspacePage page, SettingsCategory category = SettingsCategory.Robot) =>
+        Initial with { Page = page, Category = category };
+
+    private static bool IsCamera(string id) => id is "bench" or "depth" or "gripper";
+
+    public WorkspaceNavigation Navigate(string action)
+    {
+        Debug.Assert(CameraReturn != WorkspacePage.Camera, "A camera detail page cannot return to itself.");
+        if (action.StartsWith("settings.", StringComparison.Ordinal))
+        {
+            string[] parts = action[9..].Split('.');
+            var category = parts[0] switch
+            {
+                "cameras" => SettingsCategory.Cameras, "bench" => SettingsCategory.Bench,
+                "diagnostics" => SettingsCategory.Diagnostics, _ => SettingsCategory.Robot
+            };
+            string camera = parts.Length > 1 && category == SettingsCategory.Cameras && IsCamera(parts[1]) ? parts[1] : SettingsCamera;
+            return this with { Page = WorkspacePage.Settings, Category = category, SettingsCamera = camera };
+        }
+        if (action.StartsWith("camera.", StringComparison.Ordinal))
+        {
+            string selected = action[7..];
+            if (!IsCamera(selected)) throw new InvalidOperationException("Unknown camera.");
+            return this with { Page = WorkspacePage.Camera, CameraDetail = selected, CameraReturn = Page == WorkspacePage.Camera ? CameraReturn : Page };
+        }
+        return action switch
+        {
+            "camera-back" => this with { Page = CameraReturn },
+            "controls" => this with { Page = WorkspacePage.Controls },
+            "recording" => this with { Page = WorkspacePage.Recording },
+            "replay" => this with { Page = WorkspacePage.Replay },
+            "calibration" => this with { Page = WorkspacePage.Settings, Category = SettingsCategory.Bench },
+            "settings" => this with { Page = WorkspacePage.Settings },
+            _ => throw new InvalidOperationException("Unknown workspace page.")
+        };
+    }
+}
+
+internal enum WorkspacePage { Controls, Recording, Replay, Camera, Settings }
+internal enum SettingsCategory { Robot, Cameras, Bench, Diagnostics }
+
 public sealed partial class PipersPlugin
 {
-    private string workspacePage = "controls", settingsCategory = "robot", cameraDetail = "bench", cameraReturnPage = "controls";
-    private long workspaceViewEpoch;
+    internal WorkspaceNavigation Navigation { get; set; } = WorkspaceNavigation.Initial;
+    private bool calibrationOpen => Navigation.CalibrationOpen;
+    private string settingsCamera => Navigation.SettingsCamera;
+    private string cameraDetail => Navigation.CameraDetail;
+    internal long workspaceViewEpoch;
     private Task? wizardHighlightMaintenance;
-    private bool connectionDetailsOpen, cameraStreamDetailsOpen, cameraLensDetailsOpen;
+    internal bool connectionDetailsOpen, cameraStreamDetailsOpen, cameraLensDetailsOpen;
 
-    private async Task WorkspaceEvent(string action, CancellationToken cancellation)
+    internal async Task WorkspaceEvent(string action, CancellationToken cancellation)
     {
         action = action.Split('@', 2)[0];
         if (action == "link-info" || action.StartsWith("info.", StringComparison.Ordinal) || action is "recording.camera-info" or "recording.time-info") return;
         if (action == "connection-details") { connectionDetailsOpen = !connectionDetailsOpen; await Render(cancellation); return; }
         if (action == "camera-stream-details") { cameraStreamDetailsOpen = !cameraStreamDetailsOpen; await Render(cancellation); return; }
         if (action == "camera-lens-details") { cameraLensDetailsOpen = !cameraLensDetailsOpen; await Render(cancellation); return; }
-        string page = action, category = settingsCategory, cameraSettings = settingsCamera;
-        string detail = cameraDetail, returnPage = cameraReturnPage;
-        if (action.StartsWith("settings.", StringComparison.Ordinal))
-        {
-            string[] parts = action[9..].Split('.');
-            category = parts[0];
-            if (parts.Length > 1 && category == "cameras" && parts[1] is "bench" or "depth" or "gripper") cameraSettings = parts[1];
-            page = "settings";
-        }
-        if (action.StartsWith("camera.", StringComparison.Ordinal))
-        {
-            string selected = action[7..];
-            if (selected is not ("bench" or "depth" or "gripper")) throw new InvalidOperationException("Unknown camera.");
-            if (workspacePage != "camera") returnPage = workspacePage;
-            detail = selected;
-            page = "camera";
-        }
-        if (action == "camera-back") page = returnPage;
-        if (page is not ("controls" or "calibration" or "settings" or "recording" or "replay" or "camera")) throw new InvalidOperationException("Unknown workspace page.");
-        if (page == "calibration") { page = "settings"; category = "bench"; }
-        if (category is not ("robot" or "cameras" or "bench" or "controller" or "diagnostics")) category = "robot";
-        bool bench = page == "settings" && category == "bench";
+        var next = Navigation.Navigate(action);
+        bool bench = next.Page == WorkspacePage.Settings && next.Category == SettingsCategory.Bench;
         if (bench && GroupFollowActive)
             throw new InvalidOperationException("Stop following before opening bench calibration. No follower targets were changed.");
 
         // End a viewport gesture when hiding its controls. Browsing settings
         // does not revoke a healthy robot session or interrupt an episode.
-        if (page != workspacePage && (teleoperating || followRequest != 0)) await PauseTeleoperation(cancellation);
-        bool nextCalibration = bench || page == "camera" && returnPage == "settings" && category == "bench";
+        if (next.Page != Navigation.Page && (teleoperating || followRequest != 0)) await PauseTeleoperation(cancellation);
         if (bench && !calibrationOpen) await MakeCalibrationReadOnly(cancellation);
-        if (calibrationOpen && !nextCalibration)
+        if (calibrationOpen && !next.CalibrationOpen)
         {
             await StopHeightCheck(cancellation);
             await ClearWizardHighlight(cancellation);
         }
-        if (passiveMeasuredTrackingStarted && page == "settings" && category == "robot" && (pikaInventoryAt == 0 || Stopwatch.GetElapsedTime(pikaInventoryAt).TotalSeconds > 5))
+        if (passiveMeasuredTrackingStarted && next is { Page: WorkspacePage.Settings, Category: SettingsCategory.Robot } &&
+            (pikaInventoryAt == 0 || Stopwatch.GetElapsedTime(pikaInventoryAt).TotalSeconds > 5))
             await RefreshPikaInventory(cancellation);
-        await PublishWorkspaceView(cancellation, () =>
-        {
-            workspacePage = page;
-            settingsCategory = category;
-            settingsCamera = cameraSettings;
-            cameraDetail = detail;
-            cameraReturnPage = returnPage;
-            calibrationOpen = nextCalibration;
-            backendSetupOpen = page == "settings" && category is "controller" or "diagnostics";
-        });
+        await PublishWorkspaceView(cancellation, () => Navigation = next);
     }
 
     private void QueueWizardHighlight()

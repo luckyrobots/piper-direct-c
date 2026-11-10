@@ -8,32 +8,59 @@ namespace LuckyRobots.Piper.Plugin;
 
 public sealed record CalibrationPreferences(CalibrationDesk Desk, CalibrationMeasurement Measurement);
 
-public static class CalibrationCommandGuard
-{
-    public static bool Blocks(string action, bool calibrationOpen) => calibrationOpen &&
-        (action is "enable" or "safety.accept" or "teleoperate.toggle" or "zero.all" or "recovery.home" or "pika.target" or "engine.robot.target" or "engine.robot.follow" ||
-            action.StartsWith("joint.", StringComparison.Ordinal));
-}
-
 public sealed partial class PipersPlugin
 {
-    private bool calibrationOpen, calibrationPlacementUnverified, calibrationArchiveConfirmation;
-    private string calibrationProfile = "";
-    private string calibrationPath = "";
-    private CalibrationDesk calibrationDesk = new();
+    internal bool calibrationPlacementUnverified, calibrationArchiveConfirmation;
+    internal string calibrationProfile = "";
+    internal string calibrationPath = "";
+    internal CalibrationDesk calibrationDesk = new();
     private CalibrationMeasurement calibrationMeasurement = new();
-    private CalibrationIdentity? calibrationIdentity;
-    private CalibrationPlacement? calibrationOriginal, calibrationApplied;
-    private CalibrationFit? calibrationFit;
-    private readonly List<CalibrationSample> calibrationSamples = [];
+    internal CalibrationIdentity? calibrationIdentity;
+    internal CalibrationPlacement? calibrationOriginal, calibrationApplied;
+    internal CalibrationFit? calibrationFit;
+    internal readonly List<CalibrationSample> calibrationSamples = [];
     private string RobotCalibrationDirectory => Path.Combine(engine.Start.SettingsDirectory, "calibration", ActiveProfile.Id);
     private static string CalibrationNumber(double value) => value.ToString("0.###", CultureInfo.InvariantCulture);
+
+    // Desk calibration session (Cal-A), derived from the session fields:
+    //   None -> Capturing           start pins identity and original placement
+    //   Capturing -> Fitted         fit
+    //   Fitted -> Capturing         capture, correction or re-evaluation clears the fit
+    //   Fitted|Applied -> WritePending   apply or rollback sent; reply not verified yet
+    //   WritePending -> Applied     verified apply, or inspect finds the proposal
+    //   WritePending -> Fitted      verified rollback, a failed pre-send check, or inspect finds the original
+    //   any -> None                 new/archive (WritePending and Applied ask first) or a profile change
+    // Illegal and asserted: placement or samples without an identity, or an
+    // applied placement without the fit that proposed it.
+    private enum CalibrationPhase { None, Capturing, Fitted, WritePending, Applied }
+
+    private CalibrationPhase CalibrationSessionPhase
+    {
+        get
+        {
+            Debug.Assert(calibrationIdentity is not null || calibrationOriginal is null && calibrationApplied is null && calibrationFit is null &&
+                !calibrationPlacementUnverified && calibrationSamples.Count == 0, "Calibration session data exists without its identity.");
+            Debug.Assert(calibrationApplied is null || calibrationFit is not null, "An applied placement lost the fit that proposed it.");
+            return calibrationIdentity is null ? CalibrationPhase.None
+                : calibrationPlacementUnverified ? CalibrationPhase.WritePending
+                : calibrationApplied is not null ? CalibrationPhase.Applied
+                : calibrationFit is not null ? CalibrationPhase.Fitted
+                : CalibrationPhase.Capturing;
+        }
+    }
+
+    // The one exit to CalibrationPhase.None.
+    private void ClearCalibrationSession()
+    {
+        calibrationIdentity = null; calibrationOriginal = calibrationApplied = null; calibrationFit = null; calibrationReevaluation = null;
+        calibrationSamples.Clear(); calibrationPlacementUnverified = calibrationArchiveConfirmation = false;
+    }
 
     private void LoadCalibrationPreferences()
     {
         if (calibrationProfile == ActiveProfile.Id) return;
         calibrationProfile = ActiveProfile.Id;
-        calibrationIdentity = null; calibrationOriginal = calibrationApplied = null; calibrationFit = null; calibrationReevaluation = null; calibrationSamples.Clear(); calibrationPlacementUnverified = calibrationArchiveConfirmation = false;
+        ClearCalibrationSession();
         calibrationDesk = preferences.BenchReference?.Apply(new()) ?? new(); calibrationMeasurement = new();
         string path = Path.Combine(RobotCalibrationDirectory, "settings.json");
         try
@@ -49,18 +76,24 @@ public sealed partial class PipersPlugin
         calibrationPath = Directory.Exists(RobotCalibrationDirectory) ? Directory.EnumerateFiles(RobotCalibrationDirectory, "*-calibration.json").OrderByDescending(File.GetLastWriteTimeUtc).FirstOrDefault() ?? "" : "";
         try
         {
+            // Only a report with a sent or applied scene write resumes here; an
+            // unapplied report resumes only through its wizard draft.
             if (calibrationPath.Length > 0 && new FileInfo(calibrationPath).Length <= 1024 * 1024 &&
-                JsonSerializer.Deserialize<CalibrationReport>(File.ReadAllText(calibrationPath), PluginProtocol.Json) is { } report &&
-                CalibrationSavedState.Recover(report, ActiveProfile.Id) is { } saved)
-            {
-                calibrationIdentity = report.Identity; calibrationOriginal = report.OriginalPlacement; calibrationApplied = report.AppliedPlacement; calibrationFit = report.Fit;
-                calibrationReevaluation = report.ModelReevaluation;
-                calibrationSamples.AddRange(report.Samples); calibrationDesk = report.Desk; calibrationMeasurement = report.Samples.LastOrDefault()?.Measurement ?? calibrationMeasurement;
-                calibrationPlacementUnverified = saved.RequiresInspection;
-            }
+                JsonSerializer.Deserialize<CalibrationReport>(File.ReadAllText(calibrationPath), PluginProtocol.Json) is { RequiresInspection: true } report)
+                RestoreCalibrationReport(report, calibrationPath);
         }
         catch (Exception error) when (error is IOException or JsonException or InvalidOperationException or ArgumentException)
         { Trace.TraceWarning("Saved calibration could not be restored: {0}", error.Message); }
+    }
+
+    private void RestoreCalibrationReport(CalibrationReport report, string path)
+    {
+        report.Validate(ActiveProfile.Id);
+        calibrationIdentity = report.Identity; calibrationOriginal = report.OriginalPlacement; calibrationApplied = report.AppliedPlacement; calibrationFit = report.Fit;
+        calibrationReevaluation = report.ModelReevaluation;
+        calibrationSamples.Clear(); calibrationSamples.AddRange(report.Samples); calibrationDesk = report.Desk; calibrationPath = path;
+        calibrationMeasurement = report.Samples.LastOrDefault()?.Measurement ?? calibrationMeasurement;
+        calibrationPlacementUnverified = report.RequiresInspection;
     }
 
     private CalibrationIdentity CurrentCalibrationIdentity()
@@ -70,13 +103,29 @@ public sealed partial class PipersPlugin
             calibrationIdentity?.ModelAssetId ?? "", calibrationIdentity?.ModelRevision ?? "");
     }
 
+    private async Task<JsonObject> ReadRobotPose(string sceneId, string entityId, CancellationToken cancellation)
+    {
+        var reply = await engine.RequestAsync("robot.read", new JsonObject { ["sceneId"] = sceneId, ["entityId"] = entityId }, cancellation);
+        return JsonNode.Parse(reply.GetRawText())!.AsObject();
+    }
+
+    // Reads the linked robot's pose and requires that the link did not change
+    // during the read and that the reply is a metric pose for its scene entity.
+    private async Task<(RobotLink Link, JsonObject Pose)> ReadMetricPose(string unlinked, string unavailable, CancellationToken cancellation)
+    {
+        var current = link ?? throw new InvalidOperationException(unlinked);
+        var pose = await ReadRobotPose(current.SceneId, current.EntityId, cancellation);
+        if (!ReferenceEquals(link, current) || !CalibrationPose.IsMetric(pose, current.SceneId, current.EntityId))
+            throw new InvalidOperationException(unavailable);
+        return (current, pose);
+    }
+
     private async Task<CalibrationCapture> ReadCalibrationPose(CalibrationIdentity identity, CalibrationPlacement? expectedPlacement, bool handGuiding, CancellationToken cancellation)
     {
         var before = (JsonObject)Device().DeepClone();
         if (CurrentCalibrationIdentity() != identity) throw new InvalidOperationException("Calibration connection changed. Start a new calibration.");
         long start = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-        var reply = await engine.RequestAsync("robot.read", new JsonObject { ["sceneId"] = identity.SceneId, ["entityId"] = identity.RobotId }, cancellation);
-        var pose = JsonNode.Parse(reply.GetRawText())!.AsObject();
+        var pose = await ReadRobotPose(identity.SceneId, identity.RobotId, cancellation);
         var after = Device();
         if (before["joints"]!.AsArray().Zip(after["joints"]!.AsArray()).Any(p => Math.Abs(p.First!["actual_deg"]!.GetValue<double>() - p.Second!["actual_deg"]!.GetValue<double>()) > .05))
             throw new InvalidOperationException("The arm moved during scene measurement. Hold the same point still and capture again.");
@@ -94,7 +143,8 @@ public sealed partial class PipersPlugin
     private async Task MakeCalibrationReadOnly(CancellationToken cancellation)
     {
         RequireCalibrationIdle();
-        approved = linkCommandsEnabled = approvalBeforeTeaching = false;
+        approved = linkCommandsEnabled = false;
+        teachingSession.WithdrawApproval();
         PauseSceneFollowing();
         if (link is { } current) await engine.RequestAsync("robot.teleoperate", new JsonObject { ["sceneId"] = current.SceneId, ["entityId"] = current.EntityId, ["enabled"] = false }, cancellation);
     }
@@ -112,11 +162,11 @@ public sealed partial class PipersPlugin
         if (action == "archive.cancel") { calibrationArchiveConfirmation = false; await Render(cancellation); return; }
         if (action is "new" or "archive")
         {
-            if (action == "new" && (calibrationPlacementUnverified || calibrationApplied is not null))
+            if (action == "new" && CalibrationSessionPhase is CalibrationPhase.WritePending or CalibrationPhase.Applied)
             { calibrationArchiveConfirmation = true; await Render(cancellation); return; }
             if (action == "archive" && !calibrationArchiveConfirmation) throw new InvalidOperationException("Review the saved-placement archive warning first.");
             await SaveCalibration(cancellation);
-            calibrationIdentity = null; calibrationOriginal = calibrationApplied = null; calibrationFit = null; calibrationReevaluation = null; calibrationSamples.Clear(); calibrationPlacementUnverified = calibrationArchiveConfirmation = false;
+            ClearCalibrationSession();
             await Render(cancellation); return;
         }
         RequireCalibrationIdle();
@@ -134,8 +184,7 @@ public sealed partial class PipersPlugin
         var session = calibrationIdentity ?? throw new InvalidOperationException("Start a calibration while stationary in physical hand-guiding mode first.");
         if (action == "inspect")
         {
-            var response = await engine.RequestAsync("robot.read", new JsonObject { ["sceneId"] = session.SceneId, ["entityId"] = session.RobotId }, cancellation);
-            var pose = JsonNode.Parse(response.GetRawText())!.AsObject();
+            var pose = await ReadRobotPose(session.SceneId, session.RobotId, cancellation);
             if (ActiveProfile.Id != session.ProfileId || preferences.RobotId != session.RobotId || pose["sceneId"]?.GetValue<string>() != session.SceneId || pose["entityId"]?.GetValue<string>() != session.RobotId ||
                 pose["modelAssetId"]?.GetValue<string>() != session.ModelAssetId || pose["modelRevision"]?.GetValue<string>() != session.ModelRevision)
                 throw new InvalidOperationException("The selected robot changed while checking placement; no scene write was sent.");
@@ -209,6 +258,7 @@ public sealed partial class PipersPlugin
 
     private async Task SaveCalibration(CancellationToken cancellation)
     {
+        _ = CalibrationSessionPhase; // Asserts the session invariants before they are persisted.
         Directory.CreateDirectory(RobotCalibrationDirectory);
         await File.WriteAllTextAsync(Path.Combine(RobotCalibrationDirectory, "settings.json"), JsonSerializer.Serialize(new CalibrationPreferences(calibrationDesk, calibrationMeasurement), PluginProtocol.Json), cancellation);
         if (calibrationIdentity is null || calibrationOriginal is null || calibrationPath.Length == 0) return;

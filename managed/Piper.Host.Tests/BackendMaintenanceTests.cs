@@ -6,8 +6,6 @@ internal static class BackendMaintenanceTests
 {
     internal static async Task Run()
     {
-        int checks = 0;
-        void Check(bool condition, string message) { if (!condition) throw new Exception(message); ++checks; }
         const string owner = "11111111-1111-1111-1111-111111111111";
         var state = Arm(); var pikas = new JsonArray(Pika(owner));
         var restarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -18,27 +16,27 @@ internal static class BackendMaintenanceTests
         JsonElement Input(bool release = true, string? instance = null, int pid = 123) => JsonSerializer.SerializeToElement(new {
             owner, backend_process_id = pid, backend_instance_id = instance ?? service.InstanceId, release_grippers = release
         });
-        Check(!service.Prepare(Input(false)).Ok, "Restart ignored explicit gripper-release acknowledgement");
-        Check(!service.Prepare(Input(instance: "previous-session")).Ok, "Restart accepted an obsolete host instance");
-        Check(!service.Prepare(Input(pid: 124)).Ok, "Restart accepted another process identity");
-        Check(!service.Prepare(JsonSerializer.SerializeToElement(new { owner, backend_process_id = "123" })).Ok,
+        Check(!service.Prepare(Input(false), out _).Ok, "Restart ignored explicit gripper-release acknowledgement");
+        Check(!service.Prepare(Input(instance: "previous-session"), out _).Ok, "Restart accepted an obsolete host instance");
+        Check(!service.Prepare(Input(pid: 124), out _).Ok, "Restart accepted another process identity");
+        Check(!service.Prepare(JsonSerializer.SerializeToElement(new { owner, backend_process_id = "123" }), out _).Ok,
             "Malformed process ID was admitted");
-        Check(service.TryEnterControl("/api/heartbeat", out var active), "Normal request admission failed");
-        Check(!service.Prepare(Input()).Ok, "Restart raced an in-flight control request");
+        Check(service.TryEnterControl("/api/heartbeat", out var active, out _), "Normal request admission failed");
+        Check(!service.Prepare(Input(), out _).Ok, "Restart raced an in-flight control request");
         active!.Dispose(); active.Dispose(); // release is idempotent
         string before = state.ToJsonString() + pikas.ToJsonString();
         state["motion"]!["active"] = true;
-        Check(!service.Prepare(Input()).Ok, "Restart interrupted an active action");
+        Check(!service.Prepare(Input(), out _).Ok, "Restart interrupted an active action");
         state["motion"]!["active"] = false;
-        Check(service.TryEnterControl("/api/query", out var afterRejected), "Rejected restart left admission frozen");
+        Check(service.TryEnterControl("/api/query", out var afterRejected, out _), "Rejected restart left admission frozen");
         afterRejected!.Dispose();
-        Check(service.Prepare(Input()).Ok, "Fresh stationary enabled Pika with a retained power reservation was rejected");
+        Check(service.Prepare(Input(), out var commit).Ok, "Fresh stationary enabled Pika with a retained power reservation was rejected");
         Check(state.ToJsonString() + pikas.ToJsonString() == before, "Maintenance changed robot/recovery/power snapshots");
-        Check(!service.TryEnterControl("/api/command", out _), "Accepted restart allowed a new target");
-        Check(service.TryEnterControl("/api/stop", out var emergency), "Restart blocked emergency arm STOP");
+        Check(!service.TryEnterControl("/api/command", out _, out _), "Accepted restart allowed a new target");
+        Check(service.TryEnterControl("/api/stop", out var emergency, out _), "Restart blocked emergency arm STOP");
         emergency!.Dispose();
-        Check(!service.Prepare(Input()).Ok, "Duplicate restart was admitted");
-        service.Commit(); service.Commit();
+        Check(!service.Prepare(Input(), out _).Ok, "Duplicate restart was admitted");
+        commit!(); commit(); // the returned commit is one-shot
         await restarted.Task.WaitAsync(TimeSpan.FromSeconds(2));
         Check(restartCalls == 1, "Restart callback ran more than once");
         var changed = Arm();
@@ -52,8 +50,8 @@ internal static class BackendMaintenanceTests
         var racedInput = JsonSerializer.SerializeToElement(new {
             owner, backend_process_id = 123, backend_instance_id = raced.InstanceId, release_grippers = true
         });
-        Check(raced.Prepare(racedInput).Ok, "Physical-change race fixture did not admit its initially idle state");
-        raced.Commit();
+        Check(raced.Prepare(racedInput, out var racedCommit).Ok, "Physical-change race fixture did not admit its initially idle state");
+        racedCommit!();
         await secondRead.Task.WaitAsync(TimeSpan.FromSeconds(2));
         // Wait for the same callback task to publish its cancellation result.
         for (int i = 0; i < 100 && raced.Snapshot()["pending"]!.GetValue<bool>(); ++i) await Task.Delay(1);
@@ -61,19 +59,33 @@ internal static class BackendMaintenanceTests
             raced.Snapshot()["last_failure"]!.GetValue<string>().Contains("Restart cancelled", StringComparison.Ordinal),
             "Physical movement during acknowledgement did not cancel restart and unfreeze admission");
         var manual = new BackendMaintenance(Arm, () => [], () => throw new Exception("External host was stopped"), 123);
-        Check(!manual.Prepare(Input()).Ok && manual.Snapshot()["supported"]!.GetValue<bool>() == false,
+        Check(!manual.Prepare(Input(), out _).Ok && manual.Snapshot()["supported"]!.GetValue<bool>() == false,
             "Unsupervised host promised automatic restart");
         var plugin = new BackendMaintenance(Arm, () => [], () => { }, 123, pluginOwner: owner);
         var pluginInput = JsonSerializer.SerializeToElement(new {
             owner, backend_process_id = 123, backend_instance_id = plugin.InstanceId, release_grippers = true
         });
-        Check(plugin.Snapshot()["mode"]!.GetValue<string>() == "plugin" && plugin.Prepare(pluginInput).Ok,
+        Check(plugin.Snapshot()["mode"]!.GetValue<string>() == "plugin" && plugin.Prepare(pluginInput, out _).Ok,
             "Bundled session-owned host did not support its owning plugin restart");
         var foreignPlugin = new BackendMaintenance(Arm, () => [], () => { }, 123, pluginOwner: Guid.NewGuid().ToString());
         var foreignInput = JsonSerializer.SerializeToElement(new {
             owner, backend_process_id = 123, backend_instance_id = foreignPlugin.InstanceId, release_grippers = true
         });
-        Check(!foreignPlugin.Prepare(foreignInput).Ok, "Another plugin acquired a directly owned backend restart");
+        Check(!foreignPlugin.Prepare(foreignInput, out _).Ok, "Another plugin acquired a directly owned backend restart");
+
+        BackendMaintenance? probe = null;
+        bool checkingPending = true, checkingAdmitted = true;
+        probe = new BackendMaintenance(() => {
+            checkingPending = probe!.Snapshot()["pending"]!.GetValue<bool>();
+            checkingAdmitted = probe.TryEnterControl("/api/command", out var lease, out _);
+            lease?.Dispose();
+            var arm = Arm(); arm["motion"]!["active"] = true; return arm;
+        }, () => [], () => { }, 123);
+        Check(probe.PrepareShutdown(out var rejected) is not null && rejected is null, "Moving fixture was admitted for shutdown");
+        Check(!checkingPending && !checkingAdmitted, "Checking reported pending or admitted a new control");
+        Check(probe.TryEnterControl("/api/command", out var reopened, out _) && !probe.Snapshot()["pending"]!.GetValue<bool>(),
+            "A rejected check did not reopen admission");
+        reopened!.Dispose();
 
         var shutdownArm = Arm();
         var shutdownPika = Pika(owner);
@@ -81,25 +93,25 @@ internal static class BackendMaintenanceTests
             () => throw new Exception("Shutdown selected the restart exit action"), 123);
         int shutdownCalls = 0;
         void Shutdown() => ++shutdownCalls;
-        Check(shutdownGate.TryEnterControl("/api/pika/position", out var gripperWrite), "Fixture could not admit gripper write");
-        Check(shutdownGate.PrepareShutdown() is not null, "Shutdown raced an already admitted gripper command");
+        Check(shutdownGate.TryEnterControl("/api/pika/position", out var gripperWrite, out _), "Fixture could not admit gripper write");
+        Check(shutdownGate.PrepareShutdown(out _) is not null, "Shutdown raced an already admitted gripper command");
         gripperWrite!.Dispose();
-        Check(shutdownGate.PrepareShutdown() is null, "Legacy shutdown rejected an idle backend");
-        Check(!shutdownGate.TryEnterControl("/api/command", out _) && !shutdownGate.TryEnterControl("/api/pika/enable", out _),
+        Check(shutdownGate.PrepareShutdown(out var shutdownCommit) is null, "Legacy shutdown rejected an idle backend");
+        Check(!shutdownGate.TryEnterControl("/api/command", out _, out _) && !shutdownGate.TryEnterControl("/api/pika/enable", out _, out _),
             "Shutdown admitted a new arm target or gripper power request before response completion");
-        Check(shutdownGate.TryEnterControl("/api/stop/coordinated", out var shutdownStop), "Shutdown blocked coordinated STOP");
+        Check(shutdownGate.TryEnterControl("/api/stop/coordinated", out var shutdownStop, out _), "Shutdown blocked coordinated STOP");
         shutdownStop!.Dispose();
         shutdownArm["motion"]!["active"] = true;
-        shutdownGate.CommitShutdown(Shutdown);
+        shutdownCommit!(Shutdown);
         Check(shutdownCalls == 0 && shutdownGate.Snapshot()["last_failure"]?.GetValue<string>().StartsWith("Shutdown cancelled", StringComparison.Ordinal) == true,
             "Shutdown did not recheck after its response");
         shutdownArm["motion"]!["active"] = false;
         shutdownPika["following"] = true;
-        Check(shutdownGate.PrepareShutdown() is not null, "Shutdown interrupted active gripper following");
+        Check(shutdownGate.PrepareShutdown(out _) is not null, "Shutdown interrupted active gripper following");
         shutdownPika["following"] = false;
-        Check(shutdownGate.PrepareShutdown() is null, "Cancelled shutdown did not unfreeze the next attempt");
-        shutdownGate.CommitShutdown(Shutdown);
-        shutdownGate.CommitShutdown(Shutdown);
+        Check(shutdownGate.PrepareShutdown(out var retried) is null, "Cancelled shutdown did not unfreeze the next attempt");
+        retried!(Shutdown);
+        retried(Shutdown);
         Check(shutdownCalls == 1, "Legacy shutdown callback did not run exactly once");
 
         void Reject(Action<JsonObject, JsonArray> mutate, string label)
@@ -144,7 +156,7 @@ internal static class BackendMaintenanceTests
         Check(BackendMaintenance.Check(Arm(), new JsonArray(new JsonObject {
             ["connected"] = false, ["power_requested"] = false, ["power_uncertain"] = false
         }), owner) is null, "Unused read-only gripper assignment blocked maintenance");
-        Console.WriteLine($"Passed {checks} hardware-free backend maintenance checks.");
+        Console.WriteLine($"Passed {Checks} hardware-free backend maintenance checks.");
     }
 
     private static JsonObject Arm() => new() {
