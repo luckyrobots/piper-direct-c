@@ -41,7 +41,7 @@ if (args.Length >= 2 && args[0] == "--device" && args[1] is "/dev/pika-garbage-f
     }
     return;
 }
-if (args.Length >= 2 && args[0] == "--device" && args[1] is "/dev/pika-fixture" or "/dev/pika-monitor-fixture" or "/dev/pika-monitor-die-fixture" or
+if (args.Length >= 2 && args[0] == "--device" && args[1] is "/dev/pika-fixture" or "/dev/pika-second-fixture" or "/dev/pika-monitor-fixture" or "/dev/pika-monitor-die-fixture" or
     "/dev/pika-powered-disabled-die-fixture" or "/dev/pika-powered-stale-die-fixture" or "/dev/pika-powered-pending-die-fixture" or
     "/dev/pika-powered-cancel-die-fixture" or "/dev/pika-powered-buffered-die-fixture" or "/dev/pika-enable-die-fixture" or "/dev/pika-unpowered-monitor-die-fixture")
 {
@@ -92,6 +92,7 @@ foreach (bool requested in new[] { false, true })
 }
 await PikaFollowTests.RunAsync();
 await PikaMultiDeviceTests.Run();
+await PikaSnapshotTests.Run();
 await BoundedProcessTests.Run();
 await PikaAgentFaultTests.Run();
 await PikaReadOnlyAdoptionTests.Run();

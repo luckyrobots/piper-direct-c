@@ -20,7 +20,9 @@ public interface IPikaSession : IAsyncDisposable
 {
     JsonObject Snapshot(bool includeRawEvidence = false);
 
-    /// <summary>Cheap routing status. Sessions without a cheaper source derive it from <see cref="Snapshot"/>.</summary>
+    /// <summary>Cheap routing status. Sessions without a cheaper source derive it from <see cref="Snapshot"/>.
+    /// The registry reads it under its gate when it admits a connection or commits an
+    /// assignment, so it must not wait; <see cref="Snapshot"/> is never called under that gate.</summary>
     PikaSessionStatus Status => PikaSessionStatus.From(Snapshot());
 
     /// <summary>Emergency hold, whoever owns the session and whoever asks. A session with nothing
