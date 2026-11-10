@@ -1550,21 +1550,36 @@ static cJSON *select_adapter(struct controller *c,const char *requested,int *sta
     discover_lanes(c);
     return reply(status,200,"Display selection changed. All device-qualified control lanes are unchanged.");
 }
-/* Why a STOP that names a known arm does not match what that arm is doing,
-   or NULL. The arm is stopped either way; this is only reported. */
-static const char *stop_scope_mismatch(const struct controller_lane *l,const struct can_device *d,const cJSON *body)
+/* /api/stop carries one of two intents, decided here and nowhere else.
+     STOP_EMERGENCY  "stop the arm". Never refused without stopping.
+     STOP_CANCEL     "stop the action I started": the cleanup STOP a client
+                     sends for its own request_id. It stops that action only
+                     while it is still the lane's current one.
+   A body is a cancel only when it names a known arm and carries a well-formed
+   request_id. A request_id of the wrong type, or one that cannot be tied to
+   an arm, is a malformed attempt to stop something and is an emergency. */
+enum stop_intent { STOP_EMERGENCY, STOP_CANCEL };
+static enum stop_intent stop_intent_of(const cJSON *body,const struct controller_lane *named)
 {
-    double value;
-    if (field(body,"generation")&&(!numeric(body,"generation",1,UINT32_MAX,&value)||value!=d->generation))
-        return "its generation is not this adapter's current CAN connection";
-    if (field(body,"request_id")&&(l->op==OP_IDLE||strcmp(l->owner,text_field(body,"owner"))||
-        !numeric(body,"request_id",1,UINT32_MAX,&value)||value!=l->request_id))
-        return "its request_id and owner do not match an active action on this arm";
-    return NULL;
+    double request;
+    return named&&numeric(body,"request_id",1,UINT32_MAX,&request)?STOP_CANCEL:STOP_EMERGENCY;
 }
-/* /api/stop. A STOP is never refused without stopping:
-     device_id names a known arm    that arm stops, even when the request's
-                                    generation, request_id or owner is stale
+/* Whether a cancel names the action this lane is running now, for its owner. */
+static bool cancel_is_current(const struct controller_lane *l,const cJSON *body)
+{
+    double request;
+    return l->op!=OP_IDLE&&!strcmp(l->owner,text_field(body,"owner"))&&
+        numeric(body,"request_id",1,UINT32_MAX,&request)&&request==l->request_id;
+}
+/* /api/stop.
+   Cancel (see stop_intent_of): if the request is still current on the named
+   arm it is stopped as below. If it has finished or been replaced there is
+   nothing of the caller's to stop: no frame is sent, nothing is latched, an
+   idle arm or another owner's action is left alone, and the reply is 409.
+   Emergency: never refused without stopping.
+     device_id names a known arm    that arm stops, even when the generation
+                                    is stale or malformed, the owner differs
+                                    or the request_id is malformed
      no device_id (or "")           every arm stops: the operator's global STOP
      anything else                  the request cannot be tied to one arm
                                     (device_id not a string or not known, or
@@ -1584,8 +1599,20 @@ static cJSON *stop_request(struct controller *c,const cJSON *body,int *status)
     if (id&&!cJSON_IsString(id)) degraded="its device_id is not an adapter identity";
     else if (*requested&&!device) degraded="its device_id is not a known CAN adapter";
     else if (device&&!only) degraded="no control lane is available for its adapter";
-    else if (only) degraded=stop_scope_mismatch(only,device,body);
-    else if (field(body,"generation")||field(body,"request_id")) degraded="a scoped cleanup STOP needs its device_id";
+    else if (!only&&(field(body,"generation")||field(body,"request_id"))) degraded="a scoped cleanup STOP needs its device_id";
+    enum stop_intent intent=stop_intent_of(body,only);
+    if (intent==STOP_CANCEL&&!cancel_is_current(only,body)) {
+        cJSON *result=reply(status,409,"This request is no longer the current action on this arm, so there is nothing of it to stop. Nothing was stopped.");
+        str(result,"stop_intent","cancel"); str(result,"stop_scope","device"); flag(result,"stop_scope_degraded",false);
+        put(result,"stops",cJSON_CreateArray());
+        return result;
+    }
+    double generation;
+    if (only&&!degraded) {
+        if (field(body,"generation")&&(!numeric(body,"generation",1,UINT32_MAX,&generation)||generation!=device->generation))
+            degraded="its generation is not this adapter's current CAN connection";
+        else if (intent==STOP_EMERGENCY&&field(body,"request_id")) degraded="its request_id is not a request number";
+    }
     cJSON *stops=cJSON_CreateArray();
     bool changed=false,undelivered=false;
     if (only) {
@@ -1616,6 +1643,7 @@ static cJSON *stop_request(struct controller *c,const cJSON *body,int *status)
     else if (!saved) snprintf(text,sizeof text,"STOP was sent to %s, but the incident record could not be saved.",reached);
     else snprintf(text,sizeof text,"%s",only?only->message:"STOP requested independently on every known arm. Previous targets were discarded.");
     cJSON *result=reply(status,broken?500:degraded||undelivered||!saved?409:200,broken?only->message:text);
+    str(result,"stop_intent",intent==STOP_CANCEL?"cancel":"emergency");
     str(result,"stop_scope",only?"device":"all"); flag(result,"stop_scope_degraded",degraded!=NULL);
     if (degraded) str(result,"stop_scope_reason",degraded);
     put(result,"stops",stops);
