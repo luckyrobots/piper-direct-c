@@ -22,7 +22,7 @@ public sealed record BackendRestartResult(
 /// gripper power; native persisted STOP/recovery records are deliberately unchanged.</summary>
 public sealed class BackendMaintenance
 {
-    public const string RestartRoute = HostRoutes.Restart;
+    public const string RestartRoute = PiperApi.Paths.Restart;
     public const int RestartExitCode = 75;
     public const string PendingMessage = "Backend restart is in progress. Wait for the new server session; no commands will be replayed.";
     private const string ShutdownPending = "Backend shutdown is in progress. New controls are closed; STOP remains available.";
@@ -98,7 +98,7 @@ public sealed class BackendMaintenance
         {
             // Emergency STOP remains available, including after admission is
             // frozen. It cannot start motion or clear a persisted recovery latch.
-            if (phase.Stage != Stage.Open && !HostRoutes.IsEmergencyStop(route))
+            if (phase.Stage != Stage.Open && !PiperApi.IsStop(route))
             {
                 admission = null;
                 error = Busy(phase.Operation);

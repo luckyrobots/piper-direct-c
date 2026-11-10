@@ -13,12 +13,14 @@ let server, logs = '', state, keepalive, lease;
 const owner = 'automated-simulator-test';
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 /* W7 contract: every request this suite makes is recorded as "METHOD route status"
-   and compared with web/openapi.json at the end, in both directions. */
+   and compared with web/openapi.json at the end, in both directions. That file is
+   generated from managed/Piper.Contracts/piper-api.json, which the managed host's
+   own route table is generated from too (tools/gen-api.mjs). */
 const observed = new Set();
-const documentedRoute = route => /^\/api\/pika\/(?!state$|devices$)/.test(route) ? '/api/pika/{action}' : route;
+const description = JSON.parse(readFileSync(new URL('../web/openapi.json', import.meta.url), 'utf8'));
 async function call(method, route, init = {}) {
   const r = await fetch(base + route, { method, ...init });
-  observed.add(`${method} ${documentedRoute(route.split('?')[0])} ${r.status}`);
+  observed.add(`${method} ${route.split('?')[0]} ${r.status}`);
   return r;
 }
 async function refresh() { const r = await call('GET', '/api/state'); assert.equal(r.status, 200); state = await r.json(); return state; }
@@ -75,9 +77,10 @@ const unreachable = {
     'POST /api/maintenance/restart 202': 'needs a supervised or plugin-owned host',
     'GET /api/pika/devices 409': 'simulation never runs discovery',
     'POST /api/pika/devices 409': 'simulation never runs discovery',
-    'POST /api/pika/{action} 200': 'simulation rejects every gripper action',
   },
 };
+// Simulation rejects every gripper action, so no action's 200 can be produced here.
+const simulationRefuses = answer => /^POST \/api\/pika\/(?!devices )\S+ 200$/.test(answer);
 function checkContract(spec, backend) {
   const documented = new Set(), paths = new Set();
   for (const [path, item] of Object.entries(spec.paths)) {
@@ -86,19 +89,22 @@ function checkContract(spec, backend) {
     paths.add(path);
     for (const method of ['get', 'post']) for (const status of Object.keys(item[method]?.responses ?? {})) documented.add(`${method.toUpperCase()} ${path} ${status}`);
   }
-  // 403 (wrong token, origin or host) is documented once for every route, in info.description.
-  assert.match(spec.info.description, /403/);
-  const undocumented = [...observed].filter(answer => !documented.has(answer) && !answer.endsWith(' 403'));
+  // The ingress refusals (a malformed or oversized body, a wrong token, origin or host) are
+  // documented once for every route; a route lists them again only when it adds its own.
+  const common = Object.keys(spec['x-piper-common-responses']);
+  assert.deepEqual(common, ['400', '403', '413']);
+  const undocumented = [...observed].filter(answer => !documented.has(answer) && !common.includes(answer.split(' ')[2]));
   assert.deepEqual(undocumented, [], 'The server gave answers that web/openapi.json does not document');
-  const unproduced = [...documented].filter(answer => !observed.has(answer) && !(answer in unreachable[backend]));
+  const unproduced = [...documented].filter(answer => !observed.has(answer) && !(answer in unreachable[backend]) && !(backend === 'managed' && simulationRefuses(answer)));
   assert.deepEqual(unproduced, [], 'web/openapi.json documents answers the server never gave');
   const stale = Object.keys(unreachable[backend]).filter(answer => !documented.has(answer) || observed.has(answer));
   assert.deepEqual(stale, [], 'The unreachable list names answers that are undocumented or were produced');
-  // The routes the server source defines are exactly the documented ones.
-  const literals = file => new Set([...readFileSync(new URL(`../${file}`, import.meta.url), 'utf8').matchAll(/"(\/api\/[a-z./]*)"/g)].map(match => match[1]));
-  const defined = backend === 'c' ? new Set([...literals('src/controller.c'), ...literals('src/server.c')]) :
-    new Set(['managed/Piper.Host/HostRoutes.cs', 'managed/Piper.Core/ControllerService.cs', 'managed/Piper.Core/CoordinatedStop.cs'].flatMap(file => [...literals(file)]).map(route => route === '/api/pika/' ? '/api/pika/{action}' : route).concat(['/api/pika/state', '/api/pika/devices']));
-  assert.deepEqual([...paths].sort(), [...defined].sort(), 'Documented routes and the routes in the server source differ');
+  // The managed host's route table is generated from the definition, so only the C
+  // server's hand-written routes can differ from the documented ones.
+  if (backend !== 'c') return;
+  const literals = file => [...readFileSync(new URL(`../${file}`, import.meta.url), 'utf8').matchAll(/"(\/api\/[a-z./]*)"/g)].map(match => match[1]);
+  const defined = new Set([...literals('src/controller.c'), ...literals('src/server.c')]);
+  assert.deepEqual([...paths].sort(), [...defined].sort(), 'Documented routes and the routes in the C server source differ');
 }
 async function query() { await post('/api/query', {}, 202); await until(() => !state.query_active); assert.equal(selected().firmware, 'S-V1.8-2'); }
 try {
@@ -129,13 +135,17 @@ try {
     assert.equal((await (await call('GET', '/api/pika/state')).json()).connected, false);
     assert.deepEqual((await (await call('GET', '/api/pika/devices')).json()).devices, []);
     assert.deepEqual((await post('/api/pika/devices')).devices, []);
-    await post('/api/pika/disable', { owner }, 409);
+    // Simulation refuses every gripper action the definition lists, and nothing else is a gripper action.
+    for (const [path, item] of Object.entries(description.paths)) if (path.startsWith('/api/pika/') && item.post && path !== '/api/pika/devices')
+      assert.equal((await post(path, { owner }, 409)).error, 'Pika hardware is disabled in simulation');
+    const unlisted = await fetch(base + '/api/pika/unlisted', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Piper-Token': state.token }, body: JSON.stringify({ owner }) });
+    assert.equal(unlisted.status, 404); assert.equal((await unlisted.json()).error, 'Unknown API route.');
     const malformed = await call('POST', '/api/pika/connect', { headers: { 'Content-Type': 'application/json', 'X-Piper-Token': state.token }, body: '{"owner":' });
     assert.equal(malformed.status, 400);
     await post('/api/maintenance/restart', { backend_process_id: 1, backend_instance_id: 'stale', release_grippers: true }, 409);
   }
   const spec = await (await call('GET', '/api/openapi.json')).json(); assert.equal(spec.openapi, '3.1.0');
-  assert.deepEqual(spec, JSON.parse(readFileSync(new URL('../web/openapi.json', import.meta.url), 'utf8')), 'The server serves the checked-in API description');
+  assert.deepEqual(spec, description, 'The server serves the checked-in API description');
   await post('/api/select', { device_id: 'usb:absent' }, 404);
   await post('/api/select', { device_id: state.selected });
   await post('/api/query', { generation: selected().generation + 1 }, 409);
