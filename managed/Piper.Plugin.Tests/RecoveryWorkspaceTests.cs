@@ -81,7 +81,7 @@ internal static class RecoveryWorkspaceTests
         var snapshot = new JsonObject { ["token"] = "recovery-ui-fixture", ["selected"] = "can-b", ["devices"] = new JsonArray(device),
             ["motion"] = new JsonObject { ["active"] = false, ["request_id"] = 77L } };
         plugin.preferences = RobotProfileRouting.Normalize(new Preferences(Robots: [new("piper-2", "Piper 2", "can-b")], ActiveRobotId: "piper-2"));
-        plugin.token = "recovery-ui-fixture"; plugin.client = new PiperControl.PiperControlClient(calls); plugin.state = snapshot;
+        plugin.telemetry.AdoptBackend("recovery-ui-fixture"); plugin.client = new PiperControl.PiperControlClient(calls); plugin.telemetry.PublishState(snapshot);
         plugin.engine = Fixtures.Context(new PluginStart("fixture", folder, folder), (Func<object, CancellationToken, Task>)((_, _) => Task.CompletedTask),
                 (Func<string, JsonObject, CancellationToken, Task<JsonElement>>)((_, _, _) => Task.FromResult(JsonSerializer.SerializeToElement(new { applied = false }))));
         void Fresh() => plugin.telemetry.Publish(new(snapshot, "recovery-ui-fixture", 1, Stopwatch.GetTimestamp(), 0));

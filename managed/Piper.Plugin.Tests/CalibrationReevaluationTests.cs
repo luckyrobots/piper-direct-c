@@ -196,7 +196,7 @@ internal static class CalibrationReevaluationTests
                     return Task.FromResult(JsonSerializer.SerializeToElement(response));
                 }));
             var prefs = RobotProfileRouting.Normalize(new Preferences(Robots: [new("piper-1", "Fixture", "can-a", RobotId: "robot-a")], ActiveRobotId: "piper-1"));
-            Plugin.engine = context; Plugin.preferences = prefs; Plugin.state = State; Plugin.token = "session";
+            Plugin.engine = context; Plugin.preferences = prefs; Plugin.telemetry.PublishState(State); Plugin.telemetry.AdoptBackend("session");
             Plugin.link = new RobotLink(liveScene, liveEntity, Pose()["joints"]!.AsArray(), device);
             Plugin.linkBackendToken = "session"; Plugin.Navigation = WorkspaceNavigation.Calibration;
             Plugin.calibrationProfile = "piper-1"; Plugin.wizardProfile = "piper-1"; Plugin.calibrationIdentity = Identity;
@@ -244,7 +244,7 @@ internal static class CalibrationReevaluationTests
                 if (Failure == "joint") result["joints"]![0]!["position"] = 99;
                 if (Failure == "dependency") site["requiredJoints"]!.AsArray().Add("joint7");
                 if (Failure == "not-read-only") result["evaluationOnly"] = false;
-                if (Failure == "connection") Plugin.token = "changed";
+                if (Failure == "connection") Plugin.telemetry.AdoptBackend("changed");
                 if (Failure == "scene-switch") Plugin.link = new RobotLink("third-scene", liveEntity, Pose()["joints"]!.AsArray(), State["devices"]![0]!.AsObject());
             }
             return result;

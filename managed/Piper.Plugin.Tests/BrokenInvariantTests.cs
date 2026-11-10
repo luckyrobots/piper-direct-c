@@ -16,9 +16,9 @@ internal static class BrokenInvariantTests
         var plugin = new PipersPlugin();
         plugin.client = new PiperControl.PiperControlClient(rpc);
         plugin.preferences = RobotProfileRouting.Normalize(new Preferences(Robots: [new("piper-1", "Fixture", "can-one")], ActiveRobotId: "piper-1"));
-        plugin.token = Backend;
+        plugin.telemetry.AdoptBackend(Backend);
         var snapshot = Fixtures.Snapshot(Backend, Fixtures.Arm("can-one", generation: 1));
-        plugin.state = snapshot;
+        plugin.telemetry.PublishState(snapshot);
         plugin.telemetry.Publish(new(snapshot, Backend, 1, Stopwatch.GetTimestamp(), 0));
         plugin.engine = Fixtures.Context(new PluginStart("fixture", Path.GetTempPath(), Path.GetTempPath()),
             (Func<object, CancellationToken, Task>)((_, _) => Task.CompletedTask),

@@ -92,7 +92,7 @@ internal static class CalibrationSheetIntegrationTests
                     };
                     return JsonSerializer.SerializeToElement(response);
                 }));
-        plugin.engine = context; plugin.token = "fixture-session"; plugin.state = snapshot; Fresh();
+        plugin.engine = context; plugin.telemetry.AdoptBackend("fixture-session"); plugin.telemetry.PublishState(snapshot); Fresh();
         plugin.link = new RobotLink("fixture-scene", "fixture-robot", Pose()["joints"]!.AsArray(), device);
         plugin.linkBackendToken = "fixture-session"; plugin.Navigation = WorkspaceNavigation.Calibration;
         IEnumerable<JsonObject> Walk(JsonObject node)

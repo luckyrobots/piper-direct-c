@@ -77,7 +77,7 @@ public sealed partial class PipersPlugin
     private long pikaInventoryAt;
 
     internal RobotReadiness Readiness(JsonObject? device) => RobotReadiness.Inspect(device, approved,
-        ActiveProfile.PikaDevice.Length == 0 || PikaMatchesProfile() && pikaOwned && state?["pika"]?["fresh"]?.GetValue<bool>() == true &&
+        ActiveProfile.PikaDevice.Length == 0 || PikaMatchesProfile() && telemetry.Pika.Owned && state?["pika"]?["fresh"]?.GetValue<bool>() == true &&
             state["pika"]?["enabled"]?.GetValue<bool>() == true && state["pika"]?["armed"]?.GetValue<bool>() == true,
         GroupFollowIncludes(ActiveProfile.Id), state?["motion"]?["active"]?.GetValue<bool>() == true,
         measuredLinkReady: ActiveProfile.RobotId.Length == 0 || link is not null);
@@ -199,7 +199,7 @@ public sealed partial class PipersPlugin
             double pikaAge = telemetryReceipt?.PikaEvidenceAgeMilliseconds(Stopwatch.GetTimestamp()) ?? double.NaN;
             var receipt = new { id = primaryAction.Id, stage, atUtc = DateTimeOffset.UtcNow,
                 profileId = ActiveProfile.Id, robotId = ActiveProfile.RobotId, jointPrefix = ActiveProfile.RobotJointPrefix,
-                canDeviceId = ActiveProfile.CanDeviceId, approved, pikaOwned, linked = link is not null,
+                canDeviceId = ActiveProfile.CanDeviceId, approved, pikaOwned = telemetry.Pika.Owned, linked = link is not null,
                 following = SimulationFollowingActive, followAfterEnable = false, failure,
                 pikaFeedbackAgeMilliseconds = double.IsFinite(pikaAge) ? (double?)pikaAge : null,
                 pikaDevice = pika?["device"]?.GetValue<string>(), pikaPending = pika?["pending"]?.GetValue<bool>(),

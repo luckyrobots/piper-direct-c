@@ -85,14 +85,13 @@ public sealed record TelemetryScope(string BackendToken, string DeviceId, long G
 
 public sealed partial class PipersPlugin
 {
-    internal readonly LatestTelemetry telemetry = new();
-    internal TelemetryScope? telemetryScope;
-    internal string telemetryIssue = "Waiting for controller feedback", sceneTrackingStatus = "";
+    internal readonly TelemetryComponent telemetry = new();
+    internal string sceneTrackingStatus = "";
     private string telemetryConnectionUiIssue = "";
     internal string linkBackendToken = "";
     private long scenePermissionEpoch;
 
-    private bool TelemetryIsFresh() => telemetry.Latest is { } receipt && receipt.BackendToken == token && receipt.IsFresh(Stopwatch.GetTimestamp());
+    private bool TelemetryIsFresh() => telemetry.IsFresh(Stopwatch.GetTimestamp());
     internal void DisarmTelemetryTargets(string reason, bool clearLink, string? forgetApproval = null, bool forgetAllApprovals = false)
     {
         CommandAuthority.Revoke(forgetApproval, () =>
@@ -131,21 +130,21 @@ public sealed partial class PipersPlugin
             {
                 telemetry.Disconnect();
                 DisarmTelemetryTargets("Controller backend changed · all previous targets discarded", clearLink: true);
-                ReleasePikaRole();
+                telemetry.Pika.Release();
             }
-            token = receipt.BackendToken; telemetryScope = scope;
+            telemetry.AdoptBackend(receipt.BackendToken); telemetry.AdoptScope(scope);
             return; // The group validates every captured lane, independently of the visible profile/selected projection.
         }
-        if (backendChanged || telemetryScope is not null && scope != telemetryScope)
+        if (backendChanged || telemetry.Scope is not null && scope != telemetry.Scope)
         {
             // Keep the old receipt from granting control under the new epoch
             // between invalidation and publication of the replacement frame.
             telemetry.Disconnect();
             DisarmTelemetryTargets("Controller session or assigned CAN connection changed", clearLink: true); // Also releases the teaching session.
-            if (backendChanged) ReleasePikaRole();
+            if (backendChanged) telemetry.Pika.Release();
         }
-        token = receipt.BackendToken;
-        telemetryScope = scope;
+        telemetry.AdoptBackend(receipt.BackendToken);
+        telemetry.AdoptScope(scope);
         if (link is not { } linked) return;
         var device = next["devices"]?.AsArray().OfType<JsonObject>().SingleOrDefault(d => d["id"]?.GetValue<string>() == linked.DeviceId);
         if (scope != new TelemetryScope(linkBackendToken, linked.DeviceId, linked.Generation) ||
@@ -191,12 +190,12 @@ public sealed partial class PipersPlugin
                     ProjectProfilePika(next);
                     if (!telemetry.TryPrepare(next, frame.Sequence, frame.TimestampUnixMicroseconds, frame.ClockDomain,
                         receivedUtc, receivedTicks, out var receipt, out string reason))
-                    { telemetryIssue = reason; continue; }
+                    { telemetry.ReportIssue(reason); continue; }
                     ApplyIncomingScope(receipt!);
-                    state = next;
+                    telemetry.PublishState(next);
                     telemetry.Publish(receipt!);
                     ObservePikaTeachingReceipt(receipt!, receivedUtc);
-                    telemetryIssue = "";
+                    telemetry.ReportIssue("");
                 }
                 if (!cancellation.IsCancellationRequested) throw new IOException("Controller state stream ended.");
             }
@@ -204,11 +203,12 @@ public sealed partial class PipersPlugin
             {
                 telemetry.Disconnect();
                 PikaTeachingTelemetryInterrupted();
-                DisarmTelemetryTargets("Controller telemetry interrupted", clearLink: false); ReleasePikaRole();
-                telemetryIssue = error is RpcException { StatusCode: StatusCode.Unavailable }
+                DisarmTelemetryTargets("Controller telemetry interrupted", clearLink: false); telemetry.Pika.Release();
+                string issue = error is RpcException { StatusCode: StatusCode.Unavailable }
                     ? $"Controller unavailable on {ControllerEndpoint.Loopback}:{ControllerEndpoint.GrpcPort}; reconnecting automatically."
                     : "Controller telemetry interrupted: " + error.Message;
-                message = telemetryIssue;
+                telemetry.ReportIssue(issue);
+                message = issue;
                 await Task.Delay(1000, cancellation);
             }
         }
@@ -368,7 +368,7 @@ public sealed partial class PipersPlugin
                 if (selected is not null && token == key.Backend && ActiveProfile is { } current && current.Id == selected.Id &&
                     current.PikaDevice == selected.PikaDevice && current.WslDistribution == selected.WslDistribution)
                 {
-                    ReleasePikaRole();
+                    telemetry.Pika.Release();
                     message = "Pika connection: " + error.Message;
                 }
                 else Trace.TraceWarning("Independent Pika heartbeat unavailable: {0}", error.Message);
@@ -388,7 +388,7 @@ public sealed partial class PipersPlugin
                 {
                     sceneTrackingStatus = "Measured scene paused · waiting for fresh controller feedback";
                     ObserveReplayScope(null);
-                    message = telemetryIssue.Length > 0 ? telemetryIssue : "Controller feedback delayed · motion permission cleared; waiting for fresh telemetry";
+                    message = telemetry.Issue is { Length: > 0 } issue ? issue : "Controller feedback delayed · motion permission cleared; waiting for fresh telemetry";
                     QueueHeightMaintenance();
                     await Update(cancellation);
                     await Task.Delay(100, cancellation); continue;

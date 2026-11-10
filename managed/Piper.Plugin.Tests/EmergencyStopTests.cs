@@ -45,9 +45,9 @@ internal static class EmergencyStopTests
                     var next = first.State.DeepClone().AsObject();
                     next["devices"]![0]!["generation"] = 2L;
                     var replacementReceipt = first with { State = next, Sequence = 2 };
-                    fixture.Plugin.telemetryScope = new TelemetryScope(backend, "can-one", 1);
+                    fixture.Plugin.telemetry.AdoptScope(new TelemetryScope(backend, "can-one", 1));
                     fixture.Plugin.ApplyIncomingScope(replacementReceipt);
-                    fixture.Plugin.state = next;
+                    fixture.Plugin.telemetry.PublishState(next);
                     telemetry.Publish(replacementReceipt);
                     break;
             }
@@ -102,7 +102,7 @@ internal static class EmergencyStopTests
             var telemetry = fixture.Plugin.telemetry;
             var first = telemetry.Latest!;
             var profile = RobotProfileRouting.Active(fixture.Plugin.preferences);
-            fixture.Plugin.telemetryScope = new TelemetryScope(backend, "can-one", 1);
+            fixture.Plugin.telemetry.AdoptScope(new TelemetryScope(backend, "can-one", 1));
             fixture.Authority.TrySaveApproval(fixture.Authority.Epoch, profile.Id,
                 new(backend, "can-one", 1, profile.RobotId, profile.RobotJointPrefix, profile.PikaDevice, profile.WslDistribution));
             fixture.Plugin.approved = true;
@@ -113,7 +113,7 @@ internal static class EmergencyStopTests
             fixture.Plugin.RestoreControlApproval();
             Check(telemetry.Latest?.Connected == false && !fixture.Plugin.approved,
                 "Old measured evidence restored approval between scope revocation and telemetry publication");
-            fixture.Plugin.state = next;
+            fixture.Plugin.telemetry.PublishState(next);
             telemetry.Publish(replacementReceipt);
             fixture.Plugin.RestoreControlApproval();
             Check(!fixture.Plugin.approved && fixture.Authority.Current.Approvals.Count == 0,
@@ -242,7 +242,7 @@ internal static class EmergencyStopTests
                 var newReceipt = receipt with { State = changed, Sequence = 2 };
                 fixture.Plugin.ApplyIncomingScope(newReceipt);
                 telemetry.Publish(newReceipt);
-                fixture.Plugin.state = changed;
+                fixture.Plugin.telemetry.PublishState(changed);
                 fixture.Rpc.ConnectReply.TrySetResult(new ControlReply { Status = 200, Json = "{\"ok\":true}" });
                 await accept.WaitAsync(TimeSpan.FromSeconds(2));
                 Check(fixture.Rpc.Routes.SequenceEqual(new[] { "/api/pika/connect" }) &&
@@ -260,10 +260,10 @@ internal static class EmergencyStopTests
             gripper["aliases"] = new JsonArray("/dev/pika-one");
             gripper["device"] = "/dev/pika/by-host/fixture";
             snapshot["pikas"] = new JsonArray(gripper.DeepClone());
-            fixture.Plugin.state = snapshot;
+            fixture.Plugin.telemetry.PublishState(snapshot);
             telemetry.Publish(receipt with { State = snapshot, Sequence = 2 });
             fixture.Plugin.approved = true;
-            fixture.Plugin.pikaRole = (long)PikaSessionRole.Owned;
+            fixture.Plugin.telemetry.Pika.Enter(PikaSessionRole.Owned);
             await fixture.Plugin.Enable(CancellationToken.None, true, null, null);
             Check(fixture.Rpc.Routes.IsEmpty && fixture.Authority.Current.Approvals.Count == 1,
                 "An assigned Pika alias was found in telemetry but Enable reconfigured the already-owned canonical gripper");
@@ -294,14 +294,14 @@ internal static class EmergencyStopTests
             // Pika role interleavings through the observation seam: a stale writer
             // never clobbers a newer role, and a release always survives.
             var plugin = new PipersPlugin();
-            var monitorSnapshot = plugin.ObservePikaRole();
-            Check(plugin.TryAdvancePikaRole(plugin.ObservePikaRole(), PikaSessionRole.Owned) &&
-                !plugin.TryAdvancePikaRole(monitorSnapshot, PikaSessionRole.None) && plugin.PikaRole == PikaSessionRole.Owned,
+            var monitorSnapshot = plugin.telemetry.Pika.Observe();
+            Check(plugin.telemetry.Pika.TryAdvance(plugin.telemetry.Pika.Observe(), PikaSessionRole.Owned) &&
+                !plugin.telemetry.Pika.TryAdvance(monitorSnapshot, PikaSessionRole.None) && plugin.telemetry.Pika.Role == PikaSessionRole.Owned,
                 "A monitor release decided from a stale snapshot overwrote the Owned role Enable set");
-            plugin.ReleasePikaRole();
-            var enableSnapshot = plugin.ObservePikaRole();
-            plugin.ReleasePikaRole();
-            Check(!plugin.TryAdvancePikaRole(enableSnapshot, PikaSessionRole.Owned) && plugin.PikaRole == PikaSessionRole.None,
+            plugin.telemetry.Pika.Release();
+            var enableSnapshot = plugin.telemetry.Pika.Observe();
+            plugin.telemetry.Pika.Release();
+            Check(!plugin.telemetry.Pika.TryAdvance(enableSnapshot, PikaSessionRole.Owned) && plugin.telemetry.Pika.Role == PikaSessionRole.None,
                 "An Enable that observed None before a same-role revocation still upgraded to Owned");
         }
         using (var fixture = new Fixture())
@@ -312,11 +312,11 @@ internal static class EmergencyStopTests
             try
             {
                 await fixture.Rpc.ConnectReached.Task.WaitAsync(TimeSpan.FromSeconds(1));
-                fixture.Plugin.ReleasePikaRole(); // The telemetry thread revokes while connect is in flight.
+                fixture.Plugin.telemetry.Pika.Release(); // The telemetry thread revokes while connect is in flight.
                 fixture.Rpc.ConnectReply.TrySetResult(new ControlReply { Status = 200, Json = "{\"ok\":true}" });
                 bool refused = false;
                 try { await enable; } catch (InvalidOperationException error) { refused = error.Message.Contains("Pika session was released"); }
-                Check(refused && fixture.Plugin.PikaRole == PikaSessionRole.None && !fixture.Rpc.Routes.Contains("/api/pika/enable"),
+                Check(refused && fixture.Plugin.telemetry.Pika.Role == PikaSessionRole.None && !fixture.Rpc.Routes.Contains("/api/pika/enable"),
                     "Enable's Owned write overwrote a revocation that landed during its connect");
             }
             finally { fixture.Rpc.ConnectReply.TrySetResult(new ControlReply { Status = 200, Json = "{\"ok\":true}" }); }
@@ -329,7 +329,7 @@ internal static class EmergencyStopTests
             var snapshot = receipt.State.DeepClone().AsObject();
             snapshot["devices"]![0]!["recovery_required"] = true;
             snapshot["devices"]![0]!["reset_pending"] = resetPending;
-            fixture.Plugin.state = snapshot;
+            fixture.Plugin.telemetry.PublishState(snapshot);
             telemetry.Publish(receipt with { State = snapshot, Sequence = 2 });
             fixture.Plugin.approved = true;
             bool refused = false;
@@ -395,7 +395,7 @@ internal static class EmergencyStopTests
     {
         using var fixture = new Fixture();
         var plugin = fixture.Plugin;
-        var arm = plugin.state!["devices"]![0]!;
+        var arm = plugin.telemetry.State!["devices"]![0]!;
         foreach (var joint in arm["joints"]!.AsArray()) joint!["enabled"] = false;
         plugin.approved = true;
         fixture.Rpc.DelayCommand = true;
@@ -409,8 +409,8 @@ internal static class EmergencyStopTests
         // The controller finishes the enable, and telemetry ends the lease, before
         // Enable resumes from its command.
         foreach (var joint in arm["joints"]!.AsArray()) joint!["enabled"] = true;
-        plugin.state["motion"] = new JsonObject { ["active"] = false, ["request_id"] = 42L };
-        plugin.telemetry.Publish(new(plugin.state, "fake-backend-session", 2, Stopwatch.GetTimestamp(), 0));
+        plugin.telemetry.State["motion"] = new JsonObject { ["active"] = false, ["request_id"] = 42L };
+        plugin.telemetry.Publish(new(plugin.telemetry.State, "fake-backend-session", 2, Stopwatch.GetTimestamp(), 0));
         fixture.Rpc.CommandReply.TrySetResult(new ControlReply { Status = 200, Json = "{\"ok\":true,\"request_id\":42}" });
         string failure = "";
         try { await enable.WaitAsync(TimeSpan.FromSeconds(3)); }
@@ -461,10 +461,10 @@ internal static class EmergencyStopTests
             plugin.client = new PiperControl.PiperControlClient(Rpc);
             plugin.preferences = RobotProfileRouting.Normalize(new Preferences(Robots:
                 [new("piper-1", "Fixture", "can-one", PikaDevice: "/dev/pika-one")], ActiveRobotId: "piper-1"));
-            plugin.token = "fake-backend-session";
+            plugin.telemetry.AdoptBackend("fake-backend-session");
             var snapshot = Fixtures.Snapshot("fake-backend-session", Fixtures.Arm("can-one", generation: 1),
                 Fixtures.Pika("/dev/pika-one", RobotProfileRouting.Active(plugin.preferences).PikaDistribution, plugin.owner, enabled: true, position: .1));
-            plugin.state = snapshot;
+            plugin.telemetry.PublishState(snapshot);
             plugin.telemetry.Publish(new(snapshot, "fake-backend-session", 1, Stopwatch.GetTimestamp(), 0));
             var context = Fixtures.Context(new PluginStart("fixture", Path.Combine(Path.GetTempPath(), "piper-emergency-" + Guid.NewGuid().ToString("N")), Path.GetTempPath()),
                     send ?? ((_, _) => Task.CompletedTask),
