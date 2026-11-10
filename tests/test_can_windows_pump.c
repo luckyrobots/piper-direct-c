@@ -7,17 +7,25 @@ static struct win_frame received[4];
 static unsigned next_frame,reads,sends;
 static struct can_frame expected_frames[4];
 static size_t expected_count,expected_sent;
+static bool receive_broken;
+static unsigned unpumped_sends;
 static bool __stdcall fake_read(void *handle,struct win_frame *frame,uint32_t timeout)
 {
     CHECK(handle==(void *)1&&timeout==0); ++reads;
+    if (receive_broken) { SetLastError(ERROR_GEN_FAILURE); return false; }
     if (next_frame==4) { SetLastError(ERROR_TIMEOUT); return false; }
     *frame=received[next_frame++]; return true;
 }
-static int __stdcall fake_error(void *handle) { CHECK(handle==(void *)1); return 15; }
+static int __stdcall fake_error(void *handle) { CHECK(handle==(void *)1); return receive_broken?3:15; }
 static uint32_t __stdcall fake_zero(void *handle) { CHECK(handle==(void *)1); return 0; }
 static bool __stdcall fake_send(void *handle,struct win_frame *frame,fn_pump pump,void *context)
 {
     CHECK(handle==(void *)1&&frame->echo==0&&frame->channel==0&&frame->flags==0&&frame->reserved==0);
+    /* Like the adapter library: a failed pump refuses the frame before the wire. */
+    if (receive_broken) {
+        if (pump) { CHECK(!pump(context)); SetLastError(ERROR_READ_FAULT); return false; }
+        CHECK(frame->id==0x150&&frame->data[0]==1); ++unpumped_sends; return true;
+    }
     CHECK(expected_sent<expected_count);
     const struct can_frame *expected=&expected_frames[expected_sent++];
     CHECK(frame->id==expected->can_id&&frame->len==expected->len&&!memcmp(frame->data,expected->data,8));
@@ -73,5 +81,14 @@ int main(void)
         if (error==8) invalid[3].can_id=0x158;
         rejected_batch(&bus,d,invalid,4);
     }
+    /* The receive side fails hard. Motion and reset frames are refused and
+       recorded, so the controller stops; the STOP frame still goes out. */
+    receive_broken=true;previous_tx=d->tx;previous_sends=sends;
+    CHECK(!can_bus_send(&bus,d,7,pose,4)&&d->tx==previous_tx&&sends==previous_sends&&unpumped_sends==0);
+    CHECK(!strncmp(d->problem,"Windows USB-CAN receive failed",30));
+    struct can_frame reset=piper_reset_frame(),stop=piper_stop_frame();
+    CHECK(!can_bus_send(&bus,d,7,&reset,1)&&unpumped_sends==0);
+    CHECK(can_bus_send(&bus,d,7,&stop,1)&&unpumped_sends==1&&d->tx==previous_tx+1);
+    CHECK(!strncmp(d->problem,"Windows USB-CAN receive failed",30));
     puts("PASS fake native Windows pump: real batch validation and Windows packing preserve a complete mode plus six-angle transaction; malformed or 0xAD transactions send nothing, ordered RX timestamps and echo filtering remain intact.");
 }
