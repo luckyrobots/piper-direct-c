@@ -76,25 +76,25 @@ public sealed class PikaSessionRegistry : IAsyncDisposable
         }
     }
 
-    public async Task<JsonObject> HoldOwnedAsync(string owner, CancellationToken cancellation)
+    /// <summary>The gripper leg of an emergency STOP: every session, whoever owns it.</summary>
+    public async Task<JsonObject> HoldAllAsync(CancellationToken cancellation)
     {
-        if (!Guid.TryParse(owner, out _)) throw new ArgumentException("A dashboard Pika owner ID is required");
-        // Freeze identities before dispatch. Every owned session gets an
-        // independent attempt, even when another USB device fails to reply.
+        // Freeze identities before dispatch. Every session gets an independent
+        // attempt, even when another USB device fails to reply.
         Entry[] entries; lock (gate) entries = sessions.Values.ToArray();
-        var results = (await Task.WhenAll(entries.Select(entry => HoldAsync(entry, owner, cancellation)))).OfType<JsonObject>().ToArray();
+        var results = (await Task.WhenAll(entries.Select(entry => HoldAsync(entry, cancellation)))).OfType<JsonObject>().ToArray();
         bool ok = results.All(r => r["ok"]!.GetValue<bool>());
-        string message = ok ? "All owned Pika holds acknowledged." : "Pika hold unverified: " +
+        string message = ok ? "All Pika holds acknowledged." : "Pika hold unverified: " +
             string.Join("; ", results.Where(result => result["ok"]?.GetValue<bool>() != true)
                 .Select(result => result["device"]?.GetValue<string>() + " — " + result["message"]?.GetValue<string>()));
         return new() { ["ok"] = ok, ["message"] = message,
             ["sessions"] = new JsonArray(results.Select(r => (JsonNode)r).ToArray()) };
     }
 
-    private static async Task<JsonObject?> HoldAsync(Entry entry, string owner, CancellationToken cancellation)
+    private static async Task<JsonObject?> HoldAsync(Entry entry, CancellationToken cancellation)
     {
         PikaHoldResult hold;
-        try { hold = await entry.Session.HoldForOwnerAsync(owner, cancellation); }
+        try { hold = await entry.Session.HoldAsync(cancellation); }
         catch (Exception error) { hold = new(PikaHoldOutcome.Unverified, error.Message); }
         if (hold.Outcome == PikaHoldOutcome.Skipped) return null;
         return new() { ["device"] = entry.Device, ["ok"] = hold.Outcome == PikaHoldOutcome.Acknowledged, ["message"] = hold.Message };

@@ -30,7 +30,8 @@ internal sealed record LensSession(LensPhase Phase, string? Folder, long LastSeq
 
     private static LensSession Valid(LensSession next)
     {
-        Debug.Assert(next.Open == next.Folder is not null, "A lens session folder exists exactly while the session is open.");
+        if (next.Open != next.Folder is not null)
+            throw new InvalidOperationException("The lens calibration session has no capture folder for this step. Nothing was changed; start a new session.");
         return next;
     }
 }

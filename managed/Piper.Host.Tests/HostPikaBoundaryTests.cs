@@ -74,10 +74,11 @@ internal static class HostPikaBoundaryTests
             Check(rejected.Status == 409 && rejected.Error == "Finish active arm movements before changing Pika assignment" &&
                 registry.Snapshot()["device"]?.GetValue<string>() == first && !agents.ContainsKey(replacement),
                 "Pika configuration committed after an arm started moving.");
-            var stopped = await Send(HostRoutes.CoordinatedStop, new { owner });
+            // The emergency STOP names nobody: a caller who owns nothing still holds the gripper.
+            var stopped = await Send(HostRoutes.CoordinatedStop, new { owner = Guid.NewGuid().ToString() });
             Check(stopped.Status == 200 && stopped.Payload is CoordinatedStopResult { Ok: true } &&
                 agents[peer].Actions.Count(action => action == "hold") == 1 && !agents[first].Actions.Contains("hold"),
-                "Coordinated STOP after denied configuration did not hold only the owned gripper.");
+                "Coordinated STOP after denied configuration did not hold exactly the connected gripper.");
 
             var accepted = await Send("/api/pika/configure", new { owner, device = alias });
             Check(accepted.Status == 200 && registry.Snapshot()["device"]?.GetValue<string>() == replacement &&
@@ -131,6 +132,34 @@ internal static class HostPikaBoundaryTests
         }
         finally { directory.Delete(recursive: true); }
         await ControllerFailureIsConflict();
+        await FaultedLoopStillStops();
+    }
+
+    // P4: a faulted tick loop refuses ordinary actions but still attempts STOP,
+    // alone and as the arm leg of a coordinated STOP.
+    private static async Task FaultedLoopStillStops()
+    {
+        var directory = Directory.CreateTempSubdirectory("piper-host-faulted-");
+        try
+        {
+            using var controller = new ControllerService(simulated: true, directory.FullName);
+            await using var registry = new PikaSessionRegistry("", "never-launched");
+            var maintenance = new BackendMaintenance(() => new JsonObject(), () => [], () => { }, Environment.ProcessId);
+            var context = new PiperRpcContext(controller, registry, false, "", maintenance);
+            controller.FaultLoopForTest("fixture tick fault");
+            var input = JsonSerializer.SerializeToElement(new { });
+            var refused = await context.Control.ExecuteAsync("/api/reconnect", input.GetRawText(), input, default);
+            Check(refused.Status == 409 && refused.Error?.Contains("fixture tick fault") == true,
+                "A faulted controller loop admitted an ordinary action.");
+            var stopped = await context.Control.ExecuteAsync("/api/stop", input.GetRawText(), input, default);
+            Check(stopped.Status == 200 && JsonNode.Parse(stopped.ToJson())?["ok"]?.GetValue<bool>() != false,
+                "A faulted controller loop refused STOP instead of attempting it: " + stopped.ToJson());
+            var owner = JsonSerializer.SerializeToElement(new { owner = Guid.NewGuid().ToString() });
+            var coordinated = await context.Control.ExecuteAsync("/api/stop/coordinated", owner.GetRawText(), owner, default);
+            Check(JsonNode.Parse(coordinated.ToJson())?["arm"]?["ok"]?.GetValue<bool>() == true,
+                "A faulted controller loop failed the arm leg of a coordinated STOP: " + coordinated.ToJson());
+        }
+        finally { directory.Delete(recursive: true); }
     }
 
     // B23: a controller-operation exception maps to 409 in the dispatcher,
@@ -196,9 +225,9 @@ internal static class HostPikaBoundaryTests
             return Task.FromResult(new JsonObject { ["ok"] = true });
         }
 
-        public Task<PikaHoldResult> HoldForOwnerAsync(string requestedOwner, CancellationToken cancellation)
+        public Task<PikaHoldResult> HoldAsync(CancellationToken cancellation)
         {
-            if (owner != requestedOwner) return Task.FromResult(new PikaHoldResult(PikaHoldOutcome.Skipped));
+            if (owner is null) return Task.FromResult(new PikaHoldResult(PikaHoldOutcome.Skipped));
             Actions.Add("hold");
             return Task.FromResult(new PikaHoldResult(PikaHoldOutcome.Acknowledged));
         }

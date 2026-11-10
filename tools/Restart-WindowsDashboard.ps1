@@ -56,7 +56,9 @@ if(Get-Process -Id $serverId -ErrorAction SilentlyContinue) { throw 'Backend did
 $pikaUpdate=Join-Path $repo 'managed\Piper.Pika\bin\Release\net9.0\Piper.Pika.dll'
 if(Test-Path -LiteralPath $pikaUpdate) { Copy-Item -LiteralPath $pikaUpdate -Destination (Join-Path $publish 'Piper.Pika.dll') -Force }
 & (Join-Path $PSScriptRoot 'build-windows.ps1') -StageOnly -StageTo $publish
-Start-Sleep -Seconds 2
+# The old supervisor notices the exit within its 2 s monitor tick, or later when
+# a USB attach is in progress. Starting before it lets go would be refused.
+if(!(Wait-PiperSupervisorReleased $Port 30)) { throw 'The previous dashboard supervisor is still running; the dashboard remains stopped. Close it, then run Start-WindowsDashboard.ps1.' }
 $agentUpdate=Join-Path $repo 'build\pika-agent-linux\Piper.Pika.Agent'
 $packagedAgent=Join-Path $publish 'pika-agent'
 if((Test-Path -LiteralPath $agentUpdate) -and (Test-Path -LiteralPath $packagedAgent)) {

@@ -137,7 +137,7 @@ internal sealed class HostControlDispatcher(ControllerService controller, PikaSe
     private Task<CoordinatedStopResult> CoordinatedStopAsync(JsonElement input)
     {
         // Clone the payload: request cancellation/disposal must not terminate the
-        // second stop attempt. Existing owner/device/generation guards still apply.
+        // second stop attempt. A scoped stop keeps its device/generation/owner guards.
         JsonElement command = input.Clone();
         string body = command.GetRawText();
         return CoordinatedStop.RunAsync(
@@ -148,25 +148,29 @@ internal sealed class HostControlDispatcher(ControllerService controller, PikaSe
             },
             async cancellation =>
             {
+                // The gripper leg mirrors the arm leg. A cancel (an arm with a
+                // request_id) is a client's cleanup of its own action: it holds
+                // only the gripper it names. Everything else is an emergency and
+                // is never refused without holding: it holds the gripper it names,
+                // or every gripper, whoever owns it and whoever asks, when it names
+                // none. When its scope cannot be honoured it says so.
                 bool hasArm = command.TryGetProperty("device_id", out var arm);
-                if (hasArm && arm.ValueKind != JsonValueKind.String)
-                    return new(false, "Pika hold unverified: device_id must be an explicit adapter identity.");
-                bool scoped = hasArm && arm.GetString()!.Length > 0;
-                if (!scoped && (command.TryGetProperty("generation", out _) || command.TryGetProperty("request_id", out _)))
-                    return new(false, "A scoped Pika hold requires its explicit arm and gripper identities.");
-                if (scoped && (!command.TryGetProperty("pika_device", out var gripper) ||
-                    gripper.ValueKind != JsonValueKind.String || string.IsNullOrWhiteSpace(gripper.GetString())))
+                bool scoped = hasArm && arm.ValueKind == JsonValueKind.String && arm.GetString()!.Length > 0;
+                bool hasRequest = command.TryGetProperty("request_id", out _);
+                bool namesGripper = command.TryGetProperty("pika_device", out var gripper) &&
+                    gripper.ValueKind == JsonValueKind.String && !string.IsNullOrWhiteSpace(gripper.GetString());
+                if (scoped && hasRequest && !namesGripper)
                     return new(false, "A scoped STOP requires an explicit pika_device to verify the gripper hold.");
-                // SessionOwnerGuard admits a missing owner on an unowned host.
-                // An unscoped hold still needs one to find the owned grippers.
-                string? owner = command.TryGetProperty("owner", out var ownerValue) && ownerValue.ValueKind == JsonValueKind.String
-                    ? ownerValue.GetString() : null;
-                if (!scoped && !Guid.TryParse(owner, out _))
-                    return new(false, "Pika hold unverified: an unscoped STOP requires the dashboard owner ID.");
-                var result = scoped ? await pika.ExecuteAsync("hold", command, cancellation) :
-                    await pika.HoldOwnedAsync(owner!, cancellation);
-                return new(result["ok"]?.GetValue<bool>() == true,
-                    result["message"]?.GetValue<string>() ?? "Pika hold command acknowledged.");
+                string? unscopable =
+                    hasArm && arm.ValueKind != JsonValueKind.String ? "device_id is not an adapter identity" :
+                    !scoped && (hasRequest || command.TryGetProperty("generation", out _)) ? "generation or request_id came without device_id" :
+                    scoped && !namesGripper ? "it names an arm but no pika_device" : null;
+                var result = scoped && namesGripper ? await pika.ExecuteAsync("hold", command, cancellation) :
+                    await pika.HoldAllAsync(cancellation);
+                bool held = result["ok"]?.GetValue<bool>() == true;
+                string message = result["message"]?.GetValue<string>() ?? "Pika hold command acknowledged.";
+                return unscopable is null ? new(held, message) :
+                    new(false, $"This hold could not be scoped as asked: {unscopable}. Every Pika was asked to hold instead. {message}");
             });
     }
 

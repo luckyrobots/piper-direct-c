@@ -110,23 +110,26 @@ internal static class PikaMultiDeviceTests
             await stopRegistry.ExecuteAsync("connect", Input(path, ownerA), default);
             await stopRegistry.ExecuteAsync("enable", Input(path, ownerA), default);
         }
-        var held = await stopRegistry.HoldOwnedAsync(ownerA, default);
+        // The emergency hold names no owner: every gripper holds, whoever asks.
+        var held = await stopRegistry.HoldAllAsync(default);
         Check(held["ok"]!.GetValue<bool>() && stopAgents.Values.All(s => s.Actions.Count(x => x == "hold") == 1),
-            "Global coordinated hold skipped an owned gripper");
+            "Global coordinated hold skipped a gripper");
         stopAgents[a].FailHold = true;
-        var failedHold = await stopRegistry.HoldOwnedAsync(ownerA, default);
+        var failedHold = await stopRegistry.HoldAllAsync(default);
         Check(!failedHold["ok"]!.GetValue<bool>() && stopAgents[b].Actions.Count(x => x == "hold") == 2,
             "One failed Pika hold prevented the other independent hold attempt");
-        int actionsBefore = stopAgents.Values.Sum(s => s.Actions.Count);
-        Check((await stopRegistry.HoldOwnedAsync(ownerB, default))["ok"]!.GetValue<bool>() && stopAgents.Values.Sum(s => s.Actions.Count) == actionsBefore,
-            "Global hold changed another owner's grippers");
+        stopAgents[a].FailHold = false;
+        stopAgents[b].Owner = ownerB;
+        Check((await stopRegistry.HoldAllAsync(default))["ok"]!.GetValue<bool>() &&
+            stopAgents.Values.All(s => s.Actions.Count(x => x == "hold") == 3),
+            "Global hold skipped a gripper because another client owns it");
         var uncertain = new Session(a, Distro) { UnresolvedOwner = ownerA };
         var independent = new Session(b, Distro) { Owner = ownerA };
         await using var uncertainRegistry = new PikaSessionRegistry(a, "unused", Distro, discovery: discovery,
             factory: (path, _) => path == a ? uncertain : independent);
         foreach (string path in new[] { a, b })
             await uncertainRegistry.ConfigureAsync(JsonSerializer.SerializeToElement(new { owner = ownerA, pika_device = path, device = path }), default, Commit);
-        var uncertainStop = await uncertainRegistry.HoldOwnedAsync(ownerA, default);
+        var uncertainStop = await uncertainRegistry.HoldAllAsync(default);
         var outcomes = uncertainStop["sessions"]!.AsArray().ToDictionary(result => result!["device"]!.GetValue<string>());
         Check(uncertainStop["ok"]?.GetValue<bool>() == false && outcomes.Count == 2 &&
             outcomes[a]!["ok"]?.GetValue<bool>() == false && outcomes[b]!["ok"]?.GetValue<bool>() == true &&
@@ -288,6 +291,46 @@ internal static class PikaMultiDeviceTests
                 "Colliding by-id symlink was incorrectly assigned to both grippers.");
         }
         finally { Directory.Delete(temporary, true); }
+        VerifyPortIdentity();
+    }
+
+    // P7: native Linux without USBIP or a udev by-path link. The identity is
+    // the USB port, never the tty name, so it follows the adapter when the two
+    // ttys enumerate in the opposite order.
+    private static void VerifyPortIdentity()
+    {
+        IReadOnlyList<PikaSerialDevice> Enumerate(bool swapped, bool hub = true)
+        {
+            string temporary = Path.Combine(Path.GetTempPath(), "pika-sysfs-port-" + Guid.NewGuid().ToString("N"));
+            string sys = Path.Combine(temporary, "sys"), dev = Path.Combine(temporary, "dev");
+            Directory.CreateDirectory(Path.Combine(sys, "class/tty")); Directory.CreateDirectory(dev);
+            try
+            {
+                for (int port = 0; port < 2; port++)
+                {
+                    int index = swapped ? 1 - port : port;
+                    string name = "3-4." + (port + 1);
+                    string usb = Path.Combine(sys, "devices/pci0000:00/0000:00:14.0", hub ? "usb3" : "nohub", "3-4", name);
+                    string tty = Path.Combine(usb, name + ":1.0", "ttyUSB" + index, "tty", "ttyUSB" + index);
+                    Directory.CreateDirectory(tty);
+                    File.WriteAllText(Path.Combine(usb, "idVendor"), "1a86\n"); File.WriteAllText(Path.Combine(usb, "idProduct"), "7522\n");
+                    Directory.CreateSymbolicLink(Path.Combine(tty, "device"), "../../../ttyUSB" + index);
+                    Directory.CreateSymbolicLink(Path.Combine(sys, "class/tty", "ttyUSB" + index), tty);
+                    File.WriteAllText(Path.Combine(dev, "ttyUSB" + index), "fixture, not a serial port");
+                }
+                return PikaSerialDevices.EnumerateLinux(sys, dev).OrderBy(item => item.Device, StringComparer.Ordinal).ToArray();
+            }
+            finally { Directory.Delete(temporary, true); }
+        }
+        const string first = "/dev/pika/by-port/pci0000:00+0000:00:14.0+port-4.1", second = "/dev/pika/by-port/pci0000:00+0000:00:14.0+port-4.2";
+        var straight = Enumerate(swapped: false); var swapped = Enumerate(swapped: true);
+        Check(straight.Count == 2 && straight[0].Device == first && straight[1].Device == second &&
+            straight.All(item => item.HostBusId is null && item.Aliases.Contains(item.Device)),
+            "A native Linux adapter without a by-path link did not get its USB port identity: " + string.Join(", ", straight.Select(item => item.Device)));
+        Check(straight[0].SystemDevice.EndsWith("ttyUSB0", StringComparison.Ordinal) && swapped.Count == 2 && swapped[0].Device == first &&
+            swapped[0].SystemDevice.EndsWith("ttyUSB1", StringComparison.Ordinal) && swapped[1].SystemDevice.EndsWith("ttyUSB0", StringComparison.Ordinal),
+            "A gripper identity followed tty enumeration order instead of its USB port");
+        Check(Enumerate(swapped: false, hub: false).Count == 0, "An adapter without a readable USB port was listed under its unstable tty name");
     }
 
     private sealed class Discovery(params string[] devices) : IPikaDeviceDiscovery
@@ -320,10 +363,10 @@ internal static class PikaMultiDeviceTests
             result["configuration_blocked"] = Owner is not null || State["power_uncertain"]?.GetValue<bool>() == true;
             return result;
         }
-        public Task<PikaHoldResult> HoldForOwnerAsync(string owner, CancellationToken cancellation)
+        public Task<PikaHoldResult> HoldAsync(CancellationToken cancellation)
         {
-            if (Owner != owner)
-                return Task.FromResult(UnresolvedOwner == owner
+            if (Owner is null)
+                return Task.FromResult(UnresolvedOwner is not null
                     ? new PikaHoldResult(PikaHoldOutcome.Unverified, "Fixture power is unverified.")
                     : new PikaHoldResult(PikaHoldOutcome.Skipped));
             Actions.Add("hold");

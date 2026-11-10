@@ -84,6 +84,8 @@ static inline double can_bus_pose_still_for(const struct can_device *d,double no
 /* Forget all stillness evidence; the next fresh observation restarts the window. */
 void can_bus_forget_stationary(struct can_device *d);
 double piper_now(void);
+/* True once the monotonic clock has failed; piper_now is then frozen. */
+bool piper_clock_failed(void);
 void can_bus_init(struct can_bus *bus, bool simulated);
 bool can_bus_init_simulated(struct can_bus *bus, unsigned count);
 void can_bus_scan(struct can_bus *bus);

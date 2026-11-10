@@ -10,6 +10,12 @@ public sealed partial class PipersPlugin
     // Post-STOP cleanup runs after the hardware request, with its own budget, so
     // a slow STOP RPC never starts group retirement or the teaching save cancelled.
     private static readonly TimeSpan StopCleanupBudget = TimeSpan.FromSeconds(4);
+    // The panel refresh waits on the publication gate, which navigation can hold
+    // for a long time. It is bounded so follow-up passes always end.
+    internal static readonly TimeSpan StopViewBudget = TimeSpan.FromSeconds(4);
+    private readonly object stopFollowUpGate = new();
+    private Task stopFollowUp = Task.CompletedTask;
+    private bool stopFollowUpGroup, stopFollowUpQueued;
 
     // This path deliberately does not wait for the ordinary UI command gate or
     // for editor requests. The backend attempts the two channels independently.
@@ -74,17 +80,58 @@ public sealed partial class PipersPlugin
         {
             message = "STOP acknowledgement unavailable: " + error.Message + ". Verify the robot's hardware stop; no previous action will resume.";
         }
-        // Saving observations and updating the editor happen after the stop
-        // request, so a slow renderer or disk cannot hold up the hardware path.
-        using var cleanup = new CancellationTokenSource(StopCleanupBudget);
-        if (groupActive)
+        // The handler returns as soon as the hardware answered (or its budget ran
+        // out): saving observations and updating the editor run detached, so a
+        // held publication gate or slow disk can never delay the next STOP.
+        QueueStopFollowUp(groupActive);
+    }
+
+    /// <summary>The detached post-STOP work: completes when every queued pass has ended.
+    /// It never faults; failures are reported to the operator by <see cref="RunStopFollowUp"/>.</summary>
+    internal Task StopFollowUp { get { lock (stopFollowUpGate) return stopFollowUp; } }
+
+    // At most one pass runs and one waits. A STOP that arrives while a pass is
+    // waiting is covered by that pass, so repeated STOP clicks cannot pile up work.
+    private void QueueStopFollowUp(bool groupActive)
+    {
+        lock (stopFollowUpGate)
         {
-            try { await StopGroupSimulationFollowing("Operator STOP · follower group discarded", cleanup.Token); }
-            catch (Exception error) { System.Diagnostics.Trace.TraceWarning("Group STOP: {0}", error.Message); }
+            stopFollowUpGroup |= groupActive;
+            if (stopFollowUpQueued) return;
+            stopFollowUpQueued = true;
+            Task previous = stopFollowUp;
+            stopFollowUp = Task.Run(async () =>
+            {
+                await previous.ConfigureAwait(false);
+                bool group;
+                lock (stopFollowUpGate) { group = stopFollowUpGroup; stopFollowUpGroup = stopFollowUpQueued = false; }
+                await RunStopFollowUp(group).ConfigureAwait(false);
+            });
         }
-        try { await FinishPikaTeaching("Operator STOP", cleanup.Token); }
-        catch (Exception error) { System.Diagnostics.Trace.TraceWarning("Teaching stop save: {0}", error.Message); }
-        try { await Update(shutdown.Token); }
-        catch (Exception error) { System.Diagnostics.Trace.TraceWarning("STOP view: {0}", error.Message); }
+    }
+
+    private async Task RunStopFollowUp(bool groupActive)
+    {
+        var failures = new List<string>();
+        async Task Step(string label, Func<CancellationToken, Task> step, TimeSpan budget)
+        {
+            try
+            {
+                using var deadline = CancellationTokenSource.CreateLinkedTokenSource(shutdown.Token);
+                deadline.CancelAfter(budget);
+                await step(deadline.Token).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (shutdown.IsCancellationRequested) { } // The plugin is closing.
+            catch (OperationCanceledException) { failures.Add(label + " did not finish within " + budget.TotalSeconds.ToString("0") + " s"); }
+            catch (Exception error) { failures.Add(label + " failed: " + error.Message); }
+        }
+        if (groupActive) await Step("Follower group retirement", ct => StopGroupSimulationFollowing("Operator STOP · follower group discarded", ct), StopCleanupBudget);
+        await Step("Teaching save", ct => FinishPikaTeaching("Operator STOP", ct), StopCleanupBudget);
+        await Step("Panel refresh", Update, StopViewBudget);
+        if (failures.Count == 0) return;
+        string report = "STOP was sent, but its follow-up is incomplete: " + string.Join("; ", failures) +
+            ". Motion permission stays cleared; inspect the robot before continuing.";
+        System.Diagnostics.Trace.TraceError("{0}", report);
+        uiActionError = report;
     }
 }

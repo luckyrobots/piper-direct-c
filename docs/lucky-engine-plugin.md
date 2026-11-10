@@ -500,7 +500,12 @@ values alone do not validate optical extrinsics. Real RGB appearance, sensor
 noise and stereo depth holes cannot be promised pixel-identical to a rendering.
 Do not use these previews as a synchronized calibrated dataset yet.
 
-Offline development checks (no camera or robot is opened):
+Offline development checks (no camera or robot is opened). The plugin suite
+discovers and runs every `Run*` entry point of every `*Tests` class; its named
+flags (`--recovery-ui`, `--group-follow`, ...) only narrow a local run. The
+native admission suite needs `PIPER_TEST_NATIVE_PATH` (absolute path of the built
+`piper-core` library); without it the run prints `SKIPPED` and counts the skip,
+and `PIPER_TEST_REQUIRE_NATIVE=1` turns that into a failure:
 
 ```powershell
 dotnet run --project managed/Piper.Camera.Tests -c Release

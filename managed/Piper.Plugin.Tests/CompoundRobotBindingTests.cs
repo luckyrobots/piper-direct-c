@@ -30,7 +30,6 @@ internal static class CompoundRobotBindingTests
         var reversedOptions = SceneRobotBindings.Options([new JsonObject { ["entityId"] = "compound", ["name"] = "Relay world",
             ["joints"] = reordered["joints"]!.DeepClone() }]);
         Check(options.SequenceEqual(reversedOptions), "Joint enumeration order relabeled the individual simulated arms");
-        SceneRobotBindingSettingsTests.Run();
         var device = Device();
         foreach (string prefix in new[] { "", "piper3_" })
         {

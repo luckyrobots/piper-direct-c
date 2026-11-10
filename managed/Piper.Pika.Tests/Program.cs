@@ -70,7 +70,7 @@ if (args.Length >= 2 && args[0] == "--device" && args[1] is "/dev/pika-fixture" 
         if (ok && action is "enable" or "position" or "disable")
         { last_motor_request = root.GetProperty("id").GetString()!; request_time_s = fixtureClock.Elapsed.TotalSeconds; }
         double feedback_time_s = dyingPower && args[1] == "/dev/pika-powered-buffered-die-fixture" ? request_time_s - .01 : fixtureClock.Elapsed.TotalSeconds;
-        Console.WriteLine(JsonSerializer.Serialize(new { type = "state", connected = true, fresh = true, enabled, armed = enabled && !monitoringFixture, pending, following = false, age_s,
+        Console.WriteLine(JsonSerializer.Serialize(new { type = "state", connected = true, fresh = true, enabled, armed = enabled && !monitoringFixture, pending, following = false, resuming_hold = false, age_s,
             last_motor_request, request_time_s, feedback_time_s,
             telemetry = new { motor = new { Position = .5756, Speed = 0 }, motorstatus = new { Status = enabled ? "0x40" : "0x00" } } }));
         Console.WriteLine(JsonSerializer.Serialize(new { type = "ack", id = root.GetProperty("id").GetString(), ok, message = ok ? "fixture accepted" : "finger-clear required" }));
@@ -93,6 +93,7 @@ foreach (bool requested in new[] { false, true })
 await PikaFollowTests.RunAsync();
 await PikaMultiDeviceTests.Run();
 await BoundedProcessTests.Run();
+await PikaAgentFaultTests.Run();
 await PikaReadOnlyAdoptionTests.Run();
 PikaMeasuredHoldResumeTests.Run();
 await PikaDisabledEvidenceTests.Run();
@@ -160,7 +161,7 @@ foreach (string garbage in new[] { "/dev/pika-garbage-fixture", "/dev/pika-garba
             // retirement at once instead of timing out behind it.
             var retiringStopwatch = Stopwatch.StartNew();
             using var stopBound = new CancellationTokenSource(TimeSpan.FromSeconds(3));
-            var retiringHold = await garbled.HoldForOwnerAsync(owner, stopBound.Token);
+            var retiringHold = await garbled.HoldAsync(stopBound.Token);
             Check(garbled.Phase is PikaAgentPhase.Faulted or PikaAgentPhase.Closing && retiringStopwatch.Elapsed < TimeSpan.FromSeconds(1) &&
                 retiringHold.Outcome == PikaHoldOutcome.Unverified && retiringHold.Message!.Contains("retiring", StringComparison.Ordinal),
                 "A STOP hold on a faulted, retiring agent waited behind its close or reported a generic unverified result");
@@ -201,7 +202,7 @@ foreach (string garbage in new[] { "/dev/pika-garbage-fixture", "/dev/pika-garba
     await using (var failedMonitor = Fixture("/dev/pika-fixture", "/nonexistent-pika-agent-" + Guid.NewGuid()))
     {
         bool failed = false;
-        try { await failedMonitor.ExecuteAsync("connect", Input(owner), default); } catch (System.ComponentModel.Win32Exception) { failed = true; }
+        try { await failedMonitor.ExecuteAsync("connect", Input(owner), default); } catch (IOException error) when (error.Message.StartsWith("Could not start the Pika serial agent.", StringComparison.Ordinal)) { failed = true; }
         Check(failed && failedMonitor.Snapshot()["owner"] is null && !failedMonitor.Snapshot()["configuration_blocked"]!.GetValue<bool>(), "Failed monitor setup stranded serial ownership before process start");
     }
     await using (var exitedMonitor = Fixture("/dev/pika-monitor-die-fixture"))
@@ -258,11 +259,10 @@ foreach (string garbage in new[] { "/dev/pika-garbage-fixture", "/dev/pika-garba
         Check(failed && !ended["connected"]!.GetValue<bool>() && ended["power_requested"]!.GetValue<bool>() &&
             ended["power_uncertain"]!.GetValue<bool>() && ended["owner"]!.GetValue<string>() == owner,
             "A pre-enable disabled packet erased an unacknowledged power write");
-        var unverified = await failedEnable.HoldForOwnerAsync(owner, default);
+        var unverified = await failedEnable.HoldAsync(default);
         Check(unverified.Outcome == PikaHoldOutcome.Unverified &&
-            failedEnable.Snapshot()["power_uncertain"]?.GetValue<bool>() == true &&
-            (await failedEnable.HoldForOwnerAsync(other, default)).Outcome == PikaHoldOutcome.Skipped,
-            "Global hold lost uncertainty from an exited owner or acted on it for a different owner");
+            failedEnable.Snapshot()["power_uncertain"]?.GetValue<bool>() == true,
+            "Global hold lost uncertainty from an exited owner");
         await RejectAsync<InvalidOperationException>(() => failedEnable.ExecuteAsync("connect", Input(other), default), "Lost enable result allowed passive foreign takeover");
         await RejectAsync<InvalidOperationException>(() => failedEnable.ExecuteAsync("configure", Configure(other, "/dev/pika-other"), default), "Lost enable result allowed serial reassignment");
     }
@@ -291,7 +291,7 @@ foreach (string garbage in new[] { "/dev/pika-garbage-fixture", "/dev/pika-garba
     await service.ExecuteAsync("enable", Input(owner, true), default);
     await service.ExecuteAsync("heartbeat", Input(owner), default);
     Check(service.Snapshot()["connected"]!.GetValue<bool>() && service.Snapshot()["fresh"]!.GetValue<bool>(), "agent feedback not received");
-    Check((await service.HoldForOwnerAsync(owner, default)).Outcome == PikaHoldOutcome.Acknowledged,
+    Check((await service.HoldAsync(default)).Outcome == PikaHoldOutcome.Acknowledged,
         "The owned live gripper did not acknowledge its hold");
     await service.ExecuteAsync("connect", JsonSerializer.SerializeToElement(new { owner=other, take_over=true }), default);
     await RejectAsync<InvalidOperationException>(() => service.ExecuteAsync("position", JsonSerializer.SerializeToElement(new { owner, value=.5 }), default), "old owner moved after takeover");

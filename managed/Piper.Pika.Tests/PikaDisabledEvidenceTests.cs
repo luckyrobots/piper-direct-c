@@ -82,6 +82,8 @@ internal static class PikaDisabledEvidenceTests
             await service.DisposeAsync();
         }
 
+        await NeverPoweredStopIsVerified(owner, Evidence);
+
         // Reproduce a parsed message reaching publication after its agent was
         // detached. No child process, pipe or serial transport is opened.
         await using var fenced = new PikaProcessService("/dev/pika-fixture", "never-launched");
@@ -112,5 +114,61 @@ internal static class PikaDisabledEvidenceTests
                 "Replacement agent readiness or acknowledgement was dropped");
         }
         finally { fenced.DetachForTest(); }
+    }
+
+    // P3: a STOP hold on a connected gripper that was never powered is a
+    // verified success, and a rejected motor request leaves the believed
+    // power unchanged instead of leaving the gripper power-uncertain.
+    private static async Task NeverPoweredStopIsVerified(string owner, Func<JsonObject> confirmed)
+    {
+        JsonObject Never()
+        {
+            var evidence = confirmed(); evidence["last_motor_request"] = ""; evidence["power_requested"] = false;
+            evidence.Remove("request_time_s"); evidence.Remove("feedback_time_s");
+            return evidence;
+        }
+        Check(PikaDisabledEvidence.NeverPowered(Never(), owner) && !PikaDisabledEvidence.Confirmed(Never(), owner),
+            "Fresh never-powered disabled evidence was rejected, or passed as a confirmed disable request");
+        foreach (string field in new[] { "enabled", "armed", "pending", "following", "resuming_hold", "power_uncertain", "power_requested" })
+        {
+            var evidence = Never(); evidence[field] = true;
+            Check(!PikaDisabledEvidence.NeverPowered(evidence, owner), "Never-powered STOP shortcut ignored " + field);
+        }
+        foreach (string field in new[] { "configured", "connected", "fresh" })
+        {
+            var evidence = Never(); evidence[field] = false;
+            Check(!PikaDisabledEvidence.NeverPowered(evidence, owner), "Never-powered STOP shortcut accepted " + field + "=false");
+        }
+        var stale = Never(); stale["age_s"] = .501;
+        var requested = Never(); requested["last_motor_request"] = "enable";
+        Check(!PikaDisabledEvidence.NeverPowered(stale, owner) && !PikaDisabledEvidence.NeverPowered(requested, owner) &&
+            !PikaDisabledEvidence.NeverPowered(Never(), Guid.NewGuid().ToString()),
+            "Stale, previously requested or foreign evidence passed as a never-powered gripper");
+
+        // The real service against the fixture agent process.
+        JsonElement input = JsonSerializer.SerializeToElement(new { owner, clear = false });
+        await using var service = new PikaProcessService("/dev/pika-fixture", Environment.ProcessPath!, directLaunch: true);
+        await service.ExecuteAsync("connect", input, default);
+        await service.ExecuteAsync("heartbeat", input, default);
+        // The fixture rejects an enable without the finger-clear confirmation.
+        await RejectAsync<InvalidOperationException>(() => service.ExecuteAsync("enable", input, default),
+            "The fixture accepted an enable without finger-clear confirmation");
+        var refused = service.Snapshot();
+        Check(refused["power_requested"]?.GetValue<bool>() == false && refused["power_uncertain"]?.GetValue<bool>() == false,
+            "A rejected motor request changed the believed gripper power");
+        var hold = await service.HoldAsync(default);
+        var held = service.Snapshot();
+        Check(hold.Outcome == PikaHoldOutcome.Acknowledged && hold.Message?.Contains("never powered", StringComparison.Ordinal) == true &&
+            held["power_requested"]?.GetValue<bool>() == false && held["power_uncertain"]?.GetValue<bool>() == false &&
+            held["last_motor_request"]?.GetValue<string>() is null or "",
+            "STOP on a connected, never-powered gripper was not a verified success without a motor command: " + hold.Message);
+        // Once powered, the same STOP is a real hold command again.
+        await service.ExecuteAsync("enable", JsonSerializer.SerializeToElement(new { owner, clear = true }), default);
+        var powered = await service.HoldAsync(default);
+        Check(powered.Outcome == PikaHoldOutcome.Acknowledged && powered.Message == "fixture accepted" &&
+            service.Snapshot()["power_requested"]?.GetValue<bool>() == true,
+            "STOP on a powered gripper skipped its hold command");
+        await service.ExecuteAsync("disable", input, default);
+        await service.ExecuteAsync("disconnect", input, default);
     }
 }

@@ -42,8 +42,8 @@ public sealed record SheetSetup(string EdgeRoot = "", string LeftProof = "", str
 
     private static SheetSetup Checked(SheetSetup next)
     {
-        Debug.Assert((next.BackProof.Length == 0 || next.LeftProof.Length > 0) && (next.LeftProof.Length == 0 || next.EdgeRoot.Length > 0),
-            "A sheet edge confirmation lost the confirmation before it.");
+        if (next.BackProof.Length > 0 && next.LeftProof.Length == 0 || next.LeftProof.Length > 0 && next.EdgeRoot.Length == 0)
+            throw new InvalidOperationException("A sheet edge confirmation lost the confirmation before it. Nothing was confirmed; confirm the LEFT edge again.");
         return next;
     }
 }

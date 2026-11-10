@@ -6,55 +6,107 @@ const names = ['Base', 'Shoulder', 'Elbow', 'Wrist roll', 'Wrist pitch', 'Tool r
 
 const owner = crypto.randomUUID();
 
+/* The server identity last seen by poll(): its POST token and whether the
+
+   managed Host (rather than the standalone C daemon) serves this page. It is
+
+   kept across failed polls so STOP can still be delivered when `state` is stale. */
+
+let server = { token: '', host: false };
+
+function identify(next) { server = { token: next.token || '', host: typeof next.backend === 'string' }; return server; }
+
 let state, device, selectedJoint = 1, lastPoll = 0, selectedId = '';
 
 let toastTimer;
 
 const cards = [];
 
-/* Web-B operator approval. One record, changed only by setApproval().
-     unapproved -> prompting   a control action needs approval (confirmPiperControl)
-     prompting  -> approved    the operator continues
-     prompting  -> unapproved  the operator cancels or dismisses the prompt
+/* Operator prompt. One modal dialog asks one question at a time. ask()
+
+   resolves true only when the operator presses the confirm button of that
+
+   question; cancelling, dismissing, or STOP resolves false. A question asked
+
+   while another is open is refused (false): nothing queues behind the operator.
+
+   The prompt is not a modal dialog: a modal makes the header inert, and STOP
+
+   must stay clickable. Only the workspace below the header is made inert. */
+
+let prompting = null;
+
+function ask({ title, text, confirm }) {
+
+  if (prompting) return Promise.resolve(false);
+
+  return new Promise(resolve => {
+
+    const dialog = $('safety-prompt'), workspace = $('shell');
+
+    $('safety-title').textContent = title; $('safety-text').textContent = text; $('safety-continue').textContent = confirm;
+
+    $('safety-continue').disabled = false; $('safety-cancel').disabled = false;
+
+    const finish = answer => { if (prompting !== finish) return; prompting = null; workspace.inert = false; dialog.close(); resolve(answer); };
+
+    prompting = finish;
+
+    $('safety-continue').onclick = () => finish(true);
+
+    $('safety-cancel').onclick = () => finish(false);
+
+    workspace.inert = true; dialog.show(); $('safety-cancel').focus();
+
+  });
+
+}
+
+/* Web-B motion approval. One record, changed only by setApproval().
+
+     unapproved -> prompting   a motion command needs approval (approveMotion)
+
+     prompting  -> approved    the operator confirms the motion statement
+
+     prompting  -> unapproved  the operator cancels, or STOP dismisses the prompt
+
      approved   -> unapproved  the selected adapter or server token changes (revokeApproval)
+
    `prompt` is the shared answer promise, present only while prompting. A revoke
-   during prompting leaves the open prompt to decide. Approval is a client gate
-   only; it is never sent as a server safety confirmation (see confirmations()). */
+
+   during prompting leaves the open prompt to decide. Approval covers exactly
+
+   the two statements in motionStatement and nothing else: power and recovery
+
+   actions are confirmed one by one (see attestations). */
+
+const motionStatement = Object.freeze({ title: 'Make sure it is safe', text: 'Confirm for the motion commands of this session: people and objects are clear of the arm and gripper, and this dashboard is the only controller commanding the arm. Motor power and recovery actions ask again each time.', confirm: 'Enable controls' });
+
+const motionFlags = Object.freeze({ standalone: true, clear: true });
+
 let approval = { phase: 'unapproved', prompt: null };
 
 function setApproval(phase, prompt = null) { approval = { phase, prompt }; }
 
 function revokeApproval() { if (approval.phase === 'approved') setApproval('unapproved'); }
 
-window.confirmPiperControl = async () => {
+function approveMotion() {
 
-  if (approval.phase === 'approved') return true;
+  if (approval.phase === 'approved') return Promise.resolve(true);
 
   if (approval.phase === 'prompting') return approval.prompt;
 
-  const prompt = new Promise(resolve => {
-
-    const dialog = $('safety-prompt');
-
-    $('safety-continue').disabled = false; $('safety-cancel').disabled = false;
-
-    const finish = approved => { setApproval(approved ? 'approved' : 'unapproved'); dialog.close(); resolve(approved); };
-
-    $('safety-continue').onclick = () => finish(true);
-
-    $('safety-cancel').onclick = () => finish(false);
-
-    dialog.oncancel = event => { event.preventDefault(); finish(false); };
-
-    dialog.showModal();
-
-  });
+  const prompt = ask(motionStatement).then(answer => { setApproval(answer ? 'approved' : 'unapproved'); return answer; });
 
   setApproval('prompting', prompt);
 
   return prompt;
 
-};
+}
+
+// The page identity and prompt shared with pika.mjs: one owner for the arm lease and the Pika session.
+
+window.piperPage = Object.freeze({ owner, ask, token: () => server.token });
 
 function showError(message) { $('toast').textContent = message; $('toast').hidden = false; clearTimeout(toastTimer); toastTimer = setTimeout(() => { $('toast').hidden = true; }, 7000); }
 
@@ -62,22 +114,47 @@ function fixed(value, digits = 3) { return Number.isFinite(value) ? value.toFixe
 
 function chooseJoint(index) { selectedJoint = index; cards.forEach((c, i) => c.element.classList.toggle('selected', i + 1 === index)); $('active-joint').textContent = `J${index} SELECTED`; }
 
-/* Server safety confirmations, sent only on the actions whose admission in
-   src/controller.c reads them. Every /api/command reads `standalone`. Power
-   and recovery actions read `supported`; reset, verify-current and every
-   motion action read `clear`; enable reads both. `reset_completed` is never
-   implied: only verifyReset() adds it after its own operator confirmation. */
-const powerActions = new Set(['disable', 'reset', 'verify-reset', 'verify-disabled']);
+/* Server attestations (P1). src/controller.c reads `standalone` on every
 
-function confirmations(action) {
+   /api/command, `supported` on power and recovery actions, `clear` on enable,
 
-  if (action === 'verify-current') return { standalone: true, clear: true, supported: true };
+   reset, verify-current and motion, and `reset_completed` on verify-reset.
 
-  if (powerActions.has(action)) return action === 'reset' ? { standalone: true, clear: true, supported: true } : { standalone: true, supported: true };
+   A flag is sent only when the operator has confirmed the statement it stands
 
-  return action === 'enable' ? { standalone: true, clear: true, supported: true } : { standalone: true, clear: true };
+   for: each power or recovery action below asks its own question every time,
 
-}
+   and motion commands carry motionFlags under the session's motion approval.
+
+   Nothing here is implied by another action or added without a prompt. */
+
+const attestations = Object.freeze({
+
+  enable: { flags: { standalone: true, clear: true, supported: true }, title: 'Enable motor power', confirm: 'Enable motors',
+
+    text: 'Confirm now: the arm is supported, people and objects are clear of it, and this dashboard is the only controller commanding it. Enabling sends no position target.' },
+
+  disable: { flags: { standalone: true, supported: true }, title: 'Disable motor power', confirm: 'Disable motors',
+
+    text: 'Confirm now: the arm is supported, because disabling removes holding torque and the arm can fall, and this dashboard is the only controller commanding it.' },
+
+  reset: { flags: { standalone: true, clear: true, supported: true }, title: 'Reset the controller', confirm: 'Reset controller',
+
+    text: 'Confirm now: the arm is supported and stationary, people and objects are clear of it, and this dashboard is the only controller commanding it. A reset disables the motors and can remove holding torque.' },
+
+  'verify-current': { flags: { standalone: true, clear: true, supported: true }, title: 'Clear the saved stop', confirm: 'Clear saved stop',
+
+    text: 'Confirm now: you inspected the arm after the stop, it is supported and stationary with its motors enabled, people and objects are clear of it, and this dashboard is the only controller commanding it. This clears the recovery latch.' },
+
+  'verify-disabled': { flags: { standalone: true, supported: true }, title: 'Clear the saved stop', confirm: 'Clear saved stop',
+
+    text: 'Confirm now: you inspected the arm after the stop, it is supported and stationary with its motors disabled, and this dashboard is the only controller commanding it. This clears the recovery latch.' },
+
+  'verify-reset': { flags: { standalone: true, supported: true, reset_completed: true }, title: 'Verify the completed reset', confirm: 'Reset completed',
+
+    text: 'Confirm now: the controller reset or power cycle has completed, the arm is supported and stationary, and this dashboard is the only controller commanding it. This clears the recovery latch.' },
+
+});
 
 function values() { return { speed_percent: Number($('speed').value), tolerance_deg: Number($('tolerance').value) }; }
 
@@ -85,7 +162,7 @@ async function post(route, body = {}) {
 
   if (!state) throw Error('The controller server is unavailable.');
 
-  const response = await fetch(route, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Piper-Token': state.token }, body: JSON.stringify({ device_id: device?.id, generation: device?.generation, owner, ...body }), signal: AbortSignal.timeout(1500) });
+  const response = await fetch(route, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Piper-Token': server.token }, body: JSON.stringify({ device_id: device?.id, generation: device?.generation, owner, ...body }), signal: AbortSignal.timeout(1500) });
 
   const result = await response.json();
 
@@ -96,48 +173,62 @@ async function post(route, body = {}) {
 }
 
 /* Web-A control lease. One {phase, request_id} record, changed only by setLease().
+
      none     -> pending   perform() posts a request
+
      leased   -> pending   another request (e.g. hold) is posted; request_id is kept
+
      pending  -> leased    the reply carries a request_id, or one was already held
+
      pending  -> none      the reply has none and none was held, or the request fails
+
      any      -> stopping  STOP is posted; heartbeats stop and in-flight replies are ignored
+
      stopping -> none      the STOP reply or failure arrives
+
      any      -> none      server token change, completed/foreign motion, heartbeat
+
                            failure, or leaving the page
+
    Only one non-STOP request is in flight (`pending` rejects others). A reply
+
    applies only if the lease is still the record its request created, so a reply
-   that arrives after STOP, leaving or a token change cannot re-create a lease. */
+
+   that arrives after STOP, leaving or a token change cannot re-create a lease.
+
+   Such a late reply may still name a request the server admitted; release()
+
+   stops exactly that request, so no motion outlives the page that left it. */
+
 const noLease = Object.freeze({ phase: 'none', request_id: 0 });
 
 let lease = noLease;
 
 function setLease(phase, request_id = 0) { lease = phase === 'none' ? noLease : Object.freeze({ phase, request_id }); return lease; }
 
+// Automatic cleanup stop, scoped to one request this page created and no longer holds.
+
+function release(request_id, device_id) {
+
+  if (!server.token) return;
+
+  fetch('/api/stop', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Piper-Token': server.token }, body: JSON.stringify({ request_id, owner, device_id }), keepalive: true }).catch(() => {});
+
+}
+
 async function perform(route, body = {}) {
-
-  if (route === '/api/stop') {
-
-    const stopping = setLease('stopping');
-
-    try { const result = await post(route, body); $('message').textContent = result.message; return result; }
-
-    catch (error) { showError(error.message); }
-
-    finally { if (lease === stopping) setLease('none'); }
-
-    return;
-
-  }
 
   if (lease.phase === 'pending' || lease.phase === 'stopping') return;
 
-  const attempt = setLease('pending', lease.request_id);
+  const attempt = setLease('pending', lease.request_id), sentTo = device?.id;
 
   try {
 
     const result = await post(route, body);
 
     if (lease === attempt) setLease(result.request_id || attempt.request_id ? 'leased' : 'none', result.request_id || attempt.request_id);
+
+    else if (result.request_id && result.request_id !== lease.request_id) release(result.request_id, sentTo);
 
     $('message').textContent = result.message;
 
@@ -147,17 +238,85 @@ async function perform(route, body = {}) {
 
 }
 
-async function command(action, fields = {}) { if (!await window.confirmPiperControl()) return; return perform('/api/command', { ...values(), ...confirmations(action), action, ...fields }); }
+/* Operator STOP (the STOP button and Escape). It stops everything this server
 
-/* verify-reset clears a recovery latch only after the operator states, at
-   this moment, that the controller reset or power cycle has completed. */
-async function verifyReset() {
+   controls: every arm and the gripper. The request names no device, generation
 
-  if (!await window.confirmPiperControl()) return;
+   or request, so no client-side belief can make the server refuse or narrow it,
 
-  if (!window.confirm('Has the controller reset or power cycle completed, with the arm supported and stationary?')) return;
+   and it is sent even when the last state poll failed. The Host is asked for
 
-  return command('verify-reset', { reset_completed: true });
+   its coordinated stop (arms and gripper hold, attempted independently); the
+
+   standalone C daemon for its global arm stop. pika.mjs hears `piper-stop` and
+
+   always sends the jaw disable itself. An open operator prompt is refused. */
+
+async function sendStop(identity) {
+
+  const response = await fetch(identity.host ? '/api/stop/coordinated' : '/api/stop', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Piper-Token': identity.token }, body: JSON.stringify({ owner }), keepalive: true, signal: AbortSignal.timeout(identity.host ? 5000 : 1500) });
+
+  return { status: response.status, ok: response.ok, result: await response.json().catch(() => ({})) };
+
+}
+
+async function readIdentity() {
+
+  const response = await fetch('/api/state', { signal: AbortSignal.timeout(1000), cache: 'no-store' });
+
+  if (!response.ok) throw Error('The controller server did not answer.');
+
+  return identify(await response.json());
+
+}
+
+function stopOutcome({ ok, result }) {
+
+  const arm = result.arm || result;
+
+  let message = arm.message || arm.error || result.error || 'The server refused STOP.';
+
+  try { message = JSON.parse(message).message || message; } catch { /* A plain sentence. */ }
+
+  if (result.arm ? !arm.ok : !ok || result.ok === false) throw Error(message);
+
+  return result.pika && !result.pika.ok ? `${message} Gripper hold: ${result.pika.message}` : message;
+
+}
+
+async function stopAll() {
+
+  const stopping = setLease('stopping');
+
+  prompting?.(false);
+
+  window.dispatchEvent(new Event('piper-stop'));
+
+  try {
+
+    // A known token is used at once. A refused or failed delivery is retried
+
+    // once against the server's current identity (it may have restarted).
+
+    let reply = server.token ? await sendStop(server).catch(() => null) : null;
+
+    if (!reply || reply.status === 403 || reply.status === 404) reply = await sendStop(await readIdentity());
+
+    $('message').textContent = stopOutcome(reply);
+
+  } catch (error) { showError(`STOP was not confirmed: ${error.message} Use the physical stop if motion continues.`); }
+
+  finally { if (lease === stopping) setLease('none'); }
+
+}
+
+async function command(action, fields = {}) {
+
+  const statement = attestations[action];
+
+  if (!await (statement ? ask(statement) : approveMotion())) return;
+
+  return perform('/api/command', { ...values(), ...(statement ? statement.flags : motionFlags), action, ...fields });
 
 }
 
@@ -271,7 +430,7 @@ function render() {
 
   let blocker = device?.blocker || (!device ? 'Connect a USB-CAN adapter to begin.' : !allEnabled ? (approved ? 'Ready to enable motors. Enabling sends no joint-position target.' : 'Motors are off. Click Enable motors to begin.') : outside ? `Joint controls blocked: ${device.joints.filter(j => j.actual_deg < j.min_deg || j.actual_deg > j.max_deg).map(j => `J${j.index} ${fixed(j.actual_deg)}° outside ${j.min_deg}…${j.max_deg}°`).join('; ')}. Clear the path, then use Move into range.` : !approved ? 'Ready to move.' : 'Ready to move. Choose a joint and enter an angle, or use − / + step.');
 
-  if (device?.recovery_required && allDisabled && !device.reset_pending) blocker = 'Motors are off. Enable robot verifies the idle state and clears the saved stop before enabling.';
+  if (device?.recovery_required && !device.reset_pending) blocker = `A stop is saved for this arm. ${allDisabled || allEnabled ? 'Inspect the arm, then use Verify recovery to clear it' : 'Wait for consistent motor feedback, then verify recovery'}${allDisabled ? ' before enabling.' : '.'}`;
 
   if (state.query_active) blocker = 'Reading settings for this connection… controls will be ready shortly.';
 
@@ -349,9 +508,9 @@ function render() {
 
   $('reconnect').disabled = !idle();
 
-  $('enable').disabled = !idle() || !device?.fresh || !device.firmware_supported || (allEnabled && !device.recovery_required);
+  $('enable').disabled = !idle() || !device?.fresh || !device.firmware_supported || allEnabled || !!device.recovery_required;
 
-  $('enable').textContent = device?.recovery_required ? 'Enable controls' : allEnabled ? 'Enabled' : 'Enable robot';
+  $('enable').textContent = allEnabled ? 'Enabled' : 'Enable robot';
 
   const powerReady = idle() && device?.fresh && device.firmware_supported;
 
@@ -385,7 +544,7 @@ function render() {
 
   $('incident-reset').disabled = !powerReady || !!device?.reset_pending || teaching || !unhealthy;
 
-  $('incident-verify').disabled = !powerReady || !allDisabled || unhealthy;
+  $('incident-verify').disabled = !powerReady || unhealthy || !(allDisabled || (allEnabled && !device.reset_pending));
 
   $('incident-raw').textContent = JSON.stringify({original_stop:incident || null, live_status:device?.status, joint_faults:device?.joints.map(j=>({joint:j.index,fault:j.fault})), reset_pending:device?.reset_pending},null,2);
 
@@ -455,31 +614,29 @@ $('device').onchange = () => perform('/api/select', { device_id: $('device').val
 
 $('query').onclick = () => perform('/api/query'); $('reconnect').onclick = () => perform('/api/reconnect');
 
-$('stop').onclick = () => perform('/api/stop');
+$('stop').onclick = stopAll;
 
-$('enable').onclick = async () => {
+// Enabling never clears a recovery latch: that is the separate Verify recovery step.
 
-  if (!await window.confirmPiperControl()) return;
-
-  if (device?.recovery_required) {
-
-    const cleared = await (device.reset_pending ? verifyReset() : command('verify-current'));
-
-    if (!cleared) return;
-
-  }
-
-  if (!device.joints.every(j => j.enabled === true)) return command('enable');
-
-};
+$('enable').onclick = () => command('enable');
 
 $('disable').onclick = () => { window.dispatchEvent(new Event('piper-robot-disable')); return command('disable'); };
 
-$('reset').onclick = () => command('reset'); $('verify').onclick = verifyReset; $('hold').onclick = () => command('hold');
+$('reset').onclick = () => command('reset'); $('verify').onclick = () => command('verify-reset'); $('hold').onclick = () => command('hold');
 
 $('incident-reset').onclick = () => command('reset');
 
-$('incident-verify').onclick = () => device?.reset_pending ? verifyReset() : command('verify-disabled');
+// The recovery latch is cleared only here, by the verification that matches the measured motor state.
+
+$('incident-verify').onclick = () => {
+
+  if (!device?.joints) return showError('No arm feedback is available to verify.');
+
+  if (device.reset_pending) return command('verify-reset');
+
+  return command(device.joints.every(j => j.enabled === true) ? 'verify-current' : 'verify-disabled');
+
+};
 
 $('align').onclick = () => command('align');
 
@@ -488,15 +645,15 @@ $('cycle').onclick = () => command('cycle');
 $('zero-all').onclick = () => command('pose', { degrees:[0,0,0,0,0,0], synchronized:true });
 $('pose').onclick = () => { if (cards.some(c => c.input.value === '')) return showError('Enter all six target angles.'); command('pose', { degrees: cards.map(c => Number(c.input.value)) }); };
 
-$('copy').onclick = () => cards.forEach((card, i) => { card.input.value = fixed(device.joints[i].actual_deg); card.slider.value = card.input.value; card.touched = true; });
+$('copy').onclick = () => { if (device?.joints) cards.forEach((card, i) => { card.input.value = fixed(device.joints[i].actual_deg); card.slider.value = card.input.value; card.touched = true; }); };
 
 function moveGripper(width_mm) { return command('gripper', { width_mm, effort_nm: Number($('gripper-effort').value), allow_closed_offset: (device?.gripper?.width_mm < 0 && device.gripper.width_mm >= -2) }); }
 
 $('gripper-open').onclick = () => moveGripper(device?.gripper?.max_width_mm); $('gripper-close').onclick = () => moveGripper(0);
 
-$('gripper-minus').onclick = () => moveGripper(Math.max(0, device.gripper.width_mm - Number($('gripper-step').value)));
+$('gripper-minus').onclick = () => { if (device?.gripper) moveGripper(Math.max(0, device.gripper.width_mm - Number($('gripper-step').value))); };
 
-$('gripper-plus').onclick = () => moveGripper(Math.min(device.gripper.max_width_mm, device.gripper.width_mm + Number($('gripper-step').value)));
+$('gripper-plus').onclick = () => { if (device?.gripper) moveGripper(Math.min(device.gripper.max_width_mm, device.gripper.width_mm + Number($('gripper-step').value))); };
 
 $('gripper-move').onclick = () => { if ($('width').value === '') return showError('Enter the requested gripper opening.'); moveGripper(Number($('width').value)); };
 
@@ -504,7 +661,7 @@ $('gripper-move').onclick = () => { if ($('width').value === '') return showErro
 
 document.addEventListener('keydown', event => {
 
-  if (event.key === 'Escape') { event.preventDefault(); perform('/api/stop'); return; }
+  if (event.key === 'Escape') { event.preventDefault(); stopAll(); return; }
 
   if (/INPUT|SELECT|TEXTAREA/.test(event.target.tagName) || event.repeat) return;
 
@@ -514,15 +671,21 @@ document.addEventListener('keydown', event => {
 
 });
 
+/* Leaving ends whatever lease exists, including one whose first request is
+
+   still in flight: that request has no id yet, so perform() releases it when
+
+   its reply names one. */
+
 function leaving() {
 
-  if (!lease.request_id || !state) return;
+  if (lease.phase === 'none' || lease.phase === 'stopping') return;
 
-  const ending = { request_id: lease.request_id, owner, device_id: device?.id };
+  const ending = lease;
 
   setLease('none');
 
-  fetch('/api/stop', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Piper-Token': state.token }, body: JSON.stringify(ending), keepalive: true }).catch(() => {});
+  if (ending.request_id) release(ending.request_id, device?.id);
 
 }
 
@@ -564,7 +727,7 @@ async function poll() {
 
     if (state && state.token !== next.token) { setLease('none'); revokeApproval(); }
 
-    state = next; lastPoll = performance.now();
+    state = next; identify(next); lastPoll = performance.now();
 
     if (lease.phase === 'leased' && state.motion.request_id >= lease.request_id && (!state.motion.active || state.motion.owner !== owner)) setLease('none');
 

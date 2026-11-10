@@ -119,9 +119,17 @@ internal static class MultiRobotHostIntegrationTests
             if ((await Send("/api/shutdown", new())).Status != 409) throw new Exception("Shutdown ignored nonselected movement");
             var restart = new JsonObject { ["backend_process_id"] = process.Id, ["backend_instance_id"] = state!["backend_instance_id"]!.DeepClone(), ["release_grippers"] = true };
             if ((await Send(BackendMaintenance.RestartRoute, restart, true)).Status != 409 || process.HasExited) throw new Exception("Restart interrupted a nonselected device lane");
-            var stop = await Send("/api/stop/coordinated", new(), true);
-            if (stop.Status >= 400) throw new Exception("Global coordinated STOP failed: " + stop.Body);
+            // STOP acquires nothing: the session guard admits a caller who owns no lane.
+            var stop = await Send("/api/stop/coordinated", new(), true, foreign);
+            if (stop.Status >= 400) throw new Exception("A foreign caller's global coordinated STOP failed: " + stop.Body);
             await Poll(s => s["any_motion_active"]?.GetValue<bool>() == false && s["motions"]!.AsArray().All(l => l?["active"]?.GetValue<bool>() == false), "Global STOP left a lane active");
+            // The same holds on the arm-only route and on both transports.
+            foreach (bool grpc in new[] { false, true })
+                foreach (string route in new[] { "/api/stop", "/api/stop/coordinated" })
+                {
+                    var foreignStop = await Send(route, new(), grpc, foreign);
+                    if (foreignStop.Status != 200) throw new Exception($"A foreign caller's emergency STOP was refused on {route}: {foreignStop.Body}");
+                }
             if ((await Send("/api/shutdown", new())).Status != 200) throw new Exception("Stopped simulator did not allow shutdown");
             await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(5));
             if (process.ExitCode != 0) throw new Exception("Two-lane host did not close cleanly");

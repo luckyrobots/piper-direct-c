@@ -261,54 +261,76 @@ public sealed partial class PipersPlugin
             value.StartsWith("Controller telemetry interrupted", StringComparison.Ordinal);
     }
 
+    // Stale-feedback watchdog state; touched only by the arm heartbeat loop.
+    private bool staleFeedbackDisarmed;
+
+    // Everything a stale-feedback disarm withdraws. While none of it stands, a
+    // repeated disarm would change nothing except the permission epoch.
+    private bool MotionGrantStanding() => approved || linkCommandsEnabled || teleoperating || teachingSession.Current.Owned ||
+        CommandAuthority.Current is { Lease: not null } or { Confirmation: not null } ||
+        CurrentRecovery is { } recovery && !recovery.Token.IsCancellationRequested;
+
     internal async Task ArmHeartbeats(CancellationToken cancellation)
     {
         using var timer = new PeriodicTimer(TimeSpan.FromMilliseconds(200));
-        do
+        do await ArmHeartbeatTick(cancellation);
+        while (await timer.WaitForNextTickAsync(cancellation));
+    }
+
+    /// <summary>One 200 ms watchdog pass: disarm on stale feedback, otherwise renew the tracked lease.</summary>
+    internal async Task ArmHeartbeatTick(CancellationToken cancellation)
+    {
+        var group = Volatile.Read(ref groupSimulation);
+        var receipt = telemetry.Latest;
+        if (group is null && !HasFreshControlTelemetry(out receipt))
         {
-            var group = Volatile.Read(ref groupSimulation);
-            var receipt = telemetry.Latest;
-            if (group is null && !HasFreshControlTelemetry(out receipt))
-            {
-                if (!RecoveryExpectedGap(receipt)) DisarmTelemetryTargets($"Measured robot feedback exceeded the {TelemetryReceipt.MaximumAgeMilliseconds:F0} ms freshness window", clearLink: false);
-                continue;
-            }
-            if (CommandAuthority.Current.Lease is not { } lease) continue;
-            var scope = lease.Scope;
-            JsonNode? motion;
-            if (group is null)
-            {
-                if (scope.ProfileId != ActiveProfile.Id || scope.Backend != receipt!.BackendToken ||
-                    TelemetryScope.Read(receipt.State, scope.Device) != new TelemetryScope(scope.Backend, scope.Device, scope.Generation))
-                { CommandAuthority.EndLease(lease); continue; }
-                motion = receipt.State["motion"];
-            }
-            else
-            {
-                // Group requests have their own heartbeat. Preserve a previously
-                // admitted independent arm's lease without consulting UI selection.
-                if (group.Lanes.Any(lane => lane.Robot.DeviceId == scope.Device) ||
-                    receipt is null || receipt.BackendToken != scope.Backend || scope.Backend != token)
-                    continue;
-                var devices = (receipt.State["devices"] as JsonArray)?.OfType<JsonObject>()
-                    .Where(d => d["id"]?.GetValue<string>() == scope.Device).Take(2).ToArray();
-                if (devices is not { Length: 1 } || devices[0]["generation"]?.GetValue<long>() != scope.Generation ||
-                    !receipt.HasFreshDevice(devices[0], Stopwatch.GetTimestamp())) continue;
-                if (devices[0]["motion"] is not JsonObject laneMotion || laneMotion["device_id"]?.GetValue<string>() != scope.Device ||
-                    laneMotion["generation"]?.GetValue<long>() != scope.Generation) continue;
-                motion = laneMotion;
-            }
-            long request = lease.Request;
-            long reportedRequest = motion?["request_id"]?.GetValue<long>() ?? 0;
-            if (reportedRequest < request) continue; // Admission feedback has not arrived yet.
-            if (reportedRequest != request || motion?["active"]?.GetValue<bool>() != true || motion["owner"]?.GetValue<string>() != owner)
-            { CommandAuthority.EndLease(lease); continue; }
-            if (!ReferenceEquals(CommandAuthority.Current.Lease, lease)) continue;
-            try { await Call("/api/heartbeat", new JsonObject { ["request_id"] = request, ["owner"] = owner,
-                ["device_id"] = scope.Device, ["generation"] = scope.Generation }, cancellation, scope.Backend); }
-            catch (Exception error) when (!cancellation.IsCancellationRequested)
-            { CommandAuthority.EndLease(lease); message = "Arm heartbeat unavailable: " + error.Message; }
-        } while (await timer.WaitForNextTickAsync(cancellation));
+            if (RecoveryExpectedGap(receipt)) return;
+            // Revoke once on the fresh-to-stale edge. Revoking on every tick would
+            // advance the permission epoch five times a second, so an operator
+            // question raised during the gap (reset completion) would go inert at
+            // once. A grant that appears while feedback is still stale is revoked
+            // on the next tick.
+            if (staleFeedbackDisarmed && !MotionGrantStanding()) return;
+            staleFeedbackDisarmed = true;
+            DisarmTelemetryTargets($"Measured robot feedback exceeded the {TelemetryReceipt.MaximumAgeMilliseconds:F0} ms freshness window", clearLink: false);
+            return;
+        }
+        if (group is null) staleFeedbackDisarmed = false;
+        if (CommandAuthority.Current.Lease is not { } lease) return;
+        var scope = lease.Scope;
+        JsonNode? motion;
+        if (group is null)
+        {
+            if (scope.ProfileId != ActiveProfile.Id || scope.Backend != receipt!.BackendToken ||
+                TelemetryScope.Read(receipt.State, scope.Device) != new TelemetryScope(scope.Backend, scope.Device, scope.Generation))
+            { CommandAuthority.EndLease(lease); return; }
+            motion = receipt.State["motion"];
+        }
+        else
+        {
+            // Group requests have their own heartbeat. Preserve a previously
+            // admitted independent arm's lease without consulting UI selection.
+            if (group.Lanes.Any(lane => lane.Robot.DeviceId == scope.Device) ||
+                receipt is null || receipt.BackendToken != scope.Backend || scope.Backend != token)
+                return;
+            var devices = (receipt.State["devices"] as JsonArray)?.OfType<JsonObject>()
+                .Where(d => d["id"]?.GetValue<string>() == scope.Device).Take(2).ToArray();
+            if (devices is not { Length: 1 } || devices[0]["generation"]?.GetValue<long>() != scope.Generation ||
+                !receipt.HasFreshDevice(devices[0], Stopwatch.GetTimestamp())) return;
+            if (devices[0]["motion"] is not JsonObject laneMotion || laneMotion["device_id"]?.GetValue<string>() != scope.Device ||
+                laneMotion["generation"]?.GetValue<long>() != scope.Generation) return;
+            motion = laneMotion;
+        }
+        long request = lease.Request;
+        long reportedRequest = motion?["request_id"]?.GetValue<long>() ?? 0;
+        if (reportedRequest < request) return; // Admission feedback has not arrived yet.
+        if (reportedRequest != request || motion?["active"]?.GetValue<bool>() != true || motion["owner"]?.GetValue<string>() != owner)
+        { CommandAuthority.EndLease(lease); return; }
+        if (!ReferenceEquals(CommandAuthority.Current.Lease, lease)) return;
+        try { await Call("/api/heartbeat", new JsonObject { ["request_id"] = request, ["owner"] = owner,
+            ["device_id"] = scope.Device, ["generation"] = scope.Generation }, cancellation, scope.Backend); }
+        catch (Exception error) when (!cancellation.IsCancellationRequested)
+        { CommandAuthority.EndLease(lease); message = "Arm heartbeat unavailable: " + error.Message; }
     }
 
     internal async Task PikaHeartbeats(CancellationToken cancellation)

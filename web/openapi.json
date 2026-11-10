@@ -3,7 +3,7 @@
   "info": {
     "title": "PiPer Direct C position-control API",
     "version": "1.0.0",
-    "description": "Loopback-only Piper arm controller, served by two backends that share this native control core and dashboard: the C server (SocketCAN) and the managed .NET host (Windows or Linux), which adds a gRPC port, independent Pika gripper sessions and maintenance routes. No Python or robot SDK. Each path's x-piper-backend names the backends that serve it: c, managed or both. Read /api/state for the per-process token, stable selected device_id and current connection generation. Every POST requires X-Piper-Token and application/json. Accepted actions are asynchronous: poll state and renew the matching owner/request_id lease every 200 ms. Lease expires at 800 ms. Commands never resume automatically after reconnect or restart. A single-joint command sends a six-angle MoveJ pose, holding other joints at their initial measured positions. This API does not bypass the onboard MCU or expose raw torque/MIT/calibration/firmware writes. State includes controller teach_state, fault masks, persisted last_fault and per-joint max_acceleration_rad_s2/acceleration_fresh/acceleration_age_s. New motion and enable require valid angle, speed and acceleration limits read on this connection. Static configuration remains valid while the connection is uninterrupted; there is no periodic refresh or 60-second expiry. USB/CAN reconnection, a robot status-stream gap or an explicit information query invalidates the cache. Live position, motor and fault feedback still use the normal short freshness checks. Acceleration limits must be finite, greater than zero and at most 5 rad/s\u00b2. Queries are read-only and preserve unresolved recovery locks. The limits_fresh, acceleration_fresh and gripper configuration_fresh fields mean valid for this connection; their age fields report elapsed time without imposing an expiry. Missing optional standard CAN gripper settings do not block the arm or Pika."
+    "description": "Loopback-only Piper arm controller, served by two backends that share this native control core and dashboard: the C server (SocketCAN) and the managed .NET host (Windows or Linux), which adds a gRPC port, independent Pika gripper sessions and maintenance routes. No Python or robot SDK. Each path's x-piper-backend names the backends that serve it: c, managed or both. Read /api/state for the per-process token, stable selected device_id and current connection generation. Every POST requires X-Piper-Token and application/json. Accepted actions are asynchronous: poll state and renew the matching owner/request_id lease every 200 ms. Lease expires at 800 ms. Commands never resume automatically after reconnect or restart. A single-joint command sends a six-angle MoveJ pose, holding other joints at their initial measured positions. This API does not bypass the onboard MCU or expose raw torque/MIT/calibration/firmware writes. State includes controller teach_state, fault masks, persisted last_fault and per-joint max_acceleration_rad_s2/acceleration_fresh/acceleration_age_s. New motion and enable require valid angle, speed and acceleration limits read on this connection. Static configuration remains valid while the connection is uninterrupted; there is no periodic refresh or 60-second expiry. USB/CAN reconnection, a robot status-stream gap or an explicit information query invalidates the cache. Live position, motor and fault feedback still use the normal short freshness checks. Acceleration limits must be finite, greater than zero and at most 5 rad/s\u00b2. Queries are read-only and preserve unresolved recovery locks. The limits_fresh, acceleration_fresh and gripper configuration_fresh fields mean valid for this connection; their age fields report elapsed time without imposing an expiry. Missing optional standard CAN gripper settings do not block the arm or Pika. Statuses common to every route are documented here once: 403 for a wrong or missing X-Piper-Token, a foreign Origin or a non-loopback Host; 400 for a body that is not a JSON object and 413 for one that is too large. The managed host also answers 409 to every POST except /api/stop and /api/stop/coordinated while a maintenance restart is pending, and, when a plugin session owns it, 409 to every POST whose owner is not that session, except /api/query, /api/stop and /api/stop/coordinated: reading back and stopping are open to every authenticated caller. The operator STOP is POST /api/stop (C server) or POST /api/stop/coordinated (managed host) with no device_id, generation or request_id: it is never pinned to a connection generation and stops every arm."
   },
   "servers": [
     {
@@ -122,8 +122,8 @@
           "404": {
             "description": "Adapter absent"
           },
-          "409": {
-            "description": "Action active"
+          "500": {
+            "description": "The selection could not be saved; it is unchanged"
           }
         }
       },
@@ -150,13 +150,25 @@
     "/api/reconnect": {
       "post": {
         "summary": "Reopen CAN sockets and refresh selected arm firmware/limits; no network configuration or motion",
-        "description": "Invalidates cached feedback, then starts one bounded information query on the selected adapter if its CAN socket is available. Motion and stop recovery remain explicit. Poll query_active for completion; 200 does not guarantee robot replies.",
+        "description": "Invalidates cached feedback, then starts one bounded information query on the selected adapter if its CAN socket is available. Motion and stop recovery remain explicit. Poll query_active for completion; 200 does not guarantee robot replies. With generation the request is pinned: device_id (or the selected adapter) must still be at that connection generation. With neither device_id nor generation every CAN socket is reopened.",
         "requestBody": {
           "required": true,
           "content": {
             "application/json": {
               "schema": {
-                "type": "object"
+                "type": "object",
+                "properties": {
+                  "device_id": {
+                    "type": "string",
+                    "description": "Adapter to reopen; omitted means the selected adapter, or every adapter when generation is omitted too"
+                  },
+                  "generation": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 4294967295,
+                    "description": "Pins the request to this connection generation"
+                  }
+                }
               }
             }
           }
@@ -166,7 +178,7 @@
             "description": "Sockets reopened; selected adapter information read started if available"
           },
           "409": {
-            "description": "Action active"
+            "description": "Action or information read active, or the pinned generation is stale"
           }
         }
       },
@@ -288,6 +300,16 @@
                   "request_id": {
                     "type": "integer",
                     "minimum": 1
+                  },
+                  "device_id": {
+                    "type": "string",
+                    "description": "Pins the heartbeat to this adapter; requires generation"
+                  },
+                  "generation": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 4294967295,
+                    "description": "Connection generation of device_id from /api/state"
                   }
                 }
               }
@@ -299,52 +321,17 @@
             "description": "Lease renewed"
           },
           "409": {
-            "description": "No matching active lease or already expired"
+            "description": "No matching active lease, lease already expired, or the pinned adapter or generation no longer matches"
           }
-        }
+        },
+        "description": "Renews the lease of the action that owner started with request_id. With device_id the heartbeat is pinned: that adapter must still be the one running the action and generation must equal its current connection generation. Without device_id the selected adapter is used and generation is ignored."
       },
       "x-piper-backend": "both"
     },
     "/api/stop": {
       "post": {
-        "summary": "Best-effort software stop on selected arm; persist recovery requirement",
-        "description": "Does not require motion health checks or matching owner. An optional generation must match the selected adapter connection; malformed or stale generations are rejected before sending STOP. Manual callers may omit generation. Fast stop can allow damped descent; it is not a power cut or guaranteed hold. Active gripper motion also gets a gripper disable request. Disconnected hardware cannot receive the stop. Inspect physical state before recovery.",
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "type": "object",
-                "properties": {
-                  "device_id": {
-                    "type": "string"
-                  },
-                  "generation": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "maximum": 4294967295
-                  }
-                }
-              }
-            }
-          }
-        },
-        "responses": {
-          "200": {
-            "description": "Stop attempted; read message and physical state"
-          },
-          "409": {
-            "description": "Adapter identity, optional generation or automatic-stop action no longer matches"
-          }
-        }
-      },
-      "x-piper-backend": "both"
-    },
-    "/api/stop/coordinated": {
-      "x-piper-backend": "managed",
-      "post": {
-        "summary": "Stop arms and hold Pika grippers as two independent attempts",
-        "description": "Runs the arm STOP and the Pika hold concurrently, each with its own bounded attempt; a failure, timeout or block in one never suppresses the other. Admitted during maintenance like /api/stop. With a non-empty device_id the STOP is scoped to that arm and pika_device is required. Without it every arm is stopped and every Pika owned by owner is held; generation and request_id are rejected there.",
+        "summary": "Emergency software stop of arms, or cancel of the caller's own action; persist recovery requirement",
+        "description": "Two intents, reported in the reply as stop_intent. Emergency (no well-formed request_id): never refused without stopping. With no device_id every known arm gets an independent stop attempt, whoever owns the running action; with a known device_id that arm stops even when generation is stale or the owner differs. A request that cannot be tied to one arm (unknown or non-string device_id, or generation/request_id without device_id) stops every arm and is reported as degraded. Cancel (a known device_id with a request_id): the cleanup stop a client sends for its own action. It stops that arm only while owner and request_id still name its current action; otherwise 409, no frame is sent and nothing is latched. The reply lists one result per arm in stops, with stop_scope (device or all), stop_scope_degraded and, when degraded, stop_scope_reason. 200 means the scope was honoured as asked, every frame was delivered and the recovery records were saved; 409 on an emergency means arms were still stopped but something is unverified or the scope was widened: read stops. No motion health check is required. Fast stop can allow damped descent; it is not a power cut or guaranteed hold. Active gripper motion also gets a gripper disable request. Disconnected hardware cannot receive the stop. Inspect physical state before recovery.",
         "requestBody": {
           "required": true,
           "content": {
@@ -354,7 +341,54 @@
                 "properties": {
                   "owner": {
                     "type": "string",
-                    "description": "Dashboard client ID. A session-owned managed host requires its plugin owner."
+                    "description": "Sender ID. Compared only by a cancel (a stop that carries request_id). Never needed for an emergency stop, also on a session-owned managed host."
+                  },
+                  "device_id": {
+                    "type": "string",
+                    "description": "Omitted: emergency stop of every arm. Present: this arm only."
+                  },
+                  "generation": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 4294967295,
+                    "description": "Optional with device_id. A stale value never prevents an emergency stop; it is reported in the reply."
+                  },
+                  "request_id": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "With device_id: makes this a cancel of that action"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Stopped as asked, delivered and saved; read stops"
+          },
+          "409": {
+            "description": "Emergency: arms were stopped but a delivery or save is unverified, or the scope was widened to every arm (stop_scope_degraded). Cancel: the action is no longer current; nothing was sent."
+          }
+        }
+      },
+      "x-piper-backend": "both"
+    },
+    "/api/stop/coordinated": {
+      "x-piper-backend": "managed",
+      "post": {
+        "summary": "Stop arms and hold Pika grippers as two independent attempts",
+        "description": "Runs the arm STOP and the Pika hold concurrently, each with its own bounded attempt; a failure, timeout or block in one never suppresses the other. Admitted during maintenance like /api/stop. With a non-empty device_id the STOP is scoped to that arm and pika_device is required. Without it this is the emergency stop: every arm is stopped and every Pika is held, whoever owns them and whoever asks; owner is not needed, and a plugin-owned host admits it from any authenticated caller. A STOP whose scope cannot be honoured (generation or request_id without device_id, a device_id that is not a string, or an arm without pika_device and without request_id) still stops and holds everything and reports the failed scope (409). A cancel (device_id with request_id) holds only the pika_device it names.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "owner": {
+                    "type": "string",
+                    "description": "Dashboard client ID. Needed only by a scoped stop."
                   },
                   "device_id": {
                     "type": "string",

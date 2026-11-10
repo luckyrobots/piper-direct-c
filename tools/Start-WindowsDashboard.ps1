@@ -8,7 +8,7 @@ $ErrorActionPreference='Stop'
 . (Join-Path $PSScriptRoot 'WindowsDashboardDefaults.ps1')
 $taskRoot=Split-Path $PSScriptRoot -Parent
 $taskHost=Join-Path $taskRoot 'build/publish-windows/Piper.Host.exe'
-$taskUsb=Join-Path $env:ProgramFiles 'usbipd-win/usbipd.exe'
+$taskUsb=Get-PiperUsbipdPath
 $taskStateDir=Join-Path $taskRoot 'data-windows-managed'
 if (!(Test-Path $taskHost) -or !(Test-Path $taskUsb)) { throw 'Build the Windows host and install usbipd-win first. See managed/README.md.' }
 $taskDefaults=Get-PiperDashboardDefaults $taskStateDir
@@ -33,7 +33,7 @@ if($Port -lt 1 -or $Port -gt 65535){throw 'Invalid dashboard port.'}
 # The supervisor mutex and the server's exclusive bind remain authoritative.
 if (Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue | Where-Object {$_.OwningProcess -gt 0}) { throw 'A dashboard is already running on this port.' }
 New-Item -ItemType Directory -Force $taskStateDir | Out-Null
-$taskSupervisorMutex=New-Object Threading.Mutex($false,"Local\LuckyRobotsPiperDashboard.$Port")
+$taskSupervisorMutex=New-Object Threading.Mutex($false,(Get-PiperSupervisorMutexName $Port))
 try { $taskOwnsSupervisor=$taskSupervisorMutex.WaitOne(0) } catch [Threading.AbandonedMutexException] { $taskOwnsSupervisor=$true }
 if (!$taskOwnsSupervisor) { $taskSupervisorMutex.Dispose(); throw 'A dashboard supervisor is already running.' }
 $taskKeepAlive=$null

@@ -68,37 +68,37 @@ internal static class RecoveryHomeUiTests
             pump = Task.Run(async () => { while (!pumping.IsCancellationRequested) { Publish(); await Task.Delay(5, pumping.Token); } });
             await plugin.HandleEventAsync(new("fixture", button, "click",
                 JsonSerializer.SerializeToElement(new { })), CancellationToken.None);
-            long started = Stopwatch.GetTimestamp();
-            Task? recoveryWorker;
-            while ((recoveryWorker = plugin.recoveryOperation?.Worker) is null)
-            {
-                // A run that stops at the reset question may retire before this poll.
-                if (resetPending && plugin.resetCompletionPrompt is not null) { recoveryWorker = Task.CompletedTask; break; }
-                if (Stopwatch.GetElapsedTime(started).TotalSeconds > 3) throw new TimeoutException("Recovery UI event did not start its worker: " + string.Join("; ", errors));
-                await Task.Delay(5);
-            }
+            Task? recoveryWorker = null;
+            // A run that stops at the reset question may retire before this poll.
+            await Eventually(() => (recoveryWorker = plugin.recoveryOperation?.Worker) is not null || resetPending && plugin.resetCompletionPrompt is not null,
+                () => "Recovery UI event did not start its worker: " + string.Join("; ", errors));
+            recoveryWorker ??= Task.CompletedTask;
             if (cancelMove)
             {
-                while (plugin.telemetry.Latest?.State["motion"]?["active"]?.GetValue<bool>() != true)
-                {
-                    if (Stopwatch.GetElapsedTime(started).TotalSeconds > 3) throw new TimeoutException("Recovery did not report its in-flight zero move.");
-                    await Task.Delay(5);
-                }
+                await Eventually(() => plugin.telemetry.Latest?.State["motion"]?["active"]?.GetValue<bool>() == true,
+                    "Recovery did not report its in-flight zero move.");
                 await plugin.HandleEventAsync(new("fixture", cancel, "click", JsonSerializer.SerializeToElement(true)), CancellationToken.None);
             }
-            await recoveryWorker.WaitAsync(TimeSpan.FromSeconds(4));
+            await recoveryWorker.WaitAsync(LivenessLimit);
             if (resetPending)
             {
                 // B1: recovery to zero stops at the operator's reset question.
                 string question = Walk(rendered!).Single(node => node["id"]!.GetValue<string>().EndsWith(".recovery.reset", StringComparison.Ordinal))["id"]!.GetValue<string>();
                 string confirm = Walk(rendered!).Single(node => node["id"]!.GetValue<string>().EndsWith(".recovery.reset.confirm", StringComparison.Ordinal))["id"]!.GetValue<string>();
+                // A patch read from a frame the pump has already replaced is dropped,
+                // as in the plugin's own telemetry loop: publish until one lands.
+                async Task<bool> Published(bool visible)
+                {
+                    await plugin.Update(CancellationToken.None);
+                    return patches?[question]?["visible"]?.GetValue<bool>() == visible;
+                }
+                await Eventually(() => Published(true), () => "Recovery to zero never published the operator's reset question: " + plugin.message);
                 Check(calls.Actions.Count == 0 && plugin.resetCompletionPrompt is not null && plugin.recoveryOperation is null &&
                     patches?[question]?["visible"]?.GetValue<bool>() == true,
                     "Recovery to zero verified a pending reset instead of stopping at the operator's confirmation: " + plugin.message);
                 await plugin.HandleEventAsync(new("fixture", confirm, "click", JsonSerializer.SerializeToElement(true)), CancellationToken.None);
-                started = Stopwatch.GetTimestamp();
-                while (calls.Actions.Count == 0 && Stopwatch.GetElapsedTime(started).TotalSeconds < 3) await Task.Delay(5);
-                await plugin.Update(CancellationToken.None);
+                await Eventually(() => calls.Actions.Count != 0, () => "Confirming the reset question sent nothing: " + string.Join("; ", errors));
+                await Eventually(() => Published(false), () => "Confirming the reset question left it on screen: " + plugin.message);
                 Check(calls.Actions.SequenceEqual(["verify-reset"]) && calls.ResetCompletedAttestations == 1 && plugin.resetCompletionPrompt is null &&
                     patches?[question]?["visible"]?.GetValue<bool>() == false,
                     "Confirming the reset question did not send exactly one attested verify-reset: " + string.Join("; ", errors));

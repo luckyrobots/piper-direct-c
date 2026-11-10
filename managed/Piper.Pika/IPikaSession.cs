@@ -23,7 +23,8 @@ public interface IPikaSession : IAsyncDisposable
     /// <summary>Cheap routing status. Sessions without a cheaper source derive it from <see cref="Snapshot"/>.</summary>
     PikaSessionStatus Status => PikaSessionStatus.From(Snapshot());
 
-    /// <summary>Attempt a hold for this owner, skipping unrelated sessions and reporting unresolved power as unverified.</summary>
-    Task<PikaHoldResult> HoldForOwnerAsync(string owner, CancellationToken cancellation);
+    /// <summary>Emergency hold, whoever owns the session and whoever asks. A session with nothing
+    /// to hold is skipped; unresolved power is reported as unverified.</summary>
+    Task<PikaHoldResult> HoldAsync(CancellationToken cancellation);
     Task<JsonObject> ExecuteAsync(string action, JsonElement input, CancellationToken cancellation);
 }

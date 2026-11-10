@@ -98,12 +98,20 @@ public sealed partial class PipersPlugin
 
     internal void RetireRecovery(RecoveryOperation operation)
     {
-        Debug.Assert(ReferenceEquals(CurrentRecovery, operation));
         // On an interrupted native step, independently stop renewing the exact
         // captured lease even when the best-effort STOP has no acknowledgement.
         if (CommandAuthority.Current.Lease is { } lease && lease.Scope == operation.Scope)
             CommandAuthority.EndLease(lease);
-        Volatile.Write(ref recoveryOperation, null);
+        // Only the operation that owns the slot may clear it. Anything else is a
+        // broken invariant: it must not free the slot under a different recovery,
+        // so every recovery is cancelled and motion permission is withdrawn.
+        if (!ReferenceEquals(Interlocked.CompareExchange(ref recoveryOperation, null, operation), operation))
+        {
+            operation.Cancel();
+            DisarmTelemetryTargets("Recovery bookkeeping mismatch", clearLink: false, forgetApproval: operation.Scope.ProfileId);
+            uiActionError = message = "Recovery state was inconsistent · recovery cancelled and motion permission cleared. Check the robot, then start recovery again.";
+            Trace.TraceError("A recovery operation that does not own the recovery slot was retired.");
+        }
         operation.Dispose();
     }
 }

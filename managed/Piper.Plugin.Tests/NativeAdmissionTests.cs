@@ -8,12 +8,19 @@ internal static class NativeAdmissionTests
 {
     private static IntPtr nativeLibrary;
 
-    // Opt in to the real native DLL, always with simulated:true. The default
-    // suite needs no native runtime and this fixture never opens CAN or serial.
+    // Runs against the real native library, always with simulated:true; this
+    // fixture never opens CAN or serial. Without PIPER_TEST_NATIVE_PATH the suite
+    // is reported as skipped, and PIPER_TEST_REQUIRE_NATIVE=1 (CI) makes that a failure.
     public static async Task Run()
     {
         string? configured = Environment.GetEnvironmentVariable("PIPER_TEST_NATIVE_PATH");
-        if (string.IsNullOrWhiteSpace(configured)) return;
+        if (string.IsNullOrWhiteSpace(configured))
+        {
+            if (Environment.GetEnvironmentVariable("PIPER_TEST_REQUIRE_NATIVE") == "1")
+                throw new InvalidOperationException("PIPER_TEST_REQUIRE_NATIVE=1 but PIPER_TEST_NATIVE_PATH does not name the native library; the native admission checks did not run.");
+            SuiteRunner.Skip("PIPER_TEST_NATIVE_PATH is not set, so the native admission checks did not run");
+            return;
+        }
         string library = Path.GetFullPath(configured);
         if (!Path.IsPathFullyQualified(configured) || !File.Exists(library))
             throw new InvalidOperationException("PIPER_TEST_NATIVE_PATH must name an existing absolute native library path.");
@@ -108,7 +115,7 @@ internal static class NativeAdmissionTests
                     Check(after["selected"]!.GetValue<string>() == before["selected"]!.GetValue<string>() && after["query_active"]?.GetValue<bool>() == false,
                         "A cancelled queued native request mutated adapter selection or started a later query");
                     if (stopFirst)
-                        Check(after["phase"]?.GetValue<string>() == "stopped" && after["message"]!.GetValue<string>().StartsWith("Operator stop.", StringComparison.Ordinal),
+                        Check(after["phase"]?.GetValue<string>() == "stopped" && after["message"]!.GetValue<string>().StartsWith("Operator global stop.", StringComparison.Ordinal),
                             "An old queued request overwrote the native STOP after cancellation");
                 }
                 finally

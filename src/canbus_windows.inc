@@ -87,6 +87,8 @@ double piper_now(void) {
     LARGE_INTEGER ticks,freq; QueryPerformanceCounter(&ticks); QueryPerformanceFrequency(&freq);
     return (double)ticks.QuadPart/(double)freq.QuadPart;
 }
+/* QueryPerformanceCounter cannot fail on supported Windows versions. */
+bool piper_clock_failed(void) { return false; }
 static bool windows_load(void) {
     if (win.dll) return true;
     HMODULE module=NULL; wchar_t path[32768];
@@ -232,6 +234,12 @@ static bool windows_send(struct can_bus *bus,struct can_device *d,const struct c
     struct win_frame frame={.echo=0,.id=f->can_id,.len=f->len}; memcpy(frame.data,f->data,8);
     struct windows_pump_context pump={.bus=bus,.device=d,.generation=d->generation};
     if (win.send_pumped(win.handles[d->fd],&frame,windows_pump_receive,&pump)) return true;
+    /* A failing receive side refuses a pumped send before it reaches the
+       wire. That is right for motion, whose caller then stops, but the STOP
+       frame itself is still attempted once without the pump: its bounded
+       write either reaches the adapter or fails as before. */
+    bool receive_failed=pump.failed&&d->present&&d->up&&d->generation==pump.generation;
+    if (receive_failed&&f->can_id==0x150&&f->data[0]==1&&win.send_pumped(win.handles[d->fd],&frame,NULL,NULL)) return true;
     *os_error=(unsigned)GetLastError(); /* Capture before another transport call. */
     *transport_error=win.last_error(win.handles[d->fd]);
     if (!pump.failed) snprintf(d->problem,sizeof d->problem,"Windows USB-CAN send failed (transport %d, WinUSB %u)",*transport_error,*os_error);
