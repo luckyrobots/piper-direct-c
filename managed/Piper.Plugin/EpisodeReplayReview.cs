@@ -61,11 +61,69 @@ internal sealed record ReplayReview(EpisodeReplayArtifact Artifact, string Profi
         TubeConfirmed && (profile != Profile || current != Scope) ? this with { TubeConfirmed = false } : this;
 }
 
+/// <summary>Owns the Plugin-I state. Part of <see cref="WorkspaceComponent"/>.
+/// <code>
+///   field              written by                                      readers see
+///   review             the UI actor (Unload, Load, SetPath, Advance)    one volatile reference to an
+///                      and the telemetry loop (Advance only)            immutable ReplayReview
+///   path, status,      the UI actor                                    volatile strings
+///   timing status
+/// </code>
+/// The review has two writers on two threads: the UI actor loads, confirms and
+/// rechecks; the telemetry loop withdraws a placement whose controller
+/// connection or profile changed. Every change that depends on the present
+/// value therefore goes through <see cref="Advance"/>, a compare-and-swap that
+/// re-applies the transition when the other writer got in first. So the
+/// telemetry loop cannot bring back a review the operator just unloaded, and a
+/// finishing recheck cannot restore a placement that telemetry withdrew.
+/// The UI actor is whoever holds <c>PipersPlugin.commands</c>.</summary>
+internal sealed class ReplayReviewSession
+{
+    private ReplayReview? review;
+    private volatile string path = "", status = "Load a finished simulation episode to review its physical start.",
+        timingStatus = "Recheck the arm's fresh reported speed and acceleration limits. No fallback acceleration is used.";
+
+    /// <summary>The loaded review; null is Unloaded.</summary>
+    public ReplayReview? Review => Volatile.Read(ref review);
+    public string Path => path;
+    public string Status => status;
+    public string TimingStatus => timingStatus;
+
+    /// <summary>The operator typed another file: whatever was loaded no longer describes it.</summary>
+    public void SetPath(string next)
+    {
+        path = next;
+        Unload();
+    }
+
+    public void Unload() => Volatile.Write(ref review, null);
+
+    /// <summary>A freshly read episode replaces whatever was there.</summary>
+    public void Load(EpisodeReplayArtifact artifact, string profile) => Volatile.Write(ref review, new(artifact, profile));
+
+    /// <summary>Applies a pure transition to the loaded review and returns the
+    /// result, or null when nothing is loaded. The transition may run more than once.</summary>
+    public ReplayReview? Advance(Func<ReplayReview, ReplayReview> transition)
+    {
+        while (true)
+        {
+            var seen = Volatile.Read(ref review);
+            if (seen is null) return null;
+            var next = transition(seen);
+            if (ReferenceEquals(Interlocked.CompareExchange(ref review, next, seen), seen)) return next;
+        }
+    }
+
+    public void Report(string text) => status = text;
+    public void ReportTiming(string text) => timingStatus = text;
+}
+
 public sealed partial class PipersPlugin
 {
-    private string replayPath = "", replayStatus = "Load a finished simulation episode to review its physical start.";
-    internal ReplayReview? replayReview;
-    private string replayTimingStatus = "Recheck the arm's fresh reported speed and acceleration limits. No fallback acceleration is used.";
+    private string replayPath => workspace.Replay.Path;
+    private string replayStatus => workspace.Replay.Status;
+    private ReplayReview? replayReview => workspace.Replay.Review;
+    private string replayTimingStatus => workspace.Replay.TimingStatus;
 
     private Widget ReplayPage()
     {
@@ -127,35 +185,35 @@ public sealed partial class PipersPlugin
             string path = value.GetString() ?? "";
             if (path.Length > 4096 || path.Any(char.IsControl))
                 throw new InvalidOperationException("Enter a valid bounded local JSON path.");
-            replayPath = path;
-            replayReview = null;
-            replayTimingStatus = "Load and recheck fresh reported speed and acceleration limits.";
-            replayStatus = "Path changed; load the trajectory before reviewing it.";
+            workspace.Replay.SetPath(path);
+            workspace.Replay.ReportTiming("Load and recheck fresh reported speed and acceleration limits.");
+            workspace.Replay.Report("Path changed; load the trajectory before reviewing it.");
         }
         else if (action == "load")
         {
-            replayReview = null;
-            replayTimingStatus = "Recheck fresh reported speed and acceleration limits; no timing changes have been applied.";
+            workspace.Replay.Unload();
+            workspace.Replay.ReportTiming("Recheck fresh reported speed and acceleration limits; no timing changes have been applied.");
             try
             {
                 var artifact = await ReadReplayFile(replayPath, cancellation);
-                replayReview = new(artifact, ActiveProfile.Id);
-                replayStatus = artifact.HasPositionCommands
+                workspace.Replay.Load(artifact, ActiveProfile.Id);
+                workspace.Replay.Report(artifact.HasPositionCommands
                     ? "Version 2 position commands loaded. Place the real tube at the saved start, then recheck the measured start pose."
-                    : "Version 1 observations loaded for review only; physical replay requires a version 2 command export.";
+                    : "Version 1 observations loaded for review only; physical replay requires a version 2 command export.");
             }
             catch (Exception error) when (error is IOException or UnauthorizedAccessException or ArgumentException or InvalidOperationException or NotSupportedException)
             {
-                replayStatus = "Could not load trajectory: " + error.Message;
+                workspace.Replay.Report("Could not load trajectory: " + error.Message);
             }
         }
         else if (action == "placement.confirm")
         {
-            if (replayReview is not { } review || review.Profile != ActiveProfile.Id)
+            if (replayReview?.Profile != ActiveProfile.Id)
                 throw new InvalidOperationException("Load the episode for this robot profile before confirming tube placement.");
             var device = Device();
-            replayReview = review.Confirmed(new(token, device["id"]!.GetValue<string>(), device["generation"]!.GetValue<long>()));
-            replayStatus = "Tube placement confirmed by you. Recheck the real arm against the first recorded pose.";
+            var scope = new ReplayCheckScope(token, device["id"]!.GetValue<string>(), device["generation"]!.GetValue<long>());
+            workspace.Replay.Advance(loaded => loaded.Confirmed(scope));
+            workspace.Replay.Report("Tube placement confirmed by you. Recheck the real arm against the first recorded pose.");
         }
         else if (action == "recheck")
         {
@@ -165,8 +223,8 @@ public sealed partial class PipersPlugin
             }
             catch (Exception error) when (error is InvalidOperationException or PluginRequestException)
             {
-                replayReview = replayReview?.Loaded();
-                replayStatus = "Recheck incomplete: " + error.Message;
+                workspace.Replay.Advance(loaded => loaded.Loaded());
+                workspace.Replay.Report("Recheck incomplete: " + error.Message);
             }
         }
         else if (action == "start")
@@ -178,10 +236,12 @@ public sealed partial class PipersPlugin
 
     private async Task RecheckReplay(CancellationToken cancellation)
     {
-        replayTimingStatus = "Waiting for fresh reported speed and acceleration limits; no timing changes have been applied.";
-        var review = replayReview ?? throw new InvalidOperationException("Load a finished simulation episode first.");
+        workspace.Replay.ReportTiming("Waiting for fresh reported speed and acceleration limits; no timing changes have been applied.");
+        // A review loaded for another robot starts over for this one.
+        string profile = ActiveProfile.Id;
+        var review = workspace.Replay.Advance(loaded => loaded.Profile == profile ? loaded : (loaded with { Profile = profile }).Loaded())
+            ?? throw new InvalidOperationException("Load a finished simulation episode first.");
         var artifact = review.Artifact;
-        if (review.Profile != ActiveProfile.Id) replayReview = review = (review with { Profile = ActiveProfile.Id }).Loaded();
         string expectedToken = token;
         var initialDevice = Device(expectedToken: expectedToken);
         string deviceId = initialDevice["id"]!.GetValue<string>();
@@ -195,10 +255,10 @@ public sealed partial class PipersPlugin
         var limits = EpisodeReplayReportedLimits.Read(joints);
         var timing = artifact.HasPositionCommands ? EpisodeReplayPlanner.AssessJointTiming(artifact, limits) : null;
         double requiredScale = timing?.RequiredTimeScale ?? 1;
-        replayTimingStatus = timing is null ? "Version 1 has no position commands; physical timing cannot be assessed."
+        workspace.Replay.ReportTiming(timing is null ? "Version 1 has no position commands; physical timing cannot be assessed."
             : $"Last joint timing check: speed requires {timing.SpeedTimeScale:F3}×; sampled acceleration requires {timing.AccelerationTimeScale:F3}×. " +
               (requiredScale > 1 ? $"Replay needs at least {requiredScale:F3}× slower timing. No scaling applied. " : "Command intervals fit fresh reported joint caps. ") +
-              "Gripper timing and instantaneous controller response are not certified; playback remains disabled.";
+              "Gripper timing and instantaneous controller response are not certified; playback remains disabled.");
         bool poseMatches = true;
         bool firstCommandMatches = true;
         for (int i = 0; i < 6; i++)
@@ -217,18 +277,19 @@ public sealed partial class PipersPlugin
         poseMatches &= Math.Abs(opening - artifact.Samples[0].GripperOpeningMm) <= 1;
         if (artifact.HasPositionCommands)
             firstCommandMatches &= Math.Abs(artifact.Samples[0].CommandedGripperOpeningMm!.Value - artifact.Samples[0].GripperOpeningMm) <= 1;
-        replayReview = review.Rechecked(new(expectedToken, deviceId, generation));
-        replayStatus = "Last recheck: Edit context and reported joint ranges checked. " + (poseMatches ? "First pose matched within 0.5° / 1 mm. " : "First pose differed; align it separately. ") +
+        var checkedScope = new ReplayCheckScope(expectedToken, deviceId, generation);
+        workspace.Replay.Advance(loaded => loaded.Rechecked(checkedScope));
+        workspace.Replay.Report("Last recheck: Edit context and reported joint ranges checked. " + (poseMatches ? "First pose matched within 0.5° / 1 mm. " : "First pose differed; align it separately. ") +
             (!artifact.HasPositionCommands ? "Version 1 is observations-only and cannot be replayed as actions. " : requiredScale > 1 ? $"Command speed/acceleration requires at least {requiredScale:F3}× slower playback; no scaling applied. " : "Command interval speed/acceleration fits reported joint limits. ") +
             (!firstCommandMatches ? "The first command differs from the measured source start; physical planning is blocked at default tolerances. " : "") +
-            "Physical playback remains unavailable; no commands sent.";
+            "Physical playback remains unavailable; no commands sent.");
     }
 
     /// <summary>A confirmed tube placement belongs to the profile and controller
     /// connection it was confirmed on. Called from telemetry maintenance, never render.</summary>
     private void ObserveReplayScope(TelemetryReceipt? receipt)
     {
-        if (replayReview is not { TubeConfirmed: true } review) return;
+        if (replayReview is not { TubeConfirmed: true }) return;
         ReplayCheckScope? current = null;
         if (receipt is not null)
             try
@@ -237,7 +298,8 @@ public sealed partial class PipersPlugin
                 current = new(token, device["id"]!.GetValue<string>(), device["generation"]!.GetValue<long>());
             }
             catch (InvalidOperationException) { }
-        replayReview = review.Observe(ActiveProfile.Id, current);
+        string profile = ActiveProfile.Id;
+        workspace.Replay.Advance(loaded => loaded.Observe(profile, current));
     }
 
     private void AddReplayPatches(Dictionary<string, JsonObject> patches, JsonObject? device)

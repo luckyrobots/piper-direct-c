@@ -125,11 +125,11 @@ public sealed partial class PipersPlugin
         var bindings = new Dictionary<string, SimulationCameraPreferences>(preferences.SimulationCameras ?? []);
         if (action == "simselect")
         {
-            var view = Volatile.Read(ref publishedWorkspaceView);
+            var view = workspace.Confirmed(CurrentWorkspaceViewContext);
             var inventory = simulationCameras;
             int selection = value.GetInt32();
             const string changed = "Simulation cameras changed. Click Refresh cameras and select the counterpart again.";
-            if (view is null || Volatile.Read(ref workspacePublicationUncertain) != 0 || view.Context != CurrentWorkspaceViewContext ||
+            if (view is null ||
                 view.Context is not { Page: WorkspacePage.Settings, SettingsCategory: SettingsCategory.Cameras } || view.Context.SettingsCamera != camera ||
                 wireId != WorkspaceEventScope.Wrap(view.Epoch, view.Context.Profile, "camera." + camera + ".simselect") ||
                 view.CameraChoices.SceneId != (inventory?["sceneId"]?.GetValue<string>() ?? "") ||

@@ -43,7 +43,7 @@ public sealed partial class PipersPlugin
 {
     internal async Task ResumeControls(CancellationToken cancellation)
     {
-        if (primaryAction.Phase != PrimaryActionPhase.Running)
+        if (workspace.PrimaryAction.Current.Phase != PrimaryActionPhase.Running)
             throw new InvalidOperationException("Resume controls runs only as the primary robot action. Nothing was sent; click Resume controls again.");
         string expectedProfile = ActiveProfile.Id, expectedToken = token;
         long expectedPermission = CommandAuthority.Epoch;
@@ -59,7 +59,7 @@ public sealed partial class PipersPlugin
             return Device(expectedDevice, expectedGeneration, expectedToken);
         }
 
-        primaryAction = primaryAction with { Phase = PrimaryActionPhase.ResumingControls };
+        workspace.PrimaryAction.EnterResume();
         approved = linkCommandsEnabled = false;
         teachingSession.InvalidateReturn();
         try
@@ -144,6 +144,6 @@ public sealed partial class PipersPlugin
             });
             message = "Controls restored · holding this pose · previous movement discarded";
         }
-        finally { primaryAction = primaryAction with { Phase = PrimaryActionPhase.Running }; }
+        finally { workspace.PrimaryAction.LeaveResume(); }
     }
 }

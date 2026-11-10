@@ -183,7 +183,7 @@ internal static class MeasuredTrackingTests
         {
             if (plugin.telemetry.Pika.Attempt?.Worker is { } worker) await worker.WaitAsync(TimeSpan.FromSeconds(1));
         }
-        public Task LinkEvent() => plugin.HandleEventAsync(new("fixture", WorkspaceEventScope.Wrap(plugin.workspaceViewEpoch, Profile.Id, "link"),
+        public Task LinkEvent() => plugin.HandleEventAsync(new("fixture", WorkspaceEventScope.Wrap(plugin.workspace.Epoch, Profile.Id, "link"),
             "click", JsonSerializer.SerializeToElement(true)), default);
 
         public Fixture(bool started = false)

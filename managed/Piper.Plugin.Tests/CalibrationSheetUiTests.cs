@@ -53,7 +53,7 @@ internal static class CalibrationSheetUiTests
                     return Task.FromResult(JsonSerializer.SerializeToElement(result));
                 }));
         plugin.preferences = prefs; plugin.engine = context; plugin.telemetry.PublishState(state); plugin.telemetry.AdoptBackend("fixture-session");
-        plugin.calibrationProfile = "piper-1"; plugin.wizardProfile = "piper-1"; plugin.Navigation = WorkspaceNavigation.Calibration;
+        plugin.calibrationProfile = "piper-1"; plugin.wizardProfile = "piper-1"; plugin.workspace.Commit(WorkspaceNavigation.Calibration);
         plugin.link = new RobotLink("scene-a", "robot-a", joints, device);
         plugin.telemetry.Publish(new(state, "fixture-session", 1, Stopwatch.GetTimestamp(), 0));
         var draft = CalibrationWizardFlow.New("piper-1", 10) with { Step = CalibrationWizardStep.DeskBack, ModelAssetId = "asset-a", ModelRevision = "revision-a" };
@@ -67,7 +67,7 @@ internal static class CalibrationSheetUiTests
         try
         {
             await plugin.Render(CancellationToken.None);
-            long page = plugin.workspaceViewEpoch, sheet = plugin.calibrationWizard.Epoch;
+            long page = plugin.workspace.Epoch, sheet = plugin.calibrationWizard.Epoch;
             void Fresh() => plugin.telemetry.Publish(new(state, "fixture-session", 1, Stopwatch.GetTimestamp(), 0));
             async Task Click(string action)
             {
@@ -84,7 +84,7 @@ internal static class CalibrationSheetUiTests
                 "Jaw-tip confirmation was available before its marker was acknowledged");
             int beforeViews = views;
             await Click("tool.show");
-            Check(plugin.workspaceViewEpoch == page && plugin.calibrationWizard.Epoch == sheet && views == beforeViews,
+            Check(plugin.workspace.Epoch == page && plugin.calibrationWizard.Epoch == sheet && views == beforeViews,
                 "Showing jaw tips rebuilt the calibration page or invalidated the next visible button ID");
             Check(plugin.wizardMarker is MarkerState.Tool, "Showing jaw tips did not retain its confirmation scope");
             await plugin.MaintainWizardHighlight(CancellationToken.None);
@@ -108,7 +108,7 @@ internal static class CalibrationSheetUiTests
                 "Invalid precision zero reached capture despite the visible capture gate");
             // Error feedback must retain the same page, so correcting an input
             // does not require the operator to discover fresh button IDs.
-            Check(plugin.workspaceViewEpoch == page, "A rejected capture rebuilt the page and invalidated visible controls");
+            Check(plugin.workspace.Epoch == page, "A rejected capture rebuilt the page and invalidated visible controls");
             plugin.calibrationWizard.Answers["precision"] = "5";
             plugin.calibrationWizard = plugin.calibrationWizard with { Setup = plugin.calibrationWizard.Setup with { LeftProof = "stale-proof" } };
             await Patches();

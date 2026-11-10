@@ -92,7 +92,7 @@ internal static class BrokenInvariantTests
             Check(plugin.recoveryOperation is null && plugin.uiActionError.Length == 0, "An ordinary recovery retirement reported a fault or kept the slot");
 
             string resume = await Refusal(() => plugin.ResumeControls(CancellationToken.None));
-            Check(resume.Contains("primary robot action", StringComparison.Ordinal) && rpc.Routes.IsEmpty && plugin.primaryAction.Phase == PrimaryActionPhase.Idle,
+            Check(resume.Contains("primary robot action", StringComparison.Ordinal) && rpc.Routes.IsEmpty && plugin.workspace.PrimaryAction.Current.Phase == PrimaryActionPhase.Idle,
                 "Resume controls ran outside the primary robot action: " + resume);
 
             plugin.SetHeightPhase(PipersPlugin.HeightCheckPhase.Live);

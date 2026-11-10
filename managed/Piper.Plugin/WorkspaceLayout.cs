@@ -82,9 +82,9 @@ public sealed partial class PipersPlugin
             SettingsCategory.Diagnostics => Widget.Column("global.diagnostics", SettingsRobotPicker("diagnostics"),
                 Widget.Label("workspace.power", "Power unavailable") with { Appearance = "numeric" }, Widget.Label("link.status", "") with { Height = 50 },
                 Widget.Label("pika.monitor", telemetry.Pika.Status) with { Height = 42 }, BackendSetup(),
-                Widget.Button("workspace.connection-details", connectionDetailsOpen ? "Hide advanced controller actions" : "Advanced controller actions") with { Appearance = "quiet" },
+                Widget.Button("workspace.connection-details", workspace.ConnectionDetailsOpen ? "Hide advanced controller actions" : "Advanced controller actions") with { Appearance = "quiet" },
                 Widget.Column("global.advanced", Widget.Button("recovery.run", "Verify controller state"),
-                    Widget.Label("profiles.can.status", "") with { Height = 42 }, PikaReferenceControls()) with { Visible = connectionDetailsOpen }),
+                    Widget.Label("profiles.can.status", "") with { Height = 42 }, PikaReferenceControls()) with { Visible = workspace.ConnectionDetailsOpen }),
             _ => GlobalRobotsSettings()
         };
         Widget Category(SettingsCategory category, string id, string text) => Widget.Button("workspace.settings." + id, text) with { Appearance = Navigation.Category == category ? "selected" : "quiet" };

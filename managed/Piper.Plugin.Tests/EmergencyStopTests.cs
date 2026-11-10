@@ -15,7 +15,7 @@ internal static class EmergencyStopTests
         {
             using var fixture = new Fixture();
             await fixture.Plugin.Render(CancellationToken.None);
-            string Wire(string action) => WorkspaceEventScope.Wrap(fixture.Plugin.workspaceViewEpoch, "piper-1", action);
+            string Wire(string action) => WorkspaceEventScope.Wrap(fixture.Plugin.workspace.Epoch, "piper-1", action);
             await fixture.Event(Wire("safety.accept"), default);
             Check(!fixture.Plugin.approved && fixture.Rpc.Routes.IsEmpty,
                 "An Enable acknowledgement without a presented prompt reached the hardware transport");
@@ -227,7 +227,7 @@ internal static class EmergencyStopTests
             using var fixture = new Fixture();
             fixture.Rpc.DelayConnect = true;
             await fixture.Plugin.Render(CancellationToken.None);
-            string Wire(string action) => WorkspaceEventScope.Wrap(fixture.Plugin.workspaceViewEpoch, "piper-1", action);
+            string Wire(string action) => WorkspaceEventScope.Wrap(fixture.Plugin.workspace.Epoch, "piper-1", action);
             await fixture.Event(Wire("enable"), default);
             Task accept = fixture.Event(Wire("safety.accept"), default);
             try
@@ -357,7 +357,7 @@ internal static class EmergencyStopTests
         using (var fixture = new Fixture())
         {
             await fixture.Plugin.Render(CancellationToken.None);
-            var gate = fixture.Plugin.workspacePublicationGate;
+            var gate = fixture.Plugin.workspace.PublicationGate;
             await gate.WaitAsync();
             try
             {

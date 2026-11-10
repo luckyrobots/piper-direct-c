@@ -394,7 +394,7 @@ internal static partial class SimulationFollowingTests
         public Task Click(string id)
         {
             Refresh();
-            string wireId = WorkspaceEventScope.Wrap(plugin.workspaceViewEpoch, "piper-1", id);
+            string wireId = WorkspaceEventScope.Wrap(plugin.workspace.Epoch, "piper-1", id);
             return plugin.HandleEventAsync(new("fixture", wireId, "click", JsonSerializer.SerializeToElement(true)), CancellationToken.None);
         }
         public void SetDetail(string detail) => plugin.groupFollowDetail = detail;

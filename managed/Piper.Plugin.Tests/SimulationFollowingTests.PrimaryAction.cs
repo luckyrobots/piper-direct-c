@@ -67,9 +67,9 @@ internal static partial class SimulationFollowingTests
             }
             await confirmed.Click("safety.accept");
             var result = await WaitPrimary(confirmed, failConfirmation ? "failed" : "complete", initial["id"]!.GetValue<string>());
-            Check(confirmed.Plugin.primaryAction.Phase == PrimaryActionPhase.Idle && (failConfirmation
-                ? !confirmed.Plugin.approved && confirmed.Plugin.primaryAction.Status.StartsWith("Could not start:", StringComparison.Ordinal) && result["failure"]!.GetValue<string>().Contains("hand guiding", StringComparison.OrdinalIgnoreCase)
-                : confirmed.Plugin.primaryAction.Status.Length == 0 && result["failure"] is null && confirmed.Plugin.message.StartsWith("Ready ·", StringComparison.Ordinal)),
+            Check(confirmed.Plugin.workspace.PrimaryAction.Current.Phase == PrimaryActionPhase.Idle && (failConfirmation
+                ? !confirmed.Plugin.approved && confirmed.Plugin.workspace.PrimaryAction.Current.Status.StartsWith("Could not start:", StringComparison.Ordinal) && result["failure"]!.GetValue<string>().Contains("hand guiding", StringComparison.OrdinalIgnoreCase)
+                : confirmed.Plugin.workspace.PrimaryAction.Current.Status.Length == 0 && result["failure"] is null && confirmed.Plugin.message.StartsWith("Ready ·", StringComparison.Ordinal)),
                 "Safety confirmation did not complete its shared progress/failure lifecycle");
             Check(confirmed.Session is null && !confirmed.EngineRequests.Any(r => r.Action == "prepare-start") && confirmed.Rpc.Requests.IsEmpty,
                 "Safety confirmation of an already enabled arm silently started following or sent a physical request");
@@ -80,7 +80,7 @@ internal static partial class SimulationFollowingTests
             long began = Stopwatch.GetTimestamp();
             while (true)
             {
-                if (fixture.Plugin.primaryAction.Phase == PrimaryActionPhase.Idle && File.Exists(fixture.PrimaryReceipt))
+                if (fixture.Plugin.workspace.PrimaryAction.Current.Phase == PrimaryActionPhase.Idle && File.Exists(fixture.PrimaryReceipt))
                 {
                     var receipt = JsonNode.Parse(await File.ReadAllTextAsync(fixture.PrimaryReceipt))!.AsObject();
                     if (receipt["stage"]?.GetValue<string>() == stage && receipt["id"]?.GetValue<string>() != previousId) return receipt;
