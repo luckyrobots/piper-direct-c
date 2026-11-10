@@ -68,7 +68,7 @@ internal sealed class SheetWizard
     });
 
     /// <summary>Changes the setup confirmations.</summary>
-    public void ChangeSetup(Func<SheetSetup, SheetSetup> change) => Edit(draft => draft with { Setup = change(draft.Setup) });
+    public void ChangeSetup(Func<SheetSetup, SheetSetup> change) => Edit(draft => change(draft.Setup) is { } setup && setup != draft.Setup ? draft with { Setup = setup } : draft);
 
     /// <summary>The line of feedback under the sheet's actions.</summary>
     public void Report(string message) => Change(current => current with { Message = message });
