@@ -61,7 +61,10 @@ using (var absent = System.Text.Json.JsonDocument.Parse("{}"))
 {
     Check(LuckyRobots.Piper.SessionOwnerGuard.Allows("", "/api/command", absent.RootElement), "External server behavior changed");
     Check(LuckyRobots.Piper.SessionOwnerGuard.Allows("plugin-session", "/api/query", other.RootElement), "Readback query unnecessarily blocked");
-    foreach (string route in new[] { "/api/command", "/api/stop", "/api/reconnect", "/api/pika/connect", "/api/pika/configure", "/api/shutdown" })
+    foreach (string route in new[] { "/api/stop", "/api/stop/coordinated" })
+        Check(LuckyRobots.Piper.SessionOwnerGuard.Allows("plugin-session", route, other.RootElement) &&
+            LuckyRobots.Piper.SessionOwnerGuard.Allows("plugin-session", route, absent.RootElement), "Session guard refused an emergency " + route);
+    foreach (string route in new[] { "/api/command", "/api/reconnect", "/api/pika/connect", "/api/pika/configure", "/api/shutdown" })
     {
         Check(LuckyRobots.Piper.SessionOwnerGuard.Allows("plugin-session", route, authorized.RootElement), "Owner rejected for " + route);
         Check(!LuckyRobots.Piper.SessionOwnerGuard.Allows("plugin-session", route, other.RootElement), "Another client acquired session for " + route);

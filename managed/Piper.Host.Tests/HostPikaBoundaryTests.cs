@@ -74,10 +74,11 @@ internal static class HostPikaBoundaryTests
             Check(rejected.Status == 409 && rejected.Error == "Finish active arm movements before changing Pika assignment" &&
                 registry.Snapshot()["device"]?.GetValue<string>() == first && !agents.ContainsKey(replacement),
                 "Pika configuration committed after an arm started moving.");
-            var stopped = await Send(HostRoutes.CoordinatedStop, new { owner });
+            // The emergency STOP names nobody: a caller who owns nothing still holds the gripper.
+            var stopped = await Send(HostRoutes.CoordinatedStop, new { owner = Guid.NewGuid().ToString() });
             Check(stopped.Status == 200 && stopped.Payload is CoordinatedStopResult { Ok: true } &&
                 agents[peer].Actions.Count(action => action == "hold") == 1 && !agents[first].Actions.Contains("hold"),
-                "Coordinated STOP after denied configuration did not hold only the owned gripper.");
+                "Coordinated STOP after denied configuration did not hold exactly the connected gripper.");
 
             var accepted = await Send("/api/pika/configure", new { owner, device = alias });
             Check(accepted.Status == 200 && registry.Snapshot()["device"]?.GetValue<string>() == replacement &&
@@ -224,9 +225,9 @@ internal static class HostPikaBoundaryTests
             return Task.FromResult(new JsonObject { ["ok"] = true });
         }
 
-        public Task<PikaHoldResult> HoldForOwnerAsync(string requestedOwner, CancellationToken cancellation)
+        public Task<PikaHoldResult> HoldAsync(CancellationToken cancellation)
         {
-            if (owner != requestedOwner) return Task.FromResult(new PikaHoldResult(PikaHoldOutcome.Skipped));
+            if (owner is null) return Task.FromResult(new PikaHoldResult(PikaHoldOutcome.Skipped));
             Actions.Add("hold");
             return Task.FromResult(new PikaHoldResult(PikaHoldOutcome.Acknowledged));
         }

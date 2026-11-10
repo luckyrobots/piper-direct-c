@@ -137,7 +137,7 @@ internal sealed class HostControlDispatcher(ControllerService controller, PikaSe
     private Task<CoordinatedStopResult> CoordinatedStopAsync(JsonElement input)
     {
         // Clone the payload: request cancellation/disposal must not terminate the
-        // second stop attempt. Existing owner/device/generation guards still apply.
+        // second stop attempt. A scoped stop keeps its device/generation/owner guards.
         JsonElement command = input.Clone();
         string body = command.GetRawText();
         return CoordinatedStop.RunAsync(
@@ -157,14 +157,10 @@ internal sealed class HostControlDispatcher(ControllerService controller, PikaSe
                 if (scoped && (!command.TryGetProperty("pika_device", out var gripper) ||
                     gripper.ValueKind != JsonValueKind.String || string.IsNullOrWhiteSpace(gripper.GetString())))
                     return new(false, "A scoped STOP requires an explicit pika_device to verify the gripper hold.");
-                // SessionOwnerGuard admits a missing owner on an unowned host.
-                // An unscoped hold still needs one to find the owned grippers.
-                string? owner = command.TryGetProperty("owner", out var ownerValue) && ownerValue.ValueKind == JsonValueKind.String
-                    ? ownerValue.GetString() : null;
-                if (!scoped && !Guid.TryParse(owner, out _))
-                    return new(false, "Pika hold unverified: an unscoped STOP requires the dashboard owner ID.");
+                // An unscoped STOP is the emergency stop: every gripper holds,
+                // whoever owns it and whoever asks. A scoped one names its own.
                 var result = scoped ? await pika.ExecuteAsync("hold", command, cancellation) :
-                    await pika.HoldOwnedAsync(owner!, cancellation);
+                    await pika.HoldAllAsync(cancellation);
                 return new(result["ok"]?.GetValue<bool>() == true,
                     result["message"]?.GetValue<string>() ?? "Pika hold command acknowledged.");
             });

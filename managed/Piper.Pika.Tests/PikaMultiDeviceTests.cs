@@ -110,23 +110,26 @@ internal static class PikaMultiDeviceTests
             await stopRegistry.ExecuteAsync("connect", Input(path, ownerA), default);
             await stopRegistry.ExecuteAsync("enable", Input(path, ownerA), default);
         }
-        var held = await stopRegistry.HoldOwnedAsync(ownerA, default);
+        // The emergency hold names no owner: every gripper holds, whoever asks.
+        var held = await stopRegistry.HoldAllAsync(default);
         Check(held["ok"]!.GetValue<bool>() && stopAgents.Values.All(s => s.Actions.Count(x => x == "hold") == 1),
-            "Global coordinated hold skipped an owned gripper");
+            "Global coordinated hold skipped a gripper");
         stopAgents[a].FailHold = true;
-        var failedHold = await stopRegistry.HoldOwnedAsync(ownerA, default);
+        var failedHold = await stopRegistry.HoldAllAsync(default);
         Check(!failedHold["ok"]!.GetValue<bool>() && stopAgents[b].Actions.Count(x => x == "hold") == 2,
             "One failed Pika hold prevented the other independent hold attempt");
-        int actionsBefore = stopAgents.Values.Sum(s => s.Actions.Count);
-        Check((await stopRegistry.HoldOwnedAsync(ownerB, default))["ok"]!.GetValue<bool>() && stopAgents.Values.Sum(s => s.Actions.Count) == actionsBefore,
-            "Global hold changed another owner's grippers");
+        stopAgents[a].FailHold = false;
+        stopAgents[b].Owner = ownerB;
+        Check((await stopRegistry.HoldAllAsync(default))["ok"]!.GetValue<bool>() &&
+            stopAgents.Values.All(s => s.Actions.Count(x => x == "hold") == 3),
+            "Global hold skipped a gripper because another client owns it");
         var uncertain = new Session(a, Distro) { UnresolvedOwner = ownerA };
         var independent = new Session(b, Distro) { Owner = ownerA };
         await using var uncertainRegistry = new PikaSessionRegistry(a, "unused", Distro, discovery: discovery,
             factory: (path, _) => path == a ? uncertain : independent);
         foreach (string path in new[] { a, b })
             await uncertainRegistry.ConfigureAsync(JsonSerializer.SerializeToElement(new { owner = ownerA, pika_device = path, device = path }), default, Commit);
-        var uncertainStop = await uncertainRegistry.HoldOwnedAsync(ownerA, default);
+        var uncertainStop = await uncertainRegistry.HoldAllAsync(default);
         var outcomes = uncertainStop["sessions"]!.AsArray().ToDictionary(result => result!["device"]!.GetValue<string>());
         Check(uncertainStop["ok"]?.GetValue<bool>() == false && outcomes.Count == 2 &&
             outcomes[a]!["ok"]?.GetValue<bool>() == false && outcomes[b]!["ok"]?.GetValue<bool>() == true &&
@@ -360,10 +363,10 @@ internal static class PikaMultiDeviceTests
             result["configuration_blocked"] = Owner is not null || State["power_uncertain"]?.GetValue<bool>() == true;
             return result;
         }
-        public Task<PikaHoldResult> HoldForOwnerAsync(string owner, CancellationToken cancellation)
+        public Task<PikaHoldResult> HoldAsync(CancellationToken cancellation)
         {
-            if (Owner != owner)
-                return Task.FromResult(UnresolvedOwner == owner
+            if (Owner is null)
+                return Task.FromResult(UnresolvedOwner is not null
                     ? new PikaHoldResult(PikaHoldOutcome.Unverified, "Fixture power is unverified.")
                     : new PikaHoldResult(PikaHoldOutcome.Skipped));
             Actions.Add("hold");

@@ -86,6 +86,13 @@ internal static class MultiRobotHostIntegrationTests
                     throw new Exception("A foreign caller acquired a lane or an adapter changed its owner-error response");
             }
             if (!JsonNode.DeepEquals((await Read())["selected"], state["selected"])) throw new Exception("Denied owner changed the selected lane");
+            // STOP acquires nothing: the session guard never refuses it, on either route or transport.
+            foreach (bool grpc in new[] { false, true })
+                foreach (string route in new[] { "/api/stop", "/api/stop/coordinated" })
+                {
+                    var foreignStop = await Send(route, new(), grpc, foreign);
+                    if (foreignStop.Status != 200) throw new Exception($"A foreign caller's emergency STOP was refused on {route}: {foreignStop.Body}");
+                }
             foreach (string id in generations.Keys) {
                 var result = await Send("/api/query", Identity(id), id == "simulation:2");
                 if (result.Status != 202) throw new Exception("Device query rejected: " + result.Body);

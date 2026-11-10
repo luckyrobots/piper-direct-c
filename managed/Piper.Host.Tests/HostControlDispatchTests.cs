@@ -56,14 +56,14 @@ internal static class HostControlDispatchTests
             stopped.Body["arm"]?["ok"]?.GetValue<bool>() == true && stopped.Body["pika"]?["ok"]?.GetValue<bool>() == true,
             "HTTP coordinated STOP lost an independent simulated channel outcome");
         var ownerless = await Post("/api/stop/coordinated", "{}");
-        Check(ownerless.Status == HttpStatusCode.Conflict && ownerless.Body["arm"]?["ok"]?.GetValue<bool>() == true &&
-            ownerless.Body["pika"]?["message"]?.GetValue<string>() == "Pika hold unverified: an unscoped STOP requires the dashboard owner ID.",
-            "Ownerless coordinated STOP blocked the arm or hid the missing owner behind an internal error");
+        Check(ownerless.Status == HttpStatusCode.OK && ownerless.Body["arm"]?["ok"]?.GetValue<bool>() == true &&
+            ownerless.Body["pika"]?["ok"]?.GetValue<bool>() == true,
+            "An emergency coordinated STOP that names nobody was refused: " + ownerless.Body);
         var emptyScope = JsonNode.Parse(owner)!.AsObject();
         emptyScope["device_id"] = "";
         var empty = await Execute("/api/stop/coordinated", emptyScope.ToJsonString());
         Check(empty.Status == 200 && JsonNode.Parse(empty.Json)?["pika"]?["ok"]?.GetValue<bool>() == true,
-            "An empty legacy arm selector stopped all arms but did not hold all owned Pikas");
+            "An empty legacy arm selector stopped all arms but did not hold all Pikas");
         emptyScope["generation"] = device["generation"]?.DeepClone();
         var staleScope = await Post("/api/stop/coordinated", emptyScope.ToJsonString());
         Check(staleScope.Status == HttpStatusCode.Conflict && staleScope.Body["arm"]?["ok"]?.GetValue<bool>() == false &&

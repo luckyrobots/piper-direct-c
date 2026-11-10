@@ -133,36 +133,35 @@ public sealed class PikaProcessService : IPikaSession
 
     internal PikaAgentPhase Phase { get { lock (stateGate) return slot.Phase; } }
 
-    public async Task<PikaHoldResult> HoldForOwnerAsync(string requestedOwner, CancellationToken cancellation)
+    public async Task<PikaHoldResult> HoldAsync(CancellationToken cancellation)
     {
-        if (!Guid.TryParse(requestedOwner, out _)) throw new ArgumentException("A dashboard Pika owner ID is required");
-        const string noLiveSession = "Pika power is unverified and this owner has no live session to hold.";
+        const string noLiveSession = "Pika power is unverified and there is no live session to hold.";
         const string retiring = "Pika agent is retiring: closing its input makes it disable the gripper; its exit is not yet confirmed.";
-        Process? agent;
+        Process agent; string owner;
         lock (stateGate)
         {
-            // Skip unrelated devices without waiting for their operations. Pin
-            // the matching process so a queued STOP cannot reach its replacement.
-            agent = Attached is { } current && current.Owner == requestedOwner ? current.Agent.Process : null;
             // A faulted or closing agent cannot take a hold: its retirement
             // (EOF, bounded wait, tree kill) owns the operation gate, and a hold
             // queued behind it would only time out. Report that retirement,
             // still unverified, instead of waiting for it.
-            bool retiringAgent = slot is FaultedSlot or ClosingSlot && Owner == requestedOwner;
-            if (agent is null)
-                return UnresolvedOwner == requestedOwner
-                    ? new(PikaHoldOutcome.Unverified, retiringAgent ? retiring : noLiveSession)
-                    : new(PikaHoldOutcome.Skipped);
+            bool retiringAgent = slot is FaultedSlot or ClosingSlot;
+            // Nothing attached and no unresolved power: nothing to hold. Pin
+            // the attached process so a queued STOP cannot reach its replacement.
+            if (Attached is not { } current)
+                return UnresolvedOwner is null ? new(PikaHoldOutcome.Skipped)
+                    : new(PikaHoldOutcome.Unverified, retiringAgent ? retiring : noLiveSession);
             if (retiringAgent) return new(PikaHoldOutcome.Unverified, retiring);
+            (owner, agent) = (current.Owner, current.Agent.Process);
         }
 
         await operations.WaitAsync(cancellation);
         try
         {
             bool live;
-            lock (stateGate) live = IsAttached(agent) && Owner == requestedOwner && slot is not FaultedSlot && !agent.HasExited;
+            lock (stateGate) live = IsAttached(agent) && Owner == owner && slot is not FaultedSlot && !agent.HasExited;
             if (!live) return new(PikaHoldOutcome.Unverified, noLiveSession);
-            var reply = await ExecuteAgentAsync(agent, "hold", default, requestedOwner, cancellation);
+            // The hold is sent in the session owner's name, whoever asked for it.
+            var reply = await ExecuteAgentAsync(agent, "hold", default, owner, cancellation);
             return new(PikaHoldOutcome.Acknowledged, reply["message"]?.GetValue<string>());
         }
         catch (Exception error) when (error is not OperationCanceledException)

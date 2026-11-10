@@ -241,8 +241,8 @@ try {
   await post('/api/command', { action: 'enable' }, 409);
   // Repeating the operator STOP on the arm-only route is accepted on both backends.
   assert.equal((await post('/api/stop', { owner: dashboard, device_id: undefined, generation: undefined })).stops.length, 1);
-  // The coordinated stop reports an unverified channel instead of hiding it.
-  if (managed) assert.equal((await post('/api/stop/coordinated', { owner: undefined, device_id: undefined, generation: undefined }, 409)).pika.ok, false);
+  // The emergency coordinated stop names nobody and is still honoured.
+  if (managed) assert.equal((await post('/api/stop/coordinated', { owner: undefined, device_id: undefined, generation: undefined })).pika.ok, true);
   await until(() => selected().status.stationary_s >= .4);
   await action({ action: 'reset' }); assert(!selected().recovery_required); assert(selected().joints.every(j => !j.enabled));
   // W7: a reconnect that carries a generation is pinned to it.

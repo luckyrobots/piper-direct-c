@@ -156,7 +156,7 @@ internal static class PikaDisabledEvidenceTests
         var refused = service.Snapshot();
         Check(refused["power_requested"]?.GetValue<bool>() == false && refused["power_uncertain"]?.GetValue<bool>() == false,
             "A rejected motor request changed the believed gripper power");
-        var hold = await service.HoldForOwnerAsync(owner, default);
+        var hold = await service.HoldAsync(default);
         var held = service.Snapshot();
         Check(hold.Outcome == PikaHoldOutcome.Acknowledged && hold.Message?.Contains("never powered", StringComparison.Ordinal) == true &&
             held["power_requested"]?.GetValue<bool>() == false && held["power_uncertain"]?.GetValue<bool>() == false &&
@@ -164,7 +164,7 @@ internal static class PikaDisabledEvidenceTests
             "STOP on a connected, never-powered gripper was not a verified success without a motor command: " + hold.Message);
         // Once powered, the same STOP is a real hold command again.
         await service.ExecuteAsync("enable", JsonSerializer.SerializeToElement(new { owner, clear = true }), default);
-        var powered = await service.HoldForOwnerAsync(owner, default);
+        var powered = await service.HoldAsync(default);
         Check(powered.Outcome == PikaHoldOutcome.Acknowledged && powered.Message == "fixture accepted" &&
             service.Snapshot()["power_requested"]?.GetValue<bool>() == true,
             "STOP on a powered gripper skipped its hold command");
