@@ -59,6 +59,7 @@ public sealed partial class PipersPlugin : ILuckyPlugin
         if (followClock.TimestampFrequency != Stopwatch.Frequency)
             throw new ArgumentException("The Follow clock must use the telemetry timestamp frequency.", nameof(followClock));
         this.followClock = followClock;
+        recovery = new(new PikaTeachingSession(() => engine.Start.SettingsDirectory));
         var uri = new Uri(address);
         if (!uri.IsLoopback || uri.Scheme != "http") throw new ArgumentException("The controller must use a local HTTP/2 endpoint.");
         channel = GrpcChannel.ForAddress(uri);

@@ -313,12 +313,12 @@ public sealed partial class PipersPlugin
             if (!groupViewOnly) await ReleaseProfileControl(cancellation);
             else { CommandAuthority.Revoke(); link = null; approved = linkCommandsEnabled = false; telemetry.Pika.Release(); }
             await FinishPikaTeaching("Robot profile or hardware assignment changed", cancellation);
-            StorePikaTeachingWorkspace(ActiveProfile);
+            recovery.PikaTeaching.Store(ActiveProfile);
             preferences = RobotProfileRouting.Capture(preferences);
             foreach (string id in new[] { "gripper", "depth" }) await cameras.ReplaceAsync(id, startReplacement: null);
             var profiles = append ? preferences.Robots!.Append(profile).ToArray() : preferences.Robots!.Select(p => p.Id == profile.Id ? profile : p).ToArray();
             preferences = RobotProfileRouting.Activate(preferences with { Robots = profiles }, profile.Id);
-            RestorePikaTeachingWorkspace(ActiveProfile);
+            recovery.PikaTeaching.Restore(ActiveProfile);
             cameraCalibration.Clear(); cameraDimensions.TryRemove("gripper", out _); cameraDimensions.TryRemove("depth", out _);
             cameraStatus["gripper"] = cameraStatus["depth"] = "Connecting…";
             lens = LensSession.Initial;

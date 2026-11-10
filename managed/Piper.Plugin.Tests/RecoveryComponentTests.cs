@@ -7,6 +7,8 @@ internal static class RecoveryComponentTests
 {
     private static readonly RobotCommandScope Scope = new("piper-1", "backend", "can-one", 1);
 
+    private static RecoveryComponent NewRecovery() => new(new PikaTeachingSession(() => "settings"));
+
     private static RecoveryOperation Operation(RecoveryKind kind, long epoch, out CancellationToken token)
     {
         var operation = new RecoveryOperation(kind, Scope, epoch, new CancellationTokenSource());
@@ -17,7 +19,7 @@ internal static class RecoveryComponentTests
     /// <summary>One recovery at a time, and only its owner frees the slot.</summary>
     public static void RunOperationSlot()
     {
-        var recovery = new RecoveryComponent();
+        var recovery = NewRecovery();
         Check(recovery.Operation is null && recovery.Guide is null && recovery.ResetPrompt is null && recovery.HomeProgress.Length == 0 &&
             !recovery.Teaching.Current.Owned && !recovery.ObservedTeaching.BlocksTargets, "A new recovery component was not idle");
 
@@ -55,7 +57,7 @@ internal static class RecoveryComponentTests
     /// <summary>Plugin-3: every transition of the guide, including the ones that must not happen.</summary>
     public static void RunGuide()
     {
-        var recovery = new RecoveryComponent();
+        var recovery = NewRecovery();
         var gate = new HandGuideRecoveryGate("stop-1");
         var seen = gate with { SawGuiding = true };
 
@@ -113,7 +115,7 @@ internal static class RecoveryComponentTests
     /// <summary>B1: the question is asked once and answered once.</summary>
     public static void RunResetQuestion()
     {
-        var recovery = new RecoveryComponent();
+        var recovery = NewRecovery();
         Check(recovery.TakeResetCompletion() is null, "A question was answered before it was asked");
         var prompt = new ResetCompletionPrompt(Scope, 7);
         recovery.AskResetCompletion(prompt);
@@ -126,7 +128,7 @@ internal static class RecoveryComponentTests
     /// guide's single return. Exactly one of them may send it.</summary>
     public static void RunOneReturnIsClaimed()
     {
-        var recovery = new RecoveryComponent();
+        var recovery = NewRecovery();
         const int rounds = 2_000, claimants = 4;
         for (int round = 0; round < rounds; round++)
         {
@@ -151,7 +153,7 @@ internal static class RecoveryComponentTests
     /// the close has returned, no report that was already in flight may reopen it.</summary>
     public static void RunClosedGuideStaysClosed()
     {
-        var recovery = new RecoveryComponent();
+        var recovery = NewRecovery();
         const int rounds = 20_000;
         bool done = false;
         long reports = 0;
@@ -192,7 +194,7 @@ internal static class RecoveryComponentTests
         for (int round = 0; round < rounds; round++)
         {
             var authority = new RobotCommandAuthority();
-            var recovery = new RecoveryComponent();
+            var recovery = NewRecovery();
             long epoch = authority.Epoch;
             using var operation = Operation(RecoveryKind.HoldHere, epoch, out var token);
             bool admitted = false, inEpoch = false;
@@ -217,7 +219,7 @@ internal static class RecoveryComponentTests
 
         // The same holds for the B1 question: none is raised under a revoked epoch.
         var revoked = new RobotCommandAuthority();
-        var late = new RecoveryComponent();
+        var late = NewRecovery();
         long asked = revoked.Epoch;
         revoked.Revoke();
         Check(!revoked.TryInEpoch(asked, () => late.AskResetCompletion(new(Scope, asked))) && late.ResetPrompt is null,

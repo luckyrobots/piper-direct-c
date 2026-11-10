@@ -88,7 +88,8 @@ internal static class PikaTeachingTests
         plugin.preferences = RobotProfileRouting.Normalize(new());
         changed = new(identity, "disable-one", null, origin, DateTimeOffset.UnixEpoch);
         changed.RequestMotorMode("hold-two", true, Tick(.1));
-        plugin.pikaTeaching = (plugin.pikaTeaching with { Recorder = changed }).Confirming("pending-confirmation");
+        plugin.recovery.PikaTeaching.StartRecording(changed, "recording");
+        plugin.recovery.PikaTeaching.AskConfirmation("pending-confirmation");
         var patches = new Dictionary<string, JsonObject>();
         var handGuiding = new JsonObject { ["fresh"] = true, ["status"] = new JsonObject { ["control"] = 2, ["teach_state"] = 1 } };
         plugin.AddPikaTeachingPatches(patches, handGuiding);

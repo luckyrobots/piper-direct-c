@@ -63,6 +63,8 @@ internal sealed class RecoveryOperation(RecoveryKind kind, RobotCommandScope sco
 ///                                                                   immutable TeachingState
 ///   Teaching      its own lock (transitions listed on               one volatile reference to an
 ///                 TeachingSession)                                  immutable TeachingSessionState
+///   PikaTeaching  its own lock (table on PikaTeachingSession)       one volatile reference to an
+///                                                                   immutable PikaTeachingState
 /// </code>
 /// <b>Relation to <see cref="RobotCommandAuthority"/>.</b> The authority stays
 /// the only owner of permission epochs. A transition that must not survive a
@@ -82,7 +84,7 @@ internal sealed class RecoveryOperation(RecoveryKind kind, RobotCommandScope sco
 /// (the scene pose the measured link was accepted at, written with
 /// <c>linkErrorDegrees</c> by the scene-link code). The UI actor is whoever
 /// holds <c>PipersPlugin.commands</c>.</summary>
-internal sealed class RecoveryComponent
+internal sealed class RecoveryComponent(PikaTeachingSession pikaTeaching)
 {
     private RecoveryOperation? operation;
     private RecoveryGuide? guide;
@@ -92,6 +94,9 @@ internal sealed class RecoveryComponent
 
     /// <summary>Plugin-D: teaching ownership, its scope and the automatic return.</summary>
     public TeachingSession Teaching { get; } = new();
+
+    /// <summary>Plugin-G: Pika teaching, its recording and the save of its observations.</summary>
+    public PikaTeachingSession PikaTeaching { get; } = pikaTeaching;
 
     /// <summary>The running recovery; null when none is.</summary>
     public RecoveryOperation? Operation => Volatile.Read(ref operation);

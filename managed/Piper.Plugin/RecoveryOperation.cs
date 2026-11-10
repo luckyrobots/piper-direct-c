@@ -6,7 +6,7 @@ namespace LuckyRobots.Piper.Plugin;
 public sealed partial class PipersPlugin
 {
     /// <summary>Recovery state and its transitions; see <see cref="RecoveryComponent"/>.</summary>
-    internal readonly RecoveryComponent recovery = new();
+    internal readonly RecoveryComponent recovery;
     private RecoveryOperation? CurrentRecovery => recovery.Operation;
     private bool SupportedRecoveryBusy => CurrentRecovery?.Kind == RecoveryKind.HoldHere;
     private bool RecoveryHomeBusy => CurrentRecovery?.Kind == RecoveryKind.ReturnToZero;
