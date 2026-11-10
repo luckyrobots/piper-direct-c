@@ -16,6 +16,8 @@ namespace LuckyRobots.Piper.Plugin;
 ///   state          telemetry reader loop (PublishState)          volatile reference; the JSON object is
 ///                                                                never mutated after publication
 ///   issue          telemetry reader loop (ReportIssue)           volatile string
+///   Pika           PikaSession's own compare-and-swap            one volatile reference to an
+///                  (callers and threads listed on PikaSession)   immutable PikaSessionState
 /// </code>
 /// The reader loop is <c>PipersPlugin.ReadTelemetry</c>. For each frame it adopts
 /// the backend and scope (after the shell has discarded what the old scope
@@ -28,6 +30,9 @@ internal sealed class TelemetryComponent
     private volatile TelemetryScope? scope;
     private volatile JsonObject? state;
     private volatile string issue = "Waiting for controller feedback";
+
+    /// <summary>Plugin-F: this plugin's role in, and read-only monitor of, the active profile's Pika session.</summary>
+    public PikaSession Pika { get; } = new(TimeSpan.FromSeconds(3));
 
     /// <summary>The newest accepted frame with its receipt clock; null before the first.</summary>
     public TelemetryReceipt? Latest => receipts.Latest;

@@ -53,7 +53,7 @@ public sealed partial class PipersPlugin
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(shutdown.Token);
         deadline.CancelAfter(TimeSpan.FromSeconds(25));
         DisarmTelemetryTargets("Backend restart accepted; previous targets discarded", clearLink: true, forgetApproval: ActiveProfile.Id);
-        ReleasePikaRole();
+        telemetry.Pika.Release();
         backendStatus = "Restart accepted · reconnecting automatically. Previous movement will not resume.";
         await Update(deadline.Token);
         using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(1) };

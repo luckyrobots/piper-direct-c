@@ -165,10 +165,10 @@ public sealed partial class PipersPlugin
         long permissionEpoch = CommandAuthority.Epoch;
         // Existing disable retires both following and ordinary position targets.
         // No new protocol command, automatic release, enable or target is added.
-        var role = ObservePikaRole();
+        var role = telemetry.Pika.Observe();
         var reply = await PikaTeachingMotorCall("/api/pika/disable", new JsonObject { ["owner"] = owner }, false, cancellation, expectedToken);
         // A release that landed during the call stands; freed jaws never re-create a session.
-        TryAdvancePikaRole(role, PikaSessionRole.Monitoring);
+        telemetry.Pika.TryAdvance(role, PikaSessionRole.Monitoring);
         string request = reply["motor_request_id"]?.GetValue<string>() ?? "";
         UpdatePikaTeaching(s => s with { DisableRequest = request });
         if (request.Length == 0)
@@ -232,7 +232,7 @@ public sealed partial class PipersPlugin
         string expectedDevice = device["id"]!.GetValue<string>(); long generation = device["generation"]!.GetValue<long>();
         long permissionEpoch = CommandAuthority.Epoch;
         double expectedFeedback = pika["feedback_time_s"]!.GetValue<double>();
-        var role = ObservePikaRole();
+        var role = telemetry.Pika.Observe();
         var reply = await PikaTeachingMotorCall("/api/pika/resume-hold", new JsonObject { ["owner"] = owner, ["clear"] = true,
             ["expected_angle_rad"] = angle, ["expected_feedback_time_s"] = expectedFeedback }, true, cancellation, expectedToken);
         string request = reply["motor_request_id"]?.GetValue<string>() ?? "";
@@ -249,7 +249,7 @@ public sealed partial class PipersPlugin
                 pika["owner"]?.GetValue<string>() == owner && pika["armed"]?.GetValue<bool>() == true && pika["enabled"]?.GetValue<bool>() == true &&
                 pika["feedback_time_s"]?.GetValue<double>() > pika["request_time_s"]?.GetValue<double>())
             {
-                if (!TryAdvancePikaRole(role, PikaSessionRole.Owned))
+                if (!telemetry.Pika.TryAdvance(role, PikaSessionRole.Owned))
                     throw new InvalidOperationException("The Pika session was released while its measured hold was verified. Control remains unarmed.");
                 bool handGuiding = TeachingState.Inspect(device).HandGuiding;
                 UpdatePikaTeaching(s => s with { DisableRequest = "", Status = MeasuredPikaHoldStatus(s.Recorder is not null, handGuiding) });

@@ -263,7 +263,7 @@ internal static class EmergencyStopTests
             fixture.Plugin.telemetry.PublishState(snapshot);
             telemetry.Publish(receipt with { State = snapshot, Sequence = 2 });
             fixture.Plugin.approved = true;
-            fixture.Plugin.pikaRole = (long)PikaSessionRole.Owned;
+            fixture.Plugin.telemetry.Pika.Enter(PikaSessionRole.Owned);
             await fixture.Plugin.Enable(CancellationToken.None, true, null, null);
             Check(fixture.Rpc.Routes.IsEmpty && fixture.Authority.Current.Approvals.Count == 1,
                 "An assigned Pika alias was found in telemetry but Enable reconfigured the already-owned canonical gripper");
@@ -294,14 +294,14 @@ internal static class EmergencyStopTests
             // Pika role interleavings through the observation seam: a stale writer
             // never clobbers a newer role, and a release always survives.
             var plugin = new PipersPlugin();
-            var monitorSnapshot = plugin.ObservePikaRole();
-            Check(plugin.TryAdvancePikaRole(plugin.ObservePikaRole(), PikaSessionRole.Owned) &&
-                !plugin.TryAdvancePikaRole(monitorSnapshot, PikaSessionRole.None) && plugin.PikaRole == PikaSessionRole.Owned,
+            var monitorSnapshot = plugin.telemetry.Pika.Observe();
+            Check(plugin.telemetry.Pika.TryAdvance(plugin.telemetry.Pika.Observe(), PikaSessionRole.Owned) &&
+                !plugin.telemetry.Pika.TryAdvance(monitorSnapshot, PikaSessionRole.None) && plugin.telemetry.Pika.Role == PikaSessionRole.Owned,
                 "A monitor release decided from a stale snapshot overwrote the Owned role Enable set");
-            plugin.ReleasePikaRole();
-            var enableSnapshot = plugin.ObservePikaRole();
-            plugin.ReleasePikaRole();
-            Check(!plugin.TryAdvancePikaRole(enableSnapshot, PikaSessionRole.Owned) && plugin.PikaRole == PikaSessionRole.None,
+            plugin.telemetry.Pika.Release();
+            var enableSnapshot = plugin.telemetry.Pika.Observe();
+            plugin.telemetry.Pika.Release();
+            Check(!plugin.telemetry.Pika.TryAdvance(enableSnapshot, PikaSessionRole.Owned) && plugin.telemetry.Pika.Role == PikaSessionRole.None,
                 "An Enable that observed None before a same-role revocation still upgraded to Owned");
         }
         using (var fixture = new Fixture())
@@ -312,11 +312,11 @@ internal static class EmergencyStopTests
             try
             {
                 await fixture.Rpc.ConnectReached.Task.WaitAsync(TimeSpan.FromSeconds(1));
-                fixture.Plugin.ReleasePikaRole(); // The telemetry thread revokes while connect is in flight.
+                fixture.Plugin.telemetry.Pika.Release(); // The telemetry thread revokes while connect is in flight.
                 fixture.Rpc.ConnectReply.TrySetResult(new ControlReply { Status = 200, Json = "{\"ok\":true}" });
                 bool refused = false;
                 try { await enable; } catch (InvalidOperationException error) { refused = error.Message.Contains("Pika session was released"); }
-                Check(refused && fixture.Plugin.PikaRole == PikaSessionRole.None && !fixture.Rpc.Routes.Contains("/api/pika/enable"),
+                Check(refused && fixture.Plugin.telemetry.Pika.Role == PikaSessionRole.None && !fixture.Rpc.Routes.Contains("/api/pika/enable"),
                     "Enable's Owned write overwrote a revocation that landed during its connect");
             }
             finally { fixture.Rpc.ConnectReply.TrySetResult(new ControlReply { Status = 200, Json = "{\"ok\":true}" }); }

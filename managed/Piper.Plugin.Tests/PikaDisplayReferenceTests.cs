@@ -89,7 +89,7 @@ internal static class PikaDisplayReferenceTests
         string folder = Path.Combine(Path.GetTempPath(), "piper-display-reference-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(folder);
         var prefs = RobotProfileRouting.Normalize(new Preferences(Robots: [Profile], ActiveRobotId: "piper-1"));
-        plugin.preferences = prefs; plugin.telemetry.AdoptBackend("fixture-session"); plugin.pikaRole = (long)PikaSessionRole.Monitoring;
+        plugin.preferences = prefs; plugin.telemetry.AdoptBackend("fixture-session"); plugin.telemetry.Pika.Enter(PikaSessionRole.Monitoring);
         var model = new JsonArray(Enumerable.Range(1, 6).Select(i => (JsonNode)new JsonObject { ["name"] = "joint" + i, ["unit"] = "rad" }).ToArray());
         const double travel = .0470221912391186;
         model.Add(new JsonObject { ["name"] = "joint7", ["unit"] = "m", ["limited"] = true, ["min"] = -travel, ["max"] = 0 });
@@ -152,7 +152,7 @@ internal static class PikaDisplayReferenceTests
             Check(feedback[^1]["joints"]!.AsObject().Count == 6, "A saved reference was applied to another gripper assignment");
             pika["device"] = DevicePath; pika["fresh"] = false; Fresh(); await plugin.PublishMeasuredScene(CancellationToken.None);
             Check(feedback[^1]["joints"]!.AsObject().Count == 6, "Stale feedback moved the scene fingers using a saved reference");
-            pika["fresh"] = true; pika["armed"] = true; pika["enabled"] = true; pika["owner"] = plugin.owner; plugin.pikaRole = (long)PikaSessionRole.Owned;
+            pika["fresh"] = true; pika["armed"] = true; pika["enabled"] = true; pika["owner"] = plugin.owner; plugin.telemetry.Pika.Enter(PikaSessionRole.Owned);
             await Event("pika.target", 40);
             Check(rpc.Requests.Count == 0, "A held gripper could accept a manual target after robot approval was revoked");
             plugin.approved = true;

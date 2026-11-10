@@ -58,13 +58,13 @@ internal static class MeasuredTrackingTests
             await f.Restore();
             Check(f.Requests.Count == before, "Automatic scene discovery ran more than once per second");
             await f.DrainMonitor();
-            f.Plugin.pikaMonitor.ExpireBackoff();
+            f.Plugin.telemetry.Pika.ExpireBackoff();
             f.Plugin.RetryLinkedPikaMonitor();
             await f.DrainMonitor();
             Check(f.Rpc.Routes.Count == 1 && f.Rpc.Routes.Single().Route == "/api/pika/connect" &&
                 f.Rpc.Routes.Single().Body["take_over"]?.GetValue<bool>() == false,
                 "Automatic tracking sent a physical request beyond Pika's monitor-only connection");
-            Check(f.Plugin.PikaRole == PikaSessionRole.Monitoring, "Monitoring silently acquired gripper motor control");
+            Check(f.Plugin.telemetry.Pika.Role == PikaSessionRole.Monitoring, "Monitoring silently acquired gripper motor control");
 
             f.Plugin.measuredTrackingAttemptAt = 0L; f.Fresh(); before = f.Requests.Count;
             await f.Restore();
@@ -139,7 +139,7 @@ internal static class MeasuredTrackingTests
             // Exercise the real public Link toggle without StartAsync, cameras
             // or a real server. Persisted false must survive a new instance.
             await f.Restore(); await f.DrainMonitor();
-            f.Plugin.pikaRole = (long)PikaSessionRole.None; f.Plugin.pikaMonitor.Stop();
+            f.Plugin.telemetry.Pika.Enter(PikaSessionRole.None); f.Plugin.telemetry.Pika.Stop();
             await f.LinkEvent();
             var saved = JsonSerializer.Deserialize<Preferences>(await File.ReadAllTextAsync(Path.Combine(f.Folder, "preferences.json")), PluginProtocol.Json)!;
             Check(RobotProfileRouting.Active(saved).RememberMeasuredLink == false && f.Plugin.link is null,
@@ -181,7 +181,7 @@ internal static class MeasuredTrackingTests
         }
         public async Task DrainMonitor()
         {
-            if (plugin.pikaMonitor.Worker is { } worker) await worker.WaitAsync(TimeSpan.FromSeconds(1));
+            if (plugin.telemetry.Pika.Attempt?.Worker is { } worker) await worker.WaitAsync(TimeSpan.FromSeconds(1));
         }
         public Task LinkEvent() => plugin.HandleEventAsync(new("fixture", WorkspaceEventScope.Wrap(plugin.workspaceViewEpoch, Profile.Id, "link"),
             "click", JsonSerializer.SerializeToElement(true)), default);
@@ -241,7 +241,7 @@ internal static class MeasuredTrackingTests
             : new JsonObject { ["name"] = "joint" + i, ["unit"] = "m", ["limited"] = true, ["min"] = i == 7 ? -.047 : 0.0, ["max"] = i == 7 ? 0.0 : .047 })).ToArray());
         public void Dispose()
         {
-            plugin.pikaMonitor.Stop();
+            plugin.telemetry.Pika.Stop();
             plugin.shutdown.Cancel();
             DrainMonitor().GetAwaiter().GetResult();
             plugin.channel.Dispose(); Commands.Dispose();

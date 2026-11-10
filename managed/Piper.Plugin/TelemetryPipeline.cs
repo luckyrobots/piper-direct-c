@@ -130,7 +130,7 @@ public sealed partial class PipersPlugin
             {
                 telemetry.Disconnect();
                 DisarmTelemetryTargets("Controller backend changed · all previous targets discarded", clearLink: true);
-                ReleasePikaRole();
+                telemetry.Pika.Release();
             }
             telemetry.AdoptBackend(receipt.BackendToken); telemetry.AdoptScope(scope);
             return; // The group validates every captured lane, independently of the visible profile/selected projection.
@@ -141,7 +141,7 @@ public sealed partial class PipersPlugin
             // between invalidation and publication of the replacement frame.
             telemetry.Disconnect();
             DisarmTelemetryTargets("Controller session or assigned CAN connection changed", clearLink: true); // Also releases the teaching session.
-            if (backendChanged) ReleasePikaRole();
+            if (backendChanged) telemetry.Pika.Release();
         }
         telemetry.AdoptBackend(receipt.BackendToken);
         telemetry.AdoptScope(scope);
@@ -203,7 +203,7 @@ public sealed partial class PipersPlugin
             {
                 telemetry.Disconnect();
                 PikaTeachingTelemetryInterrupted();
-                DisarmTelemetryTargets("Controller telemetry interrupted", clearLink: false); ReleasePikaRole();
+                DisarmTelemetryTargets("Controller telemetry interrupted", clearLink: false); telemetry.Pika.Release();
                 string issue = error is RpcException { StatusCode: StatusCode.Unavailable }
                     ? $"Controller unavailable on {ControllerEndpoint.Loopback}:{ControllerEndpoint.GrpcPort}; reconnecting automatically."
                     : "Controller telemetry interrupted: " + error.Message;
@@ -368,7 +368,7 @@ public sealed partial class PipersPlugin
                 if (selected is not null && token == key.Backend && ActiveProfile is { } current && current.Id == selected.Id &&
                     current.PikaDevice == selected.PikaDevice && current.WslDistribution == selected.WslDistribution)
                 {
-                    ReleasePikaRole();
+                    telemetry.Pika.Release();
                     message = "Pika connection: " + error.Message;
                 }
                 else Trace.TraceWarning("Independent Pika heartbeat unavailable: {0}", error.Message);

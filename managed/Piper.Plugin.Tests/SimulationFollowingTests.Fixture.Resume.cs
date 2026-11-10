@@ -15,7 +15,7 @@ internal static partial class SimulationFollowingTests
     {
         public void SetGripperUnready()
         {
-            plugin.pikaRole = (long)PikaSessionRole.None;
+            plugin.telemetry.Pika.Enter(PikaSessionRole.None);
             Snapshot["pika"]!["enabled"] = false; Snapshot["pika"]!["armed"] = false; Snapshot["pika"]!["read_only"] = true;
             Refresh();
         }
