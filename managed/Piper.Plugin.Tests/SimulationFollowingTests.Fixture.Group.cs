@@ -51,7 +51,7 @@ internal static partial class SimulationFollowingTests
                 authority.Current.Approvals["piper-2"] with { SceneRobot = robotId, JointPrefix = prefix });
         }
         public void FocusGroupSecond()
-        { plugin.preferences = RobotProfileRouting.Activate(plugin.preferences, "piper-2"); Snapshot["selected"] = "can-b"; Refresh(); }
+        { plugin.preferences = RobotProfileRouting.Activate(plugin.preferences, "piper-2"); Edit(snapshot => snapshot["selected"] = "can-b"); }
         public void ConfigureGroup()
         {
             GroupMode = true; EpisodeId = "episode-group";
@@ -78,6 +78,10 @@ internal static partial class SimulationFollowingTests
             }
             Rpc.Accepted = (route, body) =>
             {
+                lock (snapshotGate) Accept(route, body);
+            };
+            void Accept(string route, JsonObject body)
+            {
                 var device = Snapshot["devices"]!.AsArray().OfType<JsonObject>().SingleOrDefault(d => d["id"]?.GetValue<string>() == body["device_id"]?.GetValue<string>());
                 string action = body["action"]?.GetValue<string>() ?? "";
                 if (device is not null && route == "/api/command")
@@ -99,7 +103,7 @@ internal static partial class SimulationFollowingTests
                 if (pika is not null && route == "/api/pika/follow-update") pika["telemetry"]!["motor"]!["Position"] = PikaProtocol.Angle(body["opening_mm"]!.GetValue<double>());
                 if (pika is not null && route == "/api/pika/position") pika["telemetry"]!["motor"]!["Position"] = body["value"]!.DeepClone();
                 Refresh();
-            };
+            }
             Refresh();
             groupTelemetryWorker = Task.Run(async () =>
             { while (!groupTelemetryStop.IsCancellationRequested) { Refresh(); await Task.Delay(10); } });

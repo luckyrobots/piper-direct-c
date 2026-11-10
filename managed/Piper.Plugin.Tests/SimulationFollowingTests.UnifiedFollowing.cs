@@ -11,12 +11,7 @@ internal static partial class SimulationFollowingTests
 
     internal static async Task RunUnifiedFollowing()
     {
-        static async Task Until(Func<bool> condition, string reason)
-        {
-            long began = Stopwatch.GetTimestamp();
-            while (!condition())
-            { if (Stopwatch.GetElapsedTime(began).TotalSeconds > 5) throw new InvalidOperationException(reason); await Task.Delay(10); }
-        }
+        static Task Until(Func<bool> condition, string reason) => Eventually(condition, reason);
         foreach (bool supportedRecovery in new[] { false, true })
         {
             await using var f = new Fixture();
@@ -66,8 +61,11 @@ internal static partial class SimulationFollowingTests
             await f.GroupEvent("toggle");
             var authority = f.Plugin.CommandAuthority;
             authority.TryAcknowledge(authority.Epoch, new("piper-1", f.Plugin.telemetry.BackendToken, "can-a", 7), 77);
-            var motion = f.Snapshot["devices"]![0]!["motion"]!;
-            motion["active"] = true; motion["request_id"] = 77L; motion["owner"] = f.Plugin.owner;
+            f.Edit(snapshot =>
+            {
+                var motion = snapshot["devices"]![0]!["motion"]!;
+                motion["active"] = true; motion["request_id"] = 77L; motion["owner"] = f.Plugin.owner;
+            });
             f.FocusGroupSecond();
             await f.Gap(f.Plugin.ArmHeartbeats);
             Check(f.GroupArmedForPlay && f.Plugin.groupControlEpoch == before + 1 &&
@@ -295,7 +293,7 @@ internal static partial class SimulationFollowingTests
         {
             await using var f = new Fixture(); f.ConfigureGroup(); f.SelectGroupFollowers("piper-1"); f.UseUiDispatcher();
             f.ScriptedMissedGrasp = true; f.ScriptedSourceMiss = sourceMiss;
-            foreach (var joint in f.Snapshot["devices"]![0]!["joints"]!.AsArray()) { joint!["actual_deg"] = 0d; joint["command_deg"] = 0d; }
+            f.Edit(snapshot => { foreach (var joint in snapshot["devices"]![0]!["joints"]!.AsArray()) { joint!["actual_deg"] = 0d; joint["command_deg"] = 0d; } });
             await f.Click("group.follow.toggle"); await Until(() => f.GroupArmedForPlay, "Missed-grasp fixture did not arm");
             f.RequestGroupPlay(); await Until(() => !f.GroupActive, "A missed grasp failed to complete release and home");
             var openings = f.Rpc.Requests.Where(r => r.Route == "/api/pika/follow-update").Select(r => r.Body["opening_mm"]!.GetValue<double>()).ToArray();
@@ -307,10 +305,10 @@ internal static partial class SimulationFollowingTests
         {
             await using var jaws = new Fixture();
             jaws.ConfigureGroup(); jaws.SelectGroupFollowers("piper-1"); jaws.UseUiDispatcher(); jaws.Rpc.RejectIdleHold = true;
-            jaws.Snapshot["pikas"]![0]!["telemetry"]!["motor"]!["Position"] = LuckyRobots.Piper.Pika.PikaProtocol.Angle(30);
+            jaws.Edit(snapshot => snapshot["pikas"]![0]!["telemetry"]!["motor"]!["Position"] = LuckyRobots.Piper.Pika.PikaProtocol.Angle(30));
             if (matchArm)
             {
-                jaws.Snapshot["devices"]![0]!["joints"]![0]!["actual_deg"] = 5d;
+                jaws.Edit(snapshot => snapshot["devices"]![0]!["joints"]![0]!["actual_deg"] = 5d);
                 var accepted = jaws.Rpc.Accepted;
                 jaws.Rpc.Accepted = (route, body) =>
                 {
@@ -368,7 +366,7 @@ internal static partial class SimulationFollowingTests
             await using var f = new Fixture(); f.ConfigureGroup(); f.UseUiDispatcher();
             await f.Click("group.follow.toggle"); await Until(() => f.GroupArmedForPlay, "Malformed-inventory fixture did not arm");
             f.RequestGroupPlay(); await Until(() => f.GroupPhase == GroupFollowPhase.Following, "Malformed-inventory fixture did not start");
-            f.Snapshot[broken]!.AsArray().Add(f.Snapshot[broken]![0]!.DeepClone()); f.Refresh();
+            f.Edit(snapshot => snapshot[broken]!.AsArray().Add(snapshot[broken]![0]!.DeepClone()));
             await Until(() => !f.GroupActive, "An ambiguous lane prevented whole-session retirement");
             Check(f.Rpc.Requests.Any(r => r.Body["action"]?.GetValue<string>() == "hold" && r.Body["device_id"]?.GetValue<string>() == "can-b") &&
                 f.Rpc.Requests.Any(r => r.Route == "/api/pika/hold" && r.Body["pika_device"]?.GetValue<string>() == "/dev/pika-b"),

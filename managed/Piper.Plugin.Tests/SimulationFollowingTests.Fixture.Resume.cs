@@ -31,7 +31,7 @@ internal static partial class SimulationFollowingTests
         }
         public void ConfigureTeachingResume(bool completeImmediately = true)
         {
-            publishResumeFrameCopies = true;
+            resumeFrames = true;
             var device = Snapshot["devices"]![0]!;
             device["status"]!["control"] = 2; device["status"]!["teach_state"] = 2;
             device["teaching"] = new JsonObject { ["phase"] = "ended", ["return_required"] = true, ["can_return"] = false,
@@ -42,7 +42,7 @@ internal static partial class SimulationFollowingTests
             Rpc.Accepted = (route, body) =>
             {
                 if (route != "/api/command" || body["action"]?.GetValue<string>() != "teach-return") return;
-                lock (resumeFrameGate)
+                lock (snapshotGate)
                 {
                     device["motion"]!["request_id"] = 77L;
                     device["motion"]!["active"] = !completeImmediately;
@@ -56,7 +56,7 @@ internal static partial class SimulationFollowingTests
         }
         public void SetResumeEligible()
         {
-            lock (resumeFrameGate)
+            lock (snapshotGate)
             {
                 Snapshot["devices"]![0]!["teaching"]!["can_return"] = true;
                 Refresh();
@@ -64,7 +64,7 @@ internal static partial class SimulationFollowingTests
         }
         public void CompleteResume()
         {
-            lock (resumeFrameGate)
+            lock (snapshotGate)
             {
                 var motion = Snapshot["devices"]![0]!["motion"]!;
                 motion["active"] = false;
@@ -80,7 +80,7 @@ internal static partial class SimulationFollowingTests
         }
         public void InterruptResume(string kind)
         {
-            lock (resumeFrameGate)
+            lock (snapshotGate)
             {
                 var device = Snapshot["devices"]![0]!;
                 if (kind == "permission") plugin.CommandAuthority.Revoke();
