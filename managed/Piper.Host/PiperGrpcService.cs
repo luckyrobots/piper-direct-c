@@ -60,7 +60,7 @@ public sealed class PiperGrpcService(PiperRpcContext state, IHostApplicationLife
                 throw new RpcException(new Status(StatusCode.InvalidArgument, rejected.Message));
             using (json)
             {
-                if (!HostRoutes.IsGrpcControl(request.Route))
+                if (PiperApi.ManagedControl(request.Route) is not { Grpc: true })
                     throw new RpcException(new Status(StatusCode.InvalidArgument, "Unsupported control route."));
                 using var admission = state.Control.Admit(request.Route, json.RootElement);
                 Debug.Assert(admission.Shutdown is null);

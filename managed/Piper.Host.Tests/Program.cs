@@ -9,6 +9,8 @@ using LuckyRobots.Piper.Grpc;
 using LuckyRobots.Piper.Host;
 
 await BackendMaintenanceTests.Run();
+CoordinatedStopScopeTests.Run();
+await ApiContractTests.Run();
 await HostPikaBoundaryTests.Run();
 await MultiRobotHostIntegrationTests.Run();
 

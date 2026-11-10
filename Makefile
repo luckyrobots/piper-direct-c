@@ -8,7 +8,7 @@ ifeq ($(OS),Windows_NT)
 LDLIBS += -lsetupapi -lcfgmgr32
 endif
 
-.PHONY: all test test-web test-windows test-vcan test-record clean
+.PHONY: all test test-web check-api test-windows test-vcan test-record clean
 all: build/piper-can build/piper-control build/piper-record build/piper-trace
 
 build:
@@ -90,8 +90,8 @@ test: all $(TESTS:%=build/test-%)
 
 # Dashboard modules and their fixtures: Node only, no server and no compiler,
 # so the same list runs on Linux and on Windows.
-WEB_MODULES = web/app.js web/bench.mjs web/pika.mjs web/pika_remote.mjs
-WEB_TESTS = pika_remote pika_windows_block pika pika_ui control_prompt camera_profiles
+WEB_MODULES = web/api.mjs web/app.js web/bench.mjs web/pika.mjs web/pika_remote.mjs
+WEB_TESTS = api_client pika_remote pika_windows_block pika pika_ui control_prompt camera_profiles
 test-web:
 	for m in $(WEB_MODULES); do node --check $$m || exit 1; done
 	for t in $(WEB_TESTS); do node tests/test_$$t.mjs || { echo "FAILED: tests/test_$$t.mjs"; exit 1; }; done
@@ -112,3 +112,10 @@ test-vcan: build/piper-can
 
 test-record: build/piper-record
 	python3 tests/test_record.py
+
+# API drift check: the OpenAPI description, the dashboard client and the C# route
+# table must be exactly what tools/gen-api.mjs generates from the definition,
+# managed/Piper.Contracts/piper-api.json. It needs the whole checkout, so it is its
+# own target and CI runs it beside test-web.
+check-api:
+	node tools/gen-api.mjs --check

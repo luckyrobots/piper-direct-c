@@ -46,7 +46,7 @@ internal static partial class SimulationFollowingTests
             await gripperUnready.Click("enable");
             _ = await WaitPrimary(gripperUnready, "complete");
             Check(gripperUnready.Rpc.Requests.Select(r => r.Route).SequenceEqual(["/api/pika/connect", "/api/pika/enable"]) &&
-                gripperUnready.Plugin.PikaRole == PikaSessionRole.Owned && gripperUnready.PrimaryActionName() == "Enabled",
+                gripperUnready.Plugin.telemetry.Pika.Role == PikaSessionRole.Owned && gripperUnready.PrimaryActionName() == "Enabled",
                 "Enable robot did not finish the assigned read-only/unready gripper connection");
             Check(gripperUnready.Session is null && !gripperUnready.Ready && !gripperUnready.PlayStarted && gripperUnready.Mode == "edit" &&
                 !gripperUnready.EngineRequests.Any(r => r.Method == "robot.runtime.control"),

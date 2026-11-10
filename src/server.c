@@ -23,6 +23,7 @@ struct asset { const char *route,*name,*mime; char *data; size_t size; };
 static struct asset assets[]={
     {"/","index.html","text/html; charset=utf-8",NULL,0},
     {"/app.js","app.js","text/javascript; charset=utf-8",NULL,0},
+    {"/api.mjs","api.mjs","text/javascript; charset=utf-8",NULL,0},
     {"/pika.mjs","pika.mjs","text/javascript; charset=utf-8",NULL,0},
     {"/pika_remote.mjs","pika_remote.mjs","text/javascript; charset=utf-8",NULL,0},
     {"/bench.mjs","bench.mjs","text/javascript; charset=utf-8",NULL,0},

@@ -15,7 +15,7 @@ public sealed class ControllerService : IDisposable
     private IntPtr core;
     public string Token { get; } = Convert.ToHexString(RandomNumberGenerator.GetBytes(32)).ToLowerInvariant();
     /// <summary>The native emergency STOP route; the one action a faulted tick loop still admits.</summary>
-    public const string StopRoute = "/api/stop";
+    public const string StopRoute = PiperApi.Paths.Stop;
     private volatile string? workerError;
     private int disposed;
 

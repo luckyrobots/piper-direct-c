@@ -4,10 +4,12 @@ using System.Text.Json;
 
 namespace LuckyRobots.Piper.Host;
 
-/// <summary>Ingress checks for a control request body, shared by HTTP and gRPC.</summary>
+/// <summary>The one ingress validator for a control request body, shared by HTTP and gRPC.
+/// Its limits are the API definition's. It checks the body's form only: the fields of a
+/// core route are validated by the core against its state, in the core's own order.</summary>
 internal static class ControlJson
 {
-    internal const int MaxBytes = 16384, MaxDepth = 32;
+    internal const int MaxBytes = PiperApi.MaxBodyBytes, MaxDepth = PiperApi.MaxDepth;
 
     /// <summary>Why a body was refused. HTTP replies with <see cref="Status"/>;
     /// gRPC reports the same message as InvalidArgument.</summary>

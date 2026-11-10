@@ -16,9 +16,9 @@ internal static class BackgroundLoopTests
         var plugin = new PipersPlugin();
         plugin.client = new PiperControl.PiperControlClient(new EmergencyStopTests.FakeCalls());
         plugin.preferences = RobotProfileRouting.Normalize(new Preferences(Robots: [new("piper-1", "Fixture", "can-one")], ActiveRobotId: "piper-1"));
-        plugin.token = Backend;
+        plugin.telemetry.AdoptBackend(Backend);
         snapshot = Fixtures.Snapshot(Backend, Fixtures.Arm("can-one", generation: 1));
-        plugin.state = snapshot;
+        plugin.telemetry.PublishState(snapshot);
         plugin.engine = Fixtures.Context(new PluginStart("fixture", Path.GetTempPath(), Path.GetTempPath()),
             (Func<object, CancellationToken, Task>)((_, _) => Task.CompletedTask),
             (Func<string, JsonObject, CancellationToken, Task<JsonElement>>)((_, _, _) => Task.FromResult(JsonSerializer.SerializeToElement(new { applied = false }))));

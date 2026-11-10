@@ -88,8 +88,8 @@ internal static class TelemetryPipelineTests
         var rpc = new FakeCalls(pipe.Reader);
         plugin.client = new PiperControl.PiperControlClient(rpc);
         var prefs = RobotProfileRouting.Normalize(new Preferences(Robots: [new RobotProfile("piper-1", "Fixture", "can-a")], ActiveRobotId: "piper-1"));
-        plugin.preferences = prefs; plugin.token = "session-a";
-        plugin.telemetryScope = new TelemetryScope("session-a", "can-a", 7);
+        plugin.preferences = prefs; plugin.telemetry.AdoptBackend("session-a");
+        plugin.telemetry.AdoptScope(new TelemetryScope("session-a", "can-a", 7));
         string sessionOwner = plugin.owner;
         var model = new JsonArray(Enumerable.Range(1, 6).Select(i => (JsonNode)new JsonObject { ["name"] = "joint" + i, ["unit"] = "rad" }).ToArray());
         var device = State()["devices"]![0]!.AsObject();
@@ -147,7 +147,7 @@ internal static class TelemetryPipelineTests
             Check(current.IsFresh(Stopwatch.GetTimestamp()) && current.Sequence >= 5, "Slow editor requests stopped fresh state consumption");
             Check(rpc.Heartbeats >= 3, "Slow editor requests stopped controller heartbeats");
             Check(ReferenceEquals(plugin.link, binding), "A rendering timeout destroyed a healthy same-scope scene binding");
-            Check(plugin.state is not null && plugin.token == "session-a", "A rendering timeout was classified as controller disconnection");
+            Check(plugin.telemetry.State is not null && plugin.telemetry.BackendToken == "session-a", "A rendering timeout was classified as controller disconnection");
             Check(!plugin.linkCommandsEnabled, "A failed scene acknowledgement automatically armed viewport targets");
             int beforeModeChange = Volatile.Read(ref sceneRequests);
             Volatile.Write(ref editorMode, 1);
@@ -178,7 +178,7 @@ internal static class TelemetryPipelineTests
             var rebound = new RobotLink("fixture-scene", "fixture-robot", model, State(generation: 8)["devices"]![0]!.AsObject());
             plugin.link = rebound; plugin.linkBackendToken = "session-a"; plugin.approved = true;
             currentToken = "session-b"; Feed();
-            await Until(() => plugin.link is null && plugin.token == "session-b", "Backend session change inherited old link/authorization");
+            await Until(() => plugin.link is null && plugin.telemetry.BackendToken == "session-b", "Backend session change inherited old link/authorization");
             Check(!plugin.approved, "Backend session change retained target permission");
             Check(rpc.Routes.All(route => route == "/api/heartbeat"), "Telemetry/render recovery issued a power, target, reset or configuration action");
 

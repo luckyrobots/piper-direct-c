@@ -33,8 +33,10 @@ public sealed partial class PipersPlugin : ILuckyPlugin
     internal PluginContext engine = null!;
     internal PiperControl.PiperControlClient client = null!;
     internal Preferences preferences = new();
-    internal volatile JsonObject? state;
-    internal string token = "", message = "Connecting to the existing Piper server…";
+    // Published by the Telemetry component; this shell only reads them.
+    private JsonObject? state => telemetry.State;
+    private string token => telemetry.BackendToken;
+    internal string message = "Connecting to the existing Piper server…";
     internal string uiActionError = "";
     internal RobotCommandAuthority CommandAuthority { get; } = new();
     internal volatile bool approved;
@@ -288,7 +290,7 @@ public sealed partial class PipersPlugin : ILuckyPlugin
         }
         // STOP must not wait behind a WSL startup; cancelling also defers the next
         // retry so this event acquires the command gate first.
-        await pikaMonitor.CancelAsync();
+        await telemetry.Pika.CancelAsync();
         await commands.WaitAsync(cancellation);
         try
         {
@@ -380,7 +382,7 @@ public sealed partial class PipersPlugin : ILuckyPlugin
         {
             link = null;
             await Command("disable", null, cancellation);
-            if (pikaOwned) await Call("/api/pika/disable", new JsonObject { ["owner"] = owner }, cancellation);
+            if (telemetry.Pika.Owned) await Call("/api/pika/disable", new JsonObject { ["owner"] = owner }, cancellation);
         }
         else if (id == "recovery.home") await StartRecoveryHome(cancellation);
         else if (id is "recovery.card.run" or "recovery.run") await RunRecoveryCard(cancellation, verifyOnly: id == "recovery.run");
@@ -539,14 +541,14 @@ public sealed partial class PipersPlugin : ILuckyPlugin
         CheckEnableScope();
         if (includePika && pikaTeachingDisableRequest.Length == 0 && PikaMatchesProfile() && state?["pika"]?["configured"]?.GetValue<bool>() == true)
         {
-            bool gripperAlreadyReady = pikaOwned && state["pika"]?["fresh"]?.GetValue<bool>() == true &&
+            bool gripperAlreadyReady = telemetry.Pika.Owned && state["pika"]?["fresh"]?.GetValue<bool>() == true &&
                 state["pika"]?["owner"]?.GetValue<string>() == owner && state["pika"]?["enabled"]?.GetValue<bool>() == true && state["pika"]?["armed"]?.GetValue<bool>() == true;
             if (!gripperAlreadyReady)
             {
-                var role = ObservePikaRole();
+                var role = telemetry.Pika.Observe();
                 await Call("/api/pika/connect", new JsonObject { ["owner"] = owner, ["take_over"] = true }, cancellation, expectedToken);
                 CheckEnableScope();
-                if (!TryAdvancePikaRole(role, PikaSessionRole.Owned))
+                if (!telemetry.Pika.TryAdvance(role, PikaSessionRole.Owned))
                     throw new InvalidOperationException("The Pika session was released while Enable connected it. Enable again when the gripper is reconnected.");
                 long started = Stopwatch.GetTimestamp();
                 while (state?["pika"]?["fresh"]?.GetValue<bool>() != true)
@@ -612,7 +614,7 @@ public sealed partial class PipersPlugin : ILuckyPlugin
         if (!ManualPikaControlAllowed(device))
             return "Restore robot controls before sending a gripper target. STOP and recovery retire manual arm and gripper targets.";
         if (!ProfilePikaRouting.Matches(ActiveProfile, pika)) return "The Pika serial assignment does not match this robot.";
-        if (!pikaOwned || pika!["owner"]?.GetValue<string>() != owner || pika["armed"]?.GetValue<bool>() != true)
+        if (!telemetry.Pika.Owned || pika!["owner"]?.GetValue<string>() != owner || pika["armed"]?.GetValue<bool>() != true)
             return "Pika is monitoring only. Use Enable robot before commanding its opening.";
         if (pika["fresh"]?.GetValue<bool>() != true) return "Waiting for fresh gripper feedback before changing its opening.";
         if (pika["enabled"]?.GetValue<bool>() != true) return "Pika motor power is off. Use Enable robot before commanding its opening.";
@@ -679,12 +681,12 @@ public sealed partial class PipersPlugin : ILuckyPlugin
         double? opening = PikaDisplayOpening(pika as JsonObject, out double measuredOpening) ? measuredOpening : null;
         string pikaReading = string.IsNullOrEmpty(profile.PikaDevice) ? "Unassigned" : opening.HasValue ? $"{opening.Value:F1} mm"
             : pika?["connected"]?.GetValue<bool>() != true ? "Disconnected" : GripperLink.ClosedDisplayReferenceNeeded(pika as JsonObject) ? "Set closed ref." : "No feedback";
-        patches["pika.value"] = new() { ["text"] = pikaReading, ["hint"] = PikaMonitorStatus + " Raw encoder: " +
+        patches["pika.value"] = new() { ["text"] = pikaReading, ["hint"] = telemetry.Pika.Status + " Raw encoder: " +
             (pika?["telemetry"]?["motor"]?["Position"]?.ToJsonString() ?? "unavailable") + " rad. " +
             (PikaDisplayReferenceAngle(pika as JsonObject) is double angle ? $"Closed display reference {angle:F5} rad; motor targets unchanged." : "Nominal reference; a negative closed reading may need an operator-confirmed display reference.") };
         bool manualPika = scope.Context.Page == WorkspacePage.Controls && ManualPikaBlocker(device, pika as JsonObject) is null;
         patches["pika.target"] = new() { ["value"] = opening ?? 0, ["enabled"] = manualPika };
-        patches["pika.monitor"] = new() { ["text"] = PikaMonitorStatus };
+        patches["pika.monitor"] = new() { ["text"] = telemetry.Pika.Status };
         var recoveryCard = RecoveryCardState(device);
         bool verifiable = VerifiesOnly(recoveryCard) && RecoveryCardCanRun(recoveryCard);
         patches["recovery.run"] = new() { ["enabled"] = verifiable, ["text"] = verifiable ? recoveryCard.ActionText : "Verify controller state",
@@ -724,7 +726,7 @@ public sealed partial class PipersPlugin : ILuckyPlugin
             await Quietly(StopHeightCheck(markerTimeout.Token), "Height guide");
             await Quietly(ClearWizardHighlight(markerTimeout.Token), "Calibration marker");
         }
-        await Quietly(pikaMonitor.StopAsync(), "Pika monitor");
+        await Quietly(telemetry.Pika.StopAsync(), "Pika monitor");
         await Quietly(ct => FinishPikaTeaching("Plugin closed", ct), TimeSpan.FromSeconds(1), "Pika teaching");
         await Quietly(HoldFollowing, TimeSpan.FromSeconds(1), "Following");
         // Keep telemetry/heartbeats running until this session's Pika disable is

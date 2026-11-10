@@ -54,8 +54,8 @@ app.MapWhen(context => context.Connection.LocalPort == grpcPort, grpc => {
 });
 var assets = new Dictionary<string,(string File,string Type)> {
     ["/"]=("index.html","text/html; charset=utf-8"), ["/app.js"]=("app.js","text/javascript; charset=utf-8"),
-    ["/pika.mjs"]=("pika.mjs","text/javascript; charset=utf-8"), ["/pika_remote.mjs"]=("pika_remote.mjs","text/javascript; charset=utf-8"), ["/bench.mjs"]=("bench.mjs","text/javascript; charset=utf-8"), ["/style.css"]=("style.css","text/css; charset=utf-8"),
-    [HostRoutes.OpenApi]=("openapi.json","application/json")
+    ["/api.mjs"]=("api.mjs","text/javascript; charset=utf-8"), ["/pika.mjs"]=("pika.mjs","text/javascript; charset=utf-8"), ["/pika_remote.mjs"]=("pika_remote.mjs","text/javascript; charset=utf-8"), ["/bench.mjs"]=("bench.mjs","text/javascript; charset=utf-8"), ["/style.css"]=("style.css","text/css; charset=utf-8"),
+    [PiperApi.Paths.OpenApi]=("openapi.json","application/json")
 };
 foreach (var asset in assets.Values) if (!File.Exists(Path.Combine(web,asset.File))) throw new FileNotFoundException($"Missing shared dashboard asset {asset.File}");
 app.Run(async context => {
@@ -76,13 +76,13 @@ app.Run(async context => {
     string? Query(string key) => request.Query.TryGetValue(key, out var value) ? value.ToString() : null;
     try {
         if (HttpMethods.IsGet(request.Method)) {
-            if (route==HostRoutes.State) {
+            if (route==PiperApi.Paths.State) {
                 await response.WriteAsJsonAsync(control.ReadState(OperatingSystem.IsWindows() ? "dotnet-windows" : "dotnet-linux")); return;
             }
-            if (route==HostRoutes.PikaState) {
+            if (route==PiperApi.Paths.PikaState) {
                 await response.WriteAsJsonAsync(control.PikaState(Query("pika_device"), Query("pika_distribution"))); return;
             }
-            if (route==HostRoutes.PikaDevices) { await Reply(await control.DiscoverPikaAsync(Query("distribution"), context.RequestAborted)); return; }
+            if (route==PiperApi.Paths.PikaInventory) { await Reply(await control.ReadPikaInventoryAsync(Query("distribution"), context.RequestAborted)); return; }
             if (assets.TryGetValue(route,out var asset)) { response.ContentType=asset.Type; await response.SendFileAsync(Path.Combine(web,asset.File)); return; }
             await Error(404,"Not found"); return;
         }
