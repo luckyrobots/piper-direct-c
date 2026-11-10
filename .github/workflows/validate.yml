@@ -70,7 +70,7 @@ jobs:
       - name: Dashboard modules and fixtures
         shell: bash
         # Windows runners may name GNU make mingw32-make.
-        run: $(command -v make || command -v mingw32-make) test-web
+        run: $(command -v make || command -v mingw32-make) check-api test-web
       - name: Windows offline camera fixtures
         if: runner.os == 'Windows'
         shell: pwsh

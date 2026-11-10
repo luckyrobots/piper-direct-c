@@ -1,0 +1,1849 @@
+{
+  "$comment": "The one API definition (target-architecture P3). tools/gen-api.mjs generates web/openapi.json, web/api.mjs and managed/Piper.Core/PiperApi.g.cs from this file; edit this file only, then run `node tools/gen-api.mjs`.",
+  "title": "PiPer Direct C position-control API",
+  "version": "1.0.0",
+  "description": "Loopback-only Piper arm controller, served by two backends that share this native control core and dashboard: the C server (SocketCAN) and the managed .NET host (Windows or Linux), which adds a gRPC port, independent Pika gripper sessions and maintenance routes. No Python or robot SDK. Each path's x-piper-backend names the backends that serve it: c, managed or both. Read /api/state for the per-process token, stable selected device_id and current connection generation. Every POST requires X-Piper-Token and application/json. Accepted actions are asynchronous: poll state and renew the matching owner/request_id lease every 200 ms. Lease expires at 800 ms. Commands never resume automatically after reconnect or restart. A single-joint command sends a six-angle MoveJ pose, holding other joints at their initial measured positions. This API does not bypass the onboard MCU or expose raw torque/MIT/calibration/firmware writes. State includes controller teach_state, fault masks, persisted last_fault and per-joint max_acceleration_rad_s2/acceleration_fresh/acceleration_age_s. New motion and enable require valid angle, speed and acceleration limits read on this connection. Static configuration remains valid while the connection is uninterrupted; there is no periodic refresh or 60-second expiry. USB/CAN reconnection, a robot status-stream gap or an explicit information query invalidates the cache. Live position, motor and fault feedback still use the normal short freshness checks. Acceleration limits must be finite, greater than zero and at most 5 rad/s². Queries are read-only and preserve unresolved recovery locks. The limits_fresh, acceleration_fresh and gripper configuration_fresh fields mean valid for this connection; their age fields report elapsed time without imposing an expiry. Missing optional standard CAN gripper settings do not block the arm or Pika. Statuses common to every route are documented here once: 403 for a wrong or missing X-Piper-Token, a foreign Origin or a non-loopback Host; 400 for a body that is not a JSON object and 413 for one that is too large. The managed host also answers 409 to every POST except /api/stop and /api/stop/coordinated while a maintenance restart is pending, and, when a plugin session owns it, 409 to every POST whose owner is not that session, except /api/query, /api/stop and /api/stop/coordinated: reading back and stopping are open to every authenticated caller. The operator STOP is POST /api/stop (C server) or POST /api/stop/coordinated (managed host) with no device_id, generation or request_id: it is never pinned to a connection generation and stops every arm.",
+  "server": "http://127.0.0.1:8765",
+  "limits": {
+    "max_body_bytes": 16384,
+    "max_depth": 32
+  },
+  "common_responses": {
+    "400": "The body is not one JSON object with unique keys, contains a Unicode escape or NUL, or nests deeper than the limit",
+    "403": "Wrong or missing X-Piper-Token, a foreign Origin or a non-loopback Host",
+    "413": "The body is larger than the limit"
+  },
+  "fields": {
+    "owner": {
+      "type": "string",
+      "description": "Client ID. A session-owned managed host requires its plugin owner."
+    },
+    "pika_device": {
+      "type": "string",
+      "description": "Linux Pika device identity, e.g. /dev/pika/by-host/1-2. Omitted means the assigned default gripper."
+    },
+    "pika_distribution": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "WSL distribution; null means native Linux serial. Omitted means the current assignment."
+    }
+  },
+  "schemas": {
+    "Identity": {
+      "type": "object",
+      "required": [
+        "device_id",
+        "generation"
+      ],
+      "properties": {
+        "device_id": {
+          "type": "string",
+          "description": "Stable USB adapter identity returned by state"
+        },
+        "generation": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Changes when the CAN socket reconnects"
+        }
+      }
+    },
+    "Command": {
+      "allOf": [
+        {
+          "$ref": "#/components/schemas/Identity"
+        },
+        {
+          "type": "object",
+          "required": [
+            "action",
+            "owner"
+          ],
+          "properties": {
+            "action": {
+              "type": "string",
+              "description": "teach-return explicitly returns completed physical teaching to CAN. Qualified H-V1.2-1 with S-V1.8-5 through S-V1.8-9 or S-V1.9-0/1 firmware uses a frozen measured-pose hold: confirm button_off, same_pose_confirmed, supported and clear. Fresh healthy joint/motor encoders, current configuration, all six motors already enabled and a stationary pose are required. Three measured position packets seed the hold, then a fresh receive observation precedes CAN MoveJ plus the same six measured angles at 1% speed; completion requires fresh same-pose status, joint and motor acknowledgement. Other supported firmware requires zero_pose_confirmed, all joints within 1 degree of zero and within limits, then acknowledged standby/CAN mode packets. recover-at-pose uses only the qualified measured-pose path to clear a saved software obstruction after the backend observes a new physical hand-guiding-to-off cycle on this device/generation within 120 seconds. Reset-pending, real fault/transport evidence, stale feedback, out-of-range pose or missing cycle reject without transmission. The incident stays latched until the hold is acknowledged and saved. Neither action resets, changes motor power, homes or replays an old target. Both return 202/request_id and require the normal control heartbeat during the bounded handoff. Connection/lease/mode changes cancel; unexpected movement requests protective STOP. device.teaching exposes can_return/return_reason and can_recover_at_pose/recover_at_pose_reason. verify-current requires clear=true and supported=true; it clears the recovery record without CAN transmission only when the drivers are healthy, stationary and in one consistent power state, and never clears a pending reset. move-to-zero moves all six joints to 0 degrees under the normal move checks. follow-start opens a leased following session at fresh measurements without replaying any target. follow-update sends the latest six-angle target with an increasing sequence and the session request_id; input older than 250 ms holds the measured pose. follow-commit moves to its final target, and follow-end holds the measured pose with motors enabled.",
+              "enum": [
+                "enable",
+                "disable",
+                "joint",
+                "jog",
+                "zero",
+                "pose",
+                "gripper",
+                "hold",
+                "reset",
+                "verify-reset",
+                "align",
+                "verify-disabled",
+                "cycle",
+                "teach-return",
+                "recover-at-pose",
+                "verify-current",
+                "move-to-zero",
+                "follow-start",
+                "follow-update",
+                "follow-commit",
+                "follow-end"
+              ]
+            },
+            "owner": {
+              "type": "string",
+              "minLength": 16,
+              "maxLength": 80
+            },
+            "standalone": {
+              "type": "boolean",
+              "description": "Operator confirms no linked leader or competing controller. Required true on every action admitted from idle. hold, follow-update, follow-commit and follow-end on the caller's active lane do not read it."
+            },
+            "clear": {
+              "type": "boolean",
+              "description": "Operator confirms the full motion path is clear and the arm is attended. Required true on enable, joint, jog, zero, pose, gripper, align, cycle, move-to-zero, follow-start, reset, verify-current, teach-return and recover-at-pose. disable, verify-reset and verify-disabled do not read it."
+            },
+            "supported": {
+              "type": "boolean",
+              "description": "Operator confirms the arm is physically supported. Required true on enable, disable, reset, verify-reset, verify-disabled, verify-current, teach-return and recover-at-pose. Motion and gripper actions do not read it."
+            },
+            "reset_completed": {
+              "type": "boolean",
+              "description": "Read only by verify-reset, where it is required true. Send it only after an explicit operator confirmation, for that verify-reset request, that the controller reset or power cycle has completed. It is never a default: every other action ignores it."
+            },
+            "button_off": {
+              "type": "boolean",
+              "description": "Required true for teach-return/recover-at-pose: operator confirms the physical teaching button light is off"
+            },
+            "zero_pose_confirmed": {
+              "type": "boolean",
+              "description": "Required true for legacy teach-return only: operator confirms the physical arm is at its manufacturer's zero pose"
+            },
+            "same_pose_confirmed": {
+              "type": "boolean",
+              "description": "Required true for qualified measured-pose teach-return and recover-at-pose: hold the measured current pose stationary with a clear workspace; no previous destination will resume"
+            },
+            "joint": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 6
+            },
+            "degrees": {
+              "oneOf": [
+                {
+                  "type": "number",
+                  "minimum": -360,
+                  "maximum": 360
+                },
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "number"
+                  },
+                  "minItems": 6,
+                  "maxItems": 6
+                }
+              ],
+              "description": "Absolute degrees for joint/pose; delta for jog (±5 max). Controller-reported joint limits always apply."
+            },
+            "speed_deg_s": {
+              "type": "number",
+              "minimum": 0.1,
+              "maximum": 15,
+              "default": 3
+            },
+            "tolerance_deg": {
+              "type": "number",
+              "minimum": 0.05,
+              "maximum": 1,
+              "default": 0.2
+            },
+            "width_mm": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 100
+            },
+            "effort_nm": {
+              "type": "number",
+              "minimum": 0.02,
+              "maximum": 0.5,
+              "default": 0.1
+            },
+            "allow_closed_offset": {
+              "type": "boolean",
+              "default": false
+            },
+            "synchronized": {
+              "type": "boolean",
+              "default": false
+            },
+            "speed_percent": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 100,
+              "description": "Percentage of the slowest fresh reported joint speed limit. Mutually exclusive with legacy speed_deg_s. Zero blocks new joint moves; it does not stop an active move. Alignment and scripted cycle retain explicit rates."
+            },
+            "request_id": {
+              "type": "integer",
+              "minimum": 1,
+              "description": "follow-update, follow-commit and follow-end: the request_id that follow-start answered"
+            },
+            "sequence": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 4294967295,
+              "description": "follow-update: strictly increasing within the session"
+            },
+            "trajectory": {
+              "type": "boolean",
+              "description": "follow-start only: open a trajectory-following session"
+            },
+            "trajectory_transport": {
+              "const": "position-velocity",
+              "description": "follow-start with trajectory only"
+            }
+          }
+        },
+        {
+          "if": {
+            "not": {
+              "properties": {
+                "action": {
+                  "enum": [
+                    "hold",
+                    "follow-update",
+                    "follow-commit",
+                    "follow-end"
+                  ]
+                }
+              },
+              "required": [
+                "action"
+              ]
+            }
+          },
+          "then": {
+            "properties": {
+              "standalone": {
+                "const": true
+              }
+            },
+            "required": [
+              "standalone"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "action": {
+                "enum": [
+                  "enable",
+                  "joint",
+                  "jog",
+                  "zero",
+                  "pose",
+                  "gripper",
+                  "align",
+                  "cycle",
+                  "move-to-zero",
+                  "follow-start",
+                  "reset",
+                  "verify-current",
+                  "teach-return",
+                  "recover-at-pose"
+                ]
+              }
+            },
+            "required": [
+              "action"
+            ]
+          },
+          "then": {
+            "allOf": [
+              {
+                "properties": {
+                  "clear": {
+                    "const": true
+                  }
+                },
+                "required": [
+                  "clear"
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "action": {
+                "enum": [
+                  "enable",
+                  "disable",
+                  "reset",
+                  "verify-reset",
+                  "verify-disabled",
+                  "verify-current",
+                  "teach-return",
+                  "recover-at-pose"
+                ]
+              }
+            },
+            "required": [
+              "action"
+            ]
+          },
+          "then": {
+            "allOf": [
+              {
+                "properties": {
+                  "supported": {
+                    "const": true
+                  }
+                },
+                "required": [
+                  "supported"
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "action": {
+                "const": "verify-reset"
+              }
+            },
+            "required": [
+              "action"
+            ]
+          },
+          "then": {
+            "allOf": [
+              {
+                "properties": {
+                  "reset_completed": {
+                    "const": true
+                  }
+                },
+                "required": [
+                  "reset_completed"
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "action": {
+                "enum": [
+                  "teach-return",
+                  "recover-at-pose"
+                ]
+              }
+            },
+            "required": [
+              "action"
+            ]
+          },
+          "then": {
+            "allOf": [
+              {
+                "properties": {
+                  "button_off": {
+                    "const": true
+                  }
+                },
+                "required": [
+                  "button_off"
+                ]
+              }
+            ]
+          }
+        }
+      ],
+      "x-piper-confirmations": {
+        "description": "Operator attestations that lane_action() in src/controller.c reads for each action. A client sends a flag only on the actions listed for it. teach-return and recover-at-pose also need button_off and, by firmware, same_pose_confirmed or zero_pose_confirmed.",
+        "standalone": "every action except hold, follow-update, follow-commit, follow-end",
+        "clear": [
+          "enable",
+          "joint",
+          "jog",
+          "zero",
+          "pose",
+          "gripper",
+          "align",
+          "cycle",
+          "move-to-zero",
+          "follow-start",
+          "reset",
+          "verify-current",
+          "teach-return",
+          "recover-at-pose"
+        ],
+        "supported": [
+          "enable",
+          "disable",
+          "reset",
+          "verify-reset",
+          "verify-disabled",
+          "verify-current",
+          "teach-return",
+          "recover-at-pose"
+        ],
+        "reset_completed": [
+          "verify-reset"
+        ]
+      }
+    },
+    "Result": {
+      "type": "object",
+      "properties": {
+        "ok": {
+          "type": "boolean"
+        },
+        "message": {
+          "type": "string"
+        },
+        "error": {
+          "type": "string"
+        },
+        "request_id": {
+          "type": "integer"
+        }
+      }
+    },
+    "State": {
+      "type": "object",
+      "required": [
+        "kind",
+        "simulated",
+        "token",
+        "selected",
+        "devices",
+        "motion"
+      ],
+      "properties": {
+        "kind": {
+          "const": "piper_direct_c"
+        },
+        "api_version": {
+          "type": "string"
+        },
+        "simulated": {
+          "type": "boolean"
+        },
+        "token": {
+          "type": "string"
+        },
+        "selected": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        },
+        "phase": {
+          "type": "string"
+        },
+        "query_active": {
+          "type": "boolean"
+        },
+        "storage_failed": {
+          "type": "boolean"
+        },
+        "motion": {
+          "type": "object"
+        },
+        "devices": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "generation": {
+                "type": "integer"
+              },
+              "fresh": {
+                "type": "boolean"
+              },
+              "blocker": {
+                "type": "string"
+              },
+              "joints": {
+                "type": "array",
+                "minItems": 6,
+                "maxItems": 6,
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "index": {
+                      "type": "integer"
+                    },
+                    "actual_deg": {
+                      "type": [
+                        "number",
+                        "null"
+                      ]
+                    },
+                    "target_deg": {
+                      "type": [
+                        "number",
+                        "null"
+                      ]
+                    },
+                    "fresh": {
+                      "type": "boolean"
+                    },
+                    "enabled": {
+                      "type": [
+                        "boolean",
+                        "null"
+                      ]
+                    },
+                    "min_deg": {
+                      "type": [
+                        "number",
+                        "null"
+                      ]
+                    },
+                    "max_deg": {
+                      "type": [
+                        "number",
+                        "null"
+                      ]
+                    },
+                    "limits_fresh": {
+                      "type": "boolean"
+                    }
+                  }
+                }
+              },
+              "recovery_required": {
+                "type": "boolean",
+                "description": "The persisted recovery record is not clear (or a legacy stop is unacknowledged) and no action is running."
+              },
+              "reset_pending": {
+                "type": "boolean",
+                "description": "The persisted record state is reset_pending; only reset retry or verify-reset can proceed."
+              },
+              "stop_reason": {
+                "type": "string",
+                "description": "Display text for the latched reason. Clients must not branch on it; use stop_event.kind and reset_pending."
+              },
+              "stop_event": {
+                "type": [
+                  "object",
+                  "null"
+                ],
+                "description": "First unacknowledged STOP evidence, kept until recovery clears the record. The persisted control-state.json record also carries state (clear, latched, reset_pending) and kind (intent, stop, obstruction, power, reset); recovery eligibility reads those fields, never reason text.",
+                "properties": {
+                  "kind": {
+                    "enum": [
+                      "stop",
+                      "obstruction"
+                    ],
+                    "description": "Why the STOP was latched. obstruction makes the incident eligible for recover-at-pose."
+                  },
+                  "reason": {
+                    "type": "string",
+                    "description": "Display text only"
+                  },
+                  "joint": {
+                    "type": "integer",
+                    "description": "Joint (1-6) recorded by a joint-specific stop such as an obstruction; 0 when none was recorded"
+                  },
+                  "request_id": {
+                    "type": "integer"
+                  },
+                  "unix_time": {
+                    "type": "number"
+                  },
+                  "phase_before_stop": {
+                    "type": "string"
+                  },
+                  "following": {
+                    "type": "boolean"
+                  },
+                  "finishing_target": {
+                    "type": "boolean"
+                  },
+                  "trajectory_follow": {
+                    "type": "boolean"
+                  },
+                  "arm_status": {
+                    "type": "number"
+                  },
+                  "error": {
+                    "type": "number"
+                  },
+                  "transport": {
+                    "type": "object"
+                  },
+                  "joints": {
+                    "type": "array",
+                    "items": {
+                      "type": "object"
+                    }
+                  }
+                }
+              },
+              "last_fault": {
+                "type": [
+                  "object",
+                  "null"
+                ],
+                "description": "Robot fault captured before the STOP changed the reported state"
+              },
+              "last_cleanup_error": {
+                "type": "string",
+                "description": "Latest power-cleanup failure; the primary stop_event is kept"
+              }
+            }
+          }
+        }
+      }
+    },
+    "CoordinatedStop": {
+      "type": "object",
+      "properties": {
+        "ok": {
+          "type": "boolean"
+        },
+        "arm": {
+          "$ref": "#/components/schemas/StopChannel"
+        },
+        "pika": {
+          "$ref": "#/components/schemas/StopChannel"
+        }
+      }
+    },
+    "StopChannel": {
+      "type": "object",
+      "properties": {
+        "ok": {
+          "type": "boolean"
+        },
+        "message": {
+          "type": "string"
+        }
+      }
+    }
+  },
+  "routes": [
+    {
+      "id": "camera",
+      "method": "POST",
+      "path": "/api/camera",
+      "backend": "c",
+      "class": "control",
+      "owner": "open",
+      "grpc": false,
+      "summary": "Start or stop the configured local bench webcam",
+      "description": "Independent of robot motion. Simulation never opens a real webcam. No microphone or recording. Served only by the C server; the managed host uses local browser camera selection and has no camera routes.",
+      "request": {
+        "required": [
+          "enabled"
+        ],
+        "properties": {
+          "enabled": {
+            "type": "boolean"
+          }
+        }
+      },
+      "responses": {
+        "200": {
+          "description": "Camera state; capture start is asynchronous"
+        },
+        "400": {
+          "description": "Invalid enabled flag"
+        },
+        "409": {
+          "description": "Camera unavailable or not configured"
+        }
+      }
+    },
+    {
+      "id": "cameraFrame",
+      "method": "GET",
+      "path": "/api/camera/frame",
+      "backend": "c",
+      "class": "read",
+      "summary": "Read the latest fresh bench-camera JPEG",
+      "description": "Served only by the C server; the managed host uses local browser camera selection and has no camera routes.",
+      "responses": {
+        "200": {
+          "description": "JPEG received within the last 1.5 seconds",
+          "content": {
+            "image/jpeg": {
+              "schema": {
+                "type": "string",
+                "format": "binary"
+              }
+            }
+          }
+        },
+        "409": {
+          "description": "No fresh frame"
+        }
+      }
+    },
+    {
+      "id": "state",
+      "method": "GET",
+      "path": "/api/state",
+      "backend": "both",
+      "class": "read",
+      "public": true,
+      "summary": "Discover adapters and read feedback, diagnostics, control status and token",
+      "responses": {
+        "200": {
+          "description": "Unknown numeric measurements are null. fresh/age_s describe validity. tx_frames counts queued, not acknowledged, frames. motion exposes active, owner, request_id, speed_deg_s, tolerance_deg and elapsed_s. devices contain stable ID, generation, interface, firmware, hardware, status, recovery gate, six joints and gripper feedback.",
+          "schema": "State"
+        }
+      }
+    },
+    {
+      "id": "select",
+      "method": "POST",
+      "path": "/api/select",
+      "backend": "both",
+      "class": "control",
+      "owner": "session",
+      "grpc": true,
+      "summary": "Select a discovered stable adapter; no motor command",
+      "request": {
+        "required": [
+          "device_id"
+        ],
+        "properties": {
+          "device_id": {
+            "type": "string"
+          },
+          "owner": {
+            "$field": "owner"
+          }
+        }
+      },
+      "responses": {
+        "200": {
+          "description": "Selected"
+        },
+        "404": {
+          "description": "Adapter absent"
+        },
+        "500": {
+          "description": "The selection could not be saved; it is unchanged"
+        }
+      },
+      "examples": [
+        {
+          "name": "select",
+          "body": {
+            "device_id": "usb:YOUR_ADAPTER_SERIAL",
+            "owner": "YOUR_UNIQUE_CLIENT_ID"
+          }
+        }
+      ]
+    },
+    {
+      "id": "query",
+      "method": "POST",
+      "path": "/api/query",
+      "backend": "both",
+      "class": "control",
+      "owner": "open",
+      "grpc": true,
+      "summary": "Request firmware, then six limits; ends within 3 seconds",
+      "description": "Queues one firmware read. Limit queries follow only after external robot data is received. Missing replies stay unknown.",
+      "request": {
+        "required": [
+          "device_id",
+          "generation"
+        ],
+        "properties": {
+          "device_id": {
+            "type": "string",
+            "description": "Stable USB adapter identity returned by state"
+          },
+          "generation": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "Changes when the CAN socket reconnects"
+          },
+          "owner": {
+            "type": "string",
+            "description": "Client ID. Not compared: reading back is open to every authenticated caller."
+          }
+        }
+      },
+      "responses": {
+        "202": {
+          "description": "Read started"
+        },
+        "409": {
+          "description": "Unavailable, busy or stale selection"
+        }
+      },
+      "examples": [
+        {
+          "name": "query",
+          "body": {
+            "device_id": "usb:YOUR_ADAPTER_SERIAL",
+            "generation": 1,
+            "owner": "YOUR_UNIQUE_CLIENT_ID"
+          }
+        }
+      ]
+    },
+    {
+      "id": "reconnect",
+      "method": "POST",
+      "path": "/api/reconnect",
+      "backend": "both",
+      "class": "control",
+      "owner": "session",
+      "grpc": true,
+      "summary": "Reopen CAN sockets and refresh selected arm firmware/limits; no network configuration or motion",
+      "description": "Invalidates cached feedback, then starts one bounded information query on the selected adapter if its CAN socket is available. Motion and stop recovery remain explicit. Poll query_active for completion; 200 does not guarantee robot replies. With generation the request is pinned: device_id (or the selected adapter) must still be at that connection generation. With neither device_id nor generation every CAN socket is reopened.",
+      "request": {
+        "properties": {
+          "device_id": {
+            "type": "string",
+            "description": "Adapter to reopen; omitted means the selected adapter, or every adapter when generation is omitted too"
+          },
+          "generation": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 4294967295,
+            "description": "Pins the request to this connection generation"
+          },
+          "owner": {
+            "$field": "owner"
+          }
+        }
+      },
+      "responses": {
+        "200": {
+          "description": "Sockets reopened; selected adapter information read started if available"
+        },
+        "409": {
+          "description": "Action or information read active, or the pinned generation is stale"
+        }
+      },
+      "examples": [
+        {
+          "name": "pinned",
+          "body": {
+            "device_id": "usb:YOUR_ADAPTER_SERIAL",
+            "generation": 1,
+            "owner": "YOUR_UNIQUE_CLIENT_ID"
+          }
+        }
+      ]
+    },
+    {
+      "id": "command",
+      "method": "POST",
+      "path": "/api/command",
+      "backend": "both",
+      "class": "control",
+      "owner": "session",
+      "grpc": true,
+      "summary": "Control joints, a pose, motor power, gripper or recovery",
+      "description": "enable requires all six drivers disabled and supported=true. joint sets one absolute degree target; jog adds a signed increment to the current measured angle; zero sets one target to 0 degrees without calibration writes. pose takes six absolute angles; synchronized=true uses one shared interpolation fraction so joints follow the planned straight line in joint space. gripper sets opening from 0 to the freshly queried hardware maximum (70 or 100 mm), at 5 mm/s and effort_nm 0.02–0.5 N·m (default 0.1). If raw closed feedback is between −2 and 0 mm, allow_closed_offset=true permits an explicit opening to at least 5 mm with a bounded 1 mm entry target; no encoder calibration is changed. Configuration is checked throughout motion. disable/reset require physical support, known firmware and fresh status. reset powers motors off, sends once and verifies fresh disabled, stationary feedback. A pending reset cannot be resent. verify-reset requires supported=true and reset_completed=true; send reset_completed only after the operator confirms that this reset or power cycle completed. Each confirmation flag is read only by the actions listed in the Command schema's x-piper-confirmations; do not send it on others. hold is accepted from the owner during an active joint/pose move or gripper ramp. For a gripper it ends the ramp while retaining the last sent target and effort; it does not certify contact or a secure grasp. New moves require a stationary arm and fresh limits. All asynchronous actions require heartbeats. Enable transmits only driver power commands, without a position target or mode change. align explicitly moves resting joints at most 3 degrees to 0.5 degrees inside their command ranges, at 1% MCU speed, retaining all other targets. Larger corrections are rejected. verify-disabled clears a recovery record without CAN transmission only when all drivers are healthy, stationary and disabled; pending resets still require verify-reset. A successful normal disable clears only its own in-flight record; earlier stops remain latched. cycle requires enabled motors and a starting pose within limits. It captures that measured pose, raises toward [start J1,82,-160,0,-7,start J6] degrees, pauses for two seconds after verified arrival, and returns to the captured pose. Cycle speed is fixed at up to 3 degrees/second with 0.2-degree feedback tolerance; it uses synchronized joint interpolation and a 180-second deadline. Stop, Hold, lease loss, faults or disconnection cancel the remaining cycle; return is never automatic after interruption. Motion remains supervised by the existing heartbeat. motion.sequence_stage is raising/upright/returning while active; motion.return_degrees contains the captured pose.",
+      "request": {
+        "schema": "Command"
+      },
+      "responses": {
+        "200": {
+          "description": "Recovery verified"
+        },
+        "202": {
+          "description": "Accepted; retain request_id, renew heartbeat, then check measured completion",
+          "schema": "Result"
+        },
+        "400": {
+          "description": "Invalid input, missing operator acknowledgement or target outside limits"
+        },
+        "409": {
+          "description": "Feedback, mode, firmware, driver, lease, connection or recovery prerequisite failed"
+        },
+        "500": {
+          "description": "Persistent intent could not be saved; no action started"
+        }
+      },
+      "examples": [
+        {
+          "name": "joint",
+          "body": {
+            "device_id": "usb:YOUR_ADAPTER_SERIAL",
+            "generation": 1,
+            "owner": "YOUR_UNIQUE_CLIENT_ID",
+            "action": "joint",
+            "joint": 1,
+            "degrees": 12.5,
+            "speed_deg_s": 3,
+            "tolerance_deg": 0.2,
+            "standalone": true,
+            "clear": true
+          }
+        },
+        {
+          "name": "pose",
+          "body": {
+            "device_id": "usb:YOUR_ADAPTER_SERIAL",
+            "generation": 1,
+            "owner": "YOUR_UNIQUE_CLIENT_ID",
+            "action": "pose",
+            "degrees": [
+              0,
+              45,
+              -65,
+              0,
+              10,
+              0
+            ],
+            "standalone": true,
+            "clear": true
+          }
+        },
+        {
+          "name": "verify-reset",
+          "body": {
+            "device_id": "usb:YOUR_ADAPTER_SERIAL",
+            "generation": 1,
+            "owner": "YOUR_UNIQUE_CLIENT_ID",
+            "action": "verify-reset",
+            "standalone": true,
+            "supported": true,
+            "reset_completed": true
+          }
+        },
+        {
+          "name": "disable",
+          "body": {
+            "device_id": "usb:YOUR_ADAPTER_SERIAL",
+            "generation": 1,
+            "owner": "YOUR_UNIQUE_CLIENT_ID",
+            "action": "disable",
+            "standalone": true,
+            "supported": true
+          }
+        }
+      ]
+    },
+    {
+      "id": "heartbeat",
+      "method": "POST",
+      "path": "/api/heartbeat",
+      "backend": "both",
+      "class": "control",
+      "owner": "session",
+      "grpc": true,
+      "summary": "Renew an active control lease",
+      "description": "Renews the lease of the action that owner started with request_id. With device_id the heartbeat is pinned: that adapter must still be the one running the action and generation must equal its current connection generation. Without device_id the selected adapter is used and generation is ignored.",
+      "request": {
+        "required": [
+          "owner",
+          "request_id"
+        ],
+        "properties": {
+          "owner": {
+            "type": "string",
+            "description": "The owner that started request_id"
+          },
+          "request_id": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "device_id": {
+            "type": "string",
+            "description": "Pins the heartbeat to this adapter; requires generation"
+          },
+          "generation": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 4294967295,
+            "description": "Connection generation of device_id from /api/state"
+          }
+        }
+      },
+      "responses": {
+        "200": {
+          "description": "Lease renewed"
+        },
+        "409": {
+          "description": "No matching active lease, lease already expired, or the pinned adapter or generation no longer matches"
+        }
+      },
+      "examples": [
+        {
+          "name": "renew",
+          "body": {
+            "owner": "YOUR_UNIQUE_CLIENT_ID",
+            "request_id": 1,
+            "device_id": "usb:YOUR_ADAPTER_SERIAL",
+            "generation": 1
+          }
+        }
+      ]
+    },
+    {
+      "id": "stop",
+      "method": "POST",
+      "path": "/api/stop",
+      "backend": "both",
+      "class": "stop",
+      "owner": "open",
+      "grpc": true,
+      "summary": "Emergency software stop of arms, or cancel of the caller's own action; persist recovery requirement",
+      "description": "Two intents, reported in the reply as stop_intent. Emergency (no well-formed request_id): never refused without stopping. With no device_id every known arm gets an independent stop attempt, whoever owns the running action; with a known device_id that arm stops even when generation is stale or the owner differs. A request that cannot be tied to one arm (unknown or non-string device_id, or generation/request_id without device_id) stops every arm and is reported as degraded. Cancel (a known device_id with a request_id): the cleanup stop a client sends for its own action. It stops that arm only while owner and request_id still name its current action; otherwise 409, no frame is sent and nothing is latched. The reply lists one result per arm in stops, with stop_scope (device or all), stop_scope_degraded and, when degraded, stop_scope_reason. 200 means the scope was honoured as asked, every frame was delivered and the recovery records were saved; 409 on an emergency means arms were still stopped but something is unverified or the scope was widened: read stops. No motion health check is required. Fast stop can allow damped descent; it is not a power cut or guaranteed hold. Active gripper motion also gets a gripper disable request. Disconnected hardware cannot receive the stop. Inspect physical state before recovery.",
+      "request": {
+        "properties": {
+          "owner": {
+            "type": "string",
+            "description": "Sender ID. Compared only by a cancel (a stop that carries request_id). Never needed for an emergency stop, also on a session-owned managed host."
+          },
+          "device_id": {
+            "type": "string",
+            "description": "Omitted: emergency stop of every arm. Present: this arm only."
+          },
+          "generation": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 4294967295,
+            "description": "Optional with device_id. A stale value never prevents an emergency stop; it is reported in the reply."
+          },
+          "request_id": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "With device_id: makes this a cancel of that action"
+          }
+        }
+      },
+      "responses": {
+        "200": {
+          "description": "Stopped as asked, delivered and saved; read stops"
+        },
+        "409": {
+          "description": "Emergency: arms were stopped but a delivery or save is unverified, or the scope was widened to every arm (stop_scope_degraded). Cancel: the action is no longer current; nothing was sent."
+        }
+      },
+      "examples": [
+        {
+          "name": "emergency",
+          "body": {
+            "owner": "YOUR_UNIQUE_CLIENT_ID"
+          }
+        },
+        {
+          "name": "cancel",
+          "body": {
+            "owner": "YOUR_UNIQUE_CLIENT_ID",
+            "device_id": "usb:YOUR_ADAPTER_SERIAL",
+            "request_id": 1
+          }
+        }
+      ]
+    },
+    {
+      "id": "coordinatedStop",
+      "method": "POST",
+      "path": "/api/stop/coordinated",
+      "backend": "managed",
+      "class": "stop",
+      "owner": "open",
+      "grpc": true,
+      "summary": "Stop arms and hold Pika grippers as two independent attempts",
+      "description": "Runs the arm STOP and the Pika hold concurrently, each with its own bounded attempt; a failure, timeout or block in one never suppresses the other. Admitted during maintenance like /api/stop. With a non-empty device_id the STOP is scoped to that arm and pika_device is required. Without it this is the emergency stop: every arm is stopped and every Pika is held, whoever owns them and whoever asks; owner is not needed, and a plugin-owned host admits it from any authenticated caller. A STOP whose scope cannot be honoured (generation or request_id without device_id, a device_id that is not a string, or an arm without pika_device and without request_id) still stops and holds everything and reports the failed scope (409). A cancel (device_id with request_id) holds only the pika_device it names.",
+      "request": {
+        "properties": {
+          "owner": {
+            "type": "string",
+            "description": "Client ID. Needed only by a scoped stop."
+          },
+          "device_id": {
+            "type": "string",
+            "description": "Empty or omitted stops all arms"
+          },
+          "generation": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "request_id": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "pika_device": {
+            "$field": "pika_device"
+          },
+          "pika_distribution": {
+            "$field": "pika_distribution"
+          }
+        }
+      },
+      "responses": {
+        "200": {
+          "description": "Both channels acknowledged",
+          "schema": "CoordinatedStop"
+        },
+        "409": {
+          "description": "At least one channel is unverified; read both results",
+          "schema": "CoordinatedStop"
+        }
+      },
+      "examples": [
+        {
+          "name": "emergency",
+          "body": {
+            "owner": "YOUR_UNIQUE_CLIENT_ID"
+          }
+        },
+        {
+          "name": "unnamed",
+          "body": {}
+        }
+      ]
+    },
+    {
+      "id": "shutdown",
+      "method": "POST",
+      "path": "/api/shutdown",
+      "backend": "managed",
+      "class": "maintenance",
+      "owner": "session",
+      "grpc": false,
+      "summary": "Close USB transports and exit the managed host",
+      "description": "HTTP only. Freezes new controls (STOP stays available), requires idle arms and Pika grippers, replies, then rechecks before exiting. A failed recheck cancels the shutdown and is reported in state.backend_restart.last_failure.",
+      "request": {
+        "properties": {
+          "owner": {
+            "$field": "owner"
+          }
+        }
+      },
+      "responses": {
+        "200": {
+          "description": "Shutdown accepted; the process exits after this response"
+        },
+        "409": {
+          "description": "A control request, arm motion, query or gripper movement is active, or maintenance is already in progress"
+        }
+      }
+    },
+    {
+      "id": "restart",
+      "method": "POST",
+      "path": "/api/maintenance/restart",
+      "backend": "managed",
+      "class": "maintenance",
+      "owner": "session",
+      "grpc": true,
+      "summary": "Restart a supervised or plugin-owned managed host in monitoring mode",
+      "description": "Requires the exact backend_process_id and backend_instance_id from state, the current owner, and release_grippers=true because restart releases Pika holding torque. Arm power is unchanged and STOP/recovery stays latched. The host freezes new controls, verifies idle stationary hardware, replies 202, rechecks after the response drains and exits with code 75. No target is replayed.",
+      "request": {
+        "required": [
+          "owner",
+          "backend_process_id",
+          "backend_instance_id",
+          "release_grippers"
+        ],
+        "properties": {
+          "owner": {
+            "$field": "owner"
+          },
+          "backend_process_id": {
+            "type": "integer"
+          },
+          "backend_instance_id": {
+            "type": "string"
+          },
+          "release_grippers": {
+            "const": true
+          }
+        }
+      },
+      "responses": {
+        "202": {
+          "description": "Restart accepted"
+        },
+        "409": {
+          "description": "Unsupported, stale identity, missing acknowledgement, or hardware not idle"
+        }
+      },
+      "examples": [
+        {
+          "name": "stale",
+          "body": {
+            "owner": "YOUR_UNIQUE_CLIENT_ID",
+            "backend_process_id": 1,
+            "backend_instance_id": "STALE_INSTANCE",
+            "release_grippers": true
+          }
+        }
+      ]
+    },
+    {
+      "id": "pikaState",
+      "method": "GET",
+      "path": "/api/pika/state",
+      "backend": "managed",
+      "class": "read",
+      "public": true,
+      "summary": "Read one Pika session snapshot with raw evidence",
+      "query": [
+        {
+          "name": "pika_device",
+          "schema": {
+            "type": "string"
+          },
+          "description": "Omitted means the assigned default gripper"
+        },
+        {
+          "name": "pika_distribution",
+          "schema": {
+            "type": "string"
+          },
+          "description": "Omitted means the current assignment"
+        }
+      ],
+      "responses": {
+        "200": {
+          "description": "Session snapshot; an unregistered device reports connected=false"
+        }
+      }
+    },
+    {
+      "id": "pikaInventory",
+      "method": "GET",
+      "path": "/api/pika/devices",
+      "backend": "managed",
+      "class": "read",
+      "public": true,
+      "summary": "List attached Pika grippers without opening them",
+      "query": [
+        {
+          "name": "distribution",
+          "schema": {
+            "type": "string"
+          },
+          "description": "Omitted means the current assignment"
+        }
+      ],
+      "responses": {
+        "200": {
+          "description": "Inventory; empty in simulation"
+        },
+        "409": {
+          "description": "Discovery failed"
+        }
+      }
+    },
+    {
+      "id": "pikaDevices",
+      "method": "POST",
+      "path": "/api/pika/devices",
+      "backend": "managed",
+      "class": "control",
+      "owner": "session",
+      "grpc": true,
+      "summary": "List attached Pika grippers without opening them",
+      "request": {
+        "properties": {
+          "owner": {
+            "$field": "owner"
+          },
+          "pika_distribution": {
+            "$field": "pika_distribution"
+          }
+        }
+      },
+      "responses": {
+        "200": {
+          "description": "Inventory; empty in simulation"
+        },
+        "409": {
+          "description": "Discovery failed"
+        }
+      },
+      "examples": [
+        {
+          "name": "inventory",
+          "body": {
+            "owner": "YOUR_UNIQUE_CLIENT_ID"
+          }
+        }
+      ]
+    },
+    {
+      "id": "pikaConfigure",
+      "method": "POST",
+      "path": "/api/pika/configure",
+      "backend": "managed",
+      "class": "control",
+      "owner": "session",
+      "grpc": true,
+      "summary": "Change the Pika gripper assignment",
+      "description": "Registers an assignment without opening the port. Refused while an arm moves. An empty device clears the assignment.",
+      "request": {
+        "required": [
+          "owner",
+          "device"
+        ],
+        "properties": {
+          "owner": {
+            "$field": "owner"
+          },
+          "pika_device": {
+            "$field": "pika_device"
+          },
+          "pika_distribution": {
+            "$field": "pika_distribution"
+          },
+          "device": {
+            "type": "string",
+            "description": "The new assignment: a Linux device identity; empty clears it"
+          },
+          "distribution": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The new WSL distribution; null means native Linux serial. Omitted keeps the addressed one."
+          }
+        }
+      },
+      "responses": {
+        "200": {
+          "description": "Action result",
+          "schema": "Result"
+        },
+        "409": {
+          "description": "Ownership, power evidence, assignment or transport prerequisite failed; every action in simulation"
+        }
+      },
+      "examples": [
+        {
+          "name": "configure",
+          "body": {
+            "owner": "00000000-0000-4000-8000-000000000000",
+            "device": ""
+          }
+        }
+      ]
+    },
+    {
+      "id": "pikaConnect",
+      "method": "POST",
+      "path": "/api/pika/connect",
+      "backend": "managed",
+      "class": "control",
+      "owner": "session",
+      "grpc": true,
+      "summary": "Open one Pika gripper session",
+      "description": "Reads only; never powers the motor. take_over closes a live session of another owner.",
+      "request": {
+        "required": [
+          "owner"
+        ],
+        "properties": {
+          "owner": {
+            "$field": "owner"
+          },
+          "pika_device": {
+            "$field": "pika_device"
+          },
+          "pika_distribution": {
+            "$field": "pika_distribution"
+          },
+          "take_over": {
+            "type": "boolean"
+          },
+          "read_only_adopt": {
+            "type": "boolean"
+          }
+        }
+      },
+      "responses": {
+        "200": {
+          "description": "Action result",
+          "schema": "Result"
+        },
+        "409": {
+          "description": "Ownership, power evidence, assignment or transport prerequisite failed; every action in simulation"
+        }
+      },
+      "examples": [
+        {
+          "name": "connect",
+          "body": {
+            "owner": "00000000-0000-4000-8000-000000000000",
+            "take_over": false
+          }
+        }
+      ]
+    },
+    {
+      "id": "pikaDisconnect",
+      "method": "POST",
+      "path": "/api/pika/disconnect",
+      "backend": "managed",
+      "class": "control",
+      "owner": "session",
+      "grpc": true,
+      "summary": "Close one Pika gripper session",
+      "description": "Refused while the motor state is unresolved.",
+      "request": {
+        "required": [
+          "owner"
+        ],
+        "properties": {
+          "owner": {
+            "$field": "owner"
+          },
+          "pika_device": {
+            "$field": "pika_device"
+          },
+          "pika_distribution": {
+            "$field": "pika_distribution"
+          }
+        }
+      },
+      "responses": {
+        "200": {
+          "description": "Action result",
+          "schema": "Result"
+        },
+        "409": {
+          "description": "Ownership, power evidence, assignment or transport prerequisite failed; every action in simulation"
+        }
+      },
+      "examples": [
+        {
+          "name": "disconnect",
+          "body": {
+            "owner": "00000000-0000-4000-8000-000000000000"
+          }
+        }
+      ]
+    },
+    {
+      "id": "pikaHeartbeat",
+      "method": "POST",
+      "path": "/api/pika/heartbeat",
+      "backend": "managed",
+      "class": "control",
+      "owner": "session",
+      "grpc": true,
+      "summary": "Renew the Pika session watchdog",
+      "request": {
+        "required": [
+          "owner"
+        ],
+        "properties": {
+          "owner": {
+            "$field": "owner"
+          },
+          "pika_device": {
+            "$field": "pika_device"
+          },
+          "pika_distribution": {
+            "$field": "pika_distribution"
+          }
+        }
+      },
+      "responses": {
+        "200": {
+          "description": "Action result",
+          "schema": "Result"
+        },
+        "409": {
+          "description": "Ownership, power evidence, assignment or transport prerequisite failed; every action in simulation"
+        }
+      },
+      "examples": [
+        {
+          "name": "heartbeat",
+          "body": {
+            "owner": "00000000-0000-4000-8000-000000000000"
+          }
+        }
+      ]
+    },
+    {
+      "id": "pikaEnable",
+      "method": "POST",
+      "path": "/api/pika/enable",
+      "backend": "managed",
+      "class": "control",
+      "owner": "session",
+      "grpc": true,
+      "summary": "Enable the Pika motor",
+      "description": "clear is the operator's finger-clear statement for this request.",
+      "request": {
+        "required": [
+          "owner"
+        ],
+        "properties": {
+          "owner": {
+            "$field": "owner"
+          },
+          "pika_device": {
+            "$field": "pika_device"
+          },
+          "pika_distribution": {
+            "$field": "pika_distribution"
+          },
+          "clear": {
+            "type": "boolean",
+            "description": "Operator confirms the jaw path is clear"
+          }
+        }
+      },
+      "responses": {
+        "200": {
+          "description": "Action result",
+          "schema": "Result"
+        },
+        "409": {
+          "description": "Ownership, power evidence, assignment or transport prerequisite failed; every action in simulation"
+        }
+      },
+      "examples": [
+        {
+          "name": "enable",
+          "body": {
+            "owner": "00000000-0000-4000-8000-000000000000",
+            "clear": true
+          }
+        }
+      ]
+    },
+    {
+      "id": "pikaDisable",
+      "method": "POST",
+      "path": "/api/pika/disable",
+      "backend": "managed",
+      "class": "control",
+      "owner": "session",
+      "grpc": true,
+      "summary": "Disable the Pika motor",
+      "request": {
+        "required": [
+          "owner"
+        ],
+        "properties": {
+          "owner": {
+            "$field": "owner"
+          },
+          "pika_device": {
+            "$field": "pika_device"
+          },
+          "pika_distribution": {
+            "$field": "pika_distribution"
+          }
+        }
+      },
+      "responses": {
+        "200": {
+          "description": "Action result",
+          "schema": "Result"
+        },
+        "409": {
+          "description": "Ownership, power evidence, assignment or transport prerequisite failed; every action in simulation"
+        }
+      },
+      "examples": [
+        {
+          "name": "disable",
+          "body": {
+            "owner": "00000000-0000-4000-8000-000000000000"
+          }
+        }
+      ]
+    },
+    {
+      "id": "pikaPosition",
+      "method": "POST",
+      "path": "/api/pika/position",
+      "backend": "managed",
+      "class": "control",
+      "owner": "session",
+      "grpc": true,
+      "summary": "Move the Pika jaw to one target",
+      "request": {
+        "required": [
+          "owner",
+          "value"
+        ],
+        "properties": {
+          "owner": {
+            "$field": "owner"
+          },
+          "pika_device": {
+            "$field": "pika_device"
+          },
+          "pika_distribution": {
+            "$field": "pika_distribution"
+          },
+          "value": {
+            "type": "number",
+            "description": "Target motor angle in radians; must be finite"
+          }
+        }
+      },
+      "responses": {
+        "200": {
+          "description": "Action result",
+          "schema": "Result"
+        },
+        "409": {
+          "description": "Ownership, power evidence, assignment or transport prerequisite failed; every action in simulation"
+        }
+      },
+      "examples": [
+        {
+          "name": "position",
+          "body": {
+            "owner": "00000000-0000-4000-8000-000000000000",
+            "value": 0.5
+          }
+        }
+      ]
+    },
+    {
+      "id": "pikaHold",
+      "method": "POST",
+      "path": "/api/pika/hold",
+      "backend": "managed",
+      "class": "control",
+      "owner": "session",
+      "grpc": true,
+      "summary": "Hold the Pika jaw at its measured position",
+      "description": "The gripper leg of the coordinated STOP uses this action. A gripper with verified disabled feedback answers 200 without a motor command.",
+      "request": {
+        "required": [
+          "owner"
+        ],
+        "properties": {
+          "owner": {
+            "$field": "owner"
+          },
+          "pika_device": {
+            "$field": "pika_device"
+          },
+          "pika_distribution": {
+            "$field": "pika_distribution"
+          }
+        }
+      },
+      "responses": {
+        "200": {
+          "description": "Action result",
+          "schema": "Result"
+        },
+        "409": {
+          "description": "Ownership, power evidence, assignment or transport prerequisite failed; every action in simulation"
+        }
+      },
+      "examples": [
+        {
+          "name": "hold",
+          "body": {
+            "owner": "00000000-0000-4000-8000-000000000000"
+          }
+        }
+      ]
+    },
+    {
+      "id": "pikaResumeHold",
+      "method": "POST",
+      "path": "/api/pika/resume-hold",
+      "backend": "managed",
+      "class": "control",
+      "owner": "session",
+      "grpc": true,
+      "summary": "Re-enable a disabled Pika at its measured angle",
+      "description": "Requires verified disabled feedback and the measured angle and feedback time the operator confirmed.",
+      "request": {
+        "required": [
+          "owner",
+          "clear",
+          "expected_angle_rad",
+          "expected_feedback_time_s"
+        ],
+        "properties": {
+          "owner": {
+            "$field": "owner"
+          },
+          "pika_device": {
+            "$field": "pika_device"
+          },
+          "pika_distribution": {
+            "$field": "pika_distribution"
+          },
+          "clear": {
+            "const": true,
+            "description": "Operator confirms the jaw path is clear"
+          },
+          "expected_angle_rad": {
+            "type": "number"
+          },
+          "expected_feedback_time_s": {
+            "type": "number"
+          }
+        }
+      },
+      "responses": {
+        "200": {
+          "description": "Action result",
+          "schema": "Result"
+        },
+        "409": {
+          "description": "Ownership, power evidence, assignment or transport prerequisite failed; every action in simulation"
+        }
+      },
+      "examples": [
+        {
+          "name": "resume-hold",
+          "body": {
+            "owner": "00000000-0000-4000-8000-000000000000",
+            "clear": true,
+            "expected_angle_rad": 0.5,
+            "expected_feedback_time_s": 12.5
+          }
+        }
+      ]
+    },
+    {
+      "id": "pikaFollowStart",
+      "method": "POST",
+      "path": "/api/pika/follow-start",
+      "backend": "managed",
+      "class": "control",
+      "owner": "session",
+      "grpc": true,
+      "summary": "Open a Pika following session",
+      "description": "Answers the follow_session that every follow-update must carry.",
+      "request": {
+        "required": [
+          "owner"
+        ],
+        "properties": {
+          "owner": {
+            "$field": "owner"
+          },
+          "pika_device": {
+            "$field": "pika_device"
+          },
+          "pika_distribution": {
+            "$field": "pika_distribution"
+          }
+        }
+      },
+      "responses": {
+        "200": {
+          "description": "Action result",
+          "schema": "Result"
+        },
+        "409": {
+          "description": "Ownership, power evidence, assignment or transport prerequisite failed; every action in simulation"
+        }
+      },
+      "examples": [
+        {
+          "name": "follow-start",
+          "body": {
+            "owner": "00000000-0000-4000-8000-000000000000"
+          }
+        }
+      ]
+    },
+    {
+      "id": "pikaFollowUpdate",
+      "method": "POST",
+      "path": "/api/pika/follow-update",
+      "backend": "managed",
+      "class": "control",
+      "owner": "session",
+      "grpc": true,
+      "summary": "Send the latest Pika following target",
+      "description": "Rejected updates carry pika_follow_audit.",
+      "request": {
+        "required": [
+          "owner",
+          "follow_session",
+          "sequence",
+          "opening_mm"
+        ],
+        "properties": {
+          "owner": {
+            "$field": "owner"
+          },
+          "pika_device": {
+            "$field": "pika_device"
+          },
+          "pika_distribution": {
+            "$field": "pika_distribution"
+          },
+          "follow_session": {
+            "type": "string"
+          },
+          "sequence": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "Strictly increasing within the session"
+          },
+          "opening_mm": {
+            "type": "number",
+            "description": "Jaw opening in millimetres within the gripper range"
+          }
+        }
+      },
+      "responses": {
+        "200": {
+          "description": "Action result",
+          "schema": "Result"
+        },
+        "409": {
+          "description": "Ownership, power evidence, assignment or transport prerequisite failed; every action in simulation"
+        }
+      },
+      "examples": [
+        {
+          "name": "follow-update",
+          "body": {
+            "owner": "00000000-0000-4000-8000-000000000000",
+            "follow_session": "SESSION_FROM_FOLLOW_START",
+            "sequence": 1,
+            "opening_mm": 40
+          }
+        }
+      ]
+    },
+    {
+      "id": "openApi",
+      "method": "GET",
+      "path": "/api/openapi.json",
+      "backend": "both",
+      "class": "read",
+      "public": true,
+      "summary": "Read this API description",
+      "responses": {
+        "200": {
+          "description": "OpenAPI 3.1 document",
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        }
+      }
+    }
+  ]
+}
