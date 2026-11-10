@@ -87,7 +87,8 @@ static class Stub {
     Set-Content -LiteralPath (Join-Path $publish 'plan.txt') -Value '0'
     $bad=Start-Process powershell.exe -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-File',('"'+$launcher+'"'),'-Port','70000') -WorkingDirectory $root -WindowStyle Hidden -PassThru -RedirectStandardError (Join-Path $root 'err-bad.log')
     $null=$bad.Handle; $started.Add($bad); $bad.WaitForExit()
-    Assert ($bad.ExitCode -ne 0 -and (Get-Content -Raw (Join-Path $root 'err-bad.log')) -match 'Invalid dashboard port') 'an invalid port must be refused'
+    $badError=[string](Get-Content -Raw (Join-Path $root 'err-bad.log'))
+    Assert ($bad.ExitCode -ne 0 -and $badError -match 'Invalid dashboard port') "an invalid port must be refused: $($bad.ExitCode) $badError"
     Assert ((Get-Launches).Count -eq 0) 'an invalid port must not start the host'
     Write-Output 'PASS invalid port refused'
 
