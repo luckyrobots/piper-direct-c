@@ -21,7 +21,7 @@ static cJSON *move(struct can_device *d)
     cJSON_AddNumberToObject(body,"degrees",1); cJSON_AddBoolToObject(body,"standalone",true); cJSON_AddBoolToObject(body,"clear",true);
     return body;
 }
-int main(void)
+static void scenarios(void)
 {
     char directory[96],path[160]; fixture_directory(directory,sizeof directory,"piper-clock-failure");
     snprintf(path,sizeof path,"%s/control-state.json",directory);
@@ -62,3 +62,5 @@ int main(void)
     fixture_cleanup(&c,directory);
     puts("Clock failure: malformed frames are refused; a failed monotonic clock stops the active arm, latches, blocks new motion and still delivers STOP without ending the process.");
 }
+static const struct check_test tests[]={{"clock-failure","every scenario of this file",scenarios,NULL}};
+int main(void) { return check_main("clock-failure",tests,1); }

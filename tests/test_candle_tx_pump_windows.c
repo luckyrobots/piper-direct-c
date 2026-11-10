@@ -2,7 +2,6 @@
    actual single-submit/cancel/retire path is exercised without opening USB. */
 #include "../vendor/candle/candle_defs.h"
 #include "check.h"
-#include <assert.h>
 #include <stdio.h>
 
 static BOOL WINAPI fake_write(WINUSB_INTERFACE_HANDLE,UCHAR,PUCHAR,ULONG,PULONG,LPOVERLAPPED);
@@ -97,7 +96,7 @@ static void cleanup(void)
     for (unsigned i=0;i<CANDLE_URB_COUNT;++i) CloseHandle(device.rxevents[i]);
 }
 static bool send_frame(void) { candle_frame_t f={.echo_id=7,.can_id=0x155,.can_dlc=8,.data={0x42}}; return candle_frame_send_pumped(&device,0,&f,pump,&device); }
-int main(void)
+static void scenarios(void)
 {
     fixture(RELEASE_BY_RX); CHECK(send_frame());
     CHECK(writes==1&&pumps>=2&&requeues==3&&!cancels&&!aborts&&device.last_error==CANDLE_ERR_OK); cleanup();
@@ -117,3 +116,5 @@ int main(void)
     CHECK(guarded.sentinel==0x55555555u&&requeues==1&&device.next_rx==1); cleanup();
     puts("PASS fake WinUSB: receive requeue unblocks single OUT, unchanged 20ms timeout, canceled I/O retirement, errors/partial writes, retained uncertain I/O and oversized RX discard.");
 }
+static const struct check_test tests[]={{"candle-tx-pump-windows","every scenario of this file",scenarios,NULL}};
+int main(void) { return check_main("candle-tx-pump-windows",tests,1); }

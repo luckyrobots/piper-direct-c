@@ -1,6 +1,6 @@
 #define _GNU_SOURCE
 #include "fixture.h"
-#include <assert.h>
+#include "fake_bus.h"
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -22,7 +22,7 @@ static void reject(struct controller *c,struct can_device *d,cJSON *j)
     if (status<400) { char *s=cJSON_Print(r); fprintf(stderr,"Unexpected acceptance: %s\n",s); free(s); }
     CHECK(status>=400); CHECK(d->tx==tx); CHECK(LANE(c)->op==OP_IDLE); cJSON_Delete(r);
 }
-int main(void)
+static void scenarios(void)
 {
     char directory[96]; fixture_directory(directory,sizeof directory,"piper-control-unit");
     struct controller c; CHECK(controller_init(&c,true,directory,""));
@@ -127,5 +127,6 @@ int main(void)
     CHECK(c.bus.devices[0].tx==0&&missing->tx==0);
     fixture_cleanup(&c,directory);
     puts("Control guards passed: stale feedback, faults, mode, limits, foreign sender, identity, storage, raw-command rejection, local echo, durable interruption.");
-    return 0;
 }
+static const struct check_test tests[]={{"control","every scenario of this file",scenarios,NULL}};
+int main(void) { return check_main("control",tests,1); }

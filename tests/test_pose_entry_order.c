@@ -3,26 +3,16 @@
    latched six-angle endpoint. A new move must replace that stale endpoint with
    the admission's measured hold before its first mode packet. No USB opens. */
 #include "fixture.h"
-#include <assert.h>
+#include "fake_bus.h"
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#ifdef _WIN32
-#include <windows.h>
-#include <direct.h>
-#define remove_directory _rmdir
-#else
-#include <unistd.h>
-#define remove_directory rmdir
-#endif
 
-static double clock_now=100;
 struct fake_mcu { double frozen[6],latched[6]; unsigned seeds,modes; bool active; };
 static struct fake_mcu mcu[2];
 static int fail_seed=-1;
 static unsigned fail_frame,stops[2];
-FIXTURE_WRAP_PIPER_NOW(clock_now)
 static unsigned slot(struct can_bus *bus,struct can_device *d)
 {
     CHECK(d>=bus->devices&&d<bus->devices+2);return (unsigned)(d-bus->devices);
@@ -30,7 +20,7 @@ static unsigned slot(struct can_bus *bus,struct can_device *d)
 static void decode_target(struct fake_mcu *m,const struct can_frame *frame)
 {
     struct piper_feedback decoded={0};
-    CHECK(piper_decode(&decoded,0x2a5+frame->can_id-0x155,frame->data,8,clock_now));
+    CHECK(piper_decode(&decoded,0x2a5+frame->can_id-0x155,frame->data,8,fake_bus.now));
     unsigned first=(frame->can_id-0x155)*2;
     m->latched[first]=decoded.arm[0].deg[first];m->latched[first+1]=decoded.arm[0].deg[first+1];
 }
@@ -40,7 +30,7 @@ static void mode_commit(struct fake_mcu *m,double actual[6])
        that targets arriving after the mode packet form an atomic operation. */
     memcpy(actual,m->latched,6*sizeof(double));m->active=true;
 }
-void __wrap_can_bus_receive(struct can_bus *bus,double now)
+static void mcu_receive(struct can_bus *bus,double now)
 {
     for (unsigned n=0;n<2;++n) {
         struct can_device *d=&bus->devices[n];struct piper_sample *s=&d->feedback.arm[0];
@@ -56,7 +46,7 @@ void __wrap_can_bus_receive(struct can_bus *bus,double now)
         }
     }
 }
-bool __wrap_can_bus_send(struct can_bus *bus,struct can_device *d,unsigned generation,const struct can_frame *frames,size_t count)
+static bool mcu_send(struct can_bus *bus,struct can_device *d,unsigned generation,const struct can_frame *frames,size_t count)
 {
     CHECK(bus->simulated&&can_bus_batch_allowed(d,frames,count));
     if(generation!=d->generation)return false;
@@ -87,31 +77,26 @@ static struct controller_lane *lane(struct controller *c,unsigned n)
     for (unsigned i=0;i<CANBUS_MAX;++i) if (!strcmp(c->lanes[i].lane_device,c->bus.devices[n].id)) return &c->lanes[i];
     CHECK(!"missing lane");return NULL;
 }
-static void fixture(struct controller *c,char *directory,size_t capacity,unsigned scenario)
+static void fixture(struct controller *c,char *directory,size_t capacity)
 {
-#ifdef _WIN32
-    char temp[MAX_PATH];CHECK(GetTempPathA(sizeof temp,temp)>0);
-    snprintf(directory,capacity,"%spiper-pose-entry-%lu-%u",temp,(unsigned long)GetCurrentProcessId(),scenario);
-#else
-    snprintf(directory,capacity,"/tmp/piper-pose-entry-%ld-%u",(long)getpid(),scenario);
-#endif
-    clock_now+=10;CHECK(controller_init_simulated(c,2,directory,""));
+    fixture_directory(directory,capacity,"piper-pose-entry");
+    fake_bus.now+=10;CHECK(controller_init_simulated(c,2,directory,""));
     memset(mcu,0,sizeof mcu);memset(stops,0,sizeof stops);fail_seed=-1;
     const double poses[2][6]={{-5.601,2.281,.819,1.475,7.239,-1.086},{5,15,-35,-5,12,3}};
     const double limits[6][2]={{-150,150},{0,180},{-170,0},{-100,100},{-70,70},{-180,180}};
     for (unsigned n=0;n<2;++n) {
         struct can_device *d=&c->bus.devices[n];struct piper_sample *s=&d->feedback.arm[0];
-        fixture_still(d,clock_now-1);s->control=s->motion_mode=1;
+        fixture_still(d,fake_bus.now-1);s->control=s->motion_mode=1;
         memcpy(s->deg,poses[n],sizeof s->deg);memcpy(mcu[n].frozen,poses[n],sizeof s->deg);
         memcpy(mcu[n].latched,poses[n],sizeof s->deg);mcu[n].latched[4]+=20;
         strcpy(d->feedback.hardware,"H-V1.2-1");strcpy(d->feedback.version,"S-V1.9-0");
         for (unsigned i=0;i<6;++i) {
             d->feedback.motor[i].enabled=true;
-            d->feedback.limit[i]=(struct piper_limit){.seen=true,.min=limits[i][0],.max=limits[i][1],.speed=3,.at=clock_now};
-            d->feedback.acceleration[i]=(struct piper_acceleration){.seen=true,.max=5,.at=clock_now};
+            d->feedback.limit[i]=(struct piper_limit){.seen=true,.min=limits[i][0],.max=limits[i][1],.speed=3,.at=fake_bus.now};
+            d->feedback.acceleration[i]=(struct piper_acceleration){.seen=true,.max=5,.at=fake_bus.now};
         }
     }
-    __wrap_can_bus_receive(&c->bus,clock_now);
+    can_bus_receive(&c->bus,fake_bus.now);
 }
 static void start(struct controller *c,unsigned n)
 {
@@ -126,58 +111,56 @@ static void start(struct controller *c,unsigned n)
 }
 static void tick(struct controller *c)
 {
-    clock_now+=.025;
-    LANE(c)->heartbeat=clock_now;
-    for (unsigned n=0;n<2;++n) { struct controller_lane *l=lane(c,n);if(l->op!=OP_IDLE)l->heartbeat=clock_now; }
-    controller_tick(c,clock_now);
+    fake_bus.now+=.025;
+    LANE(c)->heartbeat=fake_bus.now;
+    for (unsigned n=0;n<2;++n) { struct controller_lane *l=lane(c,n);if(l->op!=OP_IDLE)l->heartbeat=fake_bus.now; }
+    controller_tick(c,fake_bus.now);
 }
-static void cleanup(struct controller *c,const char *directory)
+static void scenarios(void)
 {
-    controller_close(c);char path[600];snprintf(path,sizeof path,"%s/control-state.json",directory);
-    CHECK(!remove(path));CHECK(!remove_directory(directory));
-}
-int main(void)
-{
+    fake_bus_model(mcu_receive,mcu_send);
     /* Validate the model can expose the old mode-first hazard before testing
        production admission ordering against that same modeled controller. */
     struct fake_mcu stale={.latched={0,0,0,0,27.239,0}};double actual[6]={0};
     mode_commit(&stale,actual);CHECK(actual[4]==27.239);
     struct controller *c=calloc(1,sizeof *c);CHECK(c);char directory[512];
-    fixture(c,directory,sizeof directory,1);start(c,0);start(c,1);tick(c);
+    fixture(c,directory,sizeof directory);start(c,0);start(c,1);tick(c);
     for(unsigned n=0;n<2;++n) CHECK(mcu[n].seeds==1&&!mcu[n].modes&&!(lane(c,n)->pose_phase==POSE_SEEDING));
     tick(c);
     for(unsigned n=0;n<2;++n) CHECK(mcu[n].seeds==1&&mcu[n].modes==1&&lane(c,n)->op!=OP_IDLE&&!stops[n]);
     for(unsigned i=0;i<8;++i)tick(c);
     for(unsigned n=0;n<2;++n) CHECK(mcu[n].seeds==1&&mcu[n].modes>1&&!stops[n]);
-    CHECK(mcu[1].latched[5]>mcu[1].frozen[5]);cleanup(c,directory);
+    CHECK(mcu[1].latched[5]>mcu[1].frozen[5]);fixture_cleanup(c,directory);
 
     /* Every partial seed failure retires this lane before any later mode;
        the other lane still seeds once and advances independently. */
     for(unsigned failure=1;failure<=3;++failure) {
-        fixture(c,directory,sizeof directory,1+failure);start(c,0);start(c,1);fail_seed=0;fail_frame=failure;tick(c);
+        fixture(c,directory,sizeof directory);start(c,0);start(c,1);fail_seed=0;fail_frame=failure;tick(c);
         CHECK(lane(c,0)->op==OP_IDLE&&!(lane(c,0)->pose_phase==POSE_SEEDING)&&stops[0]==1&&!mcu[0].modes);
         for(unsigned i=0;i<4;++i)tick(c);
-        CHECK(!mcu[0].modes&&mcu[1].seeds==1&&mcu[1].modes&&!stops[1]);cleanup(c,directory);
+        CHECK(!mcu[0].modes&&mcu[1].seeds==1&&mcu[1].modes&&!stops[1]);fixture_cleanup(c,directory);
     }
-    fixture(c,directory,sizeof directory,5);start(c,0);tick(c);++c->bus.devices[0].generation;tick(c);
-    CHECK(lane(c,0)->op==OP_IDLE&&!(lane(c,0)->pose_phase==POSE_SEEDING)&&!mcu[0].modes);cleanup(c,directory);
-    fixture(c,directory,sizeof directory,6);start(c,0);
+    fixture(c,directory,sizeof directory);start(c,0);tick(c);++c->bus.devices[0].generation;tick(c);
+    CHECK(lane(c,0)->op==OP_IDLE&&!(lane(c,0)->pose_phase==POSE_SEEDING)&&!mcu[0].modes);fixture_cleanup(c,directory);
+    fixture(c,directory,sizeof directory);start(c,0);
     c->bus.devices[0].feedback.arm[0].deg[4]+=.501;tick(c);
     CHECK(lane(c,0)->op==OP_IDLE&&!(lane(c,0)->pose_phase==POSE_SEEDING)&&!mcu[0].seeds&&!mcu[0].modes&&stops[0]==1);
-    cleanup(c,directory);
-    fixture(c,directory,sizeof directory,7);start(c,0);tick(c);
+    fixture_cleanup(c,directory);
+    fixture(c,directory,sizeof directory);start(c,0);tick(c);
     cJSON *cancel=cJSON_CreateObject();struct can_device *d=&c->bus.devices[0];
     cJSON_AddStringToObject(cancel,"device_id",d->id);cJSON_AddNumberToObject(cancel,"generation",d->generation);
     cJSON_AddStringToObject(cancel,"owner","pose-entry-order-test");cJSON_AddNumberToObject(cancel,"request_id",lane(c,0)->request_id);
     int status;cJSON *result=controller_action(c,"/api/stop",cancel,&status);CHECK(status==200);
     cJSON_Delete(cancel);cJSON_Delete(result);for(unsigned i=0;i<4;++i)tick(c);
-    CHECK(lane(c,0)->op==OP_IDLE&&!(lane(c,0)->pose_phase==POSE_SEEDING)&&!mcu[0].modes&&stops[0]==1);cleanup(c,directory);
-    fixture(c,directory,sizeof directory,8);start(c,0);
+    CHECK(lane(c,0)->op==OP_IDLE&&!(lane(c,0)->pose_phase==POSE_SEEDING)&&!mcu[0].modes&&stops[0]==1);fixture_cleanup(c,directory);
+    fixture(c,directory,sizeof directory);start(c,0);
     c->bus.devices[0].feedback.arm[0].control=2;c->bus.devices[0].feedback.arm[0].teach=1;
     c->bus.devices[0].feedback.arm[0].arm_status=11;tick(c);
     CHECK(lane(c,0)->op==OP_IDLE&&!(lane(c,0)->pose_phase==POSE_SEEDING)&&!mcu[0].seeds&&!mcu[0].modes&&!stops[0]);
     c->bus.devices[0].feedback.arm[0].control=1;c->bus.devices[0].feedback.arm[0].teach=0;
     c->bus.devices[0].feedback.arm[0].arm_status=0;tick(c);
-    CHECK(!mcu[0].seeds&&!mcu[0].modes);cleanup(c,directory);
+    CHECK(!mcu[0].seeds&&!mcu[0].modes);fixture_cleanup(c,directory);
     free(c);puts("PASS position entry ordering: stale MCU target is seeded with each lane's frozen measured pose before mode; one-shot seeds preserve later references, partial failure and generation changes cannot commit mode.");
 }
+static const struct check_test tests[]={{"pose-entry-order","every scenario of this file",scenarios,NULL}};
+int main(void) { return check_main("pose-entry-order",tests,1); }

@@ -1,6 +1,6 @@
 #define _GNU_SOURCE
 #include "fixture.h"
-#include <assert.h>
+#include "fake_bus.h"
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -9,7 +9,7 @@
 
 static void setup(struct controller *c,char *directory)
 {
-    CHECK(mkdtemp(directory)); CHECK(controller_init(c,true,directory,""));
+    CHECK(controller_init(c,true,directory,""));
     struct can_device *d=&c->bus.devices[0];
     memset(c->bus.sim_target,0,sizeof c->bus.sim_target);
     memset(d->feedback.arm[0].deg,0,sizeof d->feedback.arm[0].deg);
@@ -18,10 +18,6 @@ static void setup(struct controller *c,char *directory)
     fixture_configure(d,"S-V1.8-2",-180,180,.3,now);
     d->feedback.arm[0].control=2; d->feedback.arm[0].teach=2;
     fixture_still(d,now-1);
-}
-static void cleanup(struct controller *c,const char *directory)
-{
-    fixture_cleanup(c,directory);
 }
 static cJSON *request(struct controller *c,const char *action)
 {
@@ -62,9 +58,9 @@ static void enter_own_move(struct controller *c)
     cJSON *j=request(c,"joint"); cJSON_AddNumberToObject(j,"joint",6); cJSON_AddNumberToObject(j,"degrees",25);
     action(c,j,202); CHECK(LANE(c)->op==OP_MOVE);
 }
-int main(void)
+static void scenarios(void)
 {
-    struct controller c; char first[]="/tmp/piper-teaching-state-XXXXXX"; setup(&c,first);
+    struct controller c; char first[FIXTURE_DIRECTORY]; fixture_directory(first,sizeof first,"piper-teaching-state"); setup(&c,first);
     struct can_device *d=&c.bus.devices[0];
     CHECK(can_return(&c)); check_phase(&c,"ended",false);
     for (unsigned state=1;state<=7;++state) {
@@ -106,18 +102,18 @@ int main(void)
        are sent: no position, reset, teaching-start or motor power writes. */
     action(&c,request(&c,"teach-return"),202); CHECK(LANE(&c)->op==OP_TEACH_RETURN&&LANE(&c)->stage==STAGE_TEACH_STANDBY&&d->tx==tx+1&&d->feedback.arm[0].control==0);
     double sent=LANE(&c)->sent_at; controller_tick(&c,sent); CHECK(LANE(&c)->stage==STAGE_TEACH_STANDBY&&d->tx==tx+1);
-    usleep(2000); controller_tick(&c,piper_now()); CHECK(LANE(&c)->stage==STAGE_TEACH_CAN&&d->tx==tx+2&&d->feedback.arm[0].control==1);
+    fake_bus_advance(0.002); controller_tick(&c,piper_now()); CHECK(LANE(&c)->stage==STAGE_TEACH_CAN&&d->tx==tx+2&&d->feedback.arm[0].control==1);
     sent=LANE(&c)->sent_at; controller_tick(&c,sent); CHECK(LANE(&c)->op==OP_TEACH_RETURN&&d->tx==tx+2);
-    usleep(2000); controller_tick(&c,piper_now()); CHECK(LANE(&c)->op==OP_IDLE&&d->tx==tx+2&&c.bus.sim_enabled==63);
+    fake_bus_advance(0.002); controller_tick(&c,piper_now()); CHECK(LANE(&c)->op==OP_IDLE&&d->tx==tx+2&&c.bus.sim_enabled==63);
     for(unsigned i=0;i<6;++i) CHECK(c.bus.sim_target[i]==0&&d->feedback.arm[0].deg[i]==0);
     action(&c,request(&c,"teach-return"),200); CHECK(d->tx==tx+2); // Already CAN: no replay or repeated writes.
     struct can_frame invalid={.can_id=0x151,.len=8,.data={2,1,1}};
     CHECK(!can_bus_send(&c.bus,d,d->generation,&invalid,1));
     invalid.data[0]=0; invalid.data[2]=2; CHECK(!can_bus_send(&c.bus,d,d->generation,&invalid,1));
     invalid.data[2]=1; invalid.data[3]=1; CHECK(!can_bus_send(&c.bus,d,d->generation,&invalid,1));
-    cleanup(&c,first);
+    fixture_cleanup(&c,first);
 
-    char takeover[]="/tmp/piper-teaching-takeover-XXXXXX"; setup(&c,takeover); d=&c.bus.devices[0]; enter_own_move(&c);
+    char takeover[FIXTURE_DIRECTORY]; fixture_directory(takeover,sizeof takeover,"piper-teaching-takeover"); setup(&c,takeover); d=&c.bus.devices[0]; enter_own_move(&c);
     unsigned prior_request=LANE(&c)->request_id; tx=d->tx;
     d->feedback.arm[0].control=2; d->feedback.arm[0].teach=1; d->feedback.arm[0].arm_status=11;
     LANE(&c)->heartbeat=piper_now()-1; // Physical teaching takes priority over our expired lease.
@@ -128,10 +124,10 @@ int main(void)
     controller_tick(&c,piper_now()); CHECK(d->tx==tx&&c.bus.sim_enabled==63);
     d->feedback.arm[0].teach=2; d->feedback.arm[0].arm_status=0;
     action(&c,request(&c,"follow-update"),409); CHECK(d->tx==tx); // Old target never resumes.
-    cleanup(&c,takeover);
+    fixture_cleanup(&c,takeover);
 
     for(unsigned fault=0;fault<4;++fault) {
-        char failed[]="/tmp/piper-teaching-fault-XXXXXX"; setup(&c,failed); d=&c.bus.devices[0]; enter_own_move(&c); tx=d->tx;
+        char failed[FIXTURE_DIRECTORY]; fixture_directory(failed,sizeof failed,"piper-teaching-fault"); setup(&c,failed); d=&c.bus.devices[0]; enter_own_move(&c); tx=d->tx;
         d->feedback.arm[0].control=2; d->feedback.arm[0].teach=1; d->feedback.arm[0].arm_status=11;
         if(fault==0) d->feedback.motor[0].fault=1;
         if(fault==1) { d->simulated=false; d->fd=-1; } // Bus remains simulated; no host transport is opened.
@@ -143,11 +139,11 @@ int main(void)
         CHECK(status==409&&LANE(&c)->op==OP_IDLE&&d->tx==tx+1);
         device=snapshot(&c); CHECK(cJSON_IsTrue(cJSON_GetObjectItem(device,"recovery_required"))); cJSON_Delete(device);
         tx=d->tx; controller_tick(&c,piper_now()); CHECK(d->tx==tx); // Existing fault cannot be cleared by entering teaching.
-        cleanup(&c,failed);
+        fixture_cleanup(&c,failed);
     }
 
     for(unsigned failure=0;failure<6;++failure) {
-        char abandoned[]="/tmp/piper-teaching-abort-XXXXXX"; setup(&c,abandoned); d=&c.bus.devices[0];
+        char abandoned[FIXTURE_DIRECTORY]; fixture_directory(abandoned,sizeof abandoned,"piper-teaching-abort"); setup(&c,abandoned); d=&c.bus.devices[0];
         action(&c,request(&c,"teach-return"),202); tx=d->tx;
         if(failure==0) { d->feedback.arm[0].control=2; d->feedback.arm[0].teach=1; }
         if(failure==1) { d->feedback.arm[0].control=2; d->feedback.arm[0].deg[5]=.6; }
@@ -156,34 +152,34 @@ int main(void)
         if(failure==4) { ++d->generation; }
         if(failure==5) { d->feedback.arm[0].control=2; d->feedback.arm[0].teach=3; d->feedback.arm[0].arm_status=12; }
         controller_tick(&c,piper_now()); CHECK(LANE(&c)->op==OP_IDLE&&d->tx==tx&&c.bus.sim_enabled==63);
-        cleanup(&c,abandoned);
+        fixture_cleanup(&c,abandoned);
     }
-    char unexpected[]="/tmp/piper-teaching-unexpected-XXXXXX"; setup(&c,unexpected); d=&c.bus.devices[0];
+    char unexpected[FIXTURE_DIRECTORY]; fixture_directory(unexpected,sizeof unexpected,"piper-teaching-unexpected"); setup(&c,unexpected); d=&c.bus.devices[0];
     action(&c,request(&c,"teach-return"),202); tx=d->tx;
     d->feedback.arm[0].deg[5]=c.bus.sim_target[5]=.6;
     controller_tick(&c,piper_now()); CHECK(LANE(&c)->op==OP_IDLE&&d->tx==tx+1&&d->feedback.arm[0].arm_status==1&&c.bus.sim_enabled==63);
     device=snapshot(&c); CHECK(cJSON_IsTrue(cJSON_GetObjectItem(device,"recovery_required"))); cJSON_Delete(device);
-    cleanup(&c,unexpected);
+    fixture_cleanup(&c,unexpected);
     for(unsigned noise=0;noise<2;++noise) {
-        char settling[]="/tmp/piper-teaching-settling-XXXXXX"; setup(&c,settling); d=&c.bus.devices[0];
+        char settling[FIXTURE_DIRECTORY]; fixture_directory(settling,sizeof settling,"piper-teaching-settling"); setup(&c,settling); d=&c.bus.devices[0];
         action(&c,request(&c,"teach-return"),202); tx=d->tx;
         d->feedback.arm[0].deg[5]=c.bus.sim_target[5]=noise?.2:.06;
         fixture_still(d,piper_now()); // Model a refreshed anchor after small supported settling.
-        usleep(2000); controller_tick(&c,piper_now());
+        fake_bus_advance(0.002); controller_tick(&c,piper_now());
         CHECK(LANE(&c)->op==OP_TEACH_RETURN&&LANE(&c)->stage==STAGE_TEACH_CAN&&d->tx==tx+1);
         CHECK(d->feedback.arm[0].arm_status==0&&c.bus.sim_enabled==63);
         // Settling has not qualified a new stationary window, but remains
         // inside the supported handoff settling allowance of 0.5 degrees.
         CHECK(!d->stationary_since||piper_now()-d->stationary_since<.4);
-        usleep(2000); controller_tick(&c,piper_now());
+        fake_bus_advance(0.002); controller_tick(&c,piper_now());
         CHECK(LANE(&c)->op==OP_IDLE&&!strcmp(LANE(&c)->phase,"complete")&&d->tx==tx+1);
         device=snapshot(&c); CHECK(!cJSON_IsTrue(cJSON_GetObjectItem(device,"recovery_required"))); cJSON_Delete(device);
-        cleanup(&c,settling);
+        fixture_cleanup(&c,settling);
     }
-    char closing[]="/tmp/piper-teaching-close-XXXXXX"; setup(&c,closing); d=&c.bus.devices[0];
-    action(&c,request(&c,"teach-return"),202); tx=d->tx; cleanup(&c,closing); CHECK(d->tx==tx);
+    char closing[FIXTURE_DIRECTORY]; fixture_directory(closing,sizeof closing,"piper-teaching-close"); setup(&c,closing); d=&c.bus.devices[0];
+    action(&c,request(&c,"teach-return"),202); tx=d->tx; fixture_cleanup(&c,closing); CHECK(d->tx==tx);
 
-    char modern[]="/tmp/piper-teaching-modern-XXXXXX"; setup(&c,modern); d=&c.bus.devices[0];
+    char modern[FIXTURE_DIRECTORY]; fixture_directory(modern,sizeof modern,"piper-teaching-modern"); setup(&c,modern); d=&c.bus.devices[0];
     const char *versions[]={"S-V1.8-4","S-V1.8-5","S-V1.9-0","S-V1.9-1","S-V1.9-2","unknown"};
     for(unsigned i=0;i<6;++i) { strcpy(d->feedback.version,versions[i]); CHECK(piper_seamless_teach_supported(&d->feedback)==(i>=1&&i<=3)); }
     strcpy(d->feedback.version,"S-V1.9-0");
@@ -213,15 +209,15 @@ int main(void)
     CHECK(c.bus.sim_enabled==63&&d->feedback.arm[0].control==2);
     for(unsigned i=0;i<6;++i) { CHECK(fabs(c.bus.sim_target[i]-pose[i])<.00001); CHECK(LANE(&c)->target[i]==pose[i]); }
     sent=LANE(&c)->sent_at; controller_tick(&c,sent); CHECK(LANE(&c)->op==OP_TEACH_RETURN); // No stale status acknowledgement.
-    usleep(25000); controller_tick(&c,piper_now()); CHECK(LANE(&c)->op==OP_TEACH_RETURN&&LANE(&c)->stage==STAGE_TEACH_MODE&&d->tx==tx+7);
+    fake_bus_advance(0.025); controller_tick(&c,piper_now()); CHECK(LANE(&c)->op==OP_TEACH_RETURN&&LANE(&c)->stage==STAGE_TEACH_MODE&&d->tx==tx+7);
     sent=LANE(&c)->sent_at; controller_tick(&c,sent); CHECK(LANE(&c)->op==OP_TEACH_RETURN); // Seed feedback cannot acknowledge the final batch.
-    usleep(2000); controller_tick(&c,piper_now()); CHECK(LANE(&c)->op==OP_IDLE&&d->tx==tx+7&&c.bus.sim_enabled==63);
+    fake_bus_advance(0.002); controller_tick(&c,piper_now()); CHECK(LANE(&c)->op==OP_IDLE&&d->tx==tx+7&&c.bus.sim_enabled==63);
     for(unsigned i=0;i<6;++i) CHECK(fabs(d->feedback.arm[0].deg[i]-pose[i])<.00001);
     j=request(&c,"teach-return"); cJSON_AddBoolToObject(j,"same_pose_confirmed",true); action(&c,j,200); CHECK(d->tx==tx+7);
-    cleanup(&c,modern);
+    fixture_cleanup(&c,modern);
 
     for(unsigned variant=0;variant<3;++variant) {
-        char cancel[]="/tmp/piper-teaching-modern-abort-XXXXXX"; setup(&c,cancel); d=&c.bus.devices[0]; strcpy(d->feedback.version,"S-V1.9-0");
+        char cancel[FIXTURE_DIRECTORY]; fixture_directory(cancel,sizeof cancel,"piper-teaching-modern-abort"); setup(&c,cancel); d=&c.bus.devices[0]; strcpy(d->feedback.version,"S-V1.9-0");
         j=request(&c,"teach-return"); cJSON_AddBoolToObject(j,"same_pose_confirmed",true); action(&c,j,202); tx=d->tx;
         if(variant==0) { d->feedback.arm[0].control=2; d->feedback.arm[0].teach=1; d->feedback.arm[0].arm_status=11; }
         if(variant==1) { d->feedback.arm[0].control=1; d->feedback.arm[0].deg[5]=c.bus.sim_target[5]=.6; }
@@ -229,7 +225,9 @@ int main(void)
         controller_tick(&c,piper_now()); CHECK(LANE(&c)->op==OP_IDLE&&c.bus.sim_enabled==63);
         CHECK(d->tx==tx+(variant==1?1:0)); // STOP for unexpected CAN movement; hand guiding/lease cancellation never powers off.
         if(variant!=1) CHECK(strstr(LANE(&c)->message,"measured hold pose"));
-        cleanup(&c,cancel);
+        fixture_cleanup(&c,cancel);
     }
     puts("Teaching: legacy zero handoff, firmware-gated measured-pose handoff, fresh acknowledgements, discarded old targets, range-only hold exception and physical teaching priority passed.");
 }
+static const struct check_test tests[]={{"teaching","every scenario of this file",scenarios,NULL}};
+int main(void) { return check_main("teaching",tests,1); }

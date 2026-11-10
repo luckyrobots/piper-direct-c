@@ -1,6 +1,6 @@
 #define _GNU_SOURCE
 #include "fixture.h"
-#include <assert.h>
+#include "fake_bus.h"
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -36,7 +36,7 @@ static void unresolved(struct piper_feedback *s)
     CHECK(l->seen&&l->speed_raw_seen&&l->speed_raw==300&&!l->speed_unit_known);
     CHECK(isnan(l->speed)&&isnan(l->speed_resolution_rad_s)&&!l->speed_firmware[0]);
 }
-int main(void)
+static void scenarios(void)
 {
     const struct { const char *version,*canonical; double resolution; } cases[]={
         {"S-V1.4-9","S-V1.4-9",.001},{"S-V1.5-7","S-V1.5-7",.001},
@@ -128,3 +128,5 @@ int main(void)
     fixture_cleanup(&c,directory);
     puts("Speed units: V1.5-8 boundary, firmware ordering/provenance/reconnect; acceleration raw500=5 with unchanged admission cap passed.");
 }
+static const struct check_test tests[]={{"speed-units","every scenario of this file",scenarios,NULL}};
+int main(void) { return check_main("speed-units",tests,1); }

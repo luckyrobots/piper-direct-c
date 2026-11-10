@@ -1,5 +1,6 @@
 #define _GNU_SOURCE
 #include "fixture.h"
+#include "fake_bus.h"
 
 /* /api/stop carries two intents. An emergency STOP (no well-formed
    request_id tied to a known arm) is never refused without stopping. A cancel
@@ -106,7 +107,7 @@ static void run(const struct stop_case *k,unsigned index)
     cJSON_Delete(disk); free(sent); free(got); cJSON_Delete(body); cJSON_Delete(result);
     fixture_cleanup(&c,directory);
 }
-int main(void)
+static void scenarios(void)
 {
     const struct stop_case cases[]={
         /* Scope honoured. */
@@ -162,3 +163,5 @@ int main(void)
     fixture_cleanup(&c,directory);
     puts("STOP intent: every emergency STOP body stops (known arm despite stale generation or another owner, unresolvable scope stops every arm, malformed cancel escalates); a current cancel stops its action; a stale cancel sends nothing and leaves an idle arm or another action alone.");
 }
+static const struct check_test tests[]={{"stop-generation","every scenario of this file",scenarios,NULL}};
+int main(void) { return check_main("stop-generation",tests,1); }

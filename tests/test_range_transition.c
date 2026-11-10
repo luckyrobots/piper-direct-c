@@ -1,6 +1,6 @@
 #define _GNU_SOURCE
 #include "fixture.h"
-#include <assert.h>
+#include "fake_bus.h"
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -61,7 +61,7 @@ static void drive(struct controller *c)
     CHECK(destination_seen && LANE(c)->op==OP_IDLE && !strcmp(LANE(c)->phase,"complete") && !(LANE(c)->stage==STAGE_ALIGN_FOLLOWUP));
     CHECK(c->bus.sim_enabled==63);
 }
-int main(void)
+static void scenarios(void)
 {
     struct controller c; init(&c); struct can_device *d=&c.bus.devices[0];
     cJSON *state=controller_state(&c,"test"),*device=cJSON_GetArrayItem(cJSON_GetObjectItem(state,"devices"),0);
@@ -131,3 +131,5 @@ int main(void)
     close_fixture(&c);
     puts("Range transition passed: selected inward control, verified slow entry then zero, strict full-pose limits, fresh/fault guards and cancellation without destination replay.");
 }
+static const struct check_test tests[]={{"range-transition","every scenario of this file",scenarios,NULL}};
+int main(void) { return check_main("range-transition",tests,1); }

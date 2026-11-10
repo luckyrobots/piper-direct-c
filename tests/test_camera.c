@@ -2,12 +2,11 @@
 #include "camera.h"
 #include "check.h"
 #include "canbus.h"
-#include <assert.h>
 #include <stdio.h>
 #include <time.h>
 #include <unistd.h>
 
-int main(void)
+static void scenarios(void)
 {
     CHECK(camera_init("")); CHECK(camera_start()!=NULL);
     CHECK(!camera_init("relative-device"));
@@ -31,5 +30,6 @@ int main(void)
     camera_close();
     puts(capture?"Camera lifecycle passed: disabled default, unavailable device, no stale JPEG, child exit and cleanup.":
         "Camera lifecycle passed (capture SKIPPED): disabled default, unavailable device, no stale JPEG.");
-    return 0;
 }
+static const struct check_test tests[]={{"camera","every scenario of this file",scenarios,NULL}};
+int main(void) { return check_main("camera",tests,1); }

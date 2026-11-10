@@ -2,36 +2,24 @@
 /* Production controller and two independent native CAN simulators. All time
    and sensor-fault injection is deterministic; no USB/socket/hardware opens. */
 #include "fixture.h"
-#include <assert.h>
+#include "fake_bus.h"
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#ifdef _WIN32
-#include <windows.h>
-#include <direct.h>
-#define remove_directory _rmdir
-#else
-#include <unistd.h>
-#define remove_directory rmdir
-#endif
 
-static double clock_now=100;
 static unsigned receives;
 static int injected_fault=-1;
 static int failed_stop=-1;
 static const char *watched_state;
 static unsigned watched_stops;
 static const char *owner="two-lane-native-test";
-FIXTURE_WRAP_PIPER_NOW(clock_now)
-void __real_can_bus_receive(struct can_bus *bus,double now);
-void __wrap_can_bus_receive(struct can_bus *bus,double now)
+static void mcu_receive(struct can_bus *bus,double now)
 {
-    ++receives;__real_can_bus_receive(bus,now);
+    ++receives;fake_bus_simulator_receive(bus,now);
     if (injected_fault>=0) bus->devices[injected_fault].feedback.motor[0].fault=1;
 }
-bool __real_can_bus_send(struct can_bus *bus,struct can_device *device,unsigned generation,const struct can_frame *frames,size_t count);
-bool __wrap_can_bus_send(struct can_bus *bus,struct can_device *device,unsigned generation,const struct can_frame *frames,size_t count)
+static bool mcu_send(struct can_bus *bus,struct can_device *device,unsigned generation,const struct can_frame *frames,size_t count)
 {
     CHECK(bus->simulated);
     if (frames[0].can_id==0x150&&watched_state) {
@@ -42,19 +30,7 @@ bool __wrap_can_bus_send(struct can_bus *bus,struct can_device *device,unsigned 
         cJSON_Delete(disk); ++watched_stops;
     }
     if (failed_stop>=0&&device==&bus->devices[failed_stop]&&frames[0].can_id==0x150) return false;
-    bool sent=__real_can_bus_send(bus,device,generation,frames,count);
-    /* The simulator's same-object piper_now calls cannot be linker-wrapped.
-       Put its actual decoded configuration replies in the injected clock's
-       domain; actuator targets and sensor decoding still run production code. */
-    if (sent) for (size_t i=0;i<count;++i) {
-        unsigned joint=frames[i].data[0];
-        if (frames[i].can_id==0x472&&joint>=1&&joint<=6) {
-            if (frames[i].data[1]==1) device->feedback.limit[joint-1].at=clock_now;
-            if (frames[i].data[1]==2) device->feedback.acceleration[joint-1].at=clock_now;
-        }
-        if (frames[i].can_id==0x477) device->feedback.gripper_config_at=clock_now;
-    }
-    return sent;
+    return fake_bus_simulator_send(bus,device,generation,frames,count);
 }
 static cJSON *field(const cJSON *json,const char *key) { return cJSON_GetObjectItemCaseSensitive(json,key); }
 static struct controller_lane *lane(struct controller *c,unsigned index)
@@ -85,7 +61,7 @@ static void heartbeat(struct controller *c,unsigned index)
 }
 static void tick(struct controller *c,bool renew_first,bool renew_second)
 {
-    clock_now+=.01;unsigned before=receives;controller_tick(c,clock_now);CHECK(receives==before+1);
+    fake_bus.now+=.01;unsigned before=receives;controller_tick(c,fake_bus.now);CHECK(receives==before+1);
     if (renew_first) heartbeat(c,0);
     if (renew_second) heartbeat(c,1);
 }
@@ -112,37 +88,24 @@ static void follow(struct controller *c,unsigned index,const char *action,unsign
 }
 static void setup(struct controller *c,const char *directory)
 {
-    injected_fault=failed_stop=-1;clock_now+=10;CHECK(controller_init_simulated(c,2,directory,""));
+    injected_fault=failed_stop=-1;fake_bus.now+=10;CHECK(controller_init_simulated(c,2,directory,""));
     CHECK(!strcmp(c->bus.devices[0].id,"simulation:one")&&!strcmp(c->bus.devices[1].id,"simulation:2"));
     for (unsigned i=0;i<60;++i) tick(c,false,false);
     for (unsigned i=0;i<2;++i) cJSON_Delete(request(c,"/api/query",identity(c,i),202));
     for (unsigned i=0;i<300&&controller_any_query_active(c);++i) tick(c,false,false);
-    if (controller_any_query_active(c)) for (unsigned i=0;i<2;++i) fprintf(stderr,"query %u active %d joint %u start %.3f next %.3f now %.3f gen %u/%u op %d firmware %s hardware %s limit %d at %.3f speed%.3f acc%d at %.3f since%.3f\n",i,lane(c,i)->query,lane(c,i)->query_cursor,lane(c,i)->query_start,lane(c,i)->query_next,clock_now,lane(c,i)->query_generation,c->bus.devices[i].generation,lane(c,i)->op,c->bus.devices[i].feedback.version,c->bus.devices[i].feedback.hardware,c->bus.devices[i].feedback.limit[0].seen,c->bus.devices[i].feedback.limit[0].at,c->bus.devices[i].feedback.limit[0].speed,c->bus.devices[i].feedback.acceleration[0].seen,c->bus.devices[i].feedback.acceleration[0].at,c->bus.devices[i].configuration_since);
+    if (controller_any_query_active(c)) for (unsigned i=0;i<2;++i) fprintf(stderr,"query %u active %d joint %u start %.3f next %.3f now %.3f gen %u/%u op %d firmware %s hardware %s limit %d at %.3f speed%.3f acc%d at %.3f since%.3f\n",i,lane(c,i)->query,lane(c,i)->query_cursor,lane(c,i)->query_start,lane(c,i)->query_next,fake_bus.now,lane(c,i)->query_generation,c->bus.devices[i].generation,lane(c,i)->op,c->bus.devices[i].feedback.version,c->bus.devices[i].feedback.hardware,c->bus.devices[i].feedback.limit[0].seen,c->bus.devices[i].feedback.limit[0].at,c->bus.devices[i].feedback.limit[0].speed,c->bus.devices[i].feedback.acceleration[0].seen,c->bus.devices[i].feedback.acceleration[0].at,c->bus.devices[i].configuration_since);
     CHECK(!controller_any_query_active(c));
-    CHECK(!controller_blocker(c,&c->bus.devices[0],clock_now)&&!controller_blocker(c,&c->bus.devices[1],clock_now));
+    CHECK(!controller_blocker(c,&c->bus.devices[0],fake_bus.now)&&!controller_blocker(c,&c->bus.devices[1],fake_bus.now));
     unsigned first=command(c,0,"enable",0),second=command(c,1,"enable",0);CHECK(first&&second>first);
     for (unsigned i=0;i<500&&controller_any_motion_active(c);++i) tick(c,true,true);
     CHECK(!controller_any_motion_active(c)&&c->bus.sim_enabled==63&&c->bus.devices[1].sim_enabled==63);
     settle(c,60);
 }
-static void cleanup(struct controller *c,const char *directory)
+static void scenarios(void)
 {
-    controller_close(c);char path[512];snprintf(path,sizeof path,"%s/control-state.json",directory);
-    CHECK(!remove(path));CHECK(!remove_directory(directory));
-}
-static void path_for(char *path,size_t capacity,unsigned scenario)
-{
-#ifdef _WIN32
-    char temp[MAX_PATH];CHECK(GetTempPathA(sizeof temp,temp)>0);
-    snprintf(path,capacity,"%spiper-two-lanes-%lu-%u",temp,(unsigned long)GetCurrentProcessId(),scenario);
-#else
-    snprintf(path,capacity,"/tmp/piper-two-lanes-%ld-%u",(long)getpid(),scenario);
-#endif
-}
-int main(void)
-{
+    fake_bus_model(mcu_receive,mcu_send);
     struct controller *c=calloc(1,sizeof *c);CHECK(c);char directory[512];
-    path_for(directory,sizeof directory,1);setup(c,directory);
+    fixture_directory(directory,sizeof directory,"piper-two-lanes");setup(c,directory);
     unsigned a=command(c,0,"joint",2),b=command(c,1,"joint",-3);CHECK(b>a);
     CHECK(lane(c,0)->request_id==a&&lane(c,1)->request_id==b);
     cJSON *select=cJSON_CreateObject();cJSON_AddStringToObject(select,"device_id",c->bus.devices[1].id);
@@ -193,9 +156,9 @@ int main(void)
     CHECK(!cJSON_IsTrue(field(cJSON_GetArrayItem(field(snapshot,"devices"),1),"recovery_required")));
     cJSON_Delete(snapshot);
     cJSON_Delete(request(c,"/api/stop",identity(c,1),200));CHECK(!controller_any_motion_active(c));
-    cleanup(c,directory);
+    fixture_cleanup(c,directory);
 
-    path_for(directory,sizeof directory,2);setup(c,directory);
+    fixture_directory(directory,sizeof directory,"piper-two-lanes");setup(c,directory);
     a=command(c,0,"joint",20);b=command(c,1,"joint",-20);CHECK(b>a);
     injected_fault=0;tick(c,true,true);injected_fault=-1;
     CHECK(lane(c,0)->op==OP_IDLE&&lane(c,1)->op==OP_MOVE&&lane(c,1)->request_id==b);
@@ -207,16 +170,16 @@ int main(void)
     CHECK(controller_init_simulated(c,2,directory,""));
     snapshot=controller_state(c,"fixture");CHECK(!cJSON_IsTrue(field(snapshot,"any_motion_active")));
     for (unsigned i=0;i<2;++i) CHECK(cJSON_IsTrue(field(cJSON_GetArrayItem(field(snapshot,"devices"),i),"recovery_required")));
-    cJSON_Delete(snapshot);cleanup(c,directory);
+    cJSON_Delete(snapshot);fixture_cleanup(c,directory);
 
-    path_for(directory,sizeof directory,3);setup(c,directory);
+    fixture_directory(directory,sizeof directory,"piper-two-lanes");setup(c,directory);
     command(c,0,"joint",20);command(c,1,"joint",-20);
     tx0=c->bus.devices[0].tx;tx1=c->bus.devices[1].tx;
     controller_close(c);
     CHECK(c->bus.devices[0].tx>tx0&&c->bus.devices[1].tx>tx1);
-    char state[560];snprintf(state,sizeof state,"%s/control-state.json",directory);CHECK(!remove(state));CHECK(!remove_directory(directory));
+    char state[560];snprintf(state,sizeof state,"%s/control-state.json",directory);CHECK(!remove(state));CHECK(!rmdir(directory));
 
-    path_for(directory,sizeof directory,4);setup(c,directory);
+    fixture_directory(directory,sizeof directory,"piper-two-lanes");setup(c,directory);
     command(c,0,"gripper",40);failed_stop=0;
     tx0=c->bus.devices[0].tx;tx1=c->bus.devices[1].tx;
     cJSON *global=cJSON_CreateObject();cJSON_AddStringToObject(global,"owner",owner);
@@ -225,11 +188,11 @@ int main(void)
     /* A successful extra gripper-disable frame cannot turn a failed arm STOP
        into a successful global result, or suppress the partner's attempt. */
     CHECK(c->bus.devices[0].tx>tx0&&c->bus.devices[1].tx>tx1);
-    cJSON_Delete(snapshot);failed_stop=-1;cleanup(c,directory);
+    cJSON_Delete(snapshot);failed_stop=-1;fixture_cleanup(c,directory);
 
     /* A STOP for every arm sends every frame before the first record is
        saved, and saves them all before it replies. */
-    path_for(directory,sizeof directory,5);setup(c,directory);
+    fixture_directory(directory,sizeof directory,"piper-two-lanes");setup(c,directory);
     command(c,0,"joint",20);command(c,1,"joint",-20);
     snprintf(state,sizeof state,"%s/control-state.json",directory);
     watched_state=state;watched_stops=0;
@@ -238,11 +201,11 @@ int main(void)
     cJSON_Delete(snapshot);
     snapshot=fixture_read_json(state);
     for (unsigned i=0;i<2;++i) CHECK(cJSON_IsTrue(field(field(field(snapshot,"devices"),c->bus.devices[i].id),"stop_event_active")));
-    cJSON_Delete(snapshot);cleanup(c,directory);
+    cJSON_Delete(snapshot);fixture_cleanup(c,directory);
 
     /* A cleanup STOP that names no arm cannot be scoped: both moving arms
        stop, and the reply says the scope was widened. */
-    path_for(directory,sizeof directory,6);setup(c,directory);
+    fixture_directory(directory,sizeof directory,"piper-two-lanes");setup(c,directory);
     a=command(c,0,"joint",20);command(c,1,"joint",-20);
     tx0=c->bus.devices[0].tx;tx1=c->bus.devices[1].tx;
     cJSON *unscoped=cJSON_CreateObject();cJSON_AddStringToObject(unscoped,"owner",owner);cJSON_AddNumberToObject(unscoped,"request_id",a);
@@ -252,14 +215,15 @@ int main(void)
     CHECK(strstr(field(snapshot,"error")->valuestring,"every known arm"));
     cJSON_Delete(snapshot);
     /* A scoped STOP for one arm leaves the partner's action alone. */
-    cleanup(c,directory);path_for(directory,sizeof directory,7);setup(c,directory);
+    fixture_cleanup(c,directory);fixture_directory(directory,sizeof directory,"piper-two-lanes");setup(c,directory);
     command(c,0,"joint",20);b=command(c,1,"joint",-20);tx1=c->bus.devices[1].tx;
     cJSON *scoped=identity(c,0);cJSON_ReplaceItemInObjectCaseSensitive(scoped,"generation",cJSON_CreateNumber(c->bus.devices[0].generation+1));
     snapshot=request(c,"/api/stop",scoped,409);
     CHECK(lane(c,0)->op==OP_IDLE&&lane(c,1)->op==OP_MOVE&&lane(c,1)->request_id==b&&c->bus.devices[1].tx==tx1);
     CHECK(!strcmp(field(snapshot,"stop_scope")->valuestring,"device")&&cJSON_GetArraySize(field(snapshot,"stops"))==1);
-    cJSON_Delete(snapshot);cleanup(c,directory);
+    cJSON_Delete(snapshot);fixture_cleanup(c,directory);
     free(c);
     puts("PASS multi-device lanes: two independent simulators and simultaneous motions; selection-independent routing; unique requests; heartbeat/generation/hold isolation; local fault isolation; one receive per tick; global STOP, persisted incidents and shutdown cover every arm.");
-    return 0;
 }
+static const struct check_test tests[]={{"multi-lanes","every scenario of this file",scenarios,NULL}};
+int main(void) { return check_main("multi-lanes",tests,1); }

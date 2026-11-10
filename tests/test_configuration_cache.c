@@ -1,15 +1,14 @@
 #define _GNU_SOURCE
 #include "fixture.h"
-#include <assert.h>
+#include "fake_bus.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 
-int main(void)
+static void scenarios(void)
 {
-    char directory[]="/tmp/piper-configuration-cache-XXXXXX";
-    CHECK(mkdtemp(directory));
+    char directory[FIXTURE_DIRECTORY]; fixture_directory(directory,sizeof directory,"piper-configuration-cache");
     struct controller c; CHECK(controller_init(&c,true,directory,""));
     struct can_device *d=&c.bus.devices[0];
     double now=piper_now();
@@ -51,7 +50,7 @@ int main(void)
     cJSON_AddBoolToObject(body,"clear",true); cJSON_AddBoolToObject(body,"standalone",true);
     int status; cJSON *reply=controller_action(&c,"/api/command",body,&status);
     CHECK(status==202); cJSON_Delete(reply);
-    while(LANE(&c)->op!=OP_IDLE) { usleep(30000); LANE(&c)->heartbeat=piper_now(); controller_tick(&c,piper_now()); }
+    while(LANE(&c)->op!=OP_IDLE) { fake_bus_advance(0.03); LANE(&c)->heartbeat=piper_now(); controller_tick(&c,piper_now()); }
     CHECK(!strcmp(LANE(&c)->phase,"complete"));
 
     now=piper_now();
@@ -72,7 +71,7 @@ int main(void)
     reply=controller_action(&c,"/api/reconnect",body,&status);
     CHECK(status==200 && LANE(&c)->query); cJSON_Delete(reply);
     for(unsigned tick=0;tick<70 && LANE(&c)->query;++tick) {
-        usleep(30000); controller_tick(&c,piper_now());
+        fake_bus_advance(0.03); controller_tick(&c,piper_now());
         d->feedback.gripper_config_seen=false;
     }
     CHECK(!LANE(&c)->query && !controller_blocker(&c,d,piper_now()));
@@ -81,3 +80,5 @@ int main(void)
     cJSON_Delete(body); fixture_cleanup(&c,directory);
     puts("Configuration cache passed: no timed refresh or expiry, optional gripper independence, status-gap invalidation, reconnect rereads, no motion replay.");
 }
+static const struct check_test tests[]={{"configuration-cache","every scenario of this file",scenarios,NULL}};
+int main(void) { return check_main("configuration-cache",tests,1); }

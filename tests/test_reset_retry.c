@@ -1,6 +1,6 @@
 #define _GNU_SOURCE
 #include "fixture.h"
-#include <assert.h>
+#include "fake_bus.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -8,11 +8,9 @@
 
 /* Deterministic feedback/clock fixture. No real CAN transport is opened and
    every transmitted packet is checked: recovery must never enable or move. */
-static double clock_now=100;
 static unsigned resets,stops;
-FIXTURE_WRAP_PIPER_NOW(clock_now)
-void __wrap_can_bus_receive(struct can_bus *bus,double now) { (void)bus; (void)now; }
-bool __wrap_can_bus_send(struct can_bus *bus,struct can_device *d,unsigned generation,const struct can_frame *f,size_t count)
+static void mcu_receive(struct can_bus *bus,double now) { (void)bus; (void)now; }
+static bool mcu_send(struct can_bus *bus,struct can_device *d,unsigned generation,const struct can_frame *f,size_t count)
 {
     CHECK(bus->simulated && d && generation==d->generation && count==1);
     CHECK(f[0].can_id==0x150 && f[0].len==8);
@@ -26,11 +24,11 @@ static void fresh(struct controller *c)
 {
     struct can_device *d=&c->bus.devices[0];
     struct piper_sample *s=&d->feedback.arm[0];
-    s->status_seen=true; s->status_at=clock_now;
+    s->status_seen=true; s->status_at=fake_bus.now;
     for (unsigned i=0;i<6;++i) {
-        s->joint_seen[i]=true; s->joint_at[i]=clock_now;
-        d->feedback.motor[i].seen=true; d->feedback.motor[i].at=clock_now;
-        d->feedback.motor[i].high_seen=true; d->feedback.motor[i].high_at=clock_now;
+        s->joint_seen[i]=true; s->joint_at[i]=fake_bus.now;
+        d->feedback.motor[i].seen=true; d->feedback.motor[i].at=fake_bus.now;
+        d->feedback.motor[i].high_seen=true; d->feedback.motor[i].high_at=fake_bus.now;
     }
 }
 static cJSON *request(struct controller *c)
@@ -58,12 +56,12 @@ static bool pending(struct controller *c)
 static void fixture(struct controller *c,char directory[96])
 {
     fixture_directory(directory,96,"piper-reset-retry");
-    clock_now+=10; CHECK(controller_init(c,true,directory,""));
+    fake_bus.now+=10; CHECK(controller_init(c,true,directory,""));
     struct can_device *d=&c->bus.devices[0];
     strcpy(d->feedback.hardware,"H-V1.2-1"); strcpy(d->feedback.version,"S-V1.8-2");
     d->feedback.arm[0].control=0; d->feedback.arm[0].arm_status=1;
     d->feedback.arm[0].motion_mode=1; d->feedback.arm[0].teach=1;
-    fixture_still(d,clock_now-1);
+    fixture_still(d,fake_bus.now-1);
     for (unsigned i=0;i<6;++i) d->feedback.motor[i].enabled=false;
     fresh(c);
 }
@@ -71,8 +69,9 @@ static void close_fixture(struct controller *c,const char *directory)
 {
     CHECK(LANE(c)->op==OP_IDLE); fixture_cleanup(c,directory);
 }
-int main(void)
+static void scenarios(void)
 {
+    fake_bus_model(mcu_receive,mcu_send);
     struct controller c; char directory[96]; fixture(&c,directory);
     struct can_device *d=&c.bus.devices[0]; unsigned initial_resets=resets;
     /* Physical light is off: STOP can retain teach=1. Reset is a single
@@ -81,18 +80,18 @@ int main(void)
     unsigned first_request=LANE(&c)->request_id; action(&c,request(&c),409);
     /* No completion acknowledgement: the bounded operation fails stopped.
        The retained pending intent must no longer create an unrecoverable lock. */
-    clock_now+=3.01; fresh(&c); LANE(&c)->heartbeat=clock_now;
-    controller_tick(&c,clock_now);
+    fake_bus.now+=3.01; fresh(&c); LANE(&c)->heartbeat=fake_bus.now;
+    controller_tick(&c,fake_bus.now);
     CHECK(LANE(&c)->op==OP_IDLE && pending(&c) && strstr(LANE(&c)->message,"Control action timed out") && stops==1);
-    clock_now+=.5; fresh(&c); fixture_still(d,clock_now-1);
+    fake_bus.now+=.5; fresh(&c); fixture_still(d,fake_bus.now-1);
     action(&c,request(&c),202); CHECK(resets==initial_resets+2 && LANE(&c)->request_id==first_request+1 && pending(&c));
     action(&c,request(&c),409);
     /* A transient stale teach flag without an actual hand-guiding status
        cannot silently abandon this retry before reset acknowledgement. */
-    clock_now+=.1; d->feedback.arm[0].arm_status=0; fresh(&c); LANE(&c)->heartbeat=clock_now;
-    controller_tick(&c,clock_now); CHECK(LANE(&c)->op==OP_RESET && pending(&c));
+    fake_bus.now+=.1; d->feedback.arm[0].arm_status=0; fresh(&c); LANE(&c)->heartbeat=fake_bus.now;
+    controller_tick(&c,fake_bus.now); CHECK(LANE(&c)->op==OP_RESET && pending(&c));
     d->feedback.arm[0].teach=0;
-    clock_now+=.5; fresh(&c); LANE(&c)->heartbeat=clock_now; controller_tick(&c,clock_now);
+    fake_bus.now+=.5; fresh(&c); LANE(&c)->heartbeat=fake_bus.now; controller_tick(&c,fake_bus.now);
     CHECK(LANE(&c)->op==OP_IDLE && !pending(&c) && !strcmp(LANE(&c)->phase,"complete"));
     CHECK(resets==initial_resets+2 && stops==1);
     close_fixture(&c,directory);
@@ -102,17 +101,17 @@ int main(void)
     for (unsigned failure=0;failure<14;++failure) {
         fixture(&c,directory); d=&c.bus.devices[0];
         action(&c,request(&c),202);
-        clock_now+=3.01; fresh(&c); LANE(&c)->heartbeat=clock_now; controller_tick(&c,clock_now);
+        fake_bus.now+=3.01; fresh(&c); LANE(&c)->heartbeat=fake_bus.now; controller_tick(&c,fake_bus.now);
         CHECK(LANE(&c)->op==OP_IDLE && pending(&c));
-        clock_now+=.5; fresh(&c); fixture_still(d,clock_now-1);
+        fake_bus.now+=.5; fresh(&c); fixture_still(d,fake_bus.now-1);
         cJSON *body=request(&c); int expected=409;
         if (failure==0) { cJSON_DeleteItemFromObject(body,"supported"); expected=400; }
         if (failure==1) { cJSON_DeleteItemFromObject(body,"clear"); expected=400; }
-        if (failure==2) d->feedback.arm[0].status_at=clock_now-1;
-        if (failure==3) d->feedback.arm[0].joint_at[4]=clock_now-1;
-        if (failure==4) d->feedback.motor[4].at=clock_now-1;
+        if (failure==2) d->feedback.arm[0].status_at=fake_bus.now-1;
+        if (failure==3) d->feedback.arm[0].joint_at[4]=fake_bus.now-1;
+        if (failure==4) d->feedback.motor[4].at=fake_bus.now-1;
         if (failure==5) d->feedback.motor[4].enabled=true;
-        if (failure==6) fixture_still(d,clock_now-.1);
+        if (failure==6) fixture_still(d,fake_bus.now-.1);
         if (failure==7) { d->feedback.arm[0].arm_status=11; d->feedback.arm[0].control=2; }
         if (failure==8) { d->feedback.arm[0].arm_status=12; d->feedback.arm[0].teach=3; d->feedback.arm[0].control=2; }
         if (failure==9) d->feedback.arm[0].error=1;
@@ -126,3 +125,5 @@ int main(void)
     }
     puts("Reset retry passed: explicit supported stopped/all-off retry after timeout, one-packet in-flight guard, residual teach transition, verified completion and unsafe/stale/missing-confirmation rejection.");
 }
+static const struct check_test tests[]={{"reset-retry","every scenario of this file",scenarios,NULL}};
+int main(void) { return check_main("reset-retry",tests,1); }

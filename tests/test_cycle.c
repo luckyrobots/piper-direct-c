@@ -1,6 +1,6 @@
 #define _GNU_SOURCE
 #include "fixture.h"
-#include <assert.h>
+#include "fake_bus.h"
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -47,7 +47,7 @@ static void reach_stage(struct fixture *f,enum lane_stage wanted)
     for (unsigned i=0;i<7000&&LANE(&f->c)->stage!=wanted&&LANE(&f->c)->op!=OP_IDLE;++i) tick(f,true);
     CHECK(LANE(&f->c)->op==OP_CYCLE&&LANE(&f->c)->stage==wanted);
 }
-int main(void)
+static void scenarios(void)
 {
     struct fixture f; setup(&f);
     CHECK(request(&f,"cycle")==202); CHECK(LANE(&f.c)->op==OP_CYCLE);
@@ -119,3 +119,5 @@ int main(void)
     cleanup(&f);
     puts("Cycle passed: full upright/pause/return, captured pose, fixed axes, bounded synchronized steps, Stop in all phases, Hold, lease loss, invalid presets/start/return limits.");
 }
+static const struct check_test tests[]={{"cycle","every scenario of this file",scenarios,NULL}};
+int main(void) { return check_main("cycle",tests,1); }

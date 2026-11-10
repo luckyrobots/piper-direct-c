@@ -2,7 +2,6 @@
 #define PIPER_TEST_FIXTURE_H
 /* Shared helpers for the offline native tests. Include after _GNU_SOURCE. */
 #include "controller_internal.h"
-#include <assert.h>
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -20,9 +19,8 @@
 /* A fake "open" transport for a non-simulated device. It is negative, so no
    OS call (close, send, recvmsg) can ever act on a real descriptor. */
 #define FIXTURE_FD (-2)
-
-/* Deterministic clock for tests linked with -Wl,--wrap=piper_now. */
-#define FIXTURE_WRAP_PIPER_NOW(clock) double __wrap_piper_now(void) { return (clock); }
+/* Room for a state-directory path under the system temp folder. */
+#define FIXTURE_DIRECTORY 128
 
 /* Mark a device strictly still since `since` (both detector timestamps). */
 static inline void fixture_still(struct can_device *d,double since)
