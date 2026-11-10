@@ -94,7 +94,7 @@ internal static class CalibrationSheetIntegrationTests
                 }));
         plugin.engine = context; plugin.telemetry.AdoptBackend("fixture-session"); plugin.telemetry.PublishState(snapshot); Fresh();
         plugin.link = new RobotLink("fixture-scene", "fixture-robot", Pose()["joints"]!.AsArray(), device);
-        plugin.linkBackendToken = "fixture-session"; plugin.Navigation = WorkspaceNavigation.Calibration;
+        plugin.linkBackendToken = "fixture-session"; plugin.workspace.Commit(WorkspaceNavigation.Calibration);
         IEnumerable<JsonObject> Walk(JsonObject node)
         {
             yield return node;
@@ -111,7 +111,7 @@ internal static class CalibrationSheetIntegrationTests
         {
             await plugin.Render(CancellationToken.None); await plugin.Update(CancellationToken.None);
             var initialDraft = plugin.calibrationWizard!;
-            string retiredNext = WorkspaceEventScope.Wrap(plugin.workspaceViewEpoch, "piper-1", $"wizard.{initialDraft.Epoch}.next");
+            string retiredNext = WorkspaceEventScope.Wrap(plugin.workspace.Epoch, "piper-1", $"wizard.{initialDraft.Epoch}.next");
             await plugin.HandleEventAsync(new("luckyrobots.pipers.controls", retiredNext, "click", JsonSerializer.SerializeToElement(true)), CancellationToken.None);
             Check(ReferenceEquals(initialDraft, plugin.calibrationWizard) && calls.Count == 0,
                 "A retired wizard Next event still advanced a persisted draft or called the editor");
@@ -215,14 +215,14 @@ internal static class CalibrationSheetIntegrationTests
                     "A stale Save entry click committed a duplicate reference correction");
                 await Event("move." + row);
             }
-            long editPage = plugin.workspaceViewEpoch;
+            long editPage = plugin.workspace.Epoch;
             await Event("move.1"); await Event("field.p1left", "780");
             Check(plugin.calibrationSamples[1] == originalP2 &&
                 plugin.calibrationFit == fit, "Typing a correction changed a captured observation or fit before explicit Save entry");
             await Event("move.1");
             Check(plugin.calibrationWizard.Answers["p1left"] == "800" &&
                 plugin.calibrationSamples[1] == originalP2, "Cancel edit failed to restore the captured coordinate");
-            Check(plugin.workspaceViewEpoch == editPage, "Edit/cancel rebuilt the sheet and invalidated its visible controls");
+            Check(plugin.workspace.Epoch == editPage, "Edit/cancel rebuilt the sheet and invalidated its visible controls");
             await Event("move.1"); await Event("field.p1left", "-1"); await Event("capture.1");
             Check(plugin.calibrationSamples[1] == originalP2 && plugin.calibrationFit == fit,
                 "An out-of-desk correction replaced the captured observation");
@@ -298,7 +298,7 @@ internal static class CalibrationSheetIntegrationTests
             Check(plugin.calibrationApplied!.Same(root) && calls.Count(c => c == "robot.placement") == 1, "Checking an applied placement repeated a scene write");
             // Jaw-height phases (Cal-D), reachable from the sheet through the
             // workspace navigation fix (B3).
-            plugin.Navigation = WorkspaceNavigation.Calibration;
+            plugin.workspace.Commit(WorkspaceNavigation.Calibration);
             async Task Height(string action, string text = "") { Fresh(); await plugin.HeightCheckEvent(action, JsonSerializer.SerializeToElement(text), CancellationToken.None); }
             string HeightPhase() => plugin.heightPhase.ToString()!;
             await Height("toggle");
@@ -312,7 +312,7 @@ internal static class CalibrationSheetIntegrationTests
             Check(HeightPhase() == "Live" && plugin.heightFrozen is null, "Check another pose kept the previous pinned pose");
             await Height("toggle");
             Check(HeightPhase() == "Inactive", "Stop height check left the check active");
-            plugin.Navigation = WorkspaceNavigation.Calibration; await plugin.Render(CancellationToken.None);
+            plugin.workspace.Commit(WorkspaceNavigation.Calibration); await plugin.Render(CancellationToken.None);
             // Reopening the same compiled model must not tell users to redo an
             // already applied alignment just to perform independent height checks.
             var reopenedPose = Pose(); reopenedPose["sceneId"] = "reopened-scene";

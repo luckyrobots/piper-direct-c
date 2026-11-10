@@ -8,12 +8,6 @@ namespace LuckyRobots.Piper.Plugin;
 
 internal enum RobotPrimaryAction { None, Enable, Resume, OpenRecovery, OpenStoppedRecovery, StopFollowing }
 
-/// <summary>Plugin-5 primary robot action: Idle → Running → Idle. Running reports
-/// stages (received → enable → link-scene, or for a resume waiting-for-stillness →
-/// returning-to-controls); ResumingControls is Running while ResumeControls owns the
-/// arm. Idle keeps the last status (complete or failed) visible.</summary>
-internal enum PrimaryActionPhase { Idle, Running, ResumingControls }
-
 /// <summary>Telemetry updates numbers; only a meaningful controller transition changes the primary action.</summary>
 public sealed record RobotReadiness(string Label, string Action, bool Enabled, string Detail)
 {
@@ -67,10 +61,8 @@ public sealed record RobotReadiness(string Label, string Action, bool Enabled, s
 
 public sealed partial class PipersPlugin
 {
-    internal sealed record PrimaryActionState(PrimaryActionPhase Phase, string Id, string Status);
-    internal PrimaryActionState primaryAction = new(PrimaryActionPhase.Idle, "", "");
-    private bool PrimaryActionBusy => primaryAction.Phase != PrimaryActionPhase.Idle;
-    private bool ResumeControlsBusy => primaryAction.Phase == PrimaryActionPhase.ResumingControls;
+    private bool PrimaryActionBusy => workspace.PrimaryAction.Busy;
+    private bool ResumeControlsBusy => workspace.PrimaryAction.ResumingControls;
     private JsonObject[] pikaDevices = [];
     private SceneRobotBindingOption[] settingsRobotOptions = [];
     private string pikaInventoryMessage = "Discover connected grippers";
@@ -88,7 +80,7 @@ public sealed partial class PipersPlugin
 
     private async Task RunPrimaryAction(Func<CancellationToken, Task> action, CancellationToken cancellation)
     {
-        primaryAction = new(PrimaryActionPhase.Running, Guid.NewGuid().ToString("N"), primaryAction.Status);
+        workspace.PrimaryAction.Begin();
         try
         {
             await PrimaryActionProgress("received", "Checking the selected robot and gripper…", cancellation);
@@ -100,15 +92,15 @@ public sealed partial class PipersPlugin
             // The primary action lives above the camera/joint controls. A
             // failure must stay visible there, rather than only in a footer
             // below the scroll area. Cancellation never resumes the action.
-            primaryAction = primaryAction with { Status = error is OperationCanceledException
+            workspace.PrimaryAction.Report(error is OperationCanceledException
                 ? "Action cancelled. No previous movement will resume."
-                : "Could not start: " + error.Message };
+                : "Could not start: " + error.Message);
             await WritePrimaryActionReceipt("failed", error.Message);
             throw;
         }
         finally
         {
-            primaryAction = primaryAction with { Phase = PrimaryActionPhase.Idle };
+            workspace.PrimaryAction.Finish();
             try { using var presentation = new CancellationTokenSource(TimeSpan.FromSeconds(2)); await PatchPrimaryAction(presentation.Token); }
             catch (Exception error) { Trace.TraceWarning("Primary action presentation: {0}", error.Message); }
         }
@@ -174,7 +166,7 @@ public sealed partial class PipersPlugin
 
     private async Task PrimaryActionProgress(string stage, string text, CancellationToken cancellation)
     {
-        primaryAction = primaryAction with { Status = text };
+        workspace.PrimaryAction.Report(text);
         await WritePrimaryActionReceipt(stage);
         await PatchPrimaryAction(cancellation);
     }
@@ -183,7 +175,7 @@ public sealed partial class PipersPlugin
 
     private JsonObject PrimaryActionPatch()
     {
-        string status = primaryAction.Status;
+        string status = workspace.PrimaryAction.Current.Status;
         return new() { ["text"] = status, ["visible"] = Navigation.Page == WorkspacePage.Controls && status.Length > 0, ["hint"] = status };
     }
 
@@ -197,7 +189,7 @@ public sealed partial class PipersPlugin
             var telemetryReceipt = telemetry.Latest;
             var pika = telemetryReceipt?.State["pika"];
             double pikaAge = telemetryReceipt?.PikaEvidenceAgeMilliseconds(Stopwatch.GetTimestamp()) ?? double.NaN;
-            var receipt = new { id = primaryAction.Id, stage, atUtc = DateTimeOffset.UtcNow,
+            var receipt = new { id = workspace.PrimaryAction.Current.Id, stage, atUtc = DateTimeOffset.UtcNow,
                 profileId = ActiveProfile.Id, robotId = ActiveProfile.RobotId, jointPrefix = ActiveProfile.RobotJointPrefix,
                 canDeviceId = ActiveProfile.CanDeviceId, approved, pikaOwned = telemetry.Pika.Owned, linked = link is not null,
                 following = SimulationFollowingActive, followAfterEnable = false, failure,

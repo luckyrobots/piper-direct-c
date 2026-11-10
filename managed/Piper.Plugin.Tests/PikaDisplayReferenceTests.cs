@@ -120,7 +120,7 @@ internal static class PikaDisplayReferenceTests
         async Task Event(string id, double? value = null)
         {
             Fresh();
-            await plugin.HandleEventAsync(new("luckyrobots.pipers.controls", WorkspaceEventScope.Wrap(plugin.workspaceViewEpoch, "piper-1", id), "click", JsonSerializer.SerializeToElement(value)), CancellationToken.None);
+            await plugin.HandleEventAsync(new("luckyrobots.pipers.controls", WorkspaceEventScope.Wrap(plugin.workspace.Epoch, "piper-1", id), "click", JsonSerializer.SerializeToElement(value)), CancellationToken.None);
         }
         try
         {

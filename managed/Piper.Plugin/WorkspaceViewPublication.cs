@@ -5,43 +5,26 @@ namespace LuckyRobots.Piper.Plugin;
 
 public sealed partial class PipersPlugin
 {
-    internal readonly SemaphoreSlim workspacePublicationGate = new(1, 1);
-    private long nextWorkspaceViewEpoch;
-    private int workspacePublicationUncertain;
-    private sealed record SimulationCameraChoices(string SceneId, (string Id, string Name)[] Cameras);
-    private sealed record PublishedWorkspaceView(long Epoch, WorkspaceViewContext Context, RobotProfile StopProfile,
-        WorkspaceClearConfirmation? Confirmation, SimulationCameraChoices CameraChoices);
-    private readonly record struct WorkspaceViewContext(string Profile, WorkspaceNavigation Navigation)
-    {
-        public WorkspacePage Page => Navigation.Page;
-        public SettingsCategory SettingsCategory => Navigation.Category;
-        public string SettingsCamera => Navigation.SettingsCamera;
-        public bool Calibration => Navigation.CalibrationOpen;
-    }
     private sealed record WorkspacePatchScope(PublishedWorkspaceView? View, long Epoch, WorkspaceViewContext Context, Preferences Preferences);
     private sealed record WorkspacePatchEvidence(TelemetryReceipt? Receipt, JsonObject? State, string Backend, long PermissionEpoch);
-    private PublishedWorkspaceView? publishedWorkspaceView;
     private WorkspaceViewContext CurrentWorkspaceViewContext => new(ActiveProfile.Id, Navigation);
-    private long PublishedWorkspaceEpoch => Volatile.Read(ref publishedWorkspaceView)?.Epoch ?? Interlocked.Read(ref workspaceViewEpoch);
 
     private RobotProfile? CaptureStopProfile(string wireId, RobotProfile selected)
     {
-        var visible = Volatile.Read(ref publishedWorkspaceView)?.StopProfile;
+        var visible = workspace.Published?.StopProfile;
         if (visible is not null && wireId == WorkspaceEventScope.Wrap(0, visible.Id, "stop")) return visible;
         return wireId == WorkspaceEventScope.Wrap(0, selected.Id, "stop") ? selected : null;
     }
 
     private WorkspaceClearConfirmation? DisplayedConfirmation(string wireId, string action)
     {
-        var view = Volatile.Read(ref publishedWorkspaceView);
-        return view is not null && Volatile.Read(ref workspacePublicationUncertain) == 0 &&
-            view.Context == CurrentWorkspaceViewContext && wireId == WorkspaceEventScope.Wrap(view.Epoch, view.Context.Profile, action)
-            ? view.Confirmation : null;
+        return workspace.Confirmed(CurrentWorkspaceViewContext) is { } view &&
+            wireId == WorkspaceEventScope.Wrap(view.Epoch, view.Context.Profile, action) ? view.Confirmation : null;
     }
 
     private async Task<WorkspaceClearConfirmation> AcceptWorkspaceClearance(string wireId, CancellationToken cancellation)
     {
-        await workspacePublicationGate.WaitAsync(cancellation);
+        await workspace.PublicationGate.WaitAsync(cancellation);
         try
         {
             var confirmation = DisplayedConfirmation(wireId, "safety.accept") ??
@@ -60,29 +43,28 @@ public sealed partial class PipersPlugin
             }
             finally { CommandAuthority.DismissConfirmation(confirmation); }
         }
-        finally { workspacePublicationGate.Release(); }
+        finally { workspace.PublicationGate.Release(); }
     }
 
     private WorkspacePatchScope? CaptureWorkspacePatchScope()
     {
-        var published = Volatile.Read(ref publishedWorkspaceView);
+        var published = workspace.Published;
         var settings = preferences;
         var context = CurrentWorkspaceViewContext;
-        if (Volatile.Read(ref workspacePublicationUncertain) != 0 ||
-            published is not null && published.Context != context)
+        if (workspace.PublicationUncertain || published is not null && published.Context != context)
             return null;
-        return new(published, published?.Epoch ?? Interlocked.Read(ref workspaceViewEpoch), context, settings);
+        return new(published, published?.Epoch ?? 0, context, settings);
     }
 
     private async Task PublishWorkspacePatch(WorkspacePatchScope scope, Dictionary<string, JsonObject> patches,
         CancellationToken cancellation, WorkspacePatchEvidence? evidence = null)
     {
-        await workspacePublicationGate.WaitAsync(cancellation);
+        await workspace.PublicationGate.WaitAsync(cancellation);
         try
         {
-            if (Volatile.Read(ref workspacePublicationUncertain) != 0 ||
-                !ReferenceEquals(scope.View, Volatile.Read(ref publishedWorkspaceView)) ||
-                scope.Epoch != PublishedWorkspaceEpoch || scope.Context != CurrentWorkspaceViewContext ||
+            // The same published view carries the same epoch, so one identity check covers both.
+            if (workspace.PublicationUncertain || !ReferenceEquals(scope.View, workspace.Published) ||
+                scope.Context != CurrentWorkspaceViewContext ||
                 !ReferenceEquals(scope.Preferences, preferences))
                 return;
             if (evidence is not null && (!ReferenceEquals(evidence.Receipt, telemetry.Latest) ||
@@ -98,30 +80,33 @@ public sealed partial class PipersPlugin
                 patch => patch.Value);
             await engine.PatchAsync(Panel, scoped, cancellation);
         }
-        finally { workspacePublicationGate.Release(); }
+        finally { workspace.PublicationGate.Release(); }
     }
 
     internal string UnscopePublishedWorkspaceEvent(string wireId, string? profileId = null)
     {
-        var published = Volatile.Read(ref publishedWorkspaceView);
-        string id = WorkspaceEventScope.Unwrap(published?.Epoch ?? Interlocked.Read(ref workspaceViewEpoch), profileId ?? ActiveProfile.Id, wireId);
+        var published = workspace.Published;
+        string id = WorkspaceEventScope.Unwrap(published?.Epoch ?? 0, profileId ?? ActiveProfile.Id, wireId);
         if (id.Length == 0) return "";
         // Persistent power-release/STOP/cancel actions retain their profile
         // identity. Native engine targets still require a confirmed current view.
         bool viewBound = wireId.StartsWith("view.", StringComparison.Ordinal) || WorkspaceCommandPolicy.RequiresControls(id);
-        if (viewBound && (Volatile.Read(ref workspacePublicationUncertain) != 0 ||
+        if (viewBound && (workspace.PublicationUncertain ||
             published is not null && published.Context != CurrentWorkspaceViewContext)) return "";
         return id;
     }
 
-    private async Task PublishWorkspaceView(CancellationToken cancellation, Action? commitContext = null)
+    /// <summary>Publishes a full view. <paramref name="destination"/>, when given, is the
+    /// Plugin-1 commit: it is adopted inside the publication gate, just before the
+    /// view that shows it is sent, so a cancelled wait commits nothing.</summary>
+    private async Task PublishWorkspaceView(CancellationToken cancellation, WorkspaceNavigation? destination = null)
     {
-        await workspacePublicationGate.WaitAsync(cancellation);
+        await workspace.PublicationGate.WaitAsync(cancellation);
         try
         {
             cancellation.ThrowIfCancellationRequested();
-            commitContext?.Invoke();
-            Volatile.Write(ref workspacePublicationUncertain, 1);
+            if (destination is not null) workspace.Commit(destination);
+            workspace.BeginPublication();
             try { await Publish(cancellation); }
             catch (Exception first) when (!shutdown.IsCancellationRequested)
             {
@@ -140,7 +125,7 @@ public sealed partial class PipersPlugin
                 cancellation.ThrowIfCancellationRequested();
             }
         }
-        finally { workspacePublicationGate.Release(); }
+        finally { workspace.PublicationGate.Release(); }
 
         async Task Publish(CancellationToken ct)
         {
@@ -153,8 +138,7 @@ public sealed partial class PipersPlugin
                 CommandAuthority.DismissConfirmation(confirmation);
                 confirmation = null;
             }
-            long candidate = Math.Max(nextWorkspaceViewEpoch, Interlocked.Read(ref workspaceViewEpoch)) + 1;
-            nextWorkspaceViewEpoch = candidate;
+            long candidate = workspace.ReserveEpoch();
             var inventory = simulationCameras;
             var cameraChoices = new SimulationCameraChoices(inventory?["sceneId"]?.GetValue<string>() ?? "",
                 (inventory?["cameras"] as JsonArray)?.OfType<JsonObject>()
@@ -166,9 +150,7 @@ public sealed partial class PipersPlugin
             if (context != CurrentWorkspaceViewContext || profile.Id != context.Profile || profile.Id != current.Id ||
                 profile.CanDeviceId != current.CanDeviceId || profile.PikaDevice != current.PikaDevice || profile.WslDistribution != current.WslDistribution)
                 throw new InvalidOperationException("The workspace changed while publishing its controls; refreshing the current view.");
-            Volatile.Write(ref publishedWorkspaceView, new(candidate, context, profile, confirmation, cameraChoices));
-            Interlocked.Exchange(ref workspaceViewEpoch, candidate);
-            Volatile.Write(ref workspacePublicationUncertain, 0);
+            workspace.Confirm(new(candidate, context, profile, confirmation, cameraChoices));
         }
     }
 }

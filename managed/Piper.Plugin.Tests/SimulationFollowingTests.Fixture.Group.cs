@@ -26,7 +26,7 @@ internal static partial class SimulationFollowingTests
         {
             var sidebar = plugin.GroupFollowControls();
             var stop = sidebar.Children!.Single(w => w.Text == "Stop following" && w.Visible != false);
-            string wire = WorkspaceEventScope.Wrap(plugin.workspaceViewEpoch, "piper-1", stop.Id);
+            string wire = WorkspaceEventScope.Wrap(plugin.workspace.Epoch, "piper-1", stop.Id);
             return plugin.HandleEventAsync(new("fixture", wire, "click", JsonSerializer.SerializeToElement(true)), CancellationToken.None);
         }
         public void RequestGroupPlay() { if (!groupArmed || Mode != "edit") throw new InvalidOperationException("Group is not armed"); startRequested = true; Mode = "pause"; }

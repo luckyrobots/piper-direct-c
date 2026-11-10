@@ -52,9 +52,10 @@ public static class WorkspaceCommandPolicy
 /// States: Controls · Recording · Replay · Camera(detail, return page) ·
 /// Settings(category, settings camera). Calibration is not a page: it is open
 /// exactly while bench settings, or a camera enlarged from them, are visible.
-/// <see cref="Navigate"/> is the only transition; PipersPlugin commits its
-/// result inside the view publication gate.</summary>
-internal readonly record struct WorkspaceNavigation(WorkspacePage Page, SettingsCategory Category,
+/// <see cref="Navigate"/> is the only transition; <see cref="WorkspaceComponent"/>
+/// holds the committed value, adopted inside the view publication gate. It is a
+/// reference type so a reader on another thread sees one whole page.</summary>
+internal sealed record WorkspaceNavigation(WorkspacePage Page, SettingsCategory Category,
     string SettingsCamera, string CameraDetail, WorkspacePage CameraReturn)
 {
     public static readonly WorkspaceNavigation Initial = new(WorkspacePage.Controls, SettingsCategory.Robot, "bench", "bench", WorkspacePage.Controls);
@@ -112,21 +113,21 @@ internal enum SettingsCategory { Robot, Cameras, Bench, Diagnostics }
 
 public sealed partial class PipersPlugin
 {
-    internal WorkspaceNavigation Navigation { get; set; } = WorkspaceNavigation.Initial;
+    /// <summary>The Workspace component; this shell reads it and asks it for transitions.</summary>
+    internal readonly WorkspaceComponent workspace = new();
+    private WorkspaceNavigation Navigation => workspace.Navigation;
     private bool calibrationOpen => Navigation.CalibrationOpen;
     private string settingsCamera => Navigation.SettingsCamera;
     private string cameraDetail => Navigation.CameraDetail;
-    internal long workspaceViewEpoch;
     private Task? wizardHighlightMaintenance;
-    internal bool connectionDetailsOpen, cameraStreamDetailsOpen, cameraLensDetailsOpen;
 
     internal async Task WorkspaceEvent(string action, CancellationToken cancellation)
     {
         action = action.Split('@', 2)[0];
         if (action == "link-info" || action.StartsWith("info.", StringComparison.Ordinal) || action is "recording.camera-info" or "recording.time-info") return;
-        if (action == "connection-details") { connectionDetailsOpen = !connectionDetailsOpen; await Render(cancellation); return; }
-        if (action == "camera-stream-details") { cameraStreamDetailsOpen = !cameraStreamDetailsOpen; await Render(cancellation); return; }
-        if (action == "camera-lens-details") { cameraLensDetailsOpen = !cameraLensDetailsOpen; await Render(cancellation); return; }
+        if (action == "connection-details") { workspace.ToggleConnectionDetails(); await Render(cancellation); return; }
+        if (action == "camera-stream-details") { workspace.ToggleCameraStreamDetails(); await Render(cancellation); return; }
+        if (action == "camera-lens-details") { workspace.ToggleCameraLensDetails(); await Render(cancellation); return; }
         var next = Navigation.Navigate(action);
         bool bench = next.Page == WorkspacePage.Settings && next.Category == SettingsCategory.Bench;
         if (bench && GroupFollowActive)
@@ -144,7 +145,7 @@ public sealed partial class PipersPlugin
         if (passiveMeasuredTrackingStarted && next is { Page: WorkspacePage.Settings, Category: SettingsCategory.Robot } &&
             (pikaInventoryAt == 0 || Stopwatch.GetElapsedTime(pikaInventoryAt).TotalSeconds > 5))
             await RefreshPikaInventory(cancellation);
-        await PublishWorkspaceView(cancellation, () => Navigation = next);
+        await PublishWorkspaceView(cancellation, next);
     }
 
     private void QueueWizardHighlight()

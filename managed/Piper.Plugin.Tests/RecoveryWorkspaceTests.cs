@@ -85,7 +85,7 @@ internal static class RecoveryWorkspaceTests
         plugin.engine = Fixtures.Context(new PluginStart("fixture", folder, folder), (Func<object, CancellationToken, Task>)((_, _) => Task.CompletedTask),
                 (Func<string, JsonObject, CancellationToken, Task<JsonElement>>)((_, _, _) => Task.FromResult(JsonSerializer.SerializeToElement(new { applied = false }))));
         void Fresh() => plugin.telemetry.Publish(new(snapshot, "recovery-ui-fixture", 1, Stopwatch.GetTimestamp(), 0));
-        Task Click(string id) => plugin.HandleEventAsync(new("fixture", WorkspaceEventScope.Wrap(plugin.workspaceViewEpoch, "piper-2", id), "click", JsonSerializer.SerializeToElement(true)), CancellationToken.None);
+        Task Click(string id) => plugin.HandleEventAsync(new("fixture", WorkspaceEventScope.Wrap(plugin.workspace.Epoch, "piper-2", id), "click", JsonSerializer.SerializeToElement(true)), CancellationToken.None);
         try
         {
             Fresh(); await Click("enable");
@@ -179,7 +179,7 @@ internal static class RecoveryWorkspaceTests
             device["blocker"] = "Another controller is sending commands on this CAN bus.";
             plugin.approved = true;
             Fresh(); await Click("enable");
-            Check(calls.Actions.Count == 0 && plugin.primaryAction.Status.Contains("Another controller", StringComparison.Ordinal),
+            Check(calls.Actions.Count == 0 && plugin.workspace.PrimaryAction.Current.Status.Contains("Another controller", StringComparison.Ordinal),
                 "A queued primary click sent Enable even though the current header reported a controller blocker");
         }
         finally

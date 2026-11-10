@@ -58,21 +58,21 @@ public sealed partial class PipersPlugin
             Widget.Row("workspace.settings.camera-actions", Widget.Button("camera." + id + ".toggle", settings.Enabled ? "Pause preview" : "Start preview"), Widget.Button("workspace.camera." + id + "@settings", "Enlarge & compare"),
                 Widget.Button("camera." + id + ".simrefresh", "Refresh cameras")),
             Widget.Label("workspace.settings.camera-remember", "Selection and preview state are remembered. Enabled cameras start when Pipers opens.") with { Height = 40, Appearance = "muted" },
-            Widget.Button("workspace.camera-stream-details", cameraStreamDetailsOpen ? "Hide stream & device details" : "Stream & device details") with { Appearance = "quiet" },
+            Widget.Button("workspace.camera-stream-details", workspace.CameraStreamDetailsOpen ? "Hide stream & device details" : "Stream & device details") with { Appearance = "quiet" },
             Widget.Column("workspace.settings.camera-stream",
                 Widget.Label("camera." + id + ".info", cameraStatus.GetValueOrDefault(id, "Waiting for frames…")) with { Height = 40 },
                 Field("camera." + id + ".simselect", "Simulation counterpart", new Widget("dropdown", "camera." + id + ".simselect") {
                     Options = ["Automatic counterpart", .. cameraChoices.Cameras.Select(camera => camera.Name)],
                     Value = preferences.SimulationCameras?.GetValueOrDefault(id) is not { } counterpart || counterpart.SceneId != cameraChoices.SceneId
                         ? 0 : Array.FindIndex(cameraChoices.Cameras, camera => camera.Id == counterpart.CameraId) + 1 }),
-                Widget.Label("camera." + id + ".clock", "Host receipt timestamps are available. Exposure delay and camera-to-world alignment remain unverified.") with { Height = 42, Appearance = "muted" }) with { Visible = cameraStreamDetailsOpen, Spacing = 10 },
-            Widget.Button("workspace.camera-lens-details", cameraLensDetailsOpen ? "Hide lens calibration" : "Lens calibration & profiles") with { Appearance = "quiet" },
+                Widget.Label("camera." + id + ".clock", "Host receipt timestamps are available. Exposure delay and camera-to-world alignment remain unverified.") with { Height = 42, Appearance = "muted" }) with { Visible = workspace.CameraStreamDetailsOpen, Spacing = 10 },
+            Widget.Button("workspace.camera-lens-details", workspace.CameraLensDetailsOpen ? "Hide lens calibration" : "Lens calibration & profiles") with { Appearance = "quiet" },
             Widget.Column("camera." + id + ".calibration",
                 Widget.Button("camera." + id + ".calibrationtools", "Check bundled camera runtime"),
                 Widget.Label("camera." + id + ".calibration.help", "Print the 8 × 6 checkerboard at actual size, 20 mm squares. Move the flat board, keeping the robot stationary, and capture 20+ varied views.") with { Height = 48, Hint = "Include different tilts, distances and image edges. The camera lens solve does not calibrate its mount." },
                 Widget.Row("camera." + id + ".calibration.actions", Widget.Button("camera." + id + ".calibrationboard", "Printable board"), Widget.Button("camera." + id + ".calibrationnew", "New session"), Widget.Button("camera." + id + ".calibrationcapture", "Capture board")),
                 Widget.Button("camera." + id + ".calibrationsolve", "Solve & validate fisheye lens") with { Appearance = "primary" },
-                Widget.Label("camera." + id + ".calibration.status", lens.Status) with { Height = 46 }) with { Visible = cameraLensDetailsOpen && id == "gripper", Spacing = 12 },
-            Widget.Label("workspace.settings.factory-profile", "D405 uses its selected stream's factory intrinsics. Bench and wrist camera mounts still need independent verification.") with { Visible = cameraLensDetailsOpen && id != "gripper", Height = 48, Appearance = "muted" }) with { Spacing = 14 };
+                Widget.Label("camera." + id + ".calibration.status", lens.Status) with { Height = 46 }) with { Visible = workspace.CameraLensDetailsOpen && id == "gripper", Spacing = 12 },
+            Widget.Label("workspace.settings.factory-profile", "D405 uses its selected stream's factory intrinsics. Bench and wrist camera mounts still need independent verification.") with { Visible = workspace.CameraLensDetailsOpen && id != "gripper", Height = 48, Appearance = "muted" }) with { Spacing = 14 };
     }
 }

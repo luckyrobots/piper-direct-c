@@ -319,7 +319,7 @@ public sealed partial class PipersPlugin : ILuckyPlugin
                 await ProfileEvent(rest, cancellation);
                 // Selecting a robot returns to its controls through the same
                 // publication gate as every other navigation.
-                await PublishWorkspaceView(cancellation, () => Navigation = Navigation.Navigate("controls"));
+                await PublishWorkspaceView(cancellation, Navigation.Navigate("controls"));
             }
             else if (TryStrip(id, "pika.reference.", out rest)) { await PikaReferenceEvent(rest, cancellation); return; }
             else await ControlEvent(id, input, cancellation);

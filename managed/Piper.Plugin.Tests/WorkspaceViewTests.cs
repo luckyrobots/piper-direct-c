@@ -147,10 +147,10 @@ internal static class WorkspaceViewTests
         int Depth(JsonObject node) => 1 + (node["children"]?.AsArray().OfType<JsonObject>().Select(Depth).DefaultIfEmpty(0).Max() ?? 0);
         async Task CheckView(string page, string category = "robot", string camera = "bench")
         {
-            plugin.Navigation = WorkspaceNavigation.At(Enum.Parse<WorkspacePage>(page, true), Enum.Parse<SettingsCategory>(category, true))
-                with { SettingsCamera = camera, CameraDetail = camera };
+            plugin.workspace.Commit(WorkspaceNavigation.At(Enum.Parse<WorkspacePage>(page, true), Enum.Parse<SettingsCategory>(category, true))
+                with { SettingsCamera = camera, CameraDetail = camera });
             bool calibration = page == "settings" && category == "bench";
-            Check(plugin.Navigation.CalibrationOpen == calibration, "Calibration was not derived from the bench settings page: " + page + "/" + category);
+            Check(plugin.workspace.Navigation.CalibrationOpen == calibration, "Calibration was not derived from the bench settings page: " + page + "/" + category);
             await plugin.Render(CancellationToken.None);
             var nodes = Walk(rendered!).ToArray();
             string[] ids = nodes.Select(n => n["id"]!.GetValue<string>()).ToArray();
@@ -166,10 +166,10 @@ internal static class WorkspaceViewTests
                 Check(nodes.Where(n => n["type"]?.GetValue<string>() == "input").All(n => n["commitOnly"]?.GetValue<bool>() == false), "Calibration measurements wait for blur/Enter instead of publishing edits live");
             }
             Check(ids.Count(id => id == "robot.piper-1.stop") == 1, "Persistent profile-bound STOP is missing/duplicated: " + label);
-            long current = plugin.workspaceViewEpoch;
+            long current = plugin.workspace.Epoch;
             Check(ids.All(id => WorkspaceEventScope.Unwrap(current, "piper-1", id).Length > 0), "Rendered widget escaped its current view/profile scope: " + label);
             await plugin.Update(CancellationToken.None);
-            Check(plugin.workspaceViewEpoch == current && patched!.All(p => WorkspaceEventScope.Unwrap(current, "piper-1", p.Key).Length > 0),
+            Check(plugin.workspace.Epoch == current && patched!.All(p => WorkspaceEventScope.Unwrap(current, "piper-1", p.Key).Length > 0),
                 "Telemetry update used an old view epoch or rebuilt the page: " + label);
             if (page != "controls")
                 Check(patched![WorkspaceEventScope.Wrap(current, "piper-1", "enable")]?["enabled"]?.GetValue<bool>() == false,
@@ -178,7 +178,7 @@ internal static class WorkspaceViewTests
         try
         {
             await CheckView("controls");
-            JsonObject HeaderPatch(string id) => patched![WorkspaceEventScope.Wrap(plugin.workspaceViewEpoch, "piper-1", id)]!.AsObject();
+            JsonObject HeaderPatch(string id) => patched![WorkspaceEventScope.Wrap(plugin.workspace.Epoch, "piper-1", id)]!.AsObject();
             Check(HeaderPatch("workspace.power")["text"]?.GetValue<string>() == "Power unavailable" &&
                 HeaderPatch("enable")["enabled"]?.GetValue<bool>() == false,
                 "The disconnected header presented known motor power or actionable enable controls");
@@ -220,7 +220,7 @@ internal static class WorkspaceViewTests
                 enlarged.Navigate("camera.bench").CameraReturn == WorkspacePage.Settings && enlarged.Navigate("camera-back") is { Page: WorkspacePage.Settings, CalibrationOpen: true } &&
                 !bench.Navigate("controls").CalibrationOpen && bench.Navigate("settings.robot").Navigate("settings.controller").Category == SettingsCategory.Robot,
                 "Workspace navigation lost the calibration page, a camera's return page, or accepted an unreachable settings category");
-            plugin.Navigation = WorkspaceNavigation.Calibration;
+            plugin.workspace.Commit(WorkspaceNavigation.Calibration);
             string? heightBlocker = null;
             try { plugin.HeightContext(); }
             catch (InvalidOperationException error) { heightBlocker = error.Message; }
@@ -232,7 +232,7 @@ internal static class WorkspaceViewTests
                 await CheckView("camera", camera: camera);
             }
 
-            plugin.cameraStreamDetailsOpen = true;
+            plugin.workspace.ToggleCameraStreamDetails();
             plugin.simulationCameras = CameraInventory("source-a", "camera-a", "camera-b");
             await CheckView("settings", "cameras");
             string selector = WidgetId("camera.bench.simselect");
@@ -255,19 +255,19 @@ internal static class WorkspaceViewTests
             try
             {
                 await CheckView("settings", "cameras");
-                long before = plugin.workspaceViewEpoch;
+                long before = plugin.workspace.Epoch;
                 string back = WidgetId("workspace.controls@settings");
                 await Click(WidgetId("workspace.settings.bench"));
-                Check(plugin.Navigation.Category == SettingsCategory.Cameras && plugin.workspaceViewEpoch == before &&
+                Check(plugin.workspace.Navigation.Category == SettingsCategory.Cameras && plugin.workspace.Epoch == before &&
                     plugin.uiActionError.Contains("Stop following", StringComparison.Ordinal),
                     "Rejected Bench navigation mutated the published camera page");
                 await Click(back);
-                Check(plugin.Navigation.Page == WorkspacePage.Controls && plugin.workspaceViewEpoch > before,
+                Check(plugin.workspace.Navigation.Page == WorkspacePage.Controls && plugin.workspace.Epoch > before,
                     "The old page became unclickable after rejected Bench navigation");
             }
             finally { plugin.groupSimulation = null; }
             await CheckView("recording");
-            plugin.replayReview = new ReplayReview(EpisodeReplayTests.ValidArtifact(), "piper-1");
+            plugin.workspace.Replay.Load(EpisodeReplayTests.ValidArtifact(), "piper-1");
             await CheckView("replay");
             var replayStart = Walk(rendered!).Single(n => n["id"]?.GetValue<string>()?.EndsWith(".replay.start", StringComparison.Ordinal) == true);
             Check(replayStart["enabled"]?.GetValue<bool>() == false && replayStart["hint"]?.GetValue<string>() == EpisodeReplayAvailability.Reason,
@@ -322,7 +322,7 @@ internal static class WorkspaceViewTests
             });
             plugin.client = new PiperControl.PiperControlClient(calls); plugin.telemetry.PublishState(state); plugin.telemetry.AdoptBackend("fixture-session");
             plugin.telemetry.Publish(new(state, "fixture-session", 1, Stopwatch.GetTimestamp(), 0));
-            plugin.Navigation = WorkspaceNavigation.Initial; plugin.approved = true; plugin.linkCommandsEnabled = true;
+            plugin.workspace.Commit(WorkspaceNavigation.Initial); plugin.approved = true; plugin.linkCommandsEnabled = true;
             plugin.teachingSession.ObserveHandOver(new(binding.DeviceId, binding.Generation), approved: true); plugin.viewportDrag = new ViewportDrag(ViewportDragPhase.Following, Request: 7);
             plugin.CommandAuthority.TryAcknowledge(plugin.CommandAuthority.Epoch, new("piper-1", "fixture-session", binding.DeviceId, binding.Generation), 7);
             plugin.link = binding; plugin.linkBackendToken = "fixture-session";
@@ -343,7 +343,7 @@ internal static class WorkspaceViewTests
             Check(plugin.approved && plugin.linkCommandsEnabled && calls.Requests.Count == previousCalls,
                 "Returning to Controls revoked readiness or replayed a previous target");
             await plugin.WorkspaceEvent("replay", CancellationToken.None);
-            long replayEpoch = plugin.workspaceViewEpoch;
+            long replayEpoch = plugin.workspace.Epoch;
             await plugin.HandleEventAsync(new("luckyrobots.pipers.controls", WorkspaceEventScope.Wrap(replayEpoch, "piper-1", "replay.start"), "click", JsonSerializer.SerializeToElement(true)), CancellationToken.None);
             Check(calls.Requests.Count == previousCalls && plugin.approved,
                 "A forged replay Start event bypassed the explicit execution-unavailable policy");

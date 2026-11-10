@@ -50,7 +50,7 @@ internal static class WorkspacePublicationTests
         Check(fixture.Unscope(fixture.Wire("joint.6.target")) == "joint.6.target", "A later successful publication could not restore controls after transport recovery");
 
         oldTarget = fixture.Wire("joint.6.target"); oldNavigation = fixture.Wire("workspace.settings.robot");
-        fixture.Plugin.Navigation = WorkspaceNavigation.At(WorkspacePage.Settings);
+        fixture.Plugin.workspace.Commit(WorkspaceNavigation.At(WorkspacePage.Settings));
         Check(fixture.Unscope(oldTarget).Length == 0 && fixture.Unscope(oldNavigation).Length == 0,
             "A page change accepted the previous page's controls before its replacement view was published");
         using (var cancelled = new CancellationTokenSource())
@@ -84,7 +84,7 @@ internal static class WorkspacePublicationTests
             cancelled.Cancel();
             bool retired = false;
             try { await navigation; } catch (OperationCanceledException) { retired = true; }
-            Check(retired && serial.Plugin.Navigation == WorkspaceNavigation.Initial, "Cancelled navigation committed a destination before entering the view publication gate");
+            Check(retired && serial.Plugin.workspace.Navigation == WorkspaceNavigation.Initial, "Cancelled navigation committed a destination before entering the view publication gate");
         }
         Check(serialCalls == 1 && serial.Epoch == serialInitial, "Concurrent renders published out of order or committed an in-flight candidate");
         release.TrySetResult();
@@ -112,7 +112,7 @@ internal static class WorkspacePublicationTests
         await patchEntered.Task.WaitAsync(TimeSpan.FromSeconds(2));
         var queuedPatch = updating.Update();
         updating.Plugin.preferences = RobotProfileRouting.Normalize(new Preferences(Robots: [new("two", "Piper 2")], ActiveRobotId: "two"));
-        updating.Plugin.Navigation = WorkspaceNavigation.At(WorkspacePage.Recording);
+        updating.Plugin.workspace.Commit(WorkspaceNavigation.At(WorkspacePage.Recording));
         var replacement = updating.Render();
         Check(!replacement.IsCompleted && sent.Count == 1, "A full view overtook an in-flight patch");
         patchRelease.TrySetResult();
@@ -153,7 +153,7 @@ internal static class WorkspacePublicationTests
                     (Func<string, JsonObject, CancellationToken, Task<JsonElement>>)((_, _, _) => throw new InvalidOperationException("Unexpected engine request")));
             plugin.engine = context;
         }
-        public long Epoch => plugin.workspaceViewEpoch;
+        public long Epoch => plugin.workspace.Epoch;
         public string Wire(string id) => WorkspaceEventScope.Wrap(Epoch, RobotProfileRouting.Active(plugin.preferences).Id, id);
         public string Unscope(string id) => plugin.UnscopePublishedWorkspaceEvent(id);
         public Task Render(CancellationToken ct = default) => plugin.Render(ct);
