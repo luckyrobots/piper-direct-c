@@ -5,4 +5,5 @@
     <ProjectReference Include="../Piper.Host/Piper.Host.csproj" />
     <PackageReference Include="Grpc.Net.Client" Version="2.76.0" />
   </ItemGroup>
+  <ItemGroup><Compile Include="../Testing/TestKit.cs" Link="Testing/TestKit.cs" /><Using Include="LuckyRobots.Piper.Testing.TestKit" Static="true" /></ItemGroup>
 </Project>

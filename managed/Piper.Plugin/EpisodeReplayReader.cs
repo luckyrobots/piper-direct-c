@@ -1,6 +1,7 @@
 using System.Text;
 using System.Text.Json;
 using System.Globalization;
+using LuckyRobots.Piper.Pika;
 
 namespace LuckyRobots.Piper.Plugin;
 
@@ -62,14 +63,29 @@ public static class EpisodeReplayReader
             }
             Equal(root, "mode", "simulation");
             var robot = ReadRobot(Object(root, "robot"), version);
-            var desk = ReadDesk(Object(root, "desk"));
-            var dimensions = ReadDimensions(Object(root, "tubeDimensions"));
+            var deskJson = Object(root, "desk");
+            Properties(deskJson, "desk", "widthMm", "depthMm", "surfaceYMetres", "frame");
+            Equal(deskJson, "frame", DeskFrame);
+            double width = Number(deskJson, "widthMm"), depth = Number(deskJson, "depthMm"), surfaceY = Number(deskJson, "surfaceYMetres");
+            if (width is < 100 or > 10_000 || depth is < 100 or > 10_000 || surfaceY is < 0 or > 3)
+                throw Invalid("Desk dimensions must be 100–10000 mm, with its surface 0–3 m above world zero.");
+            var desk = new EpisodeReplayDesk(width, depth, surfaceY, DeskFrame);
+
+            var dimensionsJson = Object(root, "tubeDimensions");
+            Properties(dimensionsJson, "tubeDimensions", "diameterMm", "heightMm", "massKg", "massSource");
+            double diameter = Number(dimensionsJson, "diameterMm"), height = Number(dimensionsJson, "heightMm"), mass = Number(dimensionsJson, "massKg");
+            string massSource = Text(dimensionsJson, "massSource");
+            if (diameter is <= 0 or > 200 || height is <= 0 or > 1000 || mass is <= 0 or > 10 || massSource is not ("estimated" or "measured" or "manufacturer"))
+                throw Invalid("Tube dimensions/mass require explicit millimetre/kilogram values and an estimated, measured or manufacturer mass source.");
+            var dimensions = new EpisodeReplayTubeDimensions(diameter, height, mass, massSource);
             var start = ReadStart(Object(root, "tubeStart"), desk, dimensions);
             var recording = Object(root, "nativeRecording");
             string[] recordingFields = ["requested", "sessionLabel", "episodeOrdinal", "sessionLabelSource", "taskIndex", "taskSessionId"];
             bool hasOrdinalSource = recording.TryGetProperty("nativeOrdinalSource", out _);
             Properties(recording, "nativeRecording", version == 2 || hasOrdinalSource ? [.. recordingFields, "nativeOrdinalSource"] : recordingFields);
-            bool requested = Boolean(recording, "requested");
+            if (!recording.TryGetProperty("requested", out var requestedValue) || requestedValue.ValueKind is not (JsonValueKind.True or JsonValueKind.False))
+                throw Invalid("requested must be a boolean.");
+            bool requested = requestedValue.GetBoolean();
             string label = Text(recording, "sessionLabel", allowEmpty: true);
             int? ordinal = recording.GetProperty("episodeOrdinal").ValueKind == JsonValueKind.Null ? null : Integer(recording, "episodeOrdinal");
             if (ordinal is < 0 or > 1_000_000 || (requested && (!ordinal.HasValue || label.Length == 0)))
@@ -155,8 +171,8 @@ public static class EpisodeReplayReader
         {
             Equal(robot, "commandConvention", CommandConvention);
             reference = Number(robot, "gripperReferenceGapMm");
-            if (maximum > 90 || reference < maximum || reference > 100)
-                throw Invalid("Actual Pika opening must be at most 90 mm and distinct from its declared geometric zero-slide reference gap.");
+            if (maximum > PikaProtocol.MaximumOpeningMm || reference < maximum || reference > 100)
+                throw Invalid($"Actual Pika opening must be at most {PikaProtocol.MaximumOpeningMm} mm and distinct from its declared geometric zero-slide reference gap.");
             var proof = Object(robot, "positionActuatorProvenance");
             Properties(proof, "positionActuatorProvenance", "sourceSha256", "validation", "runtimeChecks", "runtimeTuning");
             string digest = Text(proof, "sourceSha256");
@@ -170,26 +186,6 @@ public static class EpisodeReplayReader
         return new("agilex.piper", JointConvention, Array.AsReadOnly(Enumerable.Range(1, 6).Select(i => "joint" + i).ToArray()),
             GripperConvention, GripperMapping, maximum, version == 2 ? PositionActionSource : ActionSource, reference,
             version == 2 ? CommandConvention : null, provenance);
-    }
-
-    private static EpisodeReplayDesk ReadDesk(JsonElement desk)
-    {
-        Properties(desk, "desk", "widthMm", "depthMm", "surfaceYMetres", "frame");
-        Equal(desk, "frame", DeskFrame);
-        double width = Number(desk, "widthMm"), depth = Number(desk, "depthMm"), y = Number(desk, "surfaceYMetres");
-        if (width is < 100 or > 10_000 || depth is < 100 or > 10_000 || y is < 0 or > 3)
-            throw Invalid("Desk dimensions must be 100–10000 mm, with its surface 0–3 m above world zero.");
-        return new(width, depth, y, DeskFrame);
-    }
-
-    private static EpisodeReplayTubeDimensions ReadDimensions(JsonElement dimensions)
-    {
-        Properties(dimensions, "tubeDimensions", "diameterMm", "heightMm", "massKg", "massSource");
-        double diameter = Number(dimensions, "diameterMm"), height = Number(dimensions, "heightMm"), mass = Number(dimensions, "massKg");
-        string source = Text(dimensions, "massSource");
-        if (diameter is <= 0 or > 200 || height is <= 0 or > 1000 || mass is <= 0 or > 10 || source is not ("estimated" or "measured" or "manufacturer"))
-            throw Invalid("Tube dimensions/mass require explicit millimetre/kilogram values and an estimated, measured or manufacturer mass source.");
-        return new(diameter, height, mass, source);
     }
 
     private static EpisodeReplayTubeStart ReadStart(JsonElement start, EpisodeReplayDesk desk, EpisodeReplayTubeDimensions dimensions)
@@ -281,12 +277,6 @@ public static class EpisodeReplayReader
         if (!Object(parent, name, JsonValueKind.Number).TryGetInt32(out int value))
             throw Invalid(name + " must be an integer.");
         return value;
-    }
-    private static bool Boolean(JsonElement parent, string name)
-    {
-        if (!parent.TryGetProperty(name, out var value) || value.ValueKind is not (JsonValueKind.True or JsonValueKind.False))
-            throw Invalid(name + " must be a boolean.");
-        return value.GetBoolean();
     }
     private static string Text(JsonElement parent, string name, bool allowEmpty = false)
     {

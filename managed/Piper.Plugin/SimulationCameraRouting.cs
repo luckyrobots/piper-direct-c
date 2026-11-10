@@ -42,13 +42,28 @@ public static class SimulationCameraRouting
             return;
         }
         bindings.Remove(role);
-        var candidates = inventory.Where(camera => MatchesRole(camera, role));
+        var candidates = inventory.Where(camera =>
+        {
+            var words = Words(camera["name"]?.GetValue<string>() ?? "");
+            return role switch
+            {
+                "bench" => words.Contains("lumina") || words.Contains("bench"),
+                "gripper" => words.Contains("pika") || words.Contains("fisheye"),
+                "depth" => words.Contains("d405") || words.Contains("depth"),
+                _ => false
+            };
+        });
         if (profile is not null)
         {
             var owned = candidates.Where(camera => profile.RobotId.Length > 0 && camera["robotEntityId"]?.GetValue<string>() == profile.RobotId &&
                 MatchesJointScope(camera, profile)).ToArray();
             candidates = owned.Length > 0 ? owned : candidates.Where(camera =>
-                (profile.RobotId.Length == 0 || string.IsNullOrEmpty(camera["robotEntityId"]?.GetValue<string>())) && MatchesProfileName(camera, profile));
+            {
+                if (profile.RobotId.Length > 0 && !string.IsNullOrEmpty(camera["robotEntityId"]?.GetValue<string>())) return false;
+                string[] profileWords = Words(profile.Name), nameWords = Words(camera["name"]?.GetValue<string>() ?? "");
+                return profileWords.Length > 0 && nameWords.Length >= profileWords.Length &&
+                    profileWords.SequenceEqual(nameWords.Take(profileWords.Length));
+            });
         }
         var matches = candidates.Take(2).ToArray();
         // A missing/ambiguous counterpart stays explicit rather than borrowing a
@@ -70,21 +85,4 @@ public static class SimulationCameraRouting
         return Enumerable.Range(1, 6).All(joint => names.Contains(profile.RobotJointPrefix + "joint" + joint));
     }
     private static string[] Words(string text) => Regex.Split(text.ToLowerInvariant(), "[^a-z0-9]+").Where(word => word.Length > 0).ToArray();
-    private static bool MatchesRole(JsonObject camera, string role)
-    {
-        var words = Words(camera["name"]?.GetValue<string>() ?? "");
-        return role switch
-        {
-            "bench" => words.Contains("lumina") || words.Contains("bench"),
-            "gripper" => words.Contains("pika") || words.Contains("fisheye"),
-            "depth" => words.Contains("d405") || words.Contains("depth"),
-            _ => false
-        };
-    }
-    private static bool MatchesProfileName(JsonObject camera, RobotProfile profile)
-    {
-        string[] profileWords = Words(profile.Name), nameWords = Words(camera["name"]?.GetValue<string>() ?? "");
-        return profileWords.Length > 0 && nameWords.Length >= profileWords.Length &&
-            profileWords.SequenceEqual(nameWords.Take(profileWords.Length));
-    }
 }

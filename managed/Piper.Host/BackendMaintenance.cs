@@ -1,6 +1,8 @@
+using System.Diagnostics;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Text.Json.Serialization;
+using LuckyRobots.Piper.Pika;
 
 namespace LuckyRobots.Piper.Host;
 
@@ -15,22 +17,41 @@ public sealed record BackendRestartResult(
     [property: JsonPropertyName("releases_gripper_torque")] bool ReleasesGripperTorque,
     [property: JsonPropertyName("recovery_preserved")] bool RecoveryPreserved);
 
-/// <summary>Freezes new host control admission before checking restart preconditions.
+/// <summary>Freezes new host control admission before checking process-exit preconditions.
 /// This service never invokes a robot command. Normal agent disposal releases
 /// gripper power; native persisted STOP/recovery records are deliberately unchanged.</summary>
 public sealed class BackendMaintenance
 {
-    public const string RestartRoute = "/api/maintenance/restart";
+    public const string RestartRoute = HostRoutes.Restart;
     public const int RestartExitCode = 75;
     public const string PendingMessage = "Backend restart is in progress. Wait for the new server session; no commands will be replayed.";
+    private const string ShutdownPending = "Backend shutdown is in progress. New controls are closed; STOP remains available.";
+    private enum Operation { None, Restart, Shutdown }
+
+    // Maintenance freeze (Host-B). One Phase value, written only under gate:
+    //   Open                  admits every control; Operation is None
+    //   Checking(op)          frozen while exit preconditions are read     -> Prepared | Open
+    //   Prepared(op, owner)   frozen; accepted and waiting for its one-shot
+    //                         commit                                       -> Committed
+    //   Committed(op, owner)  frozen; rechecks after the response drain    -> exit | Open (last_failure)
+    // Emergency STOP is admitted in every stage. A prepare starts only from Open
+    // with no admitted control in flight. "pending" reports Prepared/Committed,
+    // never a Checking that may still be rejected.
+    private enum Stage { Open, Checking, Prepared, Committed }
+    private readonly record struct Phase(Stage Stage, Operation Operation, string Owner)
+    {
+        internal static Phase Open => new(Stage.Open, Operation.None, "");
+        internal bool Accepted => Stage is Stage.Prepared or Stage.Committed;
+    }
+
     private readonly object gate = new();
     private readonly Func<JsonObject> armSnapshot;
     private readonly Func<JsonArray> pikaSnapshots;
     private readonly Action restart;
     private readonly TimeSpan responseDrain;
     private int controls;
-    private bool pending, committed;
-    private string preparedOwner = "", lastFailure = "";
+    private Phase phase = Phase.Open;
+    private string lastFailure = "";
     public string InstanceId { get; } = Guid.NewGuid().ToString("N");
     public int ProcessId { get; }
     public int? SupervisorProcessId { get; }
@@ -61,28 +82,37 @@ public sealed class BackendMaintenance
     {
         lock (gate) return new JsonObject {
             ["supported"] = Supported, ["mode"] = Mode, ["plugin_owner"] = PluginOwner,
-            ["endpoint"] = RestartRoute, ["pending"] = pending,
+            ["endpoint"] = RestartRoute, ["pending"] = phase.Accepted,
             ["supervisor_process_id"] = SupervisorProcessId, ["supervisor_instance_id"] = SupervisorInstanceId,
             ["releases_gripper_torque"] = true, ["preserves_arm_recovery"] = true,
             ["last_failure"] = lastFailure,
-            ["message"] = lastFailure.Length > 0 ? lastFailure : Supported ? "Restart releases Pika holding torque. Arm STOP/recovery remains latched." :
+            ["message"] = lastFailure.Length > 0 ? lastFailure : phase is { Accepted: true, Operation: Operation.Shutdown } ? ShutdownPending :
+                Supported ? "Restart releases Pika holding torque. Arm STOP/recovery remains latched." :
                 "This backend has no restart supervisor. Restart it with its original launcher; no shutdown was requested."
         };
     }
 
-    public bool TryEnterControl(string route, out IDisposable? admission)
+    internal bool TryEnterControl(string route, out IDisposable? admission, out string? error)
     {
         lock (gate)
         {
             // Emergency STOP remains available, including after admission is
             // frozen. It cannot start motion or clear a persisted recovery latch.
-            if (pending && route is not ("/api/stop" or "/api/stop/coordinated")) { admission = null; return false; }
-            ++controls; admission = new Admission(this); return true;
+            if (phase.Stage != Stage.Open && !HostRoutes.IsEmergencyStop(route))
+            {
+                admission = null;
+                error = Busy(phase.Operation);
+                return false;
+            }
+            ++controls; admission = new Admission(this); error = null; return true;
         }
     }
 
-    public BackendRestartResult Prepare(JsonElement input)
+    /// <summary>On success, <paramref name="commit"/> starts the restart after the
+    /// response drain. It is one-shot: later calls do nothing.</summary>
+    public BackendRestartResult Prepare(JsonElement input, out Action? commit)
     {
+        commit = null;
         if (!Supported) return Result(false, "This backend has no restart supervisor or owning plugin. Use its original launcher or Restart-WindowsDashboard.ps1; no shutdown was requested.");
         if (!input.TryGetProperty("owner", out var ownerValue) || ownerValue.ValueKind != JsonValueKind.String ||
             !Guid.TryParse(ownerValue.GetString(), out _)) return Result(false, "Restart requires the current plugin owner identity.");
@@ -93,48 +123,105 @@ public sealed class BackendMaintenance
             return Result(false, "The backend session changed. Read fresh state before requesting restart.");
         if (!input.TryGetProperty("release_grippers", out var release) || release.ValueKind != JsonValueKind.True)
             return Result(false, "Confirm that all grippers are empty: restarting releases Pika holding torque.");
-        lock (gate)
-        {
-            if (pending) return Result(false, PendingMessage);
-            if (controls != 0) return Result(false, "A controller request is still in progress. Wait for it to finish before restarting.");
-            pending = true; lastFailure = "";
-        }
-        bool accepted = false;
-        try
-        {
-            string? blocker = Check(armSnapshot(), pikaSnapshots(), ownerValue.GetString()!);
-            if (blocker is not null) return Result(false, blocker);
-            preparedOwner = ownerValue.GetString()!;
-            accepted = true;
-            return Result(true, "Restart accepted. Pika holding torque will be released; arm power is unchanged and existing STOP/recovery remains latched. " +
-                (Supervised ? "The supervisor restarts in monitoring mode without replaying targets." :
-                    "The owning plugin must wait for this exact process to exit75, then start one new monitoring-only backend. No targets are replayed."));
-        }
-        finally { if (!accepted) lock (gate) pending = false; }
+        string owner = ownerValue.GetString()!;
+        if (PrepareExit(Operation.Restart, owner, () => Check(armSnapshot(), pikaSnapshots(), owner)) is { } blocker)
+            return Result(false, blocker);
+        commit = OneShot(CommitRestart);
+        return Result(true, "Restart accepted. Pika holding torque will be released; arm power is unchanged and existing STOP/recovery remains latched. " +
+            (Supervised ? "The supervisor restarts in monitoring mode without replaying targets." :
+                "The owning plugin must wait for this exact process to exit75, then start one new monitoring-only backend. No targets are replayed."));
     }
 
-    public void Commit()
+    private void CommitRestart()
     {
-        lock (gate)
-        {
-            if (!pending) throw new InvalidOperationException("Restart was not admitted.");
-            if (committed) return;
-            committed = true;
-        }
+        string owner = BeginCommit(Operation.Restart);
         // Both HTTP and gRPC receive the acknowledgement before Kestrel drains.
         // Client disconnect cannot leave an accepted restart half committed.
         _ = Task.Run(async () => {
             await Task.Delay(responseDrain);
-            try
-            {
-                // A physical teach button/motion can change without a host
-                // request. Recheck after draining the acknowledgement as well.
-                string? blocker = Check(armSnapshot(), pikaSnapshots(), preparedOwner);
-                if (blocker is not null) { CancelCommit("Restart cancelled: " + blocker); return; }
-                restart();
-            }
-            catch (Exception error) { CancelCommit("Restart cancelled: state could not be verified. " + error.Message); }
+            RecheckAndExit("Restart", () => Check(armSnapshot(), pikaSnapshots(), owner), restart);
         });
+    }
+
+    /// <summary>On success, <paramref name="commit"/> rechecks and then runs the
+    /// given exit action. It is one-shot: later calls do nothing.</summary>
+    public string? PrepareShutdown(out Action<Action>? commit)
+    {
+        commit = null;
+        if (PrepareExit(Operation.Shutdown, "", CheckShutdown) is { } blocker) return blocker;
+        int used = 0;
+        commit = shutdown =>
+        {
+            if (Interlocked.Exchange(ref used, 1) != 0) return;
+            BeginCommit(Operation.Shutdown);
+            RecheckAndExit("Shutdown", CheckShutdown, shutdown);
+        };
+        return null;
+    }
+
+    private string? PrepareExit(Operation operation, string owner, Func<string?> check)
+    {
+        lock (gate)
+        {
+            if (phase.Stage != Stage.Open) return Busy(phase.Operation);
+            if (controls != 0) return operation == Operation.Restart
+                ? "A controller request is still in progress. Wait for it to finish before restarting."
+                : "A controller request is still in progress. Wait for it to finish before shutting down.";
+            phase = new(Stage.Checking, operation, ""); lastFailure = "";
+        }
+        string? blocker = null;
+        bool checkedOk = false;
+        try { blocker = check(); checkedOk = blocker is null; }
+        finally
+        {
+            // Checking has a single exit, taken under the gate with the owner.
+            lock (gate) phase = checkedOk ? new(Stage.Prepared, operation, owner) : Phase.Open;
+        }
+        return blocker;
+    }
+
+    // Only the one-shot commit of a Prepared phase reaches here, and nothing
+    // else leaves Prepared, so the phase cannot have changed.
+    private string BeginCommit(Operation operation)
+    {
+        lock (gate)
+        {
+            if (phase.Stage != Stage.Prepared || phase.Operation != operation)
+                throw new UnreachableException(operation + " commit without its prepared phase.");
+            phase = phase with { Stage = Stage.Committed };
+            return phase.Owner;
+        }
+    }
+
+    private static Action OneShot(Action action)
+    {
+        int used = 0;
+        return () => { if (Interlocked.Exchange(ref used, 1) == 0) action(); };
+    }
+
+    private static string Busy(Operation operation) => operation == Operation.Shutdown ? ShutdownPending : PendingMessage;
+
+    private void RecheckAndExit(string operation, Func<string?> check, Action exit)
+    {
+        // A physical teach button or motor can change during the response drain.
+        try
+        {
+            if (check() is { } blocker) CancelCommit(operation + " cancelled: " + blocker);
+            else exit();
+        }
+        catch (Exception error) { CancelCommit(operation + " cancelled: state could not be verified. " + error.Message); }
+    }
+
+    private string? CheckShutdown()
+    {
+        var arms = armSnapshot();
+        if (ControllerActivity.AnyMotion(arms) || ControllerActivity.AnyQuery(arms))
+            return "Stop active arm actions and finish queries before shutting down the server.";
+        if (pikaSnapshots().OfType<JsonObject>().Any(pika => pika["pending"]?.GetValue<bool>() == true ||
+            pika["following"]?.GetValue<bool>() == true || pika["resuming_hold"]?.GetValue<bool>() == true ||
+            pika["connected"]?.GetValue<bool>() == true && Finite(pika["telemetry"]?["motor"] as JsonObject, "Speed", out double speed) && Math.Abs(speed) > PikaProtocol.StationarySpeedRadiansPerSecond))
+            return "Finish active Pika gripper movements before shutting down the server.";
+        return null;
     }
 
     public static string? Check(JsonObject state, JsonArray pikas, string owner)
@@ -193,7 +280,7 @@ public sealed class BackendMaintenance
             if (!connected || pika["fresh"]?.GetValue<bool>() != true ||
                 pika["pending"]?.GetValue<bool>() != false || pika["following"]?.GetValue<bool>() != false ||
                 pika["resuming_hold"]?.GetValue<bool>() == true || pika["driver_fault"]?.GetValue<bool>() != false ||
-                !Finite(pika["telemetry"]?["motor"] as JsonObject, "Speed", out double speed) || Math.Abs(speed) > .02 ||
+                !Finite(pika["telemetry"]?["motor"] as JsonObject, "Speed", out double speed) || Math.Abs(speed) > PikaProtocol.StationarySpeedRadiansPerSecond ||
                 (powered || uncertain) && pika["post_request_feedback_verified"]?.GetValue<bool>() != true)
                 return name + ": stop gripper following and wait for fresh stationary, acknowledged motor feedback before restarting.";
         }
@@ -211,7 +298,11 @@ public sealed class BackendMaintenance
     }
     private void CancelCommit(string reason)
     {
-        lock (gate) { lastFailure = reason; pending = committed = false; preparedOwner = ""; }
+        lock (gate)
+        {
+            Debug.Assert(phase.Stage == Stage.Committed);
+            lastFailure = reason; phase = Phase.Open;
+        }
     }
     private BackendRestartResult Result(bool ok, string message) => new(ok, message, ProcessId, InstanceId, Mode,
         SupervisorProcessId, SupervisorInstanceId, true, true);

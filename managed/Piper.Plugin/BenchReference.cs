@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Text.Json.Nodes;
 
 namespace LuckyRobots.Piper.Plugin;
 
@@ -17,9 +18,20 @@ public sealed record BenchReference(double Width, double Depth, double SurfaceY)
 
 public sealed partial class PipersPlugin
 {
-    private void EnsureIndependentCalibration()
+    private bool CalibrationRootIsShared(JsonObject? live = null)
     {
-        if (ActiveProfile.RobotJointPrefix.Length > 0)
-            throw new InvalidOperationException("Desk alignment editing for this arm is unavailable because it would move both simulated arms. Its mounting position remains saved in the scene.");
+        var profile = ActiveProfile;
+        if (profile.RobotJointPrefix.Length > 0) return true;
+        var model = live ?? acknowledgedScenePose?["pose"] as JsonObject;
+        if (model?["entityId"]?.GetValue<string>() != profile.RobotId)
+            model = (scene?["robots"] as JsonArray)?.OfType<JsonObject>()
+                .FirstOrDefault(robot => robot["entityId"]?.GetValue<string>() == profile.RobotId);
+        return model is not null && SceneRobotBindings.Options([model]).Length > 1;
+    }
+
+    private void EnsureIndependentCalibration(JsonObject? live = null)
+    {
+        if (CalibrationRootIsShared(live))
+            throw new InvalidOperationException("Desk alignment editing is unavailable because it would move every arm in the shared model. Its mounting position is saved in the scene.");
     }
 }

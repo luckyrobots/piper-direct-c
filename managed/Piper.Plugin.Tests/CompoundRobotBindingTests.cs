@@ -4,33 +4,33 @@ using LuckyRobots.Piper.Plugin;
 
 internal static class CompoundRobotBindingTests
 {
-    public static void Run(Action<bool, string> check)
+    public static void Run()
     {
         var world = World();
         var first = SimulationFollowSample.Read(world);
         var second = SimulationFollowSample.Read(world, "piper3_");
-        check(first.CommandDegrees.SequenceEqual(SimulationFollowSample.Read(SimulationFollowTests.Pose()).CommandDegrees),
+        Check(first.CommandDegrees.SequenceEqual(SimulationFollowSample.Read(Fixtures.SimulationPose()).CommandDegrees),
             "Compound runtime selected another robot by array order instead of canonical names");
-        check(Math.Abs(second.CommandDegrees[0] - .5 * 180 / Math.PI) < 1e-9 && Math.Abs(second.MeasuredDegrees[0] - .6 * 180 / Math.PI) < 1e-9 &&
+        Check(Math.Abs(second.CommandDegrees[0] - .5 * 180 / Math.PI) < 1e-9 && Math.Abs(second.MeasuredDegrees[0] - .6 * 180 / Math.PI) < 1e-9 &&
             second.CommandOpeningMm == 0 && second.MeasuredOpeningMm == 0 && first.CommandOpeningMm > 19.9,
             "Namespaced runtime did not independently select its six joints and two Pika fingers");
-        check(first.Identity == second.Identity && !first.BindsTo(second), "Two arm subsets of one model shared a mapping fingerprint");
+        Check(first.Identity == second.Identity && !first.BindsTo(second), "Two arm subsets of one model shared a mapping fingerprint");
         var reordered = World();
         foreach (string key in new[] { "joints", "actuators" }) reordered[key] = new JsonArray(reordered[key]!.AsArray().Reverse().Select(n => n!.DeepClone()).ToArray());
-        check(first.BindsTo(SimulationFollowSample.Read(reordered)) && second.BindsTo(SimulationFollowSample.Read(reordered, "piper3_")),
+        Check(first.BindsTo(SimulationFollowSample.Read(reordered)) && second.BindsTo(SimulationFollowSample.Read(reordered, "piper3_")),
             "World ordering changed the pinned exact-name arm mapping");
 
         var options = SceneRobotBindings.Options([new JsonObject { ["entityId"] = "compound", ["name"] = "Relay world", ["joints"] = world["joints"]!.DeepClone() },
             new JsonObject { ["entityId"] = "static-reference", ["name"] = "Piper 2 reference" }]);
-        check(options.Length == 2 && options.All(o => o.EntityId == "compound") && options.Select(o => o.JointPrefix).ToHashSet().SetEquals(["", "piper3_"]),
+        Check(options.Length == 2 && options.All(o => o.EntityId == "compound") && options.Select(o => o.JointPrefix).ToHashSet().SetEquals(["", "piper3_"]),
             "Scene binding picker lost a namespace or exposed an empty static reference as a controllable arm");
-        check(options.Select(o => o.Name).SequenceEqual(["Sim arm 1", "Sim arm 2"]) && options.All(o => o.ModelName == "Relay world") &&
+        Check(options.Select(o => o.Name).SequenceEqual(["Sim arm 1", "Sim arm 2"]) && options.All(o => o.ModelName == "Relay world") &&
             options[1].Details.Contains("piper3_", StringComparison.Ordinal),
             "Scene choices exposed a combined physics container instead of individual arms with technical identity in details");
         var reversedOptions = SceneRobotBindings.Options([new JsonObject { ["entityId"] = "compound", ["name"] = "Relay world",
             ["joints"] = reordered["joints"]!.DeepClone() }]);
-        check(options.SequenceEqual(reversedOptions), "Joint enumeration order relabeled the individual simulated arms");
-        SceneRobotBindingSettingsTests.Run(check);
+        Check(options.SequenceEqual(reversedOptions), "Joint enumeration order relabeled the individual simulated arms");
+        SceneRobotBindingSettingsTests.Run();
         var device = Device();
         foreach (string prefix in new[] { "", "piper3_" })
         {
@@ -39,20 +39,20 @@ internal static class CompoundRobotBindingTests
                 ["telemetry"] = new JsonObject { ["motor"] = new JsonObject { ["Position"] = PikaProtocol.Angle(20) } } };
             var feedback = link.Feedback(device, pika, true);
             var values = feedback["joints"]!.AsObject();
-            check(values.Count == 8 && values.All(j => j.Key.StartsWith(prefix + "joint", StringComparison.Ordinal)) &&
+            Check(values.Count == 8 && values.All(j => j.Key.StartsWith(prefix + "joint", StringComparison.Ordinal)) &&
                 (prefix.Length == 0 || values["joint1"] is null && values["joint7"] is null), "Measured feedback crossed robot namespaces");
             var reply = new JsonObject { ["pose"] = new JsonObject { ["joints"] = new JsonArray(values.Select(p => (JsonNode)new JsonObject {
                 ["name"] = p.Key, ["position"] = p.Value!.DeepClone() }).ToArray()) } };
-            check(link.FeedbackError(feedback, reply) == 0 && link.GripperErrorMm == 0, "Namespaced arm/finger acknowledgement failed");
+            Check(link.FeedbackError(feedback, reply) == 0 && link.GripperErrorMm == 0, "Namespaced arm/finger acknowledgement failed");
             var capture = link.OrderedCaptureMapping(world);
-            check(capture["jointNames"]!.AsArray().Select(n => n!.GetValue<string>()).SequenceEqual(link.JointNames) &&
+            Check(capture["jointNames"]!.AsArray().Select(n => n!.GetValue<string>()).SequenceEqual(link.JointNames) &&
                 capture["actuatorNames"]!.AsArray().Select(n => n!.GetValue<string>()).SequenceEqual(link.JointNames) &&
                 capture["gripperMapping"]!["firstJoint"]!.GetValue<string>() == prefix + "joint7" &&
                 capture["gripperMapping"]!["secondJoint"]!.GetValue<string>() == prefix + "joint8" &&
                 capture["gripperMapping"]!["actuator"]!.GetValue<string>() == prefix + "gripper", "Ordered source requested another robot's actuator track");
             var edit = new JsonObject { ["sceneId"] = "source-a", ["entityId"] = "robot-a", ["joints"] = world["joints"]!.DeepClone(), ["editedJoint"] = prefix + "joint1" };
             var target = link.Target(edit, device);
-            check(Math.Abs(target[0] - (prefix.Length == 0 ? 0 : .6 * 180 / Math.PI)) < 1e-9 && target.Skip(1).All(v => v == 0),
+            Check(Math.Abs(target[0] - (prefix.Length == 0 ? 0 : .6 * 180 / Math.PI)) < 1e-9 && target.Skip(1).All(v => v == 0),
                 "Selected viewport edit did not preserve the other physical joints");
             edit["editedJoint"] = prefix.Length == 0 ? "piper3_joint1" : "joint1";
             Reject(() => link.Target(edit, device), "A viewport edit for the other arm crossed its namespace");
@@ -68,13 +68,11 @@ internal static class CompoundRobotBindingTests
         Reject(() => SimulationFollowSample.Read(world, "unknown_"), "Unknown namespace silently selected an available robot");
         Reject(() => SimulationFollowSample.Read(world, "../"), "Invalid namespace was accepted");
 
-        void Reject(Action action, string reason)
-        { bool rejected = false; try { action(); } catch (InvalidOperationException) { rejected = true; } check(rejected, reason); }
     }
 
     internal static JsonObject World()
     {
-        var result = SimulationFollowTests.Pose(); var other = SimulationFollowTests.Pose();
+        var result = Fixtures.SimulationPose(); var other = Fixtures.SimulationPose();
         foreach (string key in new[] { "joints", "actuators" })
         {
             foreach (var item in other[key]!.AsArray().OfType<JsonObject>())

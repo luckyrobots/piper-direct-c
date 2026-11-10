@@ -4,7 +4,7 @@ namespace LuckyRobots.Piper.Plugin;
 
 public sealed partial class PipersPlugin
 {
-    private int sheetEditingRow = -1;
+    internal int sheetEditingRow = -1;
     private bool SheetCanCorrect => calibrationIdentity is not null && link is not null && calibrationIdentity == CurrentCalibrationIdentity() &&
         calibrationApplied is null && !calibrationPlacementUnverified && SheetContactCompatible;
 
@@ -30,21 +30,45 @@ public sealed partial class PipersPlugin
         await SaveWizard(cancellation);
     }
 
+    private (CalibrationSample? Correction, string Blocker) ValidateSheetCorrection(int row, CalibrationSample sample)
+    {
+        try
+        {
+            var corrected = sample.Measurement with
+            {
+                LeftMm = CalibrationWizardFlow.Number(Wizard, $"p{row}left", 0, calibrationDesk.Width * 1000),
+                BackMm = CalibrationWizardFlow.Number(Wizard, $"p{row}back", 0, calibrationDesk.Depth * 1000)
+            };
+            var measured = corrected.World(calibrationDesk);
+            int referenceRow = 0;
+            foreach (var other in calibrationSamples)
+            {
+                int otherRow = other.HeldOut ? 4 : referenceRow++;
+                if (ReferenceEquals(other, sample)) continue;
+                double spacing = sample.HeldOut || other.HeldOut ? CheckSpacingMetres : CalibrationSolver.ReferenceDuplicateDistanceMetres;
+                if (measured.PlanarDistance(other.MeasuredWorld) >= spacing) continue;
+                if (sample.HeldOut) return (null, "Use a check cross at least 50 mm from every reference point.");
+                if (other.HeldOut) return (null, "Keep each reference point at least 50 mm from the captured check cross.");
+                string name = otherRow < 4 ? SheetPointName(otherRow) : other.Name;
+                return (null, $"This overlaps {name} (within 1 mm). Use a distinct physical cross.");
+            }
+
+            string blocker = sample.HeldOut ? "" : SheetReservedCrossBlocker(corrected.LeftMm, corrected.BackMm);
+            return blocker.Length == 0 ? (sample with { Measurement = corrected, MeasuredWorld = measured }, "") : (null, blocker);
+        }
+        catch (InvalidOperationException)
+        {
+            return (null, "Enter BACK and LEFT distances for this cross, within the desk edges (mm).");
+        }
+    }
+
     private async Task SaveSheetMeasurementCorrection(int row, CancellationToken cancellation)
     {
         if (sheetEditingRow != row || !SheetCanCorrect) throw new InvalidOperationException("Click Edit entry beside this captured point first. Applied or unverified alignments cannot be edited.");
-        string error = SheetMeasurementBlocker(row);
-        if (error.Length > 0) throw new InvalidOperationException(error);
         var sample = SheetSample(row) ?? throw new InvalidOperationException("This point has not been captured.");
-        var corrected = sample.Measurement with
-        {
-            LeftMm = CalibrationWizardFlow.Number(Wizard, $"p{row}left", 0, calibrationDesk.Width * 1000),
-            BackMm = CalibrationWizardFlow.Number(Wizard, $"p{row}back", 0, calibrationDesk.Depth * 1000)
-        };
-        var measured = corrected.World(calibrationDesk);
-        if (calibrationSamples.Any(s => !ReferenceEquals(s, sample) && s.MeasuredWorld.PlanarDistance(measured) < (row == 4 ? .05 : CalibrationSolver.ReferenceDuplicateDistanceMetres)))
-            throw new InvalidOperationException("This correction duplicates another point or places the independent check too close to a reference.");
-        if (sample.Measurement == corrected) { sheetEditingRow = -1; await SaveWizard(cancellation); return; }
+        var (correction, blocker) = ValidateSheetCorrection(row, sample);
+        if (correction is null) throw new InvalidOperationException(blocker);
+        if (sample.Measurement == correction.Measurement) { sheetEditingRow = -1; await SaveWizard(cancellation); return; }
         // Keep the original report and exact captured evidence before replacing
         // entered ruler coordinates. Audit files are never auto-loaded as reports.
         string audit = Path.Combine(RobotCalibrationDirectory, "measurement-corrections");
@@ -53,11 +77,11 @@ public sealed partial class PipersPlugin
         await File.WriteAllTextAsync(receipt, JsonSerializer.Serialize(new
         {
             reason = "Operator corrected entered desk measurements; captured pose unchanged", row, originalSample = sample,
-            correctedMeasurement = corrected, previousReport = JsonDocument.Parse(await File.ReadAllTextAsync(calibrationPath, cancellation)).RootElement.Clone()
+            correctedMeasurement = correction.Measurement, previousReport = JsonDocument.Parse(await File.ReadAllTextAsync(calibrationPath, cancellation)).RootElement.Clone()
         }, LuckyEngine.PluginSdk.PluginProtocol.Json), cancellation);
         int index = calibrationSamples.IndexOf(sample);
         var oldFit = calibrationFit;
-        calibrationSamples[index] = sample with { Measurement = corrected, MeasuredWorld = measured };
+        calibrationSamples[index] = correction;
         calibrationFit = null;
         try { await SaveCalibration(cancellation); }
         catch { calibrationSamples[index] = sample; calibrationFit = oldFit; throw; }

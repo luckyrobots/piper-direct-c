@@ -1,6 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk.Web">
   <PropertyGroup><TargetFramework>net9.0</TargetFramework><ImplicitUsings>enable</ImplicitUsings><Nullable>enable</Nullable><TreatWarningsAsErrors>true</TreatWarningsAsErrors></PropertyGroup>
   <ItemGroup>
+    <InternalsVisibleTo Include="Piper.Host.Tests" />
     <PackageReference Include="Grpc.AspNetCore" Version="2.76.0" />
     <ProjectReference Include="../Piper.Contracts/Piper.Contracts.csproj" />
     <ProjectReference Include="../Piper.Core/Piper.Core.csproj" />

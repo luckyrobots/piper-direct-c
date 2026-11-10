@@ -1,5 +1,6 @@
 using System.Globalization;
 using System.Text.Json.Nodes;
+using LuckyRobots.Piper.Pika;
 
 namespace LuckyRobots.Piper.Plugin;
 
@@ -24,9 +25,9 @@ public sealed record OrderedSimulationFrame(ulong Cursor, long SceneTimeNs, doub
             throw new InvalidOperationException("A source frame cursor or clock is invalid.");
         double physics = Number(frame, "mujocoTimeSeconds"), command = Number(frame, "commandOpeningMm"), measured = Number(frame, "measuredOpeningMm");
         long ordinal = frame["episodeOrdinal"]?.GetValue<long>() ?? 0;
-        if (physics < 0 || sceneTime < 0 || command is < -.000001 or > 90.000001 || measured is < -.25 or > 90.25 || ordinal < 0)
+        if (physics < 0 || sceneTime < 0 || command is < PikaProtocol.MinimumOpeningMm - .000001 or > PikaProtocol.MaximumOpeningMm + .000001 || measured is < PikaProtocol.MinimumOpeningMm - .25 or > PikaProtocol.MaximumOpeningMm + .25 || ordinal < 0)
             throw new InvalidOperationException("A source frame clock, episode or gripper range is invalid.");
-        return new(cursor, sceneTime, physics, Joints(frame, "commandJoints"), Joints(frame, "measuredJoints"), Math.Clamp(command, 0, 90), Math.Clamp(measured, 0, 90),
+        return new(cursor, sceneTime, physics, Joints(frame, "commandJoints"), Joints(frame, "measuredJoints"), Math.Clamp(command, PikaProtocol.MinimumOpeningMm, PikaProtocol.MaximumOpeningMm), Math.Clamp(measured, PikaProtocol.MinimumOpeningMm, PikaProtocol.MaximumOpeningMm),
             Text(frame, "episodeId"), ordinal, Text(frame, "phase"), frame["episodeComplete"]?.GetValue<bool>() == true,
             frame["episodeSucceeded"]?.GetValue<bool>() == true);
     }
@@ -46,8 +47,6 @@ public sealed class OrderedSimulationPhase
     public IReadOnlyList<OrderedSimulationFrame> Frames { get; }
     public int SourceFrameCount { get; }
     public OrderedSimulationPhaseKind Kind { get; }
-    /// <summary>Aggregate physical/source duration for display, not a clock conversion.</summary>
-    public double TimeScale { get; }
     public double DurationSeconds { get; }
     public double SourceDurationSeconds { get; }
     /// <summary>Physical arrival time of each retained source frame, including metadata-only duplicates.</summary>
@@ -55,8 +54,6 @@ public sealed class OrderedSimulationPhase
     public int RetimingIterations { get; }
     public OrderedSimulationFrame End => Frames[^1];
     public double ExpectedMeasuredOpeningMm => End.MeasuredOpeningMm;
-    public IReadOnlyList<double> PeakVelocityDegreesPerSecond { get; }
-    public IReadOnlyList<double> PeakAccelerationDegreesPerSecondSquared { get; }
     private readonly record struct Cubic(double A, double B, double C, double D, double Duration)
     {
         public double Position(double u) => ((A * u + B) * u + C) * u + D;
@@ -95,22 +92,26 @@ public sealed class OrderedSimulationPhase
         if (sourceTimes.Any(time => !double.IsFinite(time) || time < 0))
             throw new InvalidOperationException("A phase has an invalid source duration.");
         SourceDurationSeconds = sourceTimes[^1];
+        const string invalidLimit = "A phase target or physical speed/acceleration limit is invalid; no clipping was performed.";
+        for (int joint = 0; joint < 6; joint++)
+        {
+            var limit = limits[joint];
+            if (limit.JointNumber != joint + 1 || !limit.AccelerationFresh || !double.IsFinite(limit.MaximumDegreesPerSecond) ||
+                !double.IsFinite(limit.MaximumDegreesPerSecondSquared) || limit.MaximumDegreesPerSecond <= 0 || limit.MaximumDegreesPerSecondSquared <= 0 ||
+                !double.IsFinite(limit.MinimumDegrees) || !double.IsFinite(limit.MaximumDegrees) || limit.MinimumDegrees >= limit.MaximumDegrees)
+                throw new InvalidOperationException(invalidLimit);
+        }
         for (int row = 0; row < frames.Count; row++)
         {
             var frame = frames[row];
             if (frame.CommandDegrees.Count != 6 || frame.MeasuredDegrees.Count != 6 || frame.MeasuredDegrees.Any(q => !double.IsFinite(q)) ||
                 !double.IsFinite(frame.PhysicsTimeSeconds) || frame.PhysicsTimeSeconds < 0 || row > 0 && frame.PhysicsTimeSeconds < frames[row - 1].PhysicsTimeSeconds ||
-                !double.IsFinite(frame.CommandOpeningMm) || frame.CommandOpeningMm is < 0 or > 90)
+                !PikaProtocol.ValidOpening(frame.CommandOpeningMm))
                 throw new InvalidOperationException("A phase has invalid or unordered source data.");
             for (int joint = 0; joint < 6; joint++)
-            {
-                var limit = limits[joint];
-                if (limit.JointNumber != joint + 1 || !limit.AccelerationFresh || !double.IsFinite(limit.MaximumDegreesPerSecond) ||
-                    !double.IsFinite(limit.MaximumDegreesPerSecondSquared) || limit.MaximumDegreesPerSecond <= 0 || limit.MaximumDegreesPerSecondSquared <= 0 ||
-                    !double.IsFinite(limit.MinimumDegrees) || !double.IsFinite(limit.MaximumDegrees) || limit.MinimumDegrees >= limit.MaximumDegrees ||
-                    !double.IsFinite(frame.CommandDegrees[joint]) || frame.CommandDegrees[joint] < limit.MinimumDegrees || frame.CommandDegrees[joint] > limit.MaximumDegrees)
-                    throw new InvalidOperationException("A phase target or physical speed/acceleration limit is invalid; no clipping was performed.");
-            }
+                if (!double.IsFinite(frame.CommandDegrees[joint]) || frame.CommandDegrees[joint] < limits[joint].MinimumDegrees ||
+                    frame.CommandDegrees[joint] > limits[joint].MaximumDegrees)
+                    throw new InvalidOperationException(invalidLimit);
         }
         bool arm = frames.Any(f => f.CommandDegrees.Where((q, joint) => Math.Abs(q - frames[0].CommandDegrees[joint]) > .001).Any());
         bool jaws = frames.Any(f => Math.Abs(f.CommandOpeningMm - frames[0].CommandOpeningMm) > .01);
@@ -128,7 +129,6 @@ public sealed class OrderedSimulationPhase
         if (intervals.Any(interval => !double.IsFinite(interval) || interval <= 0))
             throw new InvalidOperationException("A phase has unordered physical knots.");
         curves = new Cubic[intervals.Length, 6];
-        double[] peakVelocity = new double[6], peakAcceleration = new double[6];
         if (Kind == OrderedSimulationPhaseKind.Arm)
         {
             const int maximumIterations = 500;
@@ -136,7 +136,6 @@ public sealed class OrderedSimulationPhase
             while (true)
             {
                 curves = BuildCurves(nodes, intervals);
-                Array.Clear(peakVelocity); Array.Clear(peakAcceleration);
                 double[] factors = Enumerable.Repeat(1d, intervals.Length).ToArray();
                 for (int row = 0; row < intervals.Length; row++)
                 {
@@ -145,8 +144,6 @@ public sealed class OrderedSimulationPhase
                         var peaks = curves[row, joint].Peaks();
                         if (!double.IsFinite(peaks.Velocity) || !double.IsFinite(peaks.Acceleration))
                             throw new InvalidOperationException("The phase has unbounded velocity or acceleration.");
-                        peakVelocity[joint] = Math.Max(peakVelocity[joint], peaks.Velocity);
-                        peakAcceleration[joint] = Math.Max(peakAcceleration[joint], peaks.Acceleration);
                         factors[row] = Math.Max(factors[row], Math.Max(peaks.Velocity / limits[joint].MaximumDegreesPerSecond,
                             Math.Sqrt(peaks.Acceleration / limits[joint].MaximumDegreesPerSecondSquared)));
                     }
@@ -178,20 +175,12 @@ public sealed class OrderedSimulationPhase
                 for (int joint = 0; joint < 6; joint++)
                     curves[row, joint] = curves[row, joint] with { Duration = intervals[row] };
             }
-            for (int joint = 0; joint < 6; joint++)
-            {
-                peakVelocity[joint] *= selectedSpeedFraction;
-                peakAcceleration[joint] *= selectedSpeedFraction * selectedSpeedFraction;
-            }
         }
         times = new double[nodes.Length];
         for (int row = 0; row < intervals.Length; row++) times[row + 1] = times[row] + intervals[row];
         DurationSeconds = times[^1];
         if (!double.IsFinite(DurationSeconds)) throw new InvalidOperationException("The phase has an unsupported physical duration.");
-        TimeScale = SourceDurationSeconds > 0 ? DurationSeconds / SourceDurationSeconds : 1;
         PhysicalWaypointTimes = Array.AsReadOnly(frames.Select(frame => times[Array.BinarySearch(sourceTimes, frame.PhysicsTimeSeconds - nodes[0].PhysicsTimeSeconds)]).ToArray());
-        PeakVelocityDegreesPerSecond = Array.AsReadOnly(peakVelocity);
-        PeakAccelerationDegreesPerSecondSquared = Array.AsReadOnly(peakAcceleration);
     }
 
     private static Cubic[,] BuildCurves(IReadOnlyList<OrderedSimulationFrame> nodes, double[] intervals)
@@ -252,15 +241,13 @@ public sealed class OrderedSimulationPath
     public bool Drained => SourceComplete && FrameCount == 0;
     public OrderedSimulationFrame? LastSource => last;
     public OrderedSimulationPhase? Current => closed.TryPeek(out var phase) ? phase : null;
-    public bool CanPauseProducer => closed.Count > 0;
     public bool SourceMissedGrasp => missedGraspSeen;
 
-    private readonly bool preserveSemanticPhases;
-    public OrderedSimulationPath(IReadOnlyList<EpisodeReplayJointLimit> limits, double speedFraction = 1, bool preserveSemanticPhases = false)
+    public OrderedSimulationPath(IReadOnlyList<EpisodeReplayJointLimit> limits, double speedFraction = 1)
     {
         if (!double.IsFinite(speedFraction) || speedFraction is <= 0 or > 1)
             throw new InvalidOperationException("Choose a joint speed above 0% and at most 100% before preparing the ordered follower.");
-        this.limits = limits; this.speedFraction = speedFraction; this.preserveSemanticPhases = preserveSemanticPhases;
+        this.limits = limits; this.speedFraction = speedFraction;
     }
 
     public void Append(IReadOnlyList<OrderedSimulationFrame> frames)
@@ -289,9 +276,8 @@ public sealed class OrderedSimulationPath
             if (last is not null && !episodeChanged && (frame.PhysicsTimeSeconds < last.PhysicsTimeSeconds || frame.SceneTimeNs < last.SceneTimeNs ||
                 frame.PhysicsTimeSeconds == last.PhysicsTimeSeconds && !frame.EpisodeComplete && frame.Phase == last.Phase))
                 throw new InvalidOperationException("Source physics frames or their scene clock went backwards.");
-            bool armFamily = Family(frame.Phase) == "arm" && Family(last?.Phase ?? "") == "arm";
-            bool openJawChanges = open.Count > 0 && open.Any(node => Math.Abs(node.CommandOpeningMm - open[0].CommandOpeningMm) > .01);
-            if (last is not null && (episodeChanged || frame.Phase != last.Phase && (preserveSemanticPhases || !armFamily || openJawChanges))) CloseOpen();
+            // Every semantic phase closes at its own endpoint barrier.
+            if (last is not null && (episodeChanged || frame.Phase != last.Phase)) CloseOpen();
             // The initial unlabelled prepared frame still anchors the first
             // episode's first command. Retire the old anchor only at a completed
             // episode boundary, where a source physics clock may restart.
@@ -324,12 +310,6 @@ public sealed class OrderedSimulationPath
         return separator > prefix.Length && phase.StartsWith(prefix, StringComparison.Ordinal) &&
             int.TryParse(phase.AsSpan(separator + 1), NumberStyles.None, CultureInfo.InvariantCulture, out int ordinal) && ordinal > 0 &&
             phase[prefix.Length..separator] is "arm" or "gripper" or "wait" or "verify-lift" or "verify-carry" or "verify-place" or "home" or "finish";
-    }
-
-    private static string Family(string phase)
-    {
-        string kind = PhaseKind(phase);
-        return kind is "arm" or "home" ? "arm" : kind;
     }
 
     public void Complete(OrderedSimulationPhase phase)

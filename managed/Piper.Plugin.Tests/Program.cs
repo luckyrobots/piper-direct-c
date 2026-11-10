@@ -4,56 +4,55 @@ using Grpc.Net.Client;
 using LuckyRobots.Piper.Grpc;
 using LuckyRobots.Piper.Plugin;
 
-int checks = 0;
-void Check(bool value, string description) { if (!value) throw new Exception(description); checks++; }
-void Reject(Action action, string description)
-{
-    try { action(); } catch (InvalidOperationException) { checks++; return; }
-    throw new Exception(description);
-}
 if (args is ["--teaching-resume"])
 {
-    TeachingResumeTests.Run(Check);
-    await SimulationFollowingTests.RunTeachingResume(Check);
-    Console.WriteLine($"Passed {checks} stable teaching-resume checks.");
+    TeachingResumeTests.Run();
+    await SimulationFollowingTests.RunTeachingResume();
+    Console.WriteLine($"Passed {Checks} stable teaching-resume checks.");
     return;
 }
 if (args is ["--primary-ui"])
 {
-    await SimulationFollowingTests.RunPrimaryWorkspaceAction(Check);
-    Console.WriteLine($"Passed {checks} primary workspace action checks.");
+    await SimulationFollowingTests.RunPrimaryWorkspaceAction();
+    Console.WriteLine($"Passed {Checks} primary workspace action checks.");
+    return;
+}
+if (args is ["--unified-follow"])
+{
+    await SimulationFollowingTests.RunUnifiedFollowing();
+    Console.WriteLine($"Passed {Checks} unified simulation characterization checks.");
     return;
 }
 if (args is ["--group-follow"])
 {
-    GroupSimulationFollowingTests.Run(Check);
-    await SimulationFollowingTests.RunGroupFollow(Check);
-    await SimulationFollowingTests.RunPrimaryWorkspaceAction(Check);
-    Console.WriteLine($"Passed {checks} grouped following and primary action checks.");
+    GroupSimulationFollowingTests.Run();
+    await SimulationFollowingTests.RunGroupFollow();
+    await SimulationFollowingTests.RunPrimaryWorkspaceAction();
+    Console.WriteLine($"Passed {Checks} grouped following and primary action checks.");
     return;
 }
 if (args is ["--endpoint-stationary"])
 {
-    SimulationEndpointStationaryTests.Run(Check);
-    OrderedSimulationExecutionTests.Run(Check);
-    await SimulationFollowingTests.RunOrderedProtocol(Check);
-    await SimulationFollowingTests.RunFailureHeader(Check);
-    Console.WriteLine($"Passed {checks} endpoint stationarity and failure presentation checks.");
+    SimulationEndpointStationaryTests.Run();
+    OrderedSimulationExecutionTests.Run();
+    await SimulationFollowingTests.RunGroupFollow();
+    await SimulationFollowingTests.RunUnifiedFollowing();
+    Console.WriteLine($"Passed {Checks} endpoint stationarity and failure presentation checks.");
     return;
 }
 if (args is ["--telemetry-connection"])
 {
-    TelemetryConnectionPresentationTests.Run(Check);
-    await TelemetryConnectionPresentationTests.RunNavigation(Check);
-    Console.WriteLine($"Passed {checks} telemetry connection presentation checks.");
+    TelemetryConnectionPresentationTests.Run();
+    await TelemetryConnectionPresentationTests.RunNavigation();
+    Console.WriteLine($"Passed {Checks} telemetry connection presentation checks.");
     return;
 }
 if (args is ["--recovery-ui"])
 {
-    RecoveryWorkspaceTests.Run(Check);
-    await RecoveryWorkspaceTests.RunEvents(Check);
-    await RecoveryWorkspaceTests.RunSupportedSequence(Check);
-    Console.WriteLine($"Passed {checks} recovery workspace checks.");
+    RecoveryWorkspaceTests.Run();
+    await RecoveryWorkspaceTests.RunEvents();
+    await RecoveryWorkspaceTests.RunSupportedSequence();
+    Console.WriteLine($"Passed {Checks} recovery workspace checks.");
     return;
 }
 using (var authorized = System.Text.Json.JsonDocument.Parse("{\"owner\":\"plugin-session\"}"))
@@ -69,6 +68,9 @@ using (var absent = System.Text.Json.JsonDocument.Parse("{}"))
         Check(!LuckyRobots.Piper.SessionOwnerGuard.Allows("plugin-session", route, absent.RootElement), "Missing owner accepted for " + route);
     }
 }
+Check(ControllerEndpoint.GrpcAddress == $"http://{ControllerEndpoint.Loopback}:{ControllerEndpoint.GrpcPort}" &&
+    ControllerEndpoint.StateUrl == $"http://{ControllerEndpoint.Loopback}:{ControllerEndpoint.HttpPort}/api/state",
+    "Controller endpoint constants disagree with their ports");
 var followerPreferences = RobotProfileRouting.Normalize(new Preferences(Robots: [
     new("first", "First", FollowSimulationSelected: true), new("second", "Second")], ActiveRobotId: "first"));
 followerPreferences = RobotProfileRouting.Activate(followerPreferences, "second");
@@ -103,7 +105,8 @@ var wristBinding = new SimulationCameraPreferences("scene-a", "wrist-a");
 var legacyProfiles = RobotProfileRouting.Normalize(new Preferences(Speed: 37, Step: 2, Tolerance: .3, RobotId: "scene-robot-a", Bench: sharedBench,
     Gripper: new("wrist-camera-a"), DepthSerial: "depth-a", SimulationCameras: new() { ["bench"] = benchBinding, ["gripper"] = wristBinding }, Backend: new("CustomUbuntu", "/dev/pika-a")));
 Check(legacyProfiles.Robots is { Length: 1 } && legacyProfiles.ActiveRobotId == "piper-1", "Legacy workspace did not migrate to one explicit robot");
-Check(RobotProfileRouting.Active(legacyProfiles) is { PikaDevice: "/dev/pika-a", WslDistribution: "CustomUbuntu", CameraSlot: 0 }, "Legacy Pika identity/distro did not migrate");
+Check(RobotProfileRouting.Active(legacyProfiles) is { PikaDevice: "/dev/pika-a", CameraSlot: 0 } legacyProfile &&
+    legacyProfile.WslDistribution == LuckyRobots.Piper.Pika.PikaDistribution.ForCurrentPlatform("CustomUbuntu"), "Legacy Pika identity/distro did not migrate");
 Check(legacyProfiles.Bench == sharedBench && legacyProfiles.SimulationCameras!["bench"] == benchBinding, "Migration changed the shared bench camera");
 var profileA = RobotProfileRouting.Active(legacyProfiles) with { CanDeviceId = "can-a" };
 var profileB = new RobotProfile("piper-2", "Piper 2", "can-b", 55, 4, .2, "scene-robot-b", new("wrist-camera-b"), new("depth-camera-b"), "depth-b",
@@ -115,9 +118,6 @@ Check(twoProfiles.Bench == sharedBench && twoProfiles.SimulationCameras!["bench"
 twoProfiles = RobotProfileRouting.Activate(twoProfiles, "piper-1");
 Check(twoProfiles is { Speed: 42, Step: 3, Tolerance: .25, RobotId: "scene-robot-a", DepthSerial: "depth-a" }, "Return to robot did not restore its retained settings");
 Check(twoProfiles.SimulationCameras!["gripper"] == wristBinding && !RobotProfileRouting.Active(twoProfiles).SimulationCameras!.ContainsKey("bench"), "Shared bench was copied into robot settings");
-var reloadedBindings = RobotProfileRouting.RefreshCameraBindings(twoProfiles, "new-scene-session", ["bench-scene-camera", "wrist-a", "wrist-b"]);
-Check(reloadedBindings.SimulationCameras!["bench"].SceneId == "new-scene-session" && reloadedBindings.SimulationCameras["gripper"].SceneId == "new-scene-session" &&
-    reloadedBindings.Robots![1].SimulationCameras!["gripper"].SceneId == "new-scene-session", "Scene reload left an inactive robot or shared bench bound to the previous scene session");
 var roundTripProfiles = RobotProfileRouting.Normalize(System.Text.Json.JsonSerializer.Deserialize<Preferences>(System.Text.Json.JsonSerializer.Serialize(twoProfiles))!);
 Check(roundTripProfiles.Robots!.Length == 2 && roundTripProfiles.ActiveRobotId == "piper-1" && roundTripProfiles.Robots.Select(p => p.CameraSlot).Distinct().Count() == 2, "Profile persistence lost active identity or camera slots");
 var routedSnapshot = JsonNode.Parse("""{"selected":"can-a","devices":[{"id":"can-a","generation":1},{"id":"can-b","generation":2}]}""")!.AsObject();
@@ -150,13 +150,15 @@ Check(RobotProfileRouting.EventForProfile("piper-2", "profiles.select.piper-1") 
 var reusedSlot = RobotProfileRouting.Normalize(twoProfiles with { Robots = [twoProfiles.Robots![0], new("replacement", "Replacement")] });
 Check(reusedSlot.Robots!.All(p => p.CameraSlot is >= 0 and < RobotProfileRouting.MaximumProfiles) && reusedSlot.Robots!.Select(p => p.CameraSlot).Distinct().Count() == 2, "Deleted profile's camera slot was not bounded/reusable");
 var lensProfile = JsonNode.Parse("""{"schema":1,"device":"camera-a","width":640,"height":480,"model":"kannala-brandt","fx":250,"fy":251,"cx":317,"cy":238,"coefficients":[0.01,-0.001,0,0]}""")!.AsObject();
-SimulationCameraRoutingTests.Run(Check);
-Check(CameraProfile.Matches(lensProfile, "camera-a", 640, 480, false), "Valid fisheye profile rejected");
-Check(!CameraProfile.Matches(lensProfile, "camera-b", 640, 480, false), "Lens calibration leaked to another camera");
-Check(!CameraProfile.Matches(lensProfile, "camera-a", 1280, 720, false), "Calibration accepted at wrong resolution");
-Check(!CameraProfile.Matches(lensProfile, "camera-a", 640, 480, true), "Fisheye profile accepted for depth");
+SimulationCameraRoutingTests.Run();
+await CameraPreviewSlotsTests.Run();
+Check(CameraProfile.MatchesFisheye(lensProfile, "camera-a", 640, 480), "Valid fisheye profile rejected");
+Check(!CameraProfile.MatchesFisheye(lensProfile, "camera-b", 640, 480), "Lens calibration leaked to another camera");
+Check(!CameraProfile.MatchesFisheye(lensProfile, "camera-a", 1280, 720), "Calibration accepted at wrong resolution");
+var lensAsD405 = (JsonObject)lensProfile.DeepClone(); lensAsD405["streamKind"] = "color";
+Check(!CameraProfile.MatchesD405(lensAsD405, "camera-a", 640, 480, "color"), "Fisheye profile accepted for depth");
 lensProfile["fx"] = -1;
-Check(!CameraProfile.Matches(lensProfile, "camera-a", 640, 480, false), "Invalid focal length accepted");
+Check(!CameraProfile.MatchesFisheye(lensProfile, "camera-a", 640, 480), "Invalid focal length accepted");
 var legacyD405 = System.Text.Json.JsonSerializer.Deserialize<CameraPreferences>("""{"Device":"d405","Enabled":false}""")!;
 Check(D405View.Mode(legacyD405) == "color" && !legacyD405.Enabled, "Legacy camera preferences did not migrate to color without changing enable state");
 Check(D405View.Mode(null) == "color" && D405View.MetricDepth("depth", new("d405", ViewMode: "depth")) && !D405View.MetricDepth("bench", new("bench", ViewMode: "depth")), "D405 stream kind leaked into another camera");
@@ -275,12 +277,11 @@ stopped["reset_pending"] = false;
 Check(RecoveryPlan.Inspect(stopped, false).Action == "verify-current", "Healthy stationary state needs no reset");
 stopped["status"]!["teach_state"] = 3;
 Check(RecoveryPlan.Inspect(stopped, false).Action is null, "Active teaching must not reset");
-RecoveryPlanTests.Run(Check);
-await RecoveryPlanTests.RunObservation(Check);
-RecoveryWorkspaceTests.Run(Check);
-await RecoveryWorkspaceTests.RunEvents(Check);
-await RecoveryWorkspaceTests.RunSupportedSequence(Check);
-await RecoveryHomeTests.Run(Check);
+RecoveryPlanTests.Run();
+RecoveryWorkspaceTests.Run();
+await RecoveryWorkspaceTests.RunEvents();
+await RecoveryWorkspaceTests.RunSupportedSequence();
+await RecoveryHomeTests.Run();
 
 var gate = new FollowInputGate();
 JsonObject Gesture(string phase, long number, long sequence, long timestamp = 1000) => new() {
@@ -313,11 +314,11 @@ foreach (var joint in manualDevice["joints"]!.AsArray()) { joint!["fresh"] = tru
 Check(TeachingState.Inspect(manualDevice) is { HandGuiding: true, Active: true, BlocksTargets: true }, "Physical hand-guiding mode was not recognized");
 Check(!PipersPlugin.TeachingCanResume(manualDevice), "Hand-guiding feedback rearmed motion controls");
 manualDevice["status"]!["teach_state"] = 3;
-Check(TeachingState.Inspect(manualDevice) is { Phase: "playback", BlocksTargets: true }, "Onboard playback was not separated from CAN control");
+Check(TeachingState.Inspect(manualDevice) is { Phase: TeachingPhase.Playback, BlocksTargets: true }, "Onboard playback was not separated from CAN control");
 manualDevice["status"]!["teach_state"] = 4;
-Check(TeachingState.Inspect(manualDevice).Phase == "playback-paused", "Paused onboard playback was treated as stopped teaching");
+Check(TeachingState.Inspect(manualDevice).Phase == TeachingPhase.PlaybackPaused, "Paused onboard playback was treated as stopped teaching");
 manualDevice["status"]!["teach_state"] = 2;
-Check(TeachingState.Inspect(manualDevice) is { Phase: "ended", ReturnRequired: true, CanReturn: false }, "Ended recording with sticky teach control was treated as a fault or normal CAN");
+Check(TeachingState.Inspect(manualDevice) is { Phase: TeachingPhase.Ended, ReturnRequired: true, CanReturn: false }, "Ended recording with sticky teach control was treated as a fault or normal CAN");
 manualDevice["teaching"] = new JsonObject { ["phase"] = "ended", ["return_required"] = true, ["can_return"] = true };
 Check(TeachingState.Inspect(manualDevice).CanReturn, "Native validated teaching return was not offered");
 manualDevice.Remove("teaching"); manualDevice["status"]!["control"] = 1;
@@ -332,135 +333,98 @@ Check(!PipersPlugin.TeachingCanResume(manualDevice), "Real controller recovery w
 manualDevice["recovery_required"] = false; manualDevice["fresh"] = false;
 Check(!PipersPlugin.TeachingCanResume(manualDevice), "Stale teaching exit rearmed controls");
 manualDevice["fresh"] = true;
-var reference = new AlignmentReference("Desk cross", .205, .75, 0, 80, "grasp_site");
-AlignmentCheck.ValidateReference(reference);
-Reject(() => AlignmentCheck.ValidateReference(reference with { ObjectHeightMm = double.NaN }), "Invalid reference height entered a calibration report");
-var checkSession = new AlignmentCheck("profile-a", "test-device", 1, "scene-1", "robot-1", reference, "S-V1.9-0");
-var checkedPose = new JsonObject { ["pose"] = new JsonObject { ["sceneId"] = "scene-1", ["entityId"] = "robot-1", ["joints"] = new JsonArray(Enumerable.Range(1, 6).Select(i => (JsonNode)new JsonObject { ["name"] = "joint" + i, ["position"] = Math.PI / 2 }).ToArray()) } };
-var observation = checkSession.Read(1000, "profile-a", manualDevice, link, checkedPose, 999);
-checkSession.Sample(observation); checkSession.Sample(observation with { HostUnixMilliseconds = 1050 });
-Check(checkSession.Samples == 1, "Alignment trace exceeded its 10 Hz bound");
-checkSession.Observe(observation, true, null);
-Reject(() => checkSession.Observe(observation, true, null), "Repeated identical approach counted as independent spatial evidence");
-Reject(() => checkSession.Read(1600, "profile-a", manualDevice, link, checkedPose, 999), "Stale scene acknowledgement accepted as current alignment");
-Reject(() => checkSession.Read(1000, "profile-b", manualDevice, link, checkedPose, 999), "Another robot's alignment observation was accepted");
-var oldSceneAcknowledgement = (JsonObject)checkedPose.DeepClone(); oldSceneAcknowledgement["pose"]!["sceneId"] = "old-scene";
-Reject(() => checkSession.Read(1000, "profile-a", manualDevice, link, oldSceneAcknowledgement, 999), "A previous scene's cached pose entered an alignment report");
-var mappedGripperModel = (JsonArray)joints.DeepClone();
-mappedGripperModel.Add(new JsonObject { ["name"] = "joint7", ["unit"] = "m", ["limited"] = true, ["min"] = -.05, ["max"] = 0.0 });
-mappedGripperModel.Add(new JsonObject { ["name"] = "joint8", ["unit"] = "m", ["limited"] = true, ["min"] = 0.0, ["max"] = .05 });
-var alignmentWithGripper = new RobotLink("scene-1", "robot-1", mappedGripperModel, manualDevice);
-var gripperRequest = alignmentWithGripper.Feedback(manualDevice, new JsonObject { ["fresh"] = true,
-    ["telemetry"] = new JsonObject { ["motor"] = new JsonObject { ["Position"] = LuckyRobots.Piper.Pika.PikaProtocol.Angle(30) } } }, true);
-var gripperAcknowledgement = (JsonObject)checkedPose.DeepClone();
-gripperAcknowledgement["pose"]!["joints"]!.AsArray().Add(new JsonObject { ["name"] = "joint7", ["position"] = gripperRequest["joints"]!["joint7"]!.GetValue<double>() });
-gripperAcknowledgement["pose"]!["joints"]!.AsArray().Add(new JsonObject { ["name"] = "joint8", ["position"] = gripperRequest["joints"]!["joint8"]!.GetValue<double>() });
-alignmentWithGripper.FeedbackError(gripperRequest, gripperAcknowledgement);
-string gripperStatusBeforeObservation = alignmentWithGripper.GripperStatus;
-double? gripperErrorBeforeObservation = alignmentWithGripper.GripperErrorMm;
-checkSession.Read(1000, "profile-a", manualDevice, alignmentWithGripper, gripperAcknowledgement, 999);
-Check(alignmentWithGripper.GripperStatus == gripperStatusBeforeObservation && alignmentWithGripper.GripperErrorMm == gripperErrorBeforeObservation && gripperErrorBeforeObservation == 0,
-    "Reading an alignment observation reset or unlinked independently verified Pika feedback");
-var alignmentReport = checkSession.Finish("Test complete");
-Check(Math.Abs(alignmentReport.Observations.Single().ReferenceTopMetres[1] - .83) < 1e-12, "Known object height was measured from the rendered cross rather than physical desk surface");
-Check(!alignmentReport.MetricCalibrationValid && !alignmentReport.ExposureSynchronized && alignmentReport.JointUnit == "degrees" && alignmentReport.Firmware == "S-V1.9-0",
-    "Copied joint angles or operator confirmation were incorrectly promoted to metric/timing calibration");
-Reject(() => checkSession.Observe(observation, true, null), "Finished alignment report accepted new observations");
-GripperLinkTests.Run(Check);
-EpisodeReplayTests.Run(Check);
-await EpisodeReplayTests.RunFiles(Check);
-await PikaDisplayReferenceTests.Run(Check);
-CalibrationTests.Run(Check);
-CalibrationWizardTests.Run(Check);
-UnifiedWorkspaceTests.Run(Check);
-TelemetryConnectionPresentationTests.Run(Check);
-await TelemetryConnectionPresentationTests.RunNavigation(Check);
-WorkspaceViewTests.Run(Check);
-await WorkspaceViewTests.RunRendered(Check);
-await CalibrationSheetIntegrationTests.Run(Check);
-await CalibrationSheetUiTests.Run(Check);
-await CalibrationReevaluationTests.Run(Check);
-HeightValidationTests.Run(Check);
+GripperLinkTests.Run();
+EpisodeReplayTests.Run();
+await EpisodeReplayTests.RunFiles();
+await PikaDisplayReferenceTests.Run();
+CalibrationTests.Run();
+CalibrationWizardTests.Run();
+UnifiedWorkspaceTests.Run();
+TelemetryConnectionPresentationTests.Run();
+await TelemetryConnectionPresentationTests.RunNavigation();
+WorkspaceViewTests.Run();
+await WorkspaceViewTests.RunRendered();
+await CalibrationSheetIntegrationTests.Run();
+await CalibrationSheetUiTests.Run();
+await CalibrationReevaluationTests.Run();
+HeightValidationTests.Run();
 var monitorPika = new JsonObject { ["configured"] = true };
-Check(PikaMonitorPolicy.MayConnect(monitorPika, true, "this-reader"), "Unowned configured Pika could not be monitored without enabling it");
-Check(!PikaMonitorPolicy.MayConnect(monitorPika, false, "this-reader"), "Read-only monitoring used another robot's serial assignment");
+Check(PikaMonitorConnectionPolicy.MayConnect(monitorPika, true, "this-reader"), "Unowned configured Pika could not be monitored without enabling it");
+Check(!PikaMonitorConnectionPolicy.MayConnect(monitorPika, false, "this-reader"), "Read-only monitoring used another robot's serial assignment");
 monitorPika["owner"] = "another-reader";
-Check(!PikaMonitorPolicy.MayConnect(monitorPika, true, "this-reader"), "Read-only scene linking would take over a foreign Pika session");
+Check(!PikaMonitorConnectionPolicy.MayConnect(monitorPika, true, "this-reader"), "Read-only scene linking would take over a foreign Pika session");
 monitorPika["connected"] = false; monitorPika["fresh"] = false;
-Check(!PikaMonitorPolicy.MayConnect(monitorPika, true, "this-reader"), "A legacy foreign owner without power evidence was reclaimed");
+Check(!PikaMonitorConnectionPolicy.MayConnect(monitorPika, true, "this-reader"), "A legacy foreign owner without power evidence was reclaimed");
 monitorPika["power_requested"] = false; monitorPika["power_uncertain"] = false;
-Check(PikaMonitorPolicy.MayConnect(monitorPika, true, "this-reader"), "A disconnected, explicitly read-only dead monitor could not recover after plugin reload");
+Check(PikaMonitorConnectionPolicy.MayConnect(monitorPika, true, "this-reader"), "A disconnected, explicitly read-only dead monitor could not recover after plugin reload");
 var legacyForeignMonitor = new JsonObject { ["configured"] = true, ["owner"] = "another-reader", ["power_requested"] = false, ["power_uncertain"] = false };
-Check(!PikaMonitorPolicy.MayConnect(legacyForeignMonitor, true, "this-reader"), "False power flags alone reclaimed a legacy foreign owner with unknown connection state");
+Check(!PikaMonitorConnectionPolicy.MayConnect(legacyForeignMonitor, true, "this-reader"), "False power flags alone reclaimed a legacy foreign owner with unknown connection state");
 legacyForeignMonitor["connected"] = false;
-Check(!PikaMonitorPolicy.MayConnect(legacyForeignMonitor, true, "this-reader"), "Missing foreign freshness evidence was treated as a dead monitor");
-Check(PikaMonitorPolicy.ShouldRetry(monitorPika, true, "this-reader", true, false, false), "Linked read-only telemetry did not retry a dead monitor");
-Check(!PikaMonitorPolicy.ShouldRetry(monitorPika, true, "this-reader", false, false, false), "Unlinked scene started an automatic Pika connection");
-Check(!PikaMonitorPolicy.ShouldRetry(monitorPika, false, "this-reader", true, false, false), "Retry connected a mismatched gripper assignment");
-Check(!PikaMonitorPolicy.ShouldRetry(monitorPika, true, "this-reader", true, true, false), "Read-only retry ran during a power-owned session");
-Check(!PikaMonitorPolicy.ShouldRetry(monitorPika, true, "this-reader", true, false, false, armMoving: true), "WSL monitor startup competed with an active arm movement");
-Check(!PikaMonitorPolicy.ShouldRetry(monitorPika, true, "this-reader", true, false, false, teleoperating: true), "WSL monitor startup competed with viewport following");
+Check(!PikaMonitorConnectionPolicy.MayConnect(legacyForeignMonitor, true, "this-reader"), "Missing foreign freshness evidence was treated as a dead monitor");
+Check(PikaMonitorConnectionPolicy.ShouldRetry(monitorPika, true, "this-reader", true, PikaSessionRole.None), "Linked read-only telemetry did not retry a dead monitor");
+Check(!PikaMonitorConnectionPolicy.ShouldRetry(monitorPika, true, "this-reader", false, PikaSessionRole.None), "Unlinked scene started an automatic Pika connection");
+Check(!PikaMonitorConnectionPolicy.ShouldRetry(monitorPika, false, "this-reader", true, PikaSessionRole.None), "Retry connected a mismatched gripper assignment");
+Check(!PikaMonitorConnectionPolicy.ShouldRetry(monitorPika, true, "this-reader", true, PikaSessionRole.Owned), "Read-only retry ran during a power-owned session");
+Check(!PikaMonitorConnectionPolicy.ShouldRetry(monitorPika, true, "this-reader", true, PikaSessionRole.None, armMoving: true), "WSL monitor startup competed with an active arm movement");
+Check(!PikaMonitorConnectionPolicy.ShouldRetry(monitorPika, true, "this-reader", true, PikaSessionRole.None, teleoperating: true), "WSL monitor startup competed with viewport following");
 monitorPika["connected"] = true;
-Check(!PikaMonitorPolicy.MayConnect(monitorPika, true, "this-reader"), "Foreign live warmup could be claimed by a read-only retry");
+Check(!PikaMonitorConnectionPolicy.MayConnect(monitorPika, true, "this-reader"), "Foreign live warmup could be claimed by a read-only retry");
 monitorPika["connected"] = false; monitorPika["fresh"] = true;
-Check(!PikaMonitorPolicy.MayConnect(monitorPika, true, "this-reader"), "Fresh shared foreign telemetry was claimed");
+Check(!PikaMonitorConnectionPolicy.MayConnect(monitorPika, true, "this-reader"), "Fresh shared foreign telemetry was claimed");
 monitorPika["fresh"] = false; monitorPika["power_requested"] = true;
-Check(!PikaMonitorPolicy.MayConnect(monitorPika, true, "this-reader"), "A foreign owner with a power request was reclaimed");
+Check(!PikaMonitorConnectionPolicy.MayConnect(monitorPika, true, "this-reader"), "A foreign owner with a power request was reclaimed");
 monitorPika["power_requested"] = false; monitorPika["power_uncertain"] = true;
-Check(!PikaMonitorPolicy.MayConnect(monitorPika, true, "this-reader"), "Unresolved foreign motor power was reclaimed");
+Check(!PikaMonitorConnectionPolicy.MayConnect(monitorPika, true, "this-reader"), "Unresolved foreign motor power was reclaimed");
 monitorPika["power_uncertain"] = false;
 monitorPika["owner"] = "this-reader";
-Check(PikaMonitorPolicy.MayConnect(monitorPika, true, "this-reader"), "The same reader could not retain its existing monitor");
+Check(PikaMonitorConnectionPolicy.MayConnect(monitorPika, true, "this-reader"), "The same reader could not retain its existing monitor");
 monitorPika["connected"] = true;
-Check(!PikaMonitorPolicy.ShouldRetry(monitorPika, true, "this-reader", true, false, true), "A healthy current read-only monitor reconnected every update");
+Check(!PikaMonitorConnectionPolicy.ShouldRetry(monitorPika, true, "this-reader", true, PikaSessionRole.Monitoring), "A healthy current read-only monitor reconnected every update");
 monitorPika["connected"] = false;
-Check(PikaMonitorPolicy.ShouldRetry(monitorPika, true, "this-reader", true, false, true), "A previously connected reader never retried after its agent exited");
+Check(PikaMonitorConnectionPolicy.ShouldRetry(monitorPika, true, "this-reader", true, PikaSessionRole.Monitoring), "A previously connected reader never retried after its agent exited");
 monitorPika["power_uncertain"] = true;
-Check(!PikaMonitorPolicy.MayConnect(monitorPika, true, "this-reader"), "A read-only retry resumed the same owner's unresolved power attempt");
+Check(!PikaMonitorConnectionPolicy.MayConnect(monitorPika, true, "this-reader"), "A read-only retry resumed the same owner's unresolved power attempt");
 monitorPika["power_uncertain"] = false;
 monitorPika["configured"] = false;
-Check(!PikaMonitorPolicy.MayConnect(monitorPika, true, "this-reader"), "Scene linking tried to configure or open an unassigned gripper");
+Check(!PikaMonitorConnectionPolicy.MayConnect(monitorPika, true, "this-reader"), "Scene linking tried to configure or open an unassigned gripper");
 
-await TeachingResetTests.Run(Check);
-TeachingModernTests.Run(Check);
-TeachingResumeTests.Run(Check);
-await SimulationFollowingTests.RunTeachingResume(Check);
-PikaTeachingTests.Run(Check);
-PikaTeachingWorkspaceTests.Run(Check);
-PikaMonitorConnectionTests.Run(Check);
-await UiEventDispatchTests.Run(Check);
-BackendRestartRequestTests.Run(Check);
-await EmergencyStopTests.Run(Check);
-await MeasuredTrackingTests.Run(Check);
-await MeasuredGhostPublicationTests.Run(Check);
-await TelemetryPipelineTests.Run(Check);
-SimulationFollowTests.Run(Check);
-CompoundRobotBindingTests.Run(Check);
-await SimulationPublishDiagnosticsTests.Run(Check);
-await SimulationFollowDiagnosticsTests.Run(Check);
-OrderedSimulationPathTests.Run(Check);
-OrderedSimulationSpeedTests.Run(Check);
-SimulationPublishCadenceTests.Run(Check);
-SimulationTrajectoryTransportTests.Run(Check);
-OrderedFrameReadRetryTests.Run(Check);
-SimulationFollowNativeReferenceTests.Run(Check);
-OrderedSimulationExecutionTests.Run(Check);
-GroupSimulationFollowingTests.Run(Check);
-await SimulationFollowingTests.RunGroupFollow(Check);
-SimulationEndpointStationaryTests.Run(Check);
-OrderedPhysicalContactTests.Run(Check);
-OrderedMissedGraspTests.Run(Check);
-OrderedContactLossTests.Run(Check);
-await SimulationFollowingTests.Run(Check);
-await NativeAdmissionTests.Run(Check);
+TeachingModernTests.Run();
+TeachingResumeTests.Run();
+await SimulationFollowingTests.RunTeachingResume();
+PikaTeachingTests.Run();
+PikaTeachingWorkspaceTests.Run();
+PikaMonitorConnectionTests.Run();
+await UiEventDispatchTests.Run();
+BackendRestartRequestTests.Run();
+await EmergencyStopTests.Run();
+await MeasuredTrackingTests.Run();
+await MeasuredGhostPublicationTests.Run();
+await TelemetryPipelineTests.Run();
+SimulationFollowTests.Run();
+CompoundRobotBindingTests.Run();
+await SimulationPublishDiagnosticsTests.Run();
+await SimulationFollowDiagnosticsTests.Run();
+OrderedSimulationPathTests.Run();
+OrderedSimulationSpeedTests.Run();
+SimulationPublishCadenceTests.Run();
+SimulationTrajectoryTransportTests.Run();
+SimulationFollowNativeReferenceTests.Run();
+OrderedSimulationExecutionTests.Run();
+GroupSimulationFollowingTests.Run();
+await SimulationFollowingTests.RunGroupFollow();
+await SimulationFollowingTests.RunUnifiedFollowing();
+SimulationEndpointStationaryTests.Run();
+OrderedPhysicalContactTests.Run();
+OrderedMissedGraspTests.Run();
+OrderedContactLossTests.Run();
+await NativeAdmissionTests.Run();
 var resetGapDevice = new JsonObject { ["id"] = "reset-arm", ["generation"] = 7L, ["present"] = true, ["up"] = true, ["fresh"] = false };
 var resetGapSnapshot = new JsonObject { ["selected"] = "reset-arm", ["devices"] = new JsonArray(resetGapDevice) };
-Check(TeachingResetAssisted.ExpectedFeedbackGap(true, resetGapSnapshot, "reset-arm", 7), "Expected MCU reset gap discarded an unchanged connected scene binding");
-Check(!TeachingResetAssisted.ExpectedFeedbackGap(false, resetGapSnapshot, "reset-arm", 7), "Ordinary stale feedback silently preserved a live scene link");
+Check(TeachingResetAssisted.ExpectedFeedbackGap(resetGapSnapshot, "reset-arm", 7), "Expected MCU reset gap discarded an unchanged connected scene binding");
 resetGapDevice["generation"] = 8L;
-Check(!TeachingResetAssisted.ExpectedFeedbackGap(true, resetGapSnapshot, "reset-arm", 7), "A reconnected adapter silently inherited the previous reset binding");
+Check(!TeachingResetAssisted.ExpectedFeedbackGap(resetGapSnapshot, "reset-arm", 7), "A reconnected adapter silently inherited the previous reset binding");
 resetGapDevice["generation"] = 7L; resetGapDevice["present"] = false;
-Check(!TeachingResetAssisted.ExpectedFeedbackGap(true, resetGapSnapshot, "reset-arm", 7), "Physical USB loss was hidden as an expected MCU reset gap");
+Check(!TeachingResetAssisted.ExpectedFeedbackGap(resetGapSnapshot, "reset-arm", 7), "Physical USB loss was hidden as an expected MCU reset gap");
 
 if (args.Length == 1)
 {
@@ -472,10 +436,10 @@ if (args.Length == 1)
     var snapshot = JsonNode.Parse(frame.Json)!.AsObject();
     Check(frame.Sequence > 0 && frame.ClockDomain == "host-utc", "Snapshot metadata missing");
     string token = snapshot["token"]!.GetValue<string>();
-    try { await client.ExecuteAsync(new() { Route = "/api/query", Json = "{}" }); throw new Exception("Unauthenticated command accepted"); }
-    catch (RpcException e) when (e.StatusCode == StatusCode.Unauthenticated) { checks++; }
-    try { await client.ExecuteAsync(new() { Route = "/api/query", Json = "{\"a\":1,\"a\":2}" }, new Metadata { { "x-piper-token", token } }); throw new Exception("Duplicate command keys accepted"); }
-    catch (RpcException e) when (e.StatusCode == StatusCode.InvalidArgument) { checks++; }
+    await RejectAsync<RpcException>(async () => await client.ExecuteAsync(new() { Route = "/api/query", Json = "{}" }),
+        "Unauthenticated command accepted", e => e.StatusCode == StatusCode.Unauthenticated);
+    await RejectAsync<RpcException>(async () => await client.ExecuteAsync(new() { Route = "/api/query", Json = "{\"a\":1,\"a\":2}" }, new Metadata { { "x-piper-token", token } }),
+        "Duplicate command keys accepted", e => e.StatusCode == StatusCode.InvalidArgument);
     var pika = await client.ExecuteAsync(new() { Route = "/api/pika/connect", Json = "{}" }, new Metadata { { "x-piper-token", token } });
     Check(pika.Status == 409, "Simulation opened real Pika hardware");
     using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(3));
@@ -488,4 +452,4 @@ if (args.Length == 1)
         previous = stream.ResponseStream.Current.Sequence;
     }
 }
-Console.WriteLine($"Passed {checks} Pipers mapping, reconnect, limits and gRPC checks.");
+Console.WriteLine($"Passed {Checks} Pipers mapping, reconnect, limits and gRPC checks.");

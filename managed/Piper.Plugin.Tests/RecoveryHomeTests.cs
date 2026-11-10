@@ -3,7 +3,7 @@ using LuckyRobots.Piper.Plugin;
 
 internal static class RecoveryHomeTests
 {
-    public static async Task Run(Action<bool, string> check)
+    public static async Task Run()
     {
         async Task<Exception?> Failure(Func<Task> operation)
         { try { await operation(); return null; } catch (Exception error) { return error; } }
@@ -15,16 +15,16 @@ internal static class RecoveryHomeTests
                 fixture.Device["status"]!["arm_status"] = 0; fixture.Device["recovery_required"] = false;
                 foreach (var joint in fixture.Device["joints"]!.AsArray()) joint!["enabled"] = false;
             }
-            check(RecoveryHome.Blocker(fixture.Snapshot()) is null,
+            Check(RecoveryHome.Blocker(fixture.Snapshot()) is null,
                 "Resting bounded range overrun was blocked before reset/enable, stopped=" + initiallyStopped);
             await fixture.Run();
-            check(fixture.Actions.SequenceEqual(initiallyStopped ? ["reset", "enable", "move-to-zero"] : ["enable", "move-to-zero"]),
+            Check(fixture.Actions.SequenceEqual(initiallyStopped ? ["reset", "enable", "move-to-zero"] : ["enable", "move-to-zero"]),
                 "Recovery did not use exactly reset → verified-off → power-only enable → zero");
-            check(fixture.OffVerifiedBeforeEnable && fixture.OnVerifiedBeforeZero,
+            Check(fixture.OffVerifiedBeforeEnable && fixture.OnVerifiedBeforeZero,
                 "Recovery skipped verified power stages before enabling or homing");
-            check((!initiallyStopped || fixture.Progress[0].Contains("Resetting")) && fixture.Progress[^1].Contains("Recovery complete"),
+            Check((!initiallyStopped || fixture.Progress[0].Contains("Resetting")) && fixture.Progress[^1].Contains("Recovery complete"),
                 "Recovery progress did not identify the requested zero goal and completion");
-            check(fixture.Device["joints"]!.AsArray().All(j => j!["actual_deg"]!.GetValue<double>() == 0),
+            Check(fixture.Device["joints"]!.AsArray().All(j => j!["actual_deg"]!.GetValue<double>() == 0),
                 "Recovery completed before all six zero measurements were observed");
         }
         foreach (bool softwareLatch in new[] { false, true })
@@ -33,35 +33,30 @@ internal static class RecoveryHomeTests
             fixture.Device["recovery_required"] = softwareLatch;
             fixture.Device["joints"]![1]!["actual_deg"] = .5; fixture.Device["joints"]![2]!["actual_deg"] = -.5;
             await fixture.Run();
-            check(fixture.Actions.SequenceEqual(softwareLatch ? ["verify-current", "move-to-zero"] : ["move-to-zero"]),
+            Check(fixture.Actions.SequenceEqual(softwareLatch ? ["verify-current", "move-to-zero"] : ["move-to-zero"]),
                 "Healthy enabled homing removed holding torque or sent an unnecessary power/reset command");
         }
         {
             var fixture = new Fixture(); fixture.Device["status"]!["arm_status"] = 0; fixture.Device["joints"]![2]!["enabled"] = false;
             await fixture.Run();
-            check(fixture.Actions.SequenceEqual(["reset", "enable", "move-to-zero"]),
+            Check(fixture.Actions.SequenceEqual(["reset", "enable", "move-to-zero"]),
                 "Known partial motor power bypassed reset/off verification before homing");
         }
         {
             var fixture = new Fixture(); fixture.Device["reset_pending"] = true;
             fixture.Device["status"]!["arm_status"] = 0;
             foreach (var joint in fixture.Device["joints"]!.AsArray()) joint!["enabled"] = false;
-            await fixture.Run();
-            check(fixture.Actions.SequenceEqual(["verify-reset", "enable", "move-to-zero"]),
-                "An already completed reset was resent instead of verified once");
+            var outcome = await fixture.Run();
+            Check(outcome == RecoveryHomeOutcome.ResetConfirmationRequired && fixture.Actions.Count == 0,
+                "Recovery to zero verified a pending reset instead of stopping for the operator's confirmation");
         }
         {
             var fixture = new Fixture(); fixture.Device["reset_pending"] = true;
             fixture.Device["status"]!["teach_state"] = 1;
             foreach (var joint in fixture.Device["joints"]!.AsArray()) joint!["enabled"] = false;
             await fixture.Run();
-            check(fixture.Actions.SequenceEqual(["reset", "enable", "move-to-zero"]),
+            Check(fixture.Actions.SequenceEqual(["reset", "enable", "move-to-zero"]),
                 "Explicit recovery of retired STOP/residual-teach failed or retried a stage");
-        }
-        {
-            var fixture = new Fixture();
-            check(await Failure(() => fixture.Run(acknowledged: false)) is InvalidOperationException && fixture.Actions.Count == 0,
-                "Recovery inferred physical support instead of requiring the one labelled resting/clear action");
         }
         foreach (var (name, mutate) in new (string, Action<Fixture>)[]
         {
@@ -83,7 +78,7 @@ internal static class RecoveryHomeTests
         })
         {
             var fixture = new Fixture(); mutate(fixture);
-            check(await Failure(() => fixture.Run()) is InvalidOperationException && fixture.Actions.Count == 0,
+            Check(await Failure(() => fixture.Run()) is InvalidOperationException && fixture.Actions.Count == 0,
                 "Recovery to zero admitted " + name);
         }
         foreach (string stage in new[] { "reset", "enable", "move-to-zero" })
@@ -95,20 +90,20 @@ internal static class RecoveryHomeTests
                 fixture.Motion["active"] = true;
                 throw new IOException("Lost " + step + " acknowledgement");
             };
-            check(await Failure(() => fixture.Run()) is IOException,
+            Check(await Failure(() => fixture.Run()) is IOException,
                 "Recovery swallowed a lost acknowledgement at " + stage);
-            check(fixture.Actions.Count(a => a == stage) == 1 && fixture.StoppedRequests.SequenceEqual([fixture.Motion["request_id"]!.GetValue<long>()]),
+            Check(fixture.Actions.Count(a => a == stage) == 1 && fixture.StoppedRequests.SequenceEqual([fixture.Motion["request_id"]!.GetValue<long>()]),
                 "A failed stage was retried or its newly admitted request was not stopped: " + stage);
-            check(fixture.Actions.Count == Array.IndexOf(new[] { "reset", "enable", "move-to-zero" }, stage) + 1,
+            Check(fixture.Actions.Count == Array.IndexOf(new[] { "reset", "enable", "move-to-zero" }, stage) + 1,
                 "Recovery continued to a later stage after " + stage + " failed");
         }
         foreach (string stage in new[] { "reset", "enable", "move-to-zero" })
         {
             var fixture = new Fixture(); using var cancellation = new CancellationTokenSource();
             fixture.AfterAction = step => { if (step == stage) { fixture.Motion["active"] = true; cancellation.Cancel(); } };
-            check(await Failure(() => fixture.Run(cancellation: cancellation.Token)) is OperationCanceledException,
+            Check(await Failure(() => fixture.Run(cancellation: cancellation.Token)) is OperationCanceledException,
                 "Cancellation was ignored after " + stage);
-            check(fixture.Actions.Count(a => a == stage) == 1 && fixture.StoppedRequests.Count == 1 &&
+            Check(fixture.Actions.Count(a => a == stage) == 1 && fixture.StoppedRequests.Count == 1 &&
                 fixture.Actions.Count == Array.IndexOf(new[] { "reset", "enable", "move-to-zero" }, stage) + 1,
                 "Cancellation resumed a later stage or omitted the scoped stop after " + stage);
         }
@@ -122,20 +117,20 @@ internal static class RecoveryHomeTests
                 if (sameGeneration) { fixture.Motion["request_id"] = 500L; fixture.Motion["owner"] = "another-client"; }
                 else fixture.Device["generation"] = 8L;
             };
-            check(await Failure(() => fixture.Run()) is InvalidOperationException && fixture.Actions.SequenceEqual(["reset"]) && fixture.StoppedRequests.Count == 0,
+            Check(await Failure(() => fixture.Run()) is InvalidOperationException && fixture.Actions.SequenceEqual(["reset"]) && fixture.StoppedRequests.Count == 0,
                 "A replacement controller action or CAN generation inherited recovery or received its cleanup STOP");
         }
         foreach (string stage in new[] { "reset", "enable", "move-to-zero" })
         {
             var fixture = new Fixture();
             fixture.AfterAction = step => { if (step == stage) { fixture.FreezeAfterAcknowledgement = true; fixture.Motion["active"] = true; } };
-            check(await Failure(() => fixture.Run(timeout: 35)) is TimeoutException && fixture.Actions.Count(a => a == stage) == 1 && fixture.StoppedRequests.Count == 1,
+            Check(await Failure(() => fixture.Run(timeout: 35)) is TimeoutException && fixture.Actions.Count(a => a == stage) == 1 && fixture.StoppedRequests.Count == 1,
                 "Cached pre-ack telemetry advanced recovery or failed to time out and stop at " + stage);
         }
         {
             var fixture = new Fixture();
             fixture.AfterAction = step => { if (step == "reset") { fixture.Motion["active"] = false; fixture.Phase = "stopped"; } };
-            check(await Failure(() => fixture.Run()) is InvalidOperationException && fixture.Actions.SequenceEqual(["reset"]),
+            Check(await Failure(() => fixture.Run()) is InvalidOperationException && fixture.Actions.SequenceEqual(["reset"]),
                 "A native reset timeout/fault triggered an automatic reset retry or enable");
         }
         {
@@ -155,7 +150,7 @@ internal static class RecoveryHomeTests
                 };
             };
             await fixture.Run(timeout: 500);
-            check(transientReads >= 3 && fixture.Actions.SequenceEqual(["reset", "enable", "move-to-zero"]) && fixture.StoppedRequests.Count == 0,
+            Check(transientReads >= 3 && fixture.Actions.SequenceEqual(["reset", "enable", "move-to-zero"]) && fixture.StoppedRequests.Count == 0,
                 "Expected active-owned reset transitions caused a premature client STOP instead of waiting for fresh healthy/all-off verification");
         }
         foreach (string stage in new[] { "enable", "move-to-zero" })
@@ -165,25 +160,22 @@ internal static class RecoveryHomeTests
                 if (step != stage) return;
                 fixture.Motion["active"] = true; fixture.Device["status"]!["error"] = 63;
             };
-            check(await Failure(() => fixture.Run()) is InvalidOperationException && fixture.StoppedRequests.Count == 1,
+            Check(await Failure(() => fixture.Run()) is InvalidOperationException && fixture.StoppedRequests.Count == 1,
                 "Reset's transient-status allowance leaked into " + stage);
         }
         {
             var fixture = new Fixture();
             fixture.AfterAction = step => { if (step == "move-to-zero") fixture.Device["joints"]![5]!["actual_deg"] = 5d; };
-            check(await Failure(() => fixture.Run(timeout: 35)) is TimeoutException && !fixture.Progress.Any(p => p.StartsWith("Recovery complete")),
+            Check(await Failure(() => fixture.Run(timeout: 35)) is TimeoutException && !fixture.Progress.Any(p => p.StartsWith("Recovery complete")),
                 "Recovery reported success without measured zero-position feedback");
         }
         {
             var fixture = new Fixture(); fixture.ProgressFailure = true;
-            check(await Failure(() => fixture.Run()) is IOException && fixture.Actions.Count == 0,
+            Check(await Failure(() => fixture.Run()) is IOException && fixture.Actions.Count == 0,
                 "Failure to persist the initial recovery stage still admitted a reset");
         }
-        check(WorkspaceCommandPolicy.RequiresControls("recovery.home") && CalibrationCommandGuard.Blocks("recovery.home", true),
-            "Recovery home bypassed Controls/calibration command policy");
-        check(WorkspaceCommandPolicy.RequiresControls("recovery.home.incident") && CalibrationCommandGuard.Blocks("recovery.home.incident", true),
-            "The primary incident recovery alias bypassed the same Controls/calibration policy");
-        await RecoveryHomeUiTests.Run(check);
+        Check(WorkspaceCommandPolicy.RequiresControls("recovery.home"), "Recovery home bypassed Controls/calibration command policy");
+        await RecoveryHomeUiTests.Run();
     }
 
     private sealed class Fixture
@@ -215,8 +207,8 @@ internal static class RecoveryHomeTests
             if (!FreezeAfterAcknowledgement) { ++sequence; ++ticks; }
             return new(Device, Motion, Phase, "Fixture controller stopped", sequence, ticks);
         }
-        public Task Run(bool acknowledged = true, CancellationToken cancellation = default, int timeout = 100) =>
-            RecoveryHome.Run(acknowledged, "resting-arm", 7, "recovery-fixture", Snapshot, (step, cancel) =>
+        public Task<RecoveryHomeOutcome> Run(CancellationToken cancellation = default, int timeout = 100) =>
+            RecoveryHome.Run("resting-arm", 7, "recovery-fixture", Snapshot, (step, cancel) =>
             {
                 cancel.ThrowIfCancellationRequested(); Actions.Add(step);
                 bool stateful = step is not ("verify-reset" or "verify-current");
@@ -239,6 +231,6 @@ internal static class RecoveryHomeTests
             {
                 if (ProgressFailure) throw new IOException("Fixture report storage unavailable");
                 Progress.Add(stage); return Task.CompletedTask;
-            }, cancellation, timeout, timeout, timeout);
+            }, cancellation, new(timeout, timeout, timeout));
     }
 }

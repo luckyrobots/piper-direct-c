@@ -26,7 +26,7 @@ public static class TeachingResumeCheck
             j["enabled"]?.GetValue<bool>() != true || j["fault"]?.GetValue<int>() != 0))
             throw new InvalidOperationException("All six motors must report fresh, enabled and fault-free feedback. No motor-power command was sent.");
         var teaching = TeachingState.Inspect(device);
-        if (teaching.Phase != "ended" || teaching.Active || !teaching.ReturnRequired)
+        if (teaching.Phase != TeachingPhase.Ended || teaching.Active || !teaching.ReturnRequired)
             throw new InvalidOperationException("The robot's teaching mode changed. Finish hand guiding or playback, then click Resume controls again.");
         if (device["motion"]?["active"]?.GetValue<bool>() == true || device["motion"]?["query_active"]?.GetValue<bool>() == true)
             throw new InvalidOperationException("Another controller action is active. Wait for it to finish before resuming controls.");
@@ -44,22 +44,23 @@ public sealed partial class PipersPlugin
     private async Task ResumeControls(CancellationToken cancellation)
     {
         string expectedProfile = ActiveProfile.Id, expectedToken = token;
-        long expectedPermission = Interlocked.Read(ref targetPermissionEpoch);
+        long expectedPermission = CommandAuthority.Epoch;
         var first = Device(expectedToken: expectedToken);
         string expectedDevice = first["id"]!.GetValue<string>();
         long expectedGeneration = first["generation"]!.GetValue<long>();
         JsonObject Current()
         {
             cancellation.ThrowIfCancellationRequested();
-            if (ActiveProfile.Id != expectedProfile || workspacePage != "controls" || calibrationOpen ||
-                expectedPermission != Interlocked.Read(ref targetPermissionEpoch))
+            if (ActiveProfile.Id != expectedProfile || Navigation.Page != WorkspacePage.Controls ||
+                expectedPermission != CommandAuthority.Epoch)
                 throw new InvalidOperationException("Control permission or selected robot changed. Click Resume controls again for the current robot.");
             return Device(expectedDevice, expectedGeneration, expectedToken);
         }
 
-        resumeControlsBusy = true;
+        Debug.Assert(primaryAction.Phase == PrimaryActionPhase.Running, "Resume runs only as the primary robot action.");
+        primaryAction = primaryAction with { Phase = PrimaryActionPhase.ResumingControls };
         approved = linkCommandsEnabled = false;
-        teachingReturnGate.Invalidate();
+        teachingSession.InvalidateReturn();
         try
         {
             await PrimaryActionProgress("waiting-for-stillness", "Hold the arm still · reconnecting controls at this pose…", cancellation);
@@ -83,8 +84,7 @@ public sealed partial class PipersPlugin
             // await, without another UI round-trip before the one command.
             JsonObject current = await ReadyFrame();
             var result = await Command("teach-return", TeachingState.Inspect(current).ReturnFlags(), cancellation,
-                teachingAcknowledged: true, expectedDeviceId: expectedDevice, expectedGeneration: expectedGeneration,
-                expectedToken: expectedToken, expectedPermissionEpoch: expectedPermission);
+                CommandPurpose.TeachingReturn, new(expectedProfile, expectedToken, expectedDevice, expectedGeneration), expectedPermission);
             long request = result["request_id"]?.GetValue<long>() ?? 0;
             bool Completed(JsonObject device) => TeachingCanResume(device) && (request == 0 ||
                 device["motion"]?["request_id"]?.GetValue<long>() == request &&
@@ -101,7 +101,7 @@ public sealed partial class PipersPlugin
                 if (request > 0 && observed > request)
                     throw new InvalidOperationException("A different controller request replaced this resume. No retry will run.");
                 if (Completed(current)) break;
-                if (mode.Active || mode.Phase == "stopped" || current["recovery_required"]?.GetValue<bool>() == true ||
+                if (mode.Active || mode.Phase == TeachingPhase.Stopped || current["recovery_required"]?.GetValue<bool>() == true ||
                     current["reset_pending"]?.GetValue<bool>() == true || current["status"]?["error"]?.GetValue<int>() != 0)
                     throw new InvalidOperationException("The controller changed mode or reported a fault while reconnecting. No retry will run.");
                 if (request > 0 && observed >= request)
@@ -132,18 +132,17 @@ public sealed partial class PipersPlugin
             }
             TeachingResumeCheck.CommitApproval(() => { _ = Current(); }, () =>
             {
-                approved = true; linkCommandsEnabled = link is not null;
-                teachingSeen = approvalBeforeTeaching = false;
-                RememberControlApproval();
+                teachingSession.Release();
+                RememberControlApproval(expectedPermission, activate: true);
             }, () =>
             {
                 // Urgent STOP/Disable can revoke permission during the local
                 // commit, including inside RememberControlApproval/Device.
-                controlApprovals.TryRemove(expectedProfile, out _);
+                CommandAuthority.ForgetApproval(expectedProfile);
                 approved = linkCommandsEnabled = false;
             });
             message = "Controls restored · holding this pose · previous movement discarded";
         }
-        finally { resumeControlsBusy = false; }
+        finally { primaryAction = primaryAction with { Phase = PrimaryActionPhase.Running }; }
     }
 }

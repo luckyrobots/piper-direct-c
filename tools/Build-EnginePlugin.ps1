@@ -39,17 +39,24 @@ if($Runtime -eq 'win-x64') {
 Copy-Item -LiteralPath (Join-Path $taskRepo 'lucky-plugin.yaml') -Destination $taskPackage -Force
 Copy-Item -LiteralPath (Join-Path $taskRepo 'web') -Destination $taskPackage -Recurse -Force
 New-Item -ItemType Directory -Path (Join-Path $taskPackage 'docs') -Force | Out-Null
-Copy-Item -LiteralPath (Join-Path $taskRepo 'docs/lucky-engine-plugin.md') -Destination (Join-Path $taskPackage 'docs') -Force
-Copy-Item -LiteralPath (Join-Path $taskRepo 'docs/workspace-calibration-roadmap.md') -Destination (Join-Path $taskPackage 'docs') -Force
-Copy-Item -LiteralPath (Join-Path $taskRepo 'docs/teaching-alignment.md') -Destination (Join-Path $taskPackage 'docs') -Force
-Copy-Item -LiteralPath (Join-Path $taskRepo 'docs/robot-base-calibration.md') -Destination (Join-Path $taskPackage 'docs') -Force
-Copy-Item -LiteralPath (Join-Path $taskRepo 'docs/pika-model-reference.md') -Destination (Join-Path $taskPackage 'docs') -Force
-Copy-Item -LiteralPath (Join-Path $taskRepo 'docs/physical-episode-replay.md') -Destination (Join-Path $taskPackage 'docs') -Force
-Copy-Item -LiteralPath (Join-Path $taskRepo 'docs/protocol-acceleration-units.md') -Destination (Join-Path $taskPackage 'docs') -Force
-Copy-Item -LiteralPath (Join-Path $taskRepo 'docs/replay-and-streaming-speed.md') -Destination (Join-Path $taskPackage 'docs') -Force
-Copy-Item -LiteralPath (Join-Path $taskRepo 'docs/multiple-pika-grippers.md') -Destination (Join-Path $taskPackage 'docs') -Force
-Copy-Item -LiteralPath (Join-Path $taskRepo 'docs/simplified-controls.md') -Destination (Join-Path $taskPackage 'docs') -Force
-Copy-Item -LiteralPath (Join-Path $taskRepo 'docs/backend-maintenance.md') -Destination (Join-Path $taskPackage 'docs') -Force
+$taskDocuments=@(
+    'lucky-engine-plugin.md'
+    'workspace-calibration-roadmap.md'
+    'teaching-alignment.md'
+    'robot-base-calibration.md'
+    'pika-model-reference.md'
+    'physical-episode-replay.md'
+    'protocol-acceleration-units.md'
+    'replay-and-streaming-speed.md'
+    'multiple-pika-grippers.md'
+    'simplified-controls.md'
+    'backend-maintenance.md'
+    'follow-preparation.md'
+    'control-state-machines.md'
+)
+foreach($taskDocument in $taskDocuments) {
+    Copy-Item -LiteralPath (Join-Path $taskRepo ('docs/'+$taskDocument)) -Destination (Join-Path $taskPackage 'docs') -Force
+}
 New-Item -ItemType Directory -Path (Join-Path $taskPackage 'tools') -Force | Out-Null
 Copy-Item -LiteralPath (Join-Path $taskRepo 'tools/Setup-PikaUsb.ps1') -Destination (Join-Path $taskPackage 'tools') -Force
 Copy-Item -LiteralPath (Join-Path $taskRepo 'managed/THIRD-PARTY-NOTICES.txt') -Destination $taskPackage -Force
@@ -78,7 +85,7 @@ foreach($taskProject in @('Piper.Contracts','Piper.Core','Piper.Host','Piper.Hos
 Copy-Item -LiteralPath (Join-Path $taskRepo 'vendor/realsense'),(Join-Path $taskRepo 'vendor/camera-licenses') -Destination (Join-Path $taskSource 'vendor') -Recurse -Force
 Copy-Item -LiteralPath (Join-Path $taskRepo 'vendor/plugin-sdk') -Destination (Join-Path $taskSource 'vendor') -Recurse -Force
 Copy-Item -LiteralPath (Join-Path $taskRepo 'NuGet.Config') -Destination $taskSource -Force
-New-Item -ItemType Directory -Path (Join-Path $taskSource 'tools'),(Join-Path $taskSource 'docs') -Force | Out-Null
+New-Item -ItemType Directory -Path (Join-Path $taskSource 'tools') -Force | Out-Null
 foreach($taskFile in @('Build-EnginePlugin.ps1','Prepare-CameraRuntime.ps1','build-windows.ps1','build-native-linux.sh','Setup-PikaUsb.ps1')){Copy-Item -LiteralPath (Join-Path $taskRepo ('tools/'+$taskFile)) -Destination (Join-Path $taskSource 'tools') -Force}
 Copy-Item -LiteralPath (Join-Path $taskRepo 'lucky-plugin.yaml') -Destination $taskSource -Force
 Copy-Item -LiteralPath (Join-Path $taskRepo 'Makefile') -Destination $taskSource -Force
@@ -91,17 +98,7 @@ foreach($taskTest in $taskTestSources) {
 }
 Copy-Item -LiteralPath (Join-Path $taskRepo 'README.md') -Destination $taskSource -Force
 Copy-Item -LiteralPath (Join-Path $taskRepo 'managed/README.md') -Destination (Join-Path $taskSource 'managed') -Force
-Copy-Item -LiteralPath (Join-Path $taskRepo 'docs/lucky-engine-plugin.md') -Destination (Join-Path $taskSource 'docs') -Force
-Copy-Item -LiteralPath (Join-Path $taskRepo 'docs/workspace-calibration-roadmap.md') -Destination (Join-Path $taskSource 'docs') -Force
-Copy-Item -LiteralPath (Join-Path $taskRepo 'docs/teaching-alignment.md') -Destination (Join-Path $taskSource 'docs') -Force
-Copy-Item -LiteralPath (Join-Path $taskRepo 'docs/robot-base-calibration.md') -Destination (Join-Path $taskSource 'docs') -Force
-Copy-Item -LiteralPath (Join-Path $taskRepo 'docs/pika-model-reference.md') -Destination (Join-Path $taskSource 'docs') -Force
-Copy-Item -LiteralPath (Join-Path $taskRepo 'docs/physical-episode-replay.md') -Destination (Join-Path $taskSource 'docs') -Force
-Copy-Item -LiteralPath (Join-Path $taskRepo 'docs/protocol-acceleration-units.md') -Destination (Join-Path $taskSource 'docs') -Force
-Copy-Item -LiteralPath (Join-Path $taskRepo 'docs/replay-and-streaming-speed.md') -Destination (Join-Path $taskSource 'docs') -Force
-Copy-Item -LiteralPath (Join-Path $taskRepo 'docs/multiple-pika-grippers.md') -Destination (Join-Path $taskSource 'docs') -Force
-Copy-Item -LiteralPath (Join-Path $taskRepo 'docs/simplified-controls.md') -Destination (Join-Path $taskSource 'docs') -Force
-Copy-Item -LiteralPath (Join-Path $taskRepo 'docs/backend-maintenance.md') -Destination (Join-Path $taskSource 'docs') -Force
+Copy-Item -LiteralPath (Join-Path $taskPackage 'docs') -Destination $taskSource -Recurse -Force
 Copy-Item -LiteralPath (Join-Path $taskRepo 'managed/THIRD-PARTY-NOTICES.txt') -Destination (Join-Path $taskSource 'managed') -Force
 $taskArchive=Join-Path $taskRepo ('build/Pipers-0.1.0-preview.1-'+$Runtime+'.zip')
 Add-Type -AssemblyName System.IO.Compression

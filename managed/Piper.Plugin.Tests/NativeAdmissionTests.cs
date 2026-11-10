@@ -10,7 +10,7 @@ internal static class NativeAdmissionTests
 
     // Opt in to the real native DLL, always with simulated:true. The default
     // suite needs no native runtime and this fixture never opens CAN or serial.
-    public static async Task Run(Action<bool, string> check)
+    public static async Task Run()
     {
         string? configured = Environment.GetEnvironmentVariable("PIPER_TEST_NATIVE_PATH");
         if (string.IsNullOrWhiteSpace(configured)) return;
@@ -31,7 +31,7 @@ internal static class NativeAdmissionTests
         {
             using var controller = new ControllerService(simulated: true, directory);
             var initial = JsonNode.Parse(controller.Snapshot())!.AsObject();
-            check(initial["simulated"]?.GetValue<bool>() == true, "Native admission fixture did not use the hardware-disabled simulator");
+            Check(initial["simulated"]?.GetValue<bool>() == true, "Native admission fixture did not use the hardware-disabled simulator");
             string device = initial["selected"]!.GetValue<string>();
             long generation = initial["devices"]!.AsArray().OfType<JsonObject>().Single(d => d["id"]!.GetValue<string>() == device)["generation"]!.GetValue<long>();
             string query = new JsonObject { ["device_id"] = device, ["generation"] = generation }.ToJsonString();
@@ -43,7 +43,7 @@ internal static class NativeAdmissionTests
             lock (gate)
             {
                 var accepted = controller.Execute("/api/query", query);
-                check(accepted.Status == 202 && JsonNode.Parse(controller.Snapshot())?["query_active"]?.GetValue<bool>() == true,
+                Check(accepted.Status == 202 && JsonNode.Parse(controller.Snapshot())?["query_active"]?.GetValue<bool>() == true,
                     "Native fixture query was not a valid mutating admission");
                 controller.Execute("/api/stop", "{}");
             }
@@ -102,13 +102,13 @@ internal static class NativeAdmissionTests
                     }
                     cancelled.Cancel();
                     releaseGate.Set();
-                    check(await result.Task.WaitAsync(TimeSpan.FromSeconds(3)), "A cancelled queued native " + route + " request was admitted after the lock became available");
+                    Check(await result.Task.WaitAsync(TimeSpan.FromSeconds(3)), "A cancelled queued native " + route + " request was admitted after the lock became available");
                     await holderDone.Task.WaitAsync(TimeSpan.FromSeconds(3));
                     var after = JsonNode.Parse(controller.Snapshot())!.AsObject();
-                    check(after["selected"]!.GetValue<string>() == before["selected"]!.GetValue<string>() && after["query_active"]?.GetValue<bool>() == false,
+                    Check(after["selected"]!.GetValue<string>() == before["selected"]!.GetValue<string>() && after["query_active"]?.GetValue<bool>() == false,
                         "A cancelled queued native request mutated adapter selection or started a later query");
                     if (stopFirst)
-                        check(after["phase"]?.GetValue<string>() == "stopped" && after["message"]!.GetValue<string>().StartsWith("Operator stop.", StringComparison.Ordinal),
+                        Check(after["phase"]?.GetValue<string>() == "stopped" && after["message"]!.GetValue<string>().StartsWith("Operator stop.", StringComparison.Ordinal),
                             "An old queued request overwrote the native STOP after cancellation");
                 }
                 finally

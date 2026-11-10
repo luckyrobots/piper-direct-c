@@ -45,24 +45,21 @@ public sealed partial class PipersPlugin
     {
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellation);
         deadline.CancelAfter(TimeSpan.FromSeconds(2));
-        var response = await engine.RequestAsync("robot.read", new JsonObject { ["sceneId"] = saved.SceneId, ["entityId"] = saved.RobotId }, deadline.Token);
-        return JsonNode.Parse(response.GetRawText())!.AsObject();
+        return await ReadRobotPose(saved.SceneId, saved.RobotId, deadline.Token);
     }
 
     private void InvalidateReevaluationSetup(string revision)
     {
         calibrationWizard = Wizard with { ModelAssetId = calibrationIdentity!.ModelAssetId, ModelRevision = revision,
-            OperatorSaysTcpMatches = false, Step = CalibrationWizardStep.ModelPoint, History = [] };
-        foreach (string key in new[] { "leftedgeconfirmed", "frame", "edgeroot", "physicalpoint", "sceneconfirmed", "sheetreferencepreview" })
-            Wizard.Answers.Remove(key);
+            Setup = new(), Step = CalibrationWizardStep.ModelPoint };
         Wizard.Answers["reevaluatedscene"] = calibrationIdentity.SceneId;
-        wizardHighlightScope = null; wizardReferenceHighlightScope = null; wizardReferenceAcknowledgedAt = 0;
+        SetMarker(MarkerState.None);
         sheetMarkersDirty = true; sheetMarkersPublished = false;
     }
 
     // A report may commit before its wizard draft. Restore the authoritative
     // model revision and discard old visual confirmations after that interruption.
-    private void ReconcileReevaluatedWizard()
+    internal void ReconcileReevaluatedWizard()
     {
         if (calibrationReevaluation is not null && calibrationIdentity is { } saved &&
             (Wizard.ModelAssetId != saved.ModelAssetId || Wizard.ModelRevision != saved.ModelRevision ||
@@ -73,7 +70,7 @@ public sealed partial class PipersPlugin
         }
     }
 
-    private async Task ReevaluateCalibrationModel(CancellationToken cancellation)
+    internal async Task ReevaluateCalibrationModel(CancellationToken cancellation)
     {
         var saved = calibrationIdentity ?? throw new InvalidOperationException("Capture and save desk points before re-evaluating a corrected model.");
         var root = calibrationOriginal ?? throw new InvalidOperationException("The saved calibration has no original base placement.");
@@ -131,7 +128,7 @@ public sealed partial class PipersPlugin
         {
             reason = "Explicit re-evaluation of saved physical observations after a model correction or reopening the scene; no new hardware capture or motion",
             previousReport = JsonDocument.Parse(previousReport).RootElement.Clone(),
-            previousWizard = Wizard, previousSceneId = saved.SceneId, sceneId = live.SceneId,
+            previousWizard = CalibrationWizardFile.From(Wizard), previousSceneId = saved.SceneId, sceneId = live.SceneId,
             previousModelRevision = saved.ModelRevision, modelRevision = revision, evaluations = receipts
         }, PluginProtocol.Json), cancellation);
         RequireReevaluationScope(saved, live, root, originals);
@@ -147,7 +144,6 @@ public sealed partial class PipersPlugin
         }
         InvalidateReevaluationSetup(revision);
         wizardMessage = "Saved poses re-evaluated in the current scene and model; all physical angles, measurements and capture times are preserved. Reconfirm LEFT, BACK, jaw tips and the desk, then Calculate alignment. Nothing has moved or been applied.";
-        robotCalibrationStatus = wizardMessage;
         await SaveWizard(cancellation);
     }
 }

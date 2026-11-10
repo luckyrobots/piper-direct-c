@@ -73,18 +73,16 @@ public sealed class SimulationFollowDiagnostics(string directory, string session
     private JsonObject? first;
     private readonly List<string> cleanup = [];
     private Task writer = Task.CompletedTask;
-    public string Pathname => path;
     public Task Completion { get { lock (gate) return writer; } }
 
-    public bool Capture(SimulationFollowFailure failure)
+    public void Capture(SimulationFollowFailure failure)
     {
         lock (gate)
         {
-            if (first is not null) return false;
+            if (first is not null) return;
             if (failure.Ordered is { } ordered) failure = failure with { Reason = failure.Reason + " " + ordered.Describe() };
             first = JsonSerializer.SerializeToNode(failure)!.AsObject();
             Queue();
-            return true;
         }
     }
 
@@ -99,8 +97,6 @@ public sealed class SimulationFollowDiagnostics(string directory, string session
             if (changed) Queue();
         }
     }
-
-    public string FirstReason { get { lock (gate) return first?[nameof(SimulationFollowFailure.Reason)]?.GetValue<string>() ?? ""; } }
 
     private void Queue()
     {

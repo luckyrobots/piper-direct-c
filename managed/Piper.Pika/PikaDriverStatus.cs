@@ -8,7 +8,6 @@ namespace LuckyRobots.Piper.Pika;
 public sealed record PikaDriverStatus(int Bits)
 {
     public bool Enabled => (Bits & 0x40) != 0;
-    public bool Homed => (Bits & 0x80) != 0;
     public int FaultMask => Bits & 0x3f;
     public bool HasFault => FaultMask != 0;
     public string Text

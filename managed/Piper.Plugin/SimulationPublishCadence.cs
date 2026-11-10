@@ -33,4 +33,7 @@ public sealed class SimulationPublishCadence
         }
         return TimeSpan.FromSeconds((due - completedTicks) / (double)frequency);
     }
+
+    internal Task WaitAfterPublication(TimeProvider clock, CancellationToken cancellation) =>
+        Task.Delay(DelayAfterPublication(clock.GetTimestamp()), clock, cancellation);
 }

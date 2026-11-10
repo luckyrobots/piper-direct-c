@@ -7,43 +7,67 @@ public sealed record SimulationCameraPreferences(string SceneId, string CameraId
 
 public sealed partial class PipersPlugin
 {
-    private JsonObject? simulationCameras;
+    internal JsonObject? simulationCameras;
 
-    private long simulationCameraRefreshAttempt;
-    private Task? simulationCameraRefreshWorker;
-    private JsonObject? pendingSimulationCameraDiscovery;
-    private readonly CancellationTokenSource cameraDiscoveryShutdown = new();
+    private long simulationCameraDiscoveryEpoch;
+    private sealed record SimulationCameraDiscovery(long Epoch, JsonObject Cameras);
+    private readonly ThrottledProbe<SimulationCameraDiscovery> simulationCameraProbe = new(TimeSpan.FromSeconds(2));
+    internal readonly CancellationTokenSource cameraDiscoveryShutdown = new();
+    private bool CameraDiscoveryRunning => passiveMeasuredTrackingStarted && !cameraDiscoveryShutdown.IsCancellationRequested;
 
-    private async Task StopCameraDiscoveryOnDispose()
+    private async Task MaintainCameraDiscovery(CancellationToken cancellation)
     {
-        await cameraDiscoveryShutdown.CancelAsync();
-        var tasks = new[] { simulationCameraRefreshWorker, cameraDeviceDiscoveryWorker }.OfType<Task>().ToArray();
-        try { await Task.WhenAll(tasks); }
-        catch (OperationCanceledException) { }
-        Interlocked.Exchange(ref pendingSimulationCameraDiscovery, null);
-        Interlocked.Exchange(ref pendingCameraDeviceInventory, null);
-        cameraDiscoveryShutdown.Dispose();
+        if (!CameraDiscoveryRunning || switchingProfile)
+            return;
+        try
+        {
+            if (!await commands.WaitAsync(0, cancellation))
+                return;
+            bool refreshSettings;
+            try
+            {
+                if (!CameraDiscoveryRunning || switchingProfile)
+                    return;
+                // Manual refresh and preference changes also use the command gate.
+                // Probe completion only queues evidence; this tick applies it.
+                QueueSimulationCameraRefresh(cancellation);
+                QueueCameraDeviceRefresh(cancellation);
+                if (!simulationCameraProbe.HasPending && !cameraDeviceProbe.HasPending)
+                    return;
+                using var lifetime = CancellationTokenSource.CreateLinkedTokenSource(cancellation, cameraDiscoveryShutdown.Token);
+                if (simulationCameraProbe.Take() is { } discovered && discovered.Epoch == Interlocked.Read(ref simulationCameraDiscoveryEpoch))
+                    await ApplySimulationCameraDiscovery(discovered.Cameras, lifetime.Token);
+                refreshSettings = await ApplyCameraDeviceInventory(lifetime.Token);
+            }
+            finally { commands.Release(); }
+            if (refreshSettings && CameraDiscoveryRunning && Navigation.Page == WorkspacePage.Settings)
+                await Render(cancellation);
+        }
+        catch (OperationCanceledException) when (cameraDiscoveryShutdown.IsCancellationRequested && !cancellation.IsCancellationRequested)
+        {
+        }
+        catch (Exception error) when (!cancellation.IsCancellationRequested)
+        {
+            System.Diagnostics.Trace.TraceWarning("Camera maintenance: {0}", error.Message);
+        }
     }
 
-    private async Task RefreshSimulationCameraBindings(CancellationToken cancellation)
+    // Stops both discovery probes for shutdown and drops any unapplied result.
+    private async Task RetireCameraDiscovery()
     {
-        QueueSimulationCameraRefresh(cancellation);
-        var discovered = Interlocked.Exchange(ref pendingSimulationCameraDiscovery, null);
-        if (discovered is null || switchingProfile)
-            return;
-        await ApplySimulationCameraDiscovery(discovered, cancellation);
+        await cameraDiscoveryShutdown.CancelAsync();
+        await Task.WhenAll(simulationCameraProbe.Retire(), cameraDeviceProbe.Retire());
+        cameraDiscoveryShutdown.Dispose();
     }
 
     private void QueueSimulationCameraRefresh(CancellationToken cancellation)
     {
-        if (!passiveMeasuredTrackingStarted || cameraDiscoveryShutdown.IsCancellationRequested || switchingProfile || simulationCameraRefreshWorker is { IsCompleted: false } ||
-            simulationCameraRefreshAttempt != 0 && System.Diagnostics.Stopwatch.GetElapsedTime(simulationCameraRefreshAttempt).TotalSeconds < 2)
-            return;
-        simulationCameraRefreshAttempt = System.Diagnostics.Stopwatch.GetTimestamp();
-        simulationCameraRefreshWorker = ReadSimulationCameraDiscovery(cancellation);
+        if (!CameraDiscoveryRunning || switchingProfile) return;
+        long epoch = Interlocked.Read(ref simulationCameraDiscoveryEpoch);
+        simulationCameraProbe.Queue(() => ReadSimulationCameraDiscovery(epoch, cancellation));
     }
 
-    private async Task ReadSimulationCameraDiscovery(CancellationToken cancellation)
+    private async Task<SimulationCameraDiscovery?> ReadSimulationCameraDiscovery(long epoch, CancellationToken cancellation)
     {
         using var lifetime = CancellationTokenSource.CreateLinkedTokenSource(cancellation, cameraDiscoveryShutdown.Token);
         cancellation = lifetime.Token;
@@ -60,7 +84,7 @@ public sealed partial class PipersPlugin
                 if (robots["sceneId"]?.GetValue<string>() == discovered["sceneId"]?.GetValue<string>())
                     discovered["robotInventory"] = robots;
             }
-            Interlocked.Exchange(ref pendingSimulationCameraDiscovery, discovered);
+            return new(epoch, discovered);
         }
         catch (Exception error) when (!cancellation.IsCancellationRequested)
         {
@@ -69,22 +93,14 @@ public sealed partial class PipersPlugin
         catch (OperationCanceledException) when (cancellation.IsCancellationRequested)
         {
         }
-    }
-
-    private string[] SimulationCameraNames() => new[] { "Automatic counterpart" }.Concat(
-        simulationCameras?["cameras"]?.AsArray().Select(c => c?["name"]?.GetValue<string>() ?? "Camera") ?? []).ToArray();
-
-    private int SimulationCameraIndex(string id)
-    {
-        var saved = preferences.SimulationCameras?.GetValueOrDefault(id);
-        if (saved is null || simulationCameras is null) return 0;
-        var cameras = simulationCameras["cameras"]!.AsArray();
-        for (int i = 0; i < cameras.Count; i++) if (cameras[i]?["entityId"]?.GetValue<string>() == saved.CameraId) return i + 1;
-        return 0;
+        return null;
     }
 
     private async Task DiscoverSimulationCameras(CancellationToken cancellation)
     {
+        // An explicit refresh supersedes an older periodic read still in flight.
+        Interlocked.Increment(ref simulationCameraDiscoveryEpoch);
+        simulationCameraProbe.Take();
         var discovered = JsonNode.Parse((await engine.RequestAsync("scene.cameras", cancellation: cancellation)).GetRawText())!.AsObject();
         Materialize(discovered);
         await ApplySimulationCameraDiscovery(discovered, cancellation);
@@ -103,16 +119,29 @@ public sealed partial class PipersPlugin
             await Save(cancellation);
     }
 
-    private async Task CameraComparisonEvent(string camera, string action, JsonElement value, CancellationToken cancellation)
+    private async Task CameraComparisonEvent(string camera, string action, JsonElement value, string wireId, CancellationToken cancellation)
     {
         if (action == "simrefresh") { QueueCameraDeviceRefresh(cancellation, force: true); await DiscoverSimulationCameras(cancellation); await Render(cancellation); return; }
         var bindings = new Dictionary<string, SimulationCameraPreferences>(preferences.SimulationCameras ?? []);
         if (action == "simselect")
         {
-            int index = value.GetInt32() - 1;
-            if (index < 0) bindings.Remove(camera);
-            else if (simulationCameras is not null && index < simulationCameras["cameras"]!.AsArray().Count)
-                bindings[camera] = new(simulationCameras["sceneId"]!.GetValue<string>(), simulationCameras["cameras"]![index]!["entityId"]!.GetValue<string>());
+            var view = Volatile.Read(ref publishedWorkspaceView);
+            var inventory = simulationCameras;
+            int selection = value.GetInt32();
+            const string changed = "Simulation cameras changed. Click Refresh cameras and select the counterpart again.";
+            if (view is null || Volatile.Read(ref workspacePublicationUncertain) != 0 || view.Context != CurrentWorkspaceViewContext ||
+                view.Context is not { Page: WorkspacePage.Settings, SettingsCategory: SettingsCategory.Cameras } || view.Context.SettingsCamera != camera ||
+                wireId != WorkspaceEventScope.Wrap(view.Epoch, view.Context.Profile, "camera." + camera + ".simselect") ||
+                view.CameraChoices.SceneId != (inventory?["sceneId"]?.GetValue<string>() ?? "") ||
+                selection < 0 || selection > view.CameraChoices.Cameras.Length)
+                throw new InvalidOperationException(changed);
+            if (selection == 0) bindings.Remove(camera);
+            else
+            {
+                var selected = new SimulationCameraPreferences(view.CameraChoices.SceneId, view.CameraChoices.Cameras[selection - 1].Id);
+                if (!SimulationCameraRouting.IsAvailable(selected, inventory)) throw new InvalidOperationException(changed);
+                bindings[camera] = selected;
+            }
         }
         else if (action == "simoverlay" && !D405View.MetricDepth(camera, CameraSettings(camera)) && bindings.TryGetValue(camera, out var saved))
             bindings[camera] = saved with { Overlay = !saved.Overlay };
@@ -134,7 +163,7 @@ public sealed partial class PipersPlugin
             if (id == "depth" && string.IsNullOrEmpty(identity)) identity = calibration?["device"]?.GetValue<string>() ?? "";
             bool matches = calibration is not null && (id == "depth"
                 ? CameraProfile.MatchesD405(calibration, identity, size.Width, size.Height, streamKind)
-                : CameraProfile.Matches(calibration, identity, size.Width, size.Height, false));
+                : CameraProfile.MatchesFisheye(calibration, identity, size.Width, size.Height));
             patches[$"camera.{id}.sim"] = new()
             {
                 ["sceneId"] = saved?.SceneId ?? "", ["cameraId"] = saved?.CameraId ?? "",

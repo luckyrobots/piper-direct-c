@@ -13,9 +13,9 @@ public static class MeasuredTrackingPolicy
 public sealed partial class PipersPlugin
 {
     // StartAsync sets this only for the running application, never test fixtures.
-    private bool passiveMeasuredTrackingStarted;
-    private long measuredTrackingAttemptAt;
-    private bool measuredTrackingSceneUnverified;
+    internal bool passiveMeasuredTrackingStarted;
+    internal long measuredTrackingAttemptAt;
+    internal bool measuredTrackingSceneUnverified;
 
     private void RememberMeasuredTracking(bool enabled)
     {
@@ -23,9 +23,9 @@ public sealed partial class PipersPlugin
         preferences = preferences with { Robots = preferences.Robots!.Select(p => p.Id == profile.Id ? profile : p).ToArray() };
     }
 
-    private async Task RestoreMeasuredTracking(CancellationToken cancellation)
+    internal async Task RestoreMeasuredTracking(CancellationToken cancellation)
     {
-        if (SimulationFollowingActive || !passiveMeasuredTrackingStarted || !MeasuredTrackingPolicy.Enabled(ActiveProfile) || switchingProfile || teachingResetBusy ||
+        if (GroupFollowActive || !passiveMeasuredTrackingStarted || !MeasuredTrackingPolicy.Enabled(ActiveProfile) || switchingProfile || CurrentRecovery is not null ||
             teleoperating || followRequest != 0 || state?["motion"]?["active"]?.GetValue<bool>() == true ||
             measuredTrackingAttemptAt != 0 && Stopwatch.GetElapsedTime(measuredTrackingAttemptAt).TotalSeconds < 1) return;
         // Healthy tracking already receives a verified robot.feedback reply.
@@ -39,7 +39,7 @@ public sealed partial class PipersPlugin
         if (!await commands.WaitAsync(0, cancellation)) return;
         try
         {
-            if (!MeasuredTrackingPolicy.Enabled(ActiveProfile) || switchingProfile || teachingResetBusy) return;
+            if (!MeasuredTrackingPolicy.Enabled(ActiveProfile) || switchingProfile || CurrentRecovery is not null || GroupFollowActive) return;
             await StartMeasuredLink(automatic: true, cancellation);
         }
         catch (Exception error) when (!cancellation.IsCancellationRequested)
@@ -55,7 +55,7 @@ public sealed partial class PipersPlugin
     {
         var profile = ActiveProfile;
         string expectedToken = token, expectedRobot = preferences.RobotId;
-        long permissionEpoch = Interlocked.Read(ref targetPermissionEpoch);
+        long permissionEpoch = CommandAuthority.Epoch;
         var initial = Device(expectedToken: expectedToken);
         string deviceId = initial["id"]!.GetValue<string>();
         long generation = initial["generation"]!.GetValue<long>();
@@ -66,7 +66,7 @@ public sealed partial class PipersPlugin
             if (current.Id != profile.Id || current.CanDeviceId != profile.CanDeviceId ||
                 current.PikaDevice != profile.PikaDevice || current.WslDistribution != profile.WslDistribution ||
                 current.RobotJointPrefix != profile.RobotJointPrefix ||
-                preferences.RobotId != expectedRobot || permissionEpoch != Interlocked.Read(ref targetPermissionEpoch) ||
+                preferences.RobotId != expectedRobot || permissionEpoch != CommandAuthority.Epoch ||
                 automatic && (!passiveMeasuredTrackingStarted || !MeasuredTrackingPolicy.Enabled(current)))
                 throw new InvalidOperationException("Robot assignment or permission changed while linking measured feedback.");
             var device = Device(deviceId, generation, expectedToken);
@@ -130,7 +130,7 @@ public sealed partial class PipersPlugin
             // handshake after an otherwise healthy first reply.
             using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellation);
             deadline.CancelAfter(TimeSpan.FromMilliseconds(400));
-            if (primaryActionBusy) await WritePrimaryActionReceipt("link-scene." + method);
+            if (PrimaryActionBusy) await WritePrimaryActionReceipt("link-scene." + method);
             return JsonNode.Parse((await engine.RequestAsync(method, body, deadline.Token)).GetRawText())!.AsObject();
         }
 

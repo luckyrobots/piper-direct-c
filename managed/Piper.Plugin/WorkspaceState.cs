@@ -22,7 +22,7 @@ public sealed record RobotPowerState(int? EnabledCount)
 /// <summary>UI events belong to a particular rendered page and robot; stop remains available across page changes.</summary>
 public static class WorkspaceEventScope
 {
-    private static bool Persistent(string id) => id is "stop" or "disable" or "recovery.guide.cancel" or "motion.hold" or "simulation.stop" or "teaching.reset.abort" or "group.follow.cancel" || id.StartsWith("engine.", StringComparison.Ordinal);
+    private static bool Persistent(string id) => id is "stop" or "disable" or "recovery.guide.cancel" or "motion.hold" or "simulation.stop" or "group.follow.cancel" || id.StartsWith("engine.", StringComparison.Ordinal);
     public static string Wrap(long epoch, string profileId, string id) => Persistent(id)
         ? RobotProfileRouting.ScopeEvent(profileId, id)
         : "view." + epoch.ToString(CultureInfo.InvariantCulture) + "." + RobotProfileRouting.ScopeEvent(profileId, id);
@@ -44,74 +44,101 @@ public static class WorkspaceEventScope
 
 public static class WorkspaceCommandPolicy
 {
-    public static bool RequiresControls(string id) => id is "enable" or "safety.accept" or "teleoperate.toggle" or "zero.all" or "recovery.home" or "recovery.home.incident" or "pika.target" or "pika.minus" or "pika.plus" or "pika.zero" or "engine.robot.target" or "engine.robot.follow" ||
+    public static bool RequiresControls(string id) => id is "enable" or "safety.accept" or "teleoperate.toggle" or "zero.all" or "recovery.home" or "pika.target" or "pika.minus" or "pika.plus" or "pika.zero" or "engine.robot.target" or "engine.robot.follow" ||
         id.StartsWith("joint.", StringComparison.Ordinal) || id.StartsWith("teleoperate.joint.", StringComparison.Ordinal) || id is "simulation.toggle" or "simulation.match";
 }
 
+/// <summary>Plugin-1 workspace navigation, one immutable value per published view.
+/// States: Controls · Recording · Replay · Camera(detail, return page) ·
+/// Settings(category, settings camera). Calibration is not a page: it is open
+/// exactly while bench settings, or a camera enlarged from them, are visible.
+/// <see cref="Navigate"/> is the only transition; PipersPlugin commits its
+/// result inside the view publication gate.</summary>
+internal readonly record struct WorkspaceNavigation(WorkspacePage Page, SettingsCategory Category,
+    string SettingsCamera, string CameraDetail, WorkspacePage CameraReturn)
+{
+    public static readonly WorkspaceNavigation Initial = new(WorkspacePage.Controls, SettingsCategory.Robot, "bench", "bench", WorkspacePage.Controls);
+    public static readonly WorkspaceNavigation Calibration = Initial with { Page = WorkspacePage.Settings, Category = SettingsCategory.Bench };
+
+    public bool CalibrationOpen => Category == SettingsCategory.Bench &&
+        (Page == WorkspacePage.Settings || Page == WorkspacePage.Camera && CameraReturn == WorkspacePage.Settings);
+
+    public static WorkspaceNavigation At(WorkspacePage page, SettingsCategory category = SettingsCategory.Robot) =>
+        Initial with { Page = page, Category = category };
+
+    private static bool IsCamera(string id) => id is "bench" or "depth" or "gripper";
+
+    public WorkspaceNavigation Navigate(string action)
+    {
+        Debug.Assert(CameraReturn != WorkspacePage.Camera, "A camera detail page cannot return to itself.");
+        if (action.StartsWith("settings.", StringComparison.Ordinal))
+        {
+            string[] parts = action[9..].Split('.');
+            var category = parts[0] switch
+            {
+                "cameras" => SettingsCategory.Cameras, "bench" => SettingsCategory.Bench,
+                "diagnostics" => SettingsCategory.Diagnostics, _ => SettingsCategory.Robot
+            };
+            string camera = parts.Length > 1 && category == SettingsCategory.Cameras && IsCamera(parts[1]) ? parts[1] : SettingsCamera;
+            return this with { Page = WorkspacePage.Settings, Category = category, SettingsCamera = camera };
+        }
+        if (action.StartsWith("camera.", StringComparison.Ordinal))
+        {
+            string selected = action[7..];
+            if (!IsCamera(selected)) throw new InvalidOperationException("Unknown camera.");
+            return this with { Page = WorkspacePage.Camera, CameraDetail = selected, CameraReturn = Page == WorkspacePage.Camera ? CameraReturn : Page };
+        }
+        return action switch
+        {
+            "camera-back" => this with { Page = CameraReturn },
+            "controls" => this with { Page = WorkspacePage.Controls },
+            "recording" => this with { Page = WorkspacePage.Recording },
+            "replay" => this with { Page = WorkspacePage.Replay },
+            "calibration" => this with { Page = WorkspacePage.Settings, Category = SettingsCategory.Bench },
+            "settings" => this with { Page = WorkspacePage.Settings },
+            _ => throw new InvalidOperationException("Unknown workspace page.")
+        };
+    }
+}
+
+internal enum WorkspacePage { Controls, Recording, Replay, Camera, Settings }
+internal enum SettingsCategory { Robot, Cameras, Bench, Diagnostics }
+
 public sealed partial class PipersPlugin
 {
-    private string workspacePage = "controls", settingsCategory = "robot", cameraDetail = "bench", cameraReturnPage = "controls";
-    private long workspaceViewEpoch;
+    internal WorkspaceNavigation Navigation { get; set; } = WorkspaceNavigation.Initial;
+    private bool calibrationOpen => Navigation.CalibrationOpen;
+    private string settingsCamera => Navigation.SettingsCamera;
+    private string cameraDetail => Navigation.CameraDetail;
+    internal long workspaceViewEpoch;
     private Task? wizardHighlightMaintenance;
-    private bool connectionDetailsOpen, cameraStreamDetailsOpen, cameraLensDetailsOpen, legacyAlignmentOpen;
+    internal bool connectionDetailsOpen, cameraStreamDetailsOpen, cameraLensDetailsOpen;
 
-    private async Task WorkspaceEvent(string action, CancellationToken cancellation)
+    internal async Task WorkspaceEvent(string action, CancellationToken cancellation)
     {
         action = action.Split('@', 2)[0];
         if (action == "link-info" || action.StartsWith("info.", StringComparison.Ordinal) || action is "recording.camera-info" or "recording.time-info") return;
         if (action == "connection-details") { connectionDetailsOpen = !connectionDetailsOpen; await Render(cancellation); return; }
         if (action == "camera-stream-details") { cameraStreamDetailsOpen = !cameraStreamDetailsOpen; await Render(cancellation); return; }
         if (action == "camera-lens-details") { cameraLensDetailsOpen = !cameraLensDetailsOpen; await Render(cancellation); return; }
-        if (action == "legacy-alignment") { legacyAlignmentOpen = !legacyAlignmentOpen; await Render(cancellation); return; }
-        string page = action;
-        if (action.StartsWith("settings.", StringComparison.Ordinal))
-        {
-            string[] parts = action[9..].Split('.'); settingsCategory = parts[0];
-            if (parts.Length > 1 && parts[0] == "cameras" && parts[1] is "bench" or "depth" or "gripper") settingsCamera = parts[1];
-            page = "settings";
-        }
-        if (action.StartsWith("camera.", StringComparison.Ordinal))
-        {
-            string selected = action[7..];
-            if (selected is not ("bench" or "depth" or "gripper")) throw new InvalidOperationException("Unknown camera.");
-            cameraReturnPage = workspacePage == "camera" ? cameraReturnPage : workspacePage;
-            cameraDetail = selected; page = "camera";
-        }
-        if (action == "camera-back") page = cameraReturnPage;
-        if (page is not ("controls" or "calibration" or "settings" or "recording" or "replay" or "camera")) throw new InvalidOperationException("Unknown workspace page.");
-        if (page == "calibration") { page = "settings"; settingsCategory = "bench"; }
-        if (GroupFollowActive && page == "settings" && settingsCategory == "bench")
+        var next = Navigation.Navigate(action);
+        bool bench = next.Page == WorkspacePage.Settings && next.Category == SettingsCategory.Bench;
+        if (bench && GroupFollowActive)
             throw new InvalidOperationException("Stop following before opening bench calibration. No follower targets were changed.");
-        if (settingsCategory is not ("robot" or "cameras" or "bench" or "controller" or "diagnostics")) settingsCategory = "robot";
-        if (page != workspacePage)
+
+        // End a viewport gesture when hiding its controls. Browsing settings
+        // does not revoke a healthy robot session or interrupt an episode.
+        if (next.Page != Navigation.Page && (teleoperating || followRequest != 0)) await PauseTeleoperation(cancellation);
+        if (bench && !calibrationOpen) await MakeCalibrationReadOnly(cancellation);
+        if (calibrationOpen && !next.CalibrationOpen)
         {
-            bool enteringCalibration = page == "settings" && settingsCategory == "bench";
-            if (enteringCalibration && Volatile.Read(ref simulationSession) is { } simulation)
-                await StopSimulationFollowing(simulation, "Following stopped on leaving Controls", cancellation);
-            // End a viewport gesture when hiding its controls. Browsing settings
-            // does not revoke a healthy robot session or interrupt an episode.
-            if (teleoperating || followRequest != 0) await PauseTeleoperation(cancellation);
-            if (enteringCalibration)
-            {
-                await MakeCalibrationReadOnly(cancellation);
-            }
-            bool nextCalibration = enteringCalibration || page == "camera" && cameraReturnPage == "settings" && settingsCategory == "bench";
-            if (calibrationOpen && !nextCalibration) await StopHeightCheck(cancellation);
-            if (calibrationOpen && !nextCalibration) await ClearWizardHighlight(cancellation);
-            workspacePage = page;
-            calibrationOpen = nextCalibration;
-            alignmentOpen = false;
-            teachingReturnConfirmation = false;
+            await StopHeightCheck(cancellation);
+            await ClearWizardHighlight(cancellation);
         }
-        // Categories share a page: entering/leaving calibration must still update
-        // the read-only capture scope when no top-level navigation occurred.
-        bool calibrationCategory = workspacePage == "settings" && settingsCategory == "bench";
-        if (calibrationCategory && !calibrationOpen) { await MakeCalibrationReadOnly(cancellation); calibrationOpen = true; }
-        if (!calibrationCategory && workspacePage != "camera" && calibrationOpen) { await StopHeightCheck(cancellation); await ClearWizardHighlight(cancellation); calibrationOpen = false; }
-        backendSetupOpen = workspacePage == "settings" && settingsCategory is "controller" or "diagnostics";
-        if (passiveMeasuredTrackingStarted && workspacePage == "settings" && settingsCategory == "robot" && (pikaInventoryAt == 0 || Stopwatch.GetElapsedTime(pikaInventoryAt).TotalSeconds > 5))
+        if (passiveMeasuredTrackingStarted && next is { Page: WorkspacePage.Settings, Category: SettingsCategory.Robot } &&
+            (pikaInventoryAt == 0 || Stopwatch.GetElapsedTime(pikaInventoryAt).TotalSeconds > 5))
             await RefreshPikaInventory(cancellation);
-        await Render(cancellation);
+        await PublishWorkspaceView(cancellation, () => Navigation = next);
     }
 
     private void QueueWizardHighlight()
@@ -125,11 +152,4 @@ public sealed partial class PipersPlugin
         if (!value.TryGetDouble(out double number) || !double.IsFinite(number)) throw new InvalidOperationException(label + " must be a finite number.");
         return number;
     }
-
-    private string CompactConnectionStatus(JsonObject? device) => device is null ? "Waiting for feedback"
-        : device["recovery_required"]?.GetValue<bool>() == true ? "Recovery required"
-        : device["range_recovery"]?["required"]?.GetValue<bool>() == true ? "Range entry needed"
-        : TeachingState.Inspect(device).HandGuiding ? "Hand guiding"
-        : TeachingState.Inspect(device).Active ? "Onboard playback"
-        : "Connected";
 }

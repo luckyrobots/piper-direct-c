@@ -3,13 +3,29 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using LuckyEngine.PluginSdk;
 using LuckyRobots.Piper.Pika;
+using Distribution = LuckyRobots.Piper.Pika.PikaDistribution;
 
 namespace LuckyRobots.Piper.Plugin;
 
+public sealed record AlignmentReference(string Name = "Desk cross / reference object", double X = 0, double DeskY = 0, double Z = 0,
+    double ObjectHeightMm = 0, string ToolPoint = "grasp_site");
+
 public sealed record RobotProfile(string Id, string Name, string CanDeviceId = "", double Speed = 10, double Step = 1, double Tolerance = .5,
     string RobotId = "", CameraPreferences? Gripper = null, CameraPreferences? Depth = null, string DepthSerial = "",
-    Dictionary<string, SimulationCameraPreferences>? SimulationCameras = null, string PikaDevice = "", string WslDistribution = "Ubuntu", int CameraSlot = -1,
-    AlignmentReference? Alignment = null, bool? RememberMeasuredLink = null, string SimulationTransport = SimulationTrajectoryTransport.PositionVelocity, string RobotJointPrefix = "", bool FollowSimulationSelected = false);
+    Dictionary<string, SimulationCameraPreferences>? SimulationCameras = null, string PikaDevice = "", string? WslDistribution = null, int CameraSlot = -1,
+    AlignmentReference? Alignment = null, bool? RememberMeasuredLink = null, string SimulationTransport = SimulationTrajectoryTransport.PositionVelocity, string RobotJointPrefix = "", bool FollowSimulationSelected = false)
+{
+    private readonly string? wslDistribution = Distribution.ForCurrentPlatform(WslDistribution);
+
+    /// <summary>The persisted WSL setting, normalized on every construction, <c>with</c>
+    /// and load by <see cref="Distribution.ForCurrentPlatform"/>: the named
+    /// (or default) WSL distribution on Windows, <c>null</c> (native Linux) elsewhere.
+    /// Record equality therefore compares normalized values.</summary>
+    public string? WslDistribution { get => wslDistribution; init => wslDistribution = Distribution.ForCurrentPlatform(value); }
+
+    /// <summary>The Pika agent distribution for this host, as the backend routes it.</summary>
+    internal string? PikaDistribution => WslDistribution;
+}
 
 /// <summary>Persistent identity and settings projection, independent of the editor and hardware.</summary>
 public static class RobotProfileRouting
@@ -20,7 +36,7 @@ public static class RobotProfileRouting
         RobotProfile[] profiles = value.Robots is { Length: > 0 } ? value.Robots :
             [new("piper-1", "Piper 1", Speed: value.Speed, Step: value.Step, Tolerance: value.Tolerance, RobotId: value.RobotId,
                 Gripper: value.Gripper, Depth: value.Depth, DepthSerial: value.DepthSerial,
-                SimulationCameras: RobotCameras(value.SimulationCameras), PikaDevice: value.Backend?.PikaDevice ?? "", WslDistribution: value.Backend?.WslDistribution ?? "Ubuntu",
+                SimulationCameras: RobotCameras(value.SimulationCameras), PikaDevice: value.Backend?.PikaDevice ?? "", WslDistribution: value.Backend?.WslDistribution,
                 SimulationTransport: SimulationTrajectoryTransport.Name(value.SimulationTransport))];
         if (profiles.Length > MaximumProfiles || profiles.Select(p => p.Id).Distinct(StringComparer.Ordinal).Count() != profiles.Length ||
             profiles.Any(p => p.Id.Length is 0 or > 64 || p.Id.Any(c => !char.IsAsciiLetterOrDigit(c) && c is not ('-' or '_'))))
@@ -67,15 +83,6 @@ public static class RobotProfileRouting
 
     public static string CanInventoryKey(JsonObject snapshot) => JsonSerializer.Serialize(snapshot["devices"]!.AsArray().OfType<JsonObject>()
         .Select(d => new { Id = d["id"]?.GetValue<string>(), Name = d["name"]?.GetValue<string>(), Present = d["present"]?.GetValue<bool>() == true }).OrderBy(d => d.Id, StringComparer.Ordinal));
-
-    public static Preferences RefreshCameraBindings(Preferences value, string sceneId, IEnumerable<string> cameraIds)
-    {
-        var available = cameraIds.ToHashSet(StringComparer.Ordinal);
-        Dictionary<string, SimulationCameraPreferences>? Refresh(Dictionary<string, SimulationCameraPreferences>? bindings) => bindings?.ToDictionary(pair => pair.Key,
-            pair => available.Contains(pair.Value.CameraId) ? pair.Value with { SceneId = sceneId } : pair.Value);
-        return value with { SimulationCameras = Refresh(value.SimulationCameras),
-            Robots = value.Robots?.Select(p => p with { SimulationCameras = Refresh(p.SimulationCameras) }).ToArray() };
-    }
 
     private static Dictionary<string, SimulationCameraPreferences> RobotCameras(Dictionary<string, SimulationCameraPreferences>? cameras) =>
         new((cameras ?? []).Where(p => p.Key != "bench"));
@@ -145,14 +152,14 @@ public sealed partial class PipersPlugin
     private bool canInventoryRenderPending;
     private RobotProfile ActiveProfile => RobotProfileRouting.Active(preferences);
     private string CameraImageId(string id) => id == "bench" ? id : "piper-" + ActiveProfile.CameraSlot + "." + id;
-    private bool CameraFrameReady(string id) => cameras.TryGetValue(id, out var camera) && camera.PublishedFrame is { } frame &&
+    private bool CameraFrameReady(string id) => cameras.Get(id)?.PublishedFrame is { } frame &&
         DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - frame.TimestampUnixMicroseconds / 1000 < 2000;
-    private string ScopeWidgetId(string id) => WorkspaceEventScope.Wrap(PublishedWorkspaceEpoch, ActiveProfile.Id, id);
     private static Widget ScopeRobotWidget(Widget widget, long epoch, string profileId) => widget with {
         Id = WorkspaceEventScope.Wrap(epoch, profileId, widget.Id), Children = widget.Children?.Select(child => ScopeRobotWidget(child, epoch, profileId)).ToArray() };
-    private Task Patch(Dictionary<string, JsonObject> patches, CancellationToken cancellation) => engine.PatchAsync(Panel,
-        patches.ToDictionary(p => ScopeWidgetId(p.Key), p => p.Value), cancellation);
-    private string UnscopeEvent(string id) => UnscopePublishedWorkspaceEvent(id);
+    private Task Patch(Dictionary<string, JsonObject> patches, CancellationToken cancellation) =>
+        CaptureWorkspacePatchScope() is { } scope
+            ? PublishWorkspacePatch(scope, patches, cancellation)
+            : Task.CompletedTask;
 
     private Widget RobotSidebar()
     {
@@ -162,7 +169,7 @@ public sealed partial class PipersPlugin
             Widget.Label("profiles.heading", "ROBOTS") with { Appearance = "muted" },
             Widget.Column("profiles.list", rows) with { Spacing = 8 },
             GroupFollowControls(),
-            (workspacePage == "camera" && cameraDetail == "bench" ? Widget.Label("workspace.bench.enlarged", "Bench camera is enlarged") with { Height = 60, Appearance = "muted" } : Camera("bench", "Bench camera")),
+            (Navigation.Page == WorkspacePage.Camera && cameraDetail == "bench" ? Widget.Label("workspace.bench.enlarged", "Bench camera is enlarged") with { Height = 60, Appearance = "muted" } : Camera("bench", "Bench camera")),
             Widget.Button("workspace.camera.bench@compare", "Enlarge & compare") with { Appearance = "quiet", Hint = "The bench camera is shared by every robot." }) with { Width = 170, Padding = 12, Spacing = 14, Appearance = "sidebar" };
     }
 
@@ -174,13 +181,6 @@ public sealed partial class PipersPlugin
             GroupFollowIncludes(profile.Id) ? "In follower group" : "connected";
         return profile.Name + "\n" + status;
     }
-
-    private int CanIndex() => Array.IndexOf(knownCanIds, ActiveProfile.CanDeviceId) + 1;
-    private string[] CanOptions() => new[] { "Unassigned" }.Concat(knownCanIds.Select(id =>
-    {
-        var device = state?["devices"]?.AsArray().FirstOrDefault(d => d?["id"]?.GetValue<string>() == id);
-        return (device?["name"]?.GetValue<string>() ?? "Adapter") + (device?["present"]?.GetValue<bool>() == true ? "" : " (offline)") + " · " + id;
-    })).ToArray();
 
     private async Task ObserveProfileRouting(JsonObject snapshot, CancellationToken cancellation)
     {
@@ -208,7 +208,7 @@ public sealed partial class PipersPlugin
         }
         if (!switchingProfile && !string.IsNullOrEmpty(ActiveProfile.CanDeviceId) && snapshot["selected"]?.GetValue<string>() != ActiveProfile.CanDeviceId)
         {
-            approved = false; linkCommandsEnabled = false; recoveryInProgress = false;
+            approved = false; linkCommandsEnabled = false;
             if (teleoperating && await commands.WaitAsync(0, cancellation))
             {
                 try { await PauseTeleoperation(cancellation); }
@@ -222,17 +222,19 @@ public sealed partial class PipersPlugin
         {
             try
             {
-                var patches = new Dictionary<string, JsonObject> { ["profiles.can"] = new() { ["options"] = JsonSerializer.SerializeToNode(CanOptions()), ["value"] = CanIndex() } };
+                var adapterIds = knownCanIds;
+                var patches = new Dictionary<string, JsonObject>();
+                string[] settingsOptions = ["Unassigned", .. adapterIds.Select(CanFriendlyName)];
                 foreach (var p in preferences.Robots!) patches["global.robot." + p.Id + ".can"] = new() {
-                    ["options"] = JsonSerializer.SerializeToNode(new[] { "Unassigned" }.Concat(knownCanIds.Select(CanFriendlyName))),
-                    ["value"] = Array.IndexOf(knownCanIds, p.CanDeviceId) + 1 };
+                    ["options"] = JsonSerializer.SerializeToNode(settingsOptions),
+                    ["value"] = Array.IndexOf(adapterIds, p.CanDeviceId) + 1 };
                 await Patch(patches, cancellation); canInventoryRenderPending = false;
             }
             finally { commands.Release(); }
         }
     }
 
-    private void AddProfilePatches(Dictionary<string, JsonObject> patches)
+    internal void AddProfilePatches(Dictionary<string, JsonObject> patches)
     {
         foreach (var profile in preferences.Robots!)
         {
@@ -244,30 +246,13 @@ public sealed partial class PipersPlugin
         patches["profiles.can.status"] = new() { ["text"] = string.IsNullOrEmpty(can) ? "No CAN adapter assigned · scene and robot cameras can still be configured."
             : snapshotSelected() == can ? "Active CAN · " + can : "Assigned CAN inactive or disconnected · " + can };
         string snapshotSelected() => state?["selected"]?.GetValue<string>() ?? "";
-        patches["enable"] = new() { ["enabled"] = !switchingProfile && can.Length > 0 && snapshotSelected() == can };
     }
 
-    private async Task ProfileEvent(string action, JsonElement value, CancellationToken cancellation)
+    private async Task ProfileEvent(string action, CancellationToken cancellation)
     {
         // An explicit profile edit/selection supersedes the one-time legacy
         // import, even if controller feedback has not arrived yet.
         legacyImportPending = false;
-        if (action == "name")
-        {
-            var profile = ActiveProfile with { Name = RobotProfileRouting.CleanName(value.GetString() ?? "") };
-            preferences = preferences with { Robots = preferences.Robots!.Select(p => p.Id == profile.Id ? profile : p).ToArray() };
-            await Save(cancellation); return;
-        }
-        if (action is "pika" or "wsl")
-        {
-            var profile = action == "pika" ? ActiveProfile with { PikaDevice = value.GetString()?.Trim() ?? "" } : ActiveProfile with { WslDistribution = value.GetString()?.Trim() ?? "" };
-            PikaProcessService.ValidateConfiguration(profile.PikaDevice, OperatingSystem.IsWindows() ? profile.WslDistribution : null);
-            if (profile.PikaDevice.Length > 0 && preferences.Robots!.Any(p => p.Id != profile.Id && p.PikaDevice == profile.PikaDevice && p.WslDistribution == profile.WslDistribution))
-                throw new InvalidOperationException("That Pika serial device is assigned to another robot.");
-            await ReleaseProfileControl(cancellation);
-            preferences = preferences with { Robots = preferences.Robots!.Select(p => p.Id == profile.Id ? profile : p).ToArray() };
-            await Save(cancellation); message = "Pika assignment saved. Enable this robot to connect its selected gripper."; return;
-        }
         if (action == "add")
         {
             if (preferences.Robots!.Length >= RobotProfileRouting.MaximumProfiles) throw new InvalidOperationException("At most eight robots are supported in this workspace.");
@@ -275,29 +260,12 @@ public sealed partial class PipersPlugin
                 Gripper: new("", false), Depth: new("", false), CameraSlot: Enumerable.Range(0, RobotProfileRouting.MaximumProfiles).First(i => preferences.Robots.All(p => p.CameraSlot != i)));
             await SwitchProfile(profile, append: true, cancellation); return;
         }
-        if (action == "remove")
-        {
-            if (preferences.Robots!.Length <= 1) throw new InvalidOperationException("Keep at least one robot profile.");
-            string removed = ActiveProfile.Id;
-            await SwitchProfile(preferences.Robots.First(p => p.Id != removed), false, cancellation);
-            preferences = preferences with { Robots = preferences.Robots!.Where(p => p.Id != removed).ToArray() };
-            await Save(cancellation); return;
-        }
         if (action.StartsWith("select.", StringComparison.Ordinal))
         {
             var profile = RobotProfileRouting.Capture(preferences).Robots!.Single(p => p.Id == action[7..]);
             await SwitchProfile(profile, false, cancellation); return;
         }
-        if (action == "activate") { await SwitchProfile(ActiveProfile, false, cancellation); return; }
-        if (action == "can")
-        {
-            int index = value.GetInt32() - 1;
-            var choices = knownCanIds;
-            if (index < -1 || index >= choices.Length) throw new InvalidOperationException("CAN selection is no longer available.");
-            string canId = index < 0 ? "" : choices[index];
-            RobotProfileRouting.ValidateCanAssignment(preferences, ActiveProfile.Id, canId);
-            await SwitchProfile(ActiveProfile with { CanDeviceId = canId }, false, cancellation);
-        }
+        throw new InvalidOperationException("Unknown robot profile action.");
     }
 
     private async Task ReleaseProfileControl(CancellationToken cancellation)
@@ -326,34 +294,10 @@ public sealed partial class PipersPlugin
         // Switching the visible robot does not release holding power on its
         // independent gripper session. All owned sessions keep heartbeating.
         if (link is not null) await engine.RequestAsync("robot.unsubscribe", cancellation: cancellation);
-        teleoperating = false; followInput.End(); followRequest = lease = lastCommand = 0;
-        approved = pikaOwned = pikaMonitoring = linkCommandsEnabled = recoveryInProgress = false; link = null; linkErrorDegrees = null;
+        CommandAuthority.Revoke();
+        StopViewportDrag();
+        approved = linkCommandsEnabled = false; ReleasePikaRole(); link = null; linkErrorDegrees = null;
         CancelHandGuideRecovery();
-    }
-
-    private async Task ReleaseOwnPika(CancellationToken cancellation)
-    {
-        if (state?["pika"]?["owner"]?.GetValue<string>() != owner)
-        {
-            pikaOwned = pikaMonitoring = false;
-            return; // Never disable or disconnect a foreign client's agent.
-        }
-        if (!PikaMatchesProfile()) throw new InvalidOperationException("Pika assignment changed outside this robot profile. Reconnect its original assignment before switching.");
-        if (pikaOwned || state?["pika"]?["power_requested"]?.GetValue<bool>() == true)
-        {
-            await Call("/api/pika/disable", new JsonObject { ["owner"] = owner }, cancellation);
-            long started = Stopwatch.GetTimestamp();
-            while (state?["pika"]?["fresh"]?.GetValue<bool>() != true || state["pika"]?["enabled"]?.GetValue<bool>() != false)
-            {
-                if (Stopwatch.GetElapsedTime(started).TotalSeconds > 3) throw new InvalidOperationException("Pika disable is not verified. Keep this robot selected and restore its gripper connection before switching.");
-                await Task.Delay(25, cancellation);
-            }
-        }
-        // A read-only monitor never armed its agent. EOF/disconnect therefore
-        // releases serial ownership without turning off externally enabled Pika.
-        await Call("/api/pika/disconnect", new JsonObject { ["owner"] = owner }, cancellation);
-        pikaOwned = pikaMonitoring = false;
-        pikaMonitorStatus = "Pika telemetry starts read-only when the scene is linked.";
     }
 
     private async Task SwitchProfile(RobotProfile profile, bool append, CancellationToken cancellation)
@@ -362,24 +306,22 @@ public sealed partial class PipersPlugin
         if (groupViewOnly && (append || !preferences.Robots!.Any(p => p.Id == profile.Id && p.CanDeviceId == profile.CanDeviceId &&
             p.RobotId == profile.RobotId && p.RobotJointPrefix == profile.RobotJointPrefix && p.PikaDevice == profile.PikaDevice && p.WslDistribution == profile.WslDistribution)))
             throw new InvalidOperationException("Stop grouped following before changing a robot assignment.");
-        if (calibrationWorker is { IsCompleted: false }) throw new InvalidOperationException("Finish camera setup/calibration before switching robots.");
-        await FinishAlignment("Robot profile changed", cancellation);
+        if (LensWorkerBusy) throw new InvalidOperationException("Finish camera setup/calibration before switching robots.");
         switchingProfile = true;
         try
         {
             if (!groupViewOnly) await ReleaseProfileControl(cancellation);
-            else { link = null; approved = pikaOwned = pikaMonitoring = linkCommandsEnabled = false; lease = lastCommand = 0; }
+            else { CommandAuthority.Revoke(); link = null; approved = linkCommandsEnabled = false; ReleasePikaRole(); }
             await FinishPikaTeaching("Robot profile or hardware assignment changed", cancellation);
             StorePikaTeachingWorkspace(ActiveProfile);
             preferences = RobotProfileRouting.Capture(preferences);
-            foreach (string id in new[] { "gripper", "depth" }) if (cameras.Remove(id, out var camera)) await camera.DisposeAsync();
+            foreach (string id in new[] { "gripper", "depth" }) await cameras.ReplaceAsync(id, startReplacement: null);
             var profiles = append ? preferences.Robots!.Append(profile).ToArray() : preferences.Robots!.Select(p => p.Id == profile.Id ? profile : p).ToArray();
             preferences = RobotProfileRouting.Activate(preferences with { Robots = profiles }, profile.Id);
             RestorePikaTeachingWorkspace(ActiveProfile);
-            LoadAlignmentSummary();
             cameraCalibration.Clear(); cameraDimensions.TryRemove("gripper", out _); cameraDimensions.TryRemove("depth", out _);
             cameraStatus["gripper"] = cameraStatus["depth"] = "Connecting…";
-            calibrationSession = null; calibrationLastSequence = 0; calibrationStatus = "No lens calibration. Camera mount remains unverified.";
+            lens = LensSession.Initial;
             await LoadCameraCalibration(cancellation);
             try
             {
@@ -402,16 +344,14 @@ public sealed partial class PipersPlugin
         finally { switchingProfile = false; }
     }
 
-    private bool PikaMatchesProfile() => PikaMatchesProfile(state?["pika"] as JsonObject);
-    private bool PikaMatchesProfile(JsonObject? pika) => ActiveProfile.PikaDevice.Length > 0 && pika?["device"]?.GetValue<string>() == ActiveProfile.PikaDevice &&
-        (!OperatingSystem.IsWindows() || pika?["distribution"]?.GetValue<string>() == ActiveProfile.WslDistribution);
+    private bool PikaMatchesProfile() => ProfilePikaRouting.Matches(ActiveProfile, state?["pika"] as JsonObject);
 
-    private async Task ConfigureProfilePika(CancellationToken cancellation)
+    private async Task ConfigureProfilePika(string expectedToken, CancellationToken cancellation)
     {
         if (ActiveProfile.PikaDevice.Length == 0 || PikaMatchesProfile()) return;
         if (state?["motion"]?["active"]?.GetValue<bool>() == true) throw new InvalidOperationException("Finish arm movement before changing the Pika assignment.");
         await Call("/api/pika/configure", new JsonObject { ["owner"] = owner, ["device"] = ActiveProfile.PikaDevice,
-            ["distribution"] = OperatingSystem.IsWindows() ? ActiveProfile.WslDistribution : null }, cancellation);
+            ["distribution"] = ActiveProfile.PikaDistribution }, cancellation, expectedToken);
         long started = Stopwatch.GetTimestamp();
         while (!PikaMatchesProfile())
         {

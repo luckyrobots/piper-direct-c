@@ -33,7 +33,7 @@ static bool line(FILE *out,cJSON *o)
 }
 static bool ready(struct can_device *d,double now)
 {
-    if (!d||!d->present||!d->up||!d->stable||(!d->simulated&&d->fd<0)) return false;
+    if (!d||!d->present||!d->up||!d->stable||!can_bus_transport_open(d)) return false;
     if (!piper_fresh(&d->feedback.arm[0],now)) return false;
     for (unsigned i=1;i<3;++i)
         if (piper_fresh(&d->feedback.arm[i],now)) return false;

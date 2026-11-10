@@ -57,44 +57,89 @@ export class JsonStream {
 
 if (typeof document !== 'undefined') {
   const $ = id => document.getElementById(id);
-  let port, reader, reading, writer, busy = false, armed = false, feedback, at = 0, stream, simulation = true, serverAt = 0, stopPending = false, pending = null;
-  let consent = false, autoConnect = true, robotEnabled = false, powerStopped = false;
-  const confirmControl = async () => { consent = typeof window.confirmPiperControl === 'function' ? await window.confirmPiperControl() : window.confirm("Make sure it's safe to move the gripper."); return consent; };
+  /* Web-C/D Pika session. Every control state lives in the `session` record;
+     each field below names the only code that changes it. The plain variables
+     after it are data (I/O handles, telemetry and the last server snapshot).
+
+     session.phase (setPhase):
+       disconnected -> connecting     connect() starts opening a port
+       connecting   -> read-only      the port is open; telemetry is read, nothing is sent
+       connecting   -> disconnected   opening fails
+       read-only    -> armed          enable (11) was written and not interrupted by STOP
+       armed        -> moving         a position (22) was written; `target` awaits measured arrival
+       moving       -> moving         a new position replaces the pending one
+       moving       -> armed          measured arrival within tolerance
+       armed|moving -> read-only      disarm(): disable, STOP, stale telemetry, server loss or a failed command
+       any          -> disconnected   the read loop ends or the operator disconnects
+     session.target   exists only while moving (setPhase enforces it).
+     session.busy     one operator operation runs at a time (run()).
+     session.writing  exists only while a serial write is in flight (write()).
+                      STOP (stopPika) marks it interrupted; the write then sends disable
+                      unless it was itself a disable, and reports false so its
+                      caller neither arms nor moves. The record dies with the
+                      write, so a STOP can never leak into a later command (B18).
+     session.stopLatched  set by every STOP (stopPika) and cleared only when the
+                      robot itself is disabled (piper-state) or connect() opens a
+                      new port, so robot power cannot re-arm the jaws behind the
+                      operator's back.
+     session.consent  the operator's finger-clear acknowledgement for this
+                      connection: set by confirmControl() or the robot-power
+                      enable, cleared by disconnect(). */
+  const transitions = {
+    disconnected: ['connecting'],
+    connecting: ['read-only', 'disconnected'],
+    'read-only': ['armed', 'disconnected'],
+    armed: ['moving', 'read-only', 'disconnected'],
+    moving: ['armed', 'moving', 'read-only', 'disconnected'],
+  };
+  const session = { phase: 'disconnected', target: null, busy: false, writing: null, stopLatched: false, consent: false };
+  function setPhase(next, nextTarget = null) {
+    if ((next !== session.phase || next === 'moving') && !transitions[session.phase].includes(next)) throw Error(`Invalid Pika transition ${session.phase} -> ${next}`);
+    if ((next === 'moving') !== !!nextTarget) throw Error('A Pika target exists only while moving');
+    session.phase = next; session.target = nextTarget;
+  }
+  const armed = () => session.phase === 'armed' || session.phase === 'moving';
+  const disarm = () => { if (armed()) setPhase('read-only'); };
+  // Data: serial handles, telemetry, the last /api/state snapshot and the operator's auto-connect preference.
+  let port, reader, reading, feedback, at = 0, simulation = true, serverAt = 0;
+  let autoConnect = true, robotEnabled = false;
+  const confirmControl = async () => { session.consent = await window.confirmPiperControl(); return session.consent; };
   let backendSerial = false, backendDisabled = /Win/i.test(navigator.platform || ''), apiToken = '';
   const status = text => { $('pika-status').textContent = text; };
   const fresh = () => feedback && performance.now() - at < 2000;
   const allowed = () => !simulation && performance.now() - serverAt < 6000;
   function render() {
-    $('pika-connect').disabled = busy || !!port || !allowed() || (!backendSerial && (backendDisabled || !navigator.serial));
-    $('pika-disconnect').disabled = busy || !port;
-    $('pika-enable').disabled = busy || !port || !fresh() || !allowed();
-    $('pika-disable').disabled = busy || !port;
-    for (const id of ['pika-close', 'pika-open']) $(id).disabled = busy || !!pending || !armed || !fresh() || !allowed();
-    if ($('pika-measured')) $('pika-measured').textContent = feedback && fresh() ? `${widthFromAngle(feedback.motor.Position).toFixed(2)} mm` : '— mm';
-    if ($('pika-zero')) $('pika-zero').disabled = busy || !!pending || !armed || !fresh() || !allowed();
-    if ($('pika-slider')) {
-      $('pika-slider').disabled = busy || !!pending || !armed || !fresh() || !allowed();
-      if (fresh() && !busy && !pending && document.activeElement !== $('pika-slider')) $('pika-slider').value = Math.max(0, Math.min(90, widthFromAngle(feedback.motor.Position)));
-    }
+    const connected = session.phase !== 'disconnected' && session.phase !== 'connecting';
+    const movable = !session.busy && session.phase === 'armed' && fresh() && allowed();
+    $('pika-connect').disabled = session.busy || session.phase !== 'disconnected' || !allowed() || (!backendSerial && (backendDisabled || !navigator.serial));
+    $('pika-disconnect').disabled = session.busy || !connected;
+    $('pika-enable').disabled = session.busy || !connected || !fresh() || !allowed();
+    $('pika-disable').disabled = session.busy || !connected;
+    for (const id of ['pika-close', 'pika-open', 'pika-zero', 'pika-slider']) $(id).disabled = !movable;
+    $('pika-measured').textContent = feedback && fresh() ? `${widthFromAngle(feedback.motor.Position).toFixed(2)} mm` : '— mm';
+    if (fresh() && !session.busy && session.phase !== 'moving' && document.activeElement !== $('pika-slider')) $('pika-slider').value = Math.max(0, Math.min(90, widthFromAngle(feedback.motor.Position)));
     $('pika-feedback').textContent = feedback ? `${fresh() ? 'FRESH' : 'STALE'} · model opening ${widthFromAngle(feedback.motor.Position).toFixed(2)} mm\n${JSON.stringify(feedback, null, 2)}` : 'No Pika telemetry';
   }
+  // Returns false when a STOP arrived during the write; the caller must not arm or move.
   async function write(command, value) {
     if (!port?.writable) throw Error('Pika serial is not connected');
-    writer = port.writable.getWriter();
-    try { await writer.write(packet(command, value)); } finally { writer.releaseLock(); writer = null; }
-    if (stopPending && command !== 10) { stopPending = false; await disable(); }
+    const writing = session.writing = { interrupted: false }, writer = port.writable.getWriter();
+    try { await writer.write(packet(command, value)); } finally { writer.releaseLock(); session.writing = null; }
+    if (!writing.interrupted) return true;
+    if (command !== 10) await disable();
+    return false;
   }
   async function disable() {
-    armed = false; pending = null;
-    if (port?.writable && !writer) await write(10);
+    disarm();
+    if (port?.writable && !session.writing) await write(10);
     status('Disable sent; check raw feedback. Serial writes are not acknowledgements.');
   }
   async function disconnect() {
-    armed = false;
+    if (session.phase !== 'disconnected') setPhase('disconnected');
     if (reader) await reader.cancel().catch(() => {});
     if (reading) await reading;
     if (port) await port.close().catch(() => {});
-    port = null; feedback = null; at = 0; consent = false;
+    port = null; feedback = null; at = 0; session.consent = false;
     status('Disconnected'); render();
   }
   async function readLoop() {
@@ -106,44 +151,57 @@ if (typeof document !== 'undefined') {
         for (const data of parser.push(decoder.decode(value, { stream: true }))) {
           if (typeof data.motor?.Position === 'number' && Number.isFinite(data.motor.Position) && data.motorstatus) {
             feedback = data; at = performance.now();
-            if (pending) {
+            if (session.phase === 'moving') {
               const measured = widthFromAngle(data.motor.Position);
-              if (Math.abs(measured - pending.target) <= arrivalToleranceMm && Math.abs(data.motor.Speed) <= .02) {
-                if (pending.arrived === null) pending.arrived = at;
-                if (at - pending.arrived >= 150) {
-                  status(`Reached ${measured.toFixed(2)} mm (target ${pending.target.toFixed(2)} mm; within ${arrivalToleranceMm.toFixed(1)} mm).`);
-                  pending = null;
+              if (Math.abs(measured - session.target.width) <= arrivalToleranceMm && Math.abs(data.motor.Speed) <= .02) {
+                if (session.target.arrived === null) session.target.arrived = at;
+                if (at - session.target.arrived >= 150) {
+                  status(`Reached ${measured.toFixed(2)} mm (target ${session.target.width.toFixed(2)} mm; within ${arrivalToleranceMm.toFixed(1)} mm).`);
+                  setPhase('armed');
                 }
-              } else pending.arrived = null;
+              } else session.target.arrived = null;
             }
             render();
           }
         }
       }
     } catch (e) { status(`Serial read stopped: ${e.message}`); }
-    finally { reader.releaseLock(); reader = null; armed = false; pending = null; at = 0; const ended = port; port = null; if (ended) await ended.close().catch(() => {}); render(); }
+    finally {
+      reader.releaseLock(); reader = null; at = 0;
+      if (session.phase !== 'disconnected') setPhase('disconnected');
+      const ended = port; port = null; if (ended) await ended.close().catch(() => {}); render();
+    }
   }
   async function run(fn) {
-    if (busy) return;
-    busy = true; render();
+    if (session.busy) return;
+    session.busy = true; render();
     try { await fn(); }
     catch (e) {
-      const wasArmed = armed; armed = false;
-      if (wasArmed) await disable().catch(() => {});
+      if (armed()) await disable().catch(() => {});
       status(e.message);
-    } finally { busy = false; render(); }
+    } finally { session.busy = false; render(); }
+  }
+  async function moveTo(width) {
+    const angle = angleFromWidth(width);
+    if (await write(22, angle) && armed()) setPhase('moving', { width, started: performance.now(), arrived: null });
+  }
+  async function enable(message) {
+    if (await write(11) && session.phase === 'read-only') { setPhase('armed'); status(message); }
   }
   const connect = async () => {
     if (!allowed()) throw Error('Pika hardware is unavailable in simulation or while the C server is offline');
     if (backendDisabled && !backendSerial) throw Error('Windows WCH serial is disabled after repeated driver crashes. Configure the Linux USB transport.');
+    setPhase('connecting');
     let chosen;
-    if (backendSerial) chosen = await RemotePikaPort.connect({ token: () => apiToken, clear: () => consent });
-    else {
-      const granted = navigator.serial.getPorts ? (await navigator.serial.getPorts()).filter(p => p.getInfo().usbVendorId === 0x1a86) : [];
-      chosen = granted.length === 1 ? granted[0] : await navigator.serial.requestPort({ filters: [{ usbVendorId: 0x1a86 }] });
-      await chosen.open({ baudRate: 460800, dataBits: 8, stopBits: 1, parity: 'none', flowControl: 'none' });
-    }
-    port = chosen; feedback = null; armed = false; powerStopped = false; at = 0; reading = readLoop();
+    try {
+      if (backendSerial) chosen = await RemotePikaPort.connect({ token: () => apiToken, clear: () => session.consent });
+      else {
+        const granted = navigator.serial.getPorts ? (await navigator.serial.getPorts()).filter(p => p.getInfo().usbVendorId === 0x1a86) : [];
+        chosen = granted.length === 1 ? granted[0] : await navigator.serial.requestPort({ filters: [{ usbVendorId: 0x1a86 }] });
+        await chosen.open({ baudRate: 460800, dataBits: 8, stopBits: 1, parity: 'none', flowControl: 'none' });
+      }
+    } catch (e) { setPhase('disconnected'); throw e; }
+    port = chosen; feedback = null; session.stopLatched = false; at = 0; setPhase('read-only'); reading = readLoop();
     status(`Connected ${backendSerial ? 'through the Linux serial driver' : 'at 460800 baud'}; reading only. Waiting for Pika motor telemetry.`);
   };
   $('pika-connect').onclick = () => { autoConnect = true; return run(connect); };
@@ -151,49 +209,43 @@ if (typeof document !== 'undefined') {
   $('pika-enable').onclick = () => run(async () => {
     if (!allowed() || !fresh()) throw Error('Fresh gripper telemetry is required');
     if (!await confirmControl()) return;
-    await write(11); armed = true; status('Enable sent (not acknowledged). Choose a bounded 1 or 5 mm step.');
+    await enable('Enable sent (not acknowledged). Choose a bounded 1 or 5 mm step.');
   });
   $('pika-disable').onclick = () => run(disable);
   for (const [id, direction] of [['pika-close', -1], ['pika-open', 1]]) $(id).onclick = () => run(async () => {
-    if (pending) throw Error('Wait for the current Pika step to finish');
-    if (!allowed() || !fresh() || !armed || !document.hasFocus()) throw Error('Reconnect/enable with fresh telemetry and finger-clear confirmation first');
+    if (session.phase === 'moving') throw Error('Wait for the current Pika step to finish');
+    if (!allowed() || !fresh() || !armed() || !document.hasFocus()) throw Error('Reconnect/enable with fresh telemetry and finger-clear confirmation first');
     const step = Number($('pika-step').value || 1);
     if (![1, 5].includes(step)) throw Error('Choose a 1 or 5 mm step');
-    const measured = widthFromAngle(feedback.motor.Position), target = measured + direction * step;
+    const measured = widthFromAngle(feedback.motor.Position), width = measured + direction * step;
     if (!Number.isFinite(measured) || measured < 0 || measured > 90) throw Error('Measured opening is outside the model range; no movement sent');
-    await write(22, angleFromWidth(target));
-    pending = { target, started: performance.now(), arrived: null };
-    status(`Requested ${target.toFixed(2)} mm; waiting for measured arrival.`);
+    await moveTo(width);
+    status(`Requested ${width.toFixed(2)} mm; waiting for measured arrival.`);
   });
-
-  if ($('pika-zero')) $('pika-zero').onclick = () => run(async () => {
-    if (!armed || !allowed() || !fresh()) throw Error('Enable the gripper first');
+  $('pika-zero').onclick = () => run(async () => {
+    if (!armed() || !allowed() || !fresh()) throw Error('Enable the gripper first');
     const deadline = performance.now() + 120000;
-    while (armed && fresh() && allowed() && performance.now() < deadline) {
+    while (armed() && fresh() && allowed() && performance.now() < deadline) {
       const measured = widthFromAngle(feedback.motor.Position);
       if (measured <= arrivalToleranceMm) { status(`Closed to ${measured.toFixed(2)} mm.`); return; }
-      const target = Math.max(0, measured - 5);
-      await write(22, angleFromWidth(target)); pending = { target, started: performance.now(), arrived: null };
-      while (pending && armed && allowed()) await new Promise(resolve => setTimeout(resolve, 50));
+      await moveTo(Math.max(0, measured - 5));
+      while (session.phase === 'moving' && allowed()) await new Promise(resolve => setTimeout(resolve, 50));
     }
-    if (armed) await disable();
+    if (armed()) await disable();
   });
-  setInterval(() => { if (autoConnect && backendSerial && allowed() && !port && !busy && !document.hidden && document.hasFocus()) run(connect); }, 2500);
-  window.addEventListener('focus', () => { if (autoConnect && backendSerial && allowed() && !port && !busy && !document.hidden && document.hasFocus()) run(connect); });
-  if ($('pika-slider')) {
-    $('pika-slider').oninput = () => { $('pika-slider-target').textContent = `Target ${Number($('pika-slider').value).toFixed(1)} mm · release to move`; };
-    $('pika-slider').onchange = () => {
-      const goal = Number($('pika-slider').value);
-      return run(async () => {
-        if (!Number.isFinite(goal) || goal < 0 || goal > 90) throw Error('Pika opening must be 0–90 mm');
-        if (!armed || !allowed() || !fresh() || !document.hasFocus()) throw Error('Enable the gripper with fresh telemetry first');
-        await write(22, angleFromWidth(goal));
-        pending = { target:goal, started:performance.now(), arrived:null };
-        status(`Requested opening ${goal.toFixed(1)} mm; waiting for measured arrival.`);
-      });
-    };
-  }
-  if ($('pika-expand')) $('pika-expand').onclick = () => {
+  setInterval(() => { if (autoConnect && backendSerial && allowed() && !port && !session.busy && !document.hidden && document.hasFocus()) run(connect); }, 2500);
+  window.addEventListener('focus', () => { if (autoConnect && backendSerial && allowed() && !port && !session.busy && !document.hidden && document.hasFocus()) run(connect); });
+  $('pika-slider').oninput = () => { $('pika-slider-target').textContent = `Target ${Number($('pika-slider').value).toFixed(1)} mm · release to move`; };
+  $('pika-slider').onchange = () => {
+    const goal = Number($('pika-slider').value);
+    return run(async () => {
+      if (!Number.isFinite(goal) || goal < 0 || goal > 90) throw Error('Pika opening must be 0–90 mm');
+      if (!armed() || !allowed() || !fresh() || !document.hasFocus()) throw Error('Enable the gripper with fresh telemetry first');
+      await moveTo(goal);
+      status(`Requested opening ${goal.toFixed(1)} mm; waiting for measured arrival.`);
+    });
+  };
+  $('pika-expand').onclick = () => {
     const expanded = $('pika-details').hidden;
     $('pika-details').hidden = !expanded;
     $('pika-row').classList.toggle('expanded', expanded);
@@ -201,10 +253,10 @@ if (typeof document !== 'undefined') {
     $('pika-expand').textContent = expanded ? 'Less ▴' : 'Details ▾';
   };
   const stopPika = (reason = 'Operator stop') => {
-    powerStopped = true;
-    if (!armed && !busy) return;
-    armed = false;
-    if (writer) stopPending = true;
+    session.stopLatched = true;
+    if (!armed() && !session.busy) return;
+    disarm();
+    if (session.writing) session.writing.interrupted = true;
     else if (port) disable().then(() => status(`${reason}; disable sent.`)).catch(e => status(`Disable could not be sent: ${e.message}`));
   };
   $('stop').addEventListener('click', () => stopPika());
@@ -213,38 +265,36 @@ if (typeof document !== 'undefined') {
   // A bounded serial position step is not the arm's continuous control lease.
   // Browser chrome/tool focus changes must not cut it off mid-step. Hidden
   // pages, lost telemetry, STOP and server loss still request disable.
-  document.addEventListener('visibilitychange', () => { if (document.hidden) { stopPika('Dashboard hidden'); if (port && !busy) run(disconnect); } });
+  document.addEventListener('visibilitychange', () => { if (document.hidden) { stopPika('Dashboard hidden'); if (port && !session.busy) run(disconnect); } });
   setInterval(() => {
-    if (armed && !fresh()) stopPika('Pika telemetry stale');
-    else if (armed && !allowed()) stopPika('Controller server unavailable');
-    else if (pending && performance.now() - pending.started > 6000) stopPika('Pika step timed out');
+    if (armed() && !fresh()) stopPika('Pika telemetry stale');
+    else if (armed() && !allowed()) stopPika('Controller server unavailable');
+    else if (session.phase === 'moving' && performance.now() - session.target.started > 6000) stopPika('Pika step timed out');
     render();
   }, 100);
-  async function serverMode() {
-    try {
-      const r = await fetch('/api/state', { cache: 'no-store', signal: AbortSignal.timeout(1000) }); if (!r.ok) throw Error();
-      const s = await r.json(); simulation = s.simulated !== false; serverAt = performance.now(); apiToken = s.token || '';
-      backendSerial = s.pika?.configured && ['linux-serial', 'wsl-linux-serial'].includes(s.pika.transport);
-      const robot = s.devices?.find(d => d.id === s.selected);
-      robotEnabled = !!robot?.fresh && !robot.recovery_required && !robot.status?.arm_status && !robot.status?.error && robot.joints?.every(j => j.enabled === true);
-      if (!robotEnabled) powerStopped = false;
-      if (backendSerial && port && !busy && fresh()) {
-        if (robotEnabled && !armed && !powerStopped && !document.hidden && document.hasFocus()) {
-          // Robot enable is the shared power action. This sends no position target.
-          run(async () => { consent = true; await write(11); armed = true; status('Enabled with robot · ready'); });
-        } else if (!robotEnabled && armed) run(disable);
-      }
-      backendDisabled = s.pika?.transport === 'disabled' || (!backendSerial && /Win/i.test(navigator.platform || ''));
-      if ($('pika-transport-description')) $('pika-transport-description').textContent = backendSerial ?
-        'Separate from the standard CAN gripper. The C# backend uses the Linux USB serial driver; Windows WCH COM is bypassed. Connecting reads telemetry only.' :
-        backendDisabled ? 'Pika serial is disabled until the Linux USB transport is configured. The Windows WCH driver crashed in both tested versions.' :
-        'Separate from the standard CAN gripper. Select the Pika CH340 serial device. Connecting reads telemetry only.';
+  // app.js polls /api/state and dispatches each result here (null when a poll fails).
+  window.addEventListener('piper-state', ({ detail: s }) => {
+    if (!s) { simulation = true; render(); return; }
+    simulation = s.simulated !== false; serverAt = performance.now(); apiToken = s.token || '';
+    backendSerial = s.pika?.configured && ['linux-serial', 'wsl-linux-serial'].includes(s.pika.transport);
+    const robot = s.devices?.find(d => d.id === s.selected);
+    robotEnabled = !!robot?.fresh && !robot.recovery_required && !robot.status?.arm_status && !robot.status?.error && robot.joints?.every(j => j.enabled === true);
+    if (!robotEnabled) session.stopLatched = false;
+    if (backendSerial && port && !session.busy && fresh()) {
+      if (robotEnabled && !armed() && !session.stopLatched && !document.hidden && document.hasFocus()) {
+        // Robot enable is the shared power action. This sends no position session.target.
+        run(async () => { session.consent = true; await enable('Enabled with robot · ready'); });
+      } else if (!robotEnabled && armed()) run(disable);
     }
-    catch { simulation = true; }
-    render(); setTimeout(serverMode, 1000);
-  }
+    backendDisabled = s.pika?.transport === 'disabled' || (!backendSerial && /Win/i.test(navigator.platform || ''));
+    $('pika-transport-description').textContent = backendSerial ?
+      'Separate from the standard CAN gripper. The C# backend uses the Linux USB serial driver; Windows WCH COM is bypassed. Connecting reads telemetry only.' :
+      backendDisabled ? 'Pika serial is disabled until the Linux USB transport is configured. The Windows WCH driver crashed in both tested versions.' :
+      'Separate from the standard CAN gripper. Select the Pika CH340 serial device. Connecting reads telemetry only.';
+    render();
+  });
   if (!navigator.serial) status('Use desktop Chrome or Edge for Web Serial. No serial connection attempted.');
-  serverMode();
+  render();
 
   setupCamera({key:'piper.camera.pika.v1',videoId:'pika-video',deviceId:'pika-camera-device',listId:'pika-camera-list',startId:'pika-camera-start',stopId:'pika-camera-stop',statusId:'pika-camera-status',preferred:'DECXIN',width:640,height:480});
   window.addEventListener('pagehide', () => stopPika());

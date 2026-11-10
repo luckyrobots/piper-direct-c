@@ -3,9 +3,13 @@ using System.Text.Json.Nodes;
 
 namespace LuckyRobots.Piper.Plugin;
 
+internal enum RecoveryWorkspaceAction { None, SupportedStop, Disable, EnableHold, TeachReturn, RecoverAtPose, VerifyReset, VerifyCurrent }
+
 /// <summary>A recovery explanation and one explicit next action, derived from the selected arm's live evidence.</summary>
 public sealed record RecoveryWorkspaceState(string Cause, string NextStep, string Requirements, string? Action, string ActionText, bool CanAct)
 {
+    internal RecoveryWorkspaceAction NextAction { get; init; }
+
     public static RecoveryWorkspaceState Inspect(JsonObject? device, bool moving, bool waiting = false)
     {
         string cause = device?["stop_event"]?["reason"]?.GetValue<string>() is { Length: > 0 } recorded ? recorded
@@ -14,8 +18,21 @@ public sealed record RecoveryWorkspaceState(string Cause, string NextStep, strin
         double strict = Number(device?["status"]?["stationary_s"]), pose = Number(device?["status"]?["pose_stationary_s"]);
         string evidence = $"Measured pose stable: {pose:F2} s · power/return stillness: {strict:F2} s (reset requires 0.40 s).";
         string requirements = string.Join("\n", new[] { range, evidence }.Where(line => line.Length > 0));
-        RecoveryWorkspaceState Step(string next, string? action = null, string label = "Waiting for controller feedback", bool enabled = false) =>
-            new(cause, next, requirements, action, label, enabled);
+        RecoveryWorkspaceState Step(string next, RecoveryWorkspaceAction action = RecoveryWorkspaceAction.None, string label = "Waiting for controller feedback")
+        {
+            string? route = action switch
+            {
+                RecoveryWorkspaceAction.SupportedStop => "supported-stop",
+                RecoveryWorkspaceAction.Disable => "disable",
+                RecoveryWorkspaceAction.EnableHold => "enable",
+                RecoveryWorkspaceAction.TeachReturn => "teach-return",
+                RecoveryWorkspaceAction.RecoverAtPose => "recover-at-pose",
+                RecoveryWorkspaceAction.VerifyReset => "verify-reset",
+                RecoveryWorkspaceAction.VerifyCurrent => "verify-current",
+                _ => null
+            };
+            return new(cause, next, requirements, route, label, action != RecoveryWorkspaceAction.None) { NextAction = action };
+        }
         if (device?["fresh"]?.GetValue<bool>() != true)
             return Step("Waiting for live feedback from this robot. Recovery will not send a command using an old pose.");
         var power = RobotPowerState.Inspect(device);
@@ -28,10 +45,10 @@ public sealed record RecoveryWorkspaceState(string Cause, string NextStep, strin
         {
             cause = "Controller STOP is latched. " + cause;
             bool healthyDrivers = device["status"]?["error"]?.GetValue<int>() == 0 && device["joints"]!.AsArray().All(j => j?["fault"]?.GetValue<int>() == 0);
-            if (!healthyDrivers) return Step(plan.NextStep, power.EnabledCount > 0 ? "disable" : null,
-                power.EnabledCount > 0 ? "Arm supported — Disable arm motors" : "Inspect the driver fault first", power.EnabledCount > 0);
+            if (!healthyDrivers) return Step(plan.NextStep, power.EnabledCount > 0 ? RecoveryWorkspaceAction.Disable : RecoveryWorkspaceAction.None,
+                power.EnabledCount > 0 ? "Arm supported — Disable arm motors" : "Inspect the driver fault first");
             return Step("Rest or support the arm and clear its surroundings, then click Arm supported — recover. One acknowledgement disables the motors, clears STOP once, verifies recovery and restores holding only at a legal measured pose. The green button alone cannot clear controller STOP.",
-                "supported-stop", "Arm supported — recover", true);
+                RecoveryWorkspaceAction.SupportedStop, "Arm supported — recover");
         }
         if (teaching.HandGuiding)
             return Step("Green light is on: move the arm to a clear pose within the ranges shown below. Single-click its button again to turn the light off, then keep it still.", label: "Turn the green light off when ready");
@@ -40,11 +57,11 @@ public sealed record RecoveryWorkspaceState(string Cause, string NextStep, strin
         if (power.AllEnabled && device["teaching"]?["can_recover_at_pose"]?.GetValue<bool>() == true &&
             device["teaching"]?["recovery_teach_cycle_complete"]?.GetValue<bool>() == true)
             return Step("The controller verified the completed green-light hand-guiding cycle and this measured pose. Resume holds here and discards the interrupted target.",
-                "recover-at-pose", "Resume controls at this pose", true);
-        if (recovery && plan.Action is "verify-reset" or "verify-current")
-            return Step(plan.NextStep, plan.Action, "Verify controller recovery", true);
+                RecoveryWorkspaceAction.RecoverAtPose, "Resume controls at this pose");
         if (recovery)
         {
+            if (plan.Action == "verify-reset") return Step(plan.NextStep, RecoveryWorkspaceAction.VerifyReset, "Verify controller recovery");
+            if (plan.Action == "verify-current") return Step(plan.NextStep, RecoveryWorkspaceAction.VerifyCurrent, "Verify controller recovery");
             string why = device["teaching"]?["recover_at_pose_reason"]?.GetValue<string>() ?? device["blocker"]?.GetValue<string>() ?? plan.NextStep;
             return Step("Single-click the physical button for green hand guiding, move clear, then click it again to finish. " + why,
                 label: "Waiting for a qualified hand-guided pose");
@@ -52,13 +69,14 @@ public sealed record RecoveryWorkspaceState(string Cause, string NextStep, strin
         if (teaching.ReturnRequired)
             return Step(teaching.CanReturn ? teaching.SamePoseReturn ? "The green light is off. Resume controls to hold this measured pose without homing or replay."
                     : "The controller verified its required zero pose. Complete the supported return to CAN; no homing or replay will run." : teaching.NextStep,
-                teaching.CanReturn ? "teach-return" : null, teaching.SamePoseReturn ? "Resume controls at this pose" : "Return to controls at verified zero", teaching.CanReturn);
+                teaching.CanReturn ? RecoveryWorkspaceAction.TeachReturn : RecoveryWorkspaceAction.None,
+                teaching.SamePoseReturn ? "Resume controls at this pose" : "Return to controls at verified zero");
         if (power.EnabledCount == 0)
         {
             bool legal = range.Length == 0 && string.IsNullOrEmpty(device["blocker"]?.GetValue<string>());
             return Step(legal ? "Controller recovery is complete. Keep the arm supported and enable holding at its current measured pose."
                 : "Controller STOP is cleared and all motors are off. Support the arm. Use the physical green-light hand-guiding mode to bring the listed joints into range, then turn the light off. " + (device["blocker"]?.GetValue<string>() ?? ""),
-                legal ? "enable" : null, "Arm supported — Enable holding here", legal);
+                legal ? RecoveryWorkspaceAction.EnableHold : RecoveryWorkspaceAction.None, "Arm supported — Enable holding here");
         }
         return Step("Recovery is complete. All six motors hold the measured pose. The interrupted movement was discarded.", label: "Recovery complete");
     }
@@ -85,213 +103,241 @@ public sealed record RecoveryWorkspaceState(string Cause, string NextStep, strin
     { number = double.NaN; return value is JsonValue scalar && scalar.TryGetValue<double>(out number) && double.IsFinite(number); }
 }
 
-public sealed class HandGuideRecoveryGate(string identity, bool observedGuiding = false)
+/// <summary>Immutable physical proof for one recorded stop: whether a green-light
+/// hand-guiding cycle was seen on exactly that stop's arm, connection and record.</summary>
+public sealed record HandGuideRecoveryGate(string Identity, bool SawGuiding = false)
 {
-    public string Identity { get; } = identity;
-    public bool SawGuiding { get; private set; } = observedGuiding;
-    public bool Attempted { get; private set; }
-    public bool Observe(string currentIdentity, TeachingState mode, bool qualified)
-    {
-        if (currentIdentity != Identity) return false;
-        if (mode.HandGuiding) SawGuiding = true;
-        if (!SawGuiding || Attempted || mode.Active || !qualified) return false;
-        Attempted = true;
-        return true;
-    }
+    /// <summary>The gate after one observation: hand guiding on the same identity is recorded.</summary>
+    public HandGuideRecoveryGate Observe(string currentIdentity, TeachingState mode) =>
+        currentIdentity == Identity && mode.HandGuiding && !SawGuiding ? this with { SawGuiding = true } : this;
+
+    /// <summary>True when a seen cycle has ended and the controller qualifies this pose.</summary>
+    public bool Qualifies(string currentIdentity, TeachingState mode, bool qualified) =>
+        currentIdentity == Identity && SawGuiding && !mode.Active && qualified;
+}
+
+/// <summary>Plugin-3 recovery guide, replaced as one immutable value. Each state
+/// carries only its own data:
+/// <code>
+///   Closed (null) → Open → Armed(Gate) → Attempted(Gate) → CommandSent → Closed
+///                   Open ──card return──────────────────→ CommandSent
+///   Armed/Attempted ──recorded stop changed──→ Open
+/// </code>
+/// Armed waits for a green-light cycle (<see cref="HandGuideRecoveryGate.SawGuiding"/>).
+/// Attempted has claimed its one same-pose return and is never retried. A supported
+/// STOP recovery records the original stop in <see cref="SupportedStop"/>. The guide
+/// closes on Cancel/STOP, on a connection change and on verified holding.</summary>
+internal abstract record RecoveryGuide(string Scope, string Message, JsonObject? SupportedStop)
+{
+    internal sealed record Open(string Scope, string Message = "", JsonObject? SupportedStop = null) : RecoveryGuide(Scope, Message, SupportedStop);
+    internal sealed record Armed(string Scope, HandGuideRecoveryGate Gate, string Message = "", JsonObject? SupportedStop = null)
+        : RecoveryGuide(Scope, Message, SupportedStop);
+    internal sealed record Attempted(string Scope, HandGuideRecoveryGate Gate, string Message = "", JsonObject? SupportedStop = null)
+        : RecoveryGuide(Scope, Message, SupportedStop);
+    internal sealed record CommandSent(string Scope, string Message = "", JsonObject? SupportedStop = null) : RecoveryGuide(Scope, Message, SupportedStop);
+
+    /// <summary>The hand-guide proof while one is armed or claimed.</summary>
+    public HandGuideRecoveryGate? HandGuideGate => this switch { Armed armed => armed.Gate, Attempted attempted => attempted.Gate, _ => null };
+    public RecoveryGuide Sent(string message) => new CommandSent(Scope, message, SupportedStop);
+    public RecoveryGuide Disarmed(string message) => new Open(Scope, message, SupportedStop);
 }
 
 public sealed partial class PipersPlugin
 {
-    private HandGuideRecoveryGate? handGuideRecovery;
-    private string handGuideRecoveryMessage = "";
-    private bool handGuideRecoveryCommandSent;
-    private bool recoveryGuideOpen;
-    private string recoveryGuideScope = "";
-    private volatile bool supportedRecoveryBusy;
-    private CancellationTokenSource? supportedRecoveryCancellation;
-    private Task? supportedRecoveryWorker;
-    private JsonObject? supportedRecoveryStop;
-    private volatile bool supportedRecoveryResetting;
-    private string supportedRecoveryBackend = "", supportedRecoveryDevice = "", supportedRecoveryProfile = "";
-    private long supportedRecoveryGeneration, supportedRecoveryPermission, supportedRecoveryResetAt;
+    internal RecoveryGuide? recoveryGuide;
+    private RecoveryGuide? CurrentGuide => Volatile.Read(ref recoveryGuide);
 
-    private bool SupportedRecoveryExpectedGap(TelemetryReceipt? receipt)
+    /// <summary>Applies <paramref name="change"/> to the open guide; a closed guide stays closed,
+    /// so a late worker update cannot reopen what Cancel or STOP retired.</summary>
+    private void UpdateRecoveryGuide(Func<RecoveryGuide, RecoveryGuide> change)
     {
-        long now = Stopwatch.GetTimestamp();
-        if (!supportedRecoveryBusy || !supportedRecoveryResetting || supportedRecoveryCancellation?.IsCancellationRequested == true || supportedRecoveryResetAt == 0 ||
-            Stopwatch.GetElapsedTime(supportedRecoveryResetAt, now).TotalSeconds > 5 ||
-            token != supportedRecoveryBackend || ActiveProfile.Id != supportedRecoveryProfile ||
-            supportedRecoveryPermission != Interlocked.Read(ref targetPermissionEpoch) ||
-            receipt is null || receipt.BackendToken != supportedRecoveryBackend || !receipt.IsFresh(now) ||
-            receipt.State["selected"]?.GetValue<string>() != supportedRecoveryDevice) return false;
-        var device = receipt.State["devices"]?.AsArray().OfType<JsonObject>().SingleOrDefault(d => d["id"]?.GetValue<string>() == supportedRecoveryDevice);
-        return device?["generation"]?.GetValue<long>() == supportedRecoveryGeneration && device["present"]?.GetValue<bool>() == true &&
-            device["up"]?.GetValue<bool>() == true && device["status"]?["error"]?.GetValue<int>() == 0 &&
-            device["status"]?["arm_status"]?.GetValue<int>() is 0 or 1 && device["joints"] is JsonArray { Count: 6 } joints &&
-            joints.All(j => j?["fault"]?.GetValue<int>() == 0) && !receipt.HasFreshDevice(device, now);
+        while (CurrentGuide is { } current)
+            if (ReferenceEquals(Interlocked.CompareExchange(ref recoveryGuide, change(current), current), current)) return;
     }
+
+    private void SetRecoveryGuideMessage(string text) => UpdateRecoveryGuide(guide => guide with { Message = text });
 
     private string RecoveryConnectionIdentity(JsonObject device) => token + ":" + ActiveProfile.Id + ":" +
         device["id"]?.GetValue<string>() + ":" + device["generation"]?.GetValue<long>();
 
-    private bool RecoveryGuideMatches(JsonObject? device) => device is not null && recoveryGuideOpen && recoveryGuideScope == RecoveryConnectionIdentity(device);
+    /// <summary>The connection identity plus the recorded stop that the guide recovers from.</summary>
+    private string RecoveryIdentity(JsonObject device) => RecoveryConnectionIdentity(device) + ":" +
+        (device["stop_event"]?["request_id"]?.ToJsonString() ?? device["stop_reason"]?.GetValue<string>() ?? "");
 
-    private async Task RunRecoveryCard(CancellationToken cancellation)
+    private bool RecoveryGuideFor(JsonObject? device) => device is not null && CurrentGuide?.Scope == RecoveryConnectionIdentity(device);
+
+    private RecoveryWorkspaceState RecoveryCardState(JsonObject? device) => RecoveryWorkspaceState.Inspect(device,
+        state?["motion"]?["active"]?.GetValue<bool>() == true, SupportedRecoveryBusy && RecoveryGuideFor(device));
+
+    private bool RecoveryCardCanRun(RecoveryWorkspaceState view) => view.CanAct && !switchingProfile && CurrentRecovery is null && !GroupFollowActive;
+
+    private static bool VerifiesOnly(RecoveryWorkspaceState view) => view.NextAction is RecoveryWorkspaceAction.VerifyReset or RecoveryWorkspaceAction.VerifyCurrent;
+
+    /// <summary>The single recovery entry point. The Controls card runs its next
+    /// step; Diagnostics' "Verify controller state" (verifyOnly) may run only the
+    /// card's verification steps, which change neither motor power nor position.</summary>
+    private async Task RunRecoveryCard(CancellationToken cancellation, bool verifyOnly = false)
     {
-        if (workspacePage != "controls" || calibrationOpen) throw new InvalidOperationException("Return to Controls to use the recovery guide.");
+        if (!verifyOnly && Navigation.Page != WorkspacePage.Controls) throw new InvalidOperationException("Return to Controls to use the recovery guide.");
+        long permissionEpoch = CommandAuthority.Epoch;
         var device = Device();
-        var view = RecoveryWorkspaceState.Inspect(device, state?["motion"]?["active"]?.GetValue<bool>() == true, recoveryInProgress);
-        if (!view.CanAct || view.Action is null) throw new InvalidOperationException(view.NextStep);
-        recoveryGuideOpen = true; recoveryGuideScope = RecoveryConnectionIdentity(device);
+        var view = RecoveryCardState(device);
+        if (!RecoveryCardCanRun(view)) throw new InvalidOperationException(view.CanAct ? "Wait for the current robot action to finish before continuing recovery." : view.NextStep);
+        if (verifyOnly && !VerifiesOnly(view)) throw new InvalidOperationException("Use the recovery card on Controls for this step. " + view.NextStep);
+        if (!verifyOnly)
+        {
+            string scope = RecoveryConnectionIdentity(device);
+            if (CurrentGuide?.Scope != scope) Volatile.Write(ref recoveryGuide, new RecoveryGuide.Open(scope));
+        }
+        string? progress = null;
         try
         {
-            if (view.Action == "supported-stop") StartSupportedStopRecovery(device);
-            else if (view.Action == "disable")
+            switch (view.NextAction)
             {
-                approved = linkCommandsEnabled = false; ForgetControlApproval();
-                await Command("disable", null, cancellation);
-                handGuideRecoveryMessage = "Disable requested. Keep supporting the arm until all six motors report off; the next recovery action appears here.";
+                case RecoveryWorkspaceAction.SupportedStop:
+                    StartSupportedStopRecovery(device, permissionEpoch, cancellation);
+                    break;
+                case RecoveryWorkspaceAction.Disable:
+                    approved = linkCommandsEnabled = false; ForgetControlApproval();
+                    await Command("disable", null, cancellation);
+                    progress = "Disable requested. Keep supporting the arm until all six motors report off; the next recovery action appears here.";
+                    break;
+                case RecoveryWorkspaceAction.EnableHold:
+                    var scope = ControlScope(ActiveProfile, token, device);
+                    if (!CommandAuthority.TryInEpoch(permissionEpoch, () => approved = true))
+                        throw new InvalidOperationException("Holding setup was cancelled by STOP or a control-scope change.");
+                    await RunPrimaryAction(ct => CompleteRobotEnable(permissionEpoch, scope, ct), cancellation);
+                    CancelHandGuideRecovery();
+                    break;
+                case RecoveryWorkspaceAction.TeachReturn:
+                case RecoveryWorkspaceAction.RecoverAtPose:
+                    bool teaching = view.NextAction == RecoveryWorkspaceAction.TeachReturn;
+                    var flags = teaching ? TeachingState.Inspect(device).ReturnFlags()
+                        : new JsonObject { ["button_off"] = true, ["same_pose_confirmed"] = true };
+                    await Command(view.Action!, flags, cancellation, teaching ? CommandPurpose.TeachingReturn : CommandPurpose.Recovery);
+                    progress = "Restoring holding control at the measured pose. No homing, replay or power change.";
+                    UpdateRecoveryGuide(guide => guide.Sent(progress));
+                    break;
+                case RecoveryWorkspaceAction.VerifyReset:
+                    // B1: ask; ConfirmResetCompletion sends verify-reset only on Confirm.
+                    RequestResetCompletion(new RobotCommandScope(ActiveProfile.Id, token, device["id"]!.GetValue<string>(),
+                        device["generation"]!.GetValue<long>()), permissionEpoch);
+                    progress = "Confirm that the controller reset or power cycle completed. Cancel sends nothing.";
+                    break;
+                case RecoveryWorkspaceAction.VerifyCurrent:
+                    await Command(view.Action!, null, cancellation, CommandPurpose.Recovery);
+                    progress = "Controller recovery verification requested.";
+                    break;
             }
-            else if (view.Action == "enable")
-            {
-                followAfterEnable = false; approved = true;
-                await RunPrimaryAction(CompleteRobotEnable, cancellation);
-                CancelHandGuideRecovery();
-            }
-            else if (view.Action is "teach-return" or "recover-at-pose")
-            {
-                var flags = view.Action == "teach-return" ? TeachingState.Inspect(device).ReturnFlags()
-                    : new JsonObject { ["button_off"] = true, ["same_pose_confirmed"] = true };
-                await Command(view.Action, flags, cancellation,
-                    recoveryAcknowledged: view.Action == "recover-at-pose", teachingAcknowledged: view.Action == "teach-return");
-                handGuideRecoveryCommandSent = true;
-                handGuideRecoveryMessage = "Restoring holding control at the measured pose. No homing, replay or power change.";
-            }
-            else
-            {
-                var result = await Command(view.Action, null, cancellation, recoveryAcknowledged: true);
-                Interlocked.Exchange(ref recoveryRequestId, result["request_id"]?.GetValue<long>() ?? 0);
-                Interlocked.Exchange(ref recoveryAcknowledgedSequence, telemetry.Latest?.Sequence ?? 0);
-                Interlocked.Exchange(ref recoveryAcknowledgedTicks, Stopwatch.GetTimestamp());
-                recoveryInProgress = view.Action == "reset";
-                handGuideRecoveryMessage = view.Action == "reset" ? "Reset requested. Keep the arm supported while disabled-motor feedback is verified. No motor enable or position target will be sent." : "Controller recovery verification requested.";
-            }
-            message = handGuideRecoveryMessage.Length > 0 ? handGuideRecoveryMessage : message;
+            if (progress is not null) SetRecoveryGuideMessage(progress);
+            if ((progress ?? CurrentGuide?.Message) is { Length: > 0 } shown) message = shown;
         }
-        catch (Exception error) { handGuideRecoveryMessage = "Recovery did not advance: " + error.Message; throw; }
+        catch (Exception error) { SetRecoveryGuideMessage("Recovery did not advance: " + error.Message); throw; }
     }
-
-    private string RecoveryIdentity(JsonObject device) => token + ":" + ActiveProfile.Id + ":" +
-        device["id"]?.GetValue<string>() + ":" + device["generation"]?.GetValue<long>() + ":" +
-        (device["stop_event"]?["request_id"]?.ToJsonString() ?? device["stop_reason"]?.GetValue<string>() ?? "");
 
     private void BeginHandGuideRecovery(JsonObject device)
     {
-        recoveryGuideOpen = true; recoveryGuideScope = RecoveryConnectionIdentity(device);
-        handGuideRecovery = new(RecoveryIdentity(device), device["teaching"]?["recovery_teach_cycle_complete"]?.GetValue<bool>() == true);
-        handGuideRecoveryCommandSent = false;
-        handGuideRecoveryMessage = "Single-click the physical arm button for a solid green light. Move the arm clear of the obstacle, then single-click again and hold still. Controls return at that pose; no homing or replay.";
-        message = handGuideRecoveryMessage;
+        const string instructions = "Single-click the physical arm button for a solid green light. Move the arm clear of the obstacle, then single-click again and hold still. Controls return at that pose; no homing or replay.";
+        Volatile.Write(ref recoveryGuide, new RecoveryGuide.Armed(RecoveryConnectionIdentity(device),
+            new(RecoveryIdentity(device), device["teaching"]?["recovery_teach_cycle_complete"]?.GetValue<bool>() == true), instructions));
+        message = instructions;
     }
 
     private void CancelHandGuideRecovery()
     {
-        try { supportedRecoveryCancellation?.Cancel(); } catch (ObjectDisposedException) { }
-        supportedRecoveryStop = null;
-        recoveryGuideOpen = false; recoveryGuideScope = "";
-        handGuideRecovery = null;
-        handGuideRecoveryCommandSent = false;
-        handGuideRecoveryMessage = "";
+        CurrentRecovery?.Cancel();
+        Volatile.Write(ref recoveryGuide, null);
     }
 
-    private async Task ObserveHandGuideRecovery(CancellationToken cancellation)
+    internal async Task ObserveHandGuideRecovery(CancellationToken cancellation)
     {
-        if (supportedRecoveryBusy || (!recoveryGuideOpen && handGuideRecovery is null) || switchingProfile || calibrationOpen || !HasFreshControlTelemetry(out _)) return;
+        if (CurrentRecovery is not null || GroupFollowActive || CurrentGuide is null || switchingProfile || calibrationOpen || !HasFreshControlTelemetry(out _)) return;
+        long expectedPermission = CommandAuthority.Epoch;
         var device = Device();
-        if (recoveryGuideScope != RecoveryConnectionIdentity(device)) { CancelHandGuideRecovery(); return; }
-        if (handGuideRecoveryCommandSent)
+        if (CurrentGuide is not { } guide) return;
+        if (guide.Scope != RecoveryConnectionIdentity(device)) { CancelHandGuideRecovery(); return; }
+        if (guide is RecoveryGuide.CommandSent)
         {
             if (device["recovery_required"]?.GetValue<bool>() != true && TeachingCanResume(device))
             {
-                approved = true; linkCommandsEnabled = link is not null;
-                RememberControlApproval();
-                teachingSeen = approvalBeforeTeaching = false;
+                RememberControlApproval(expectedPermission, activate: true);
+                teachingSession.Release();
                 CancelHandGuideRecovery();
                 message = "Ready · holding the hand-guided pose · interrupted movement discarded";
             }
             else if (state?["motion"]?["active"]?.GetValue<bool>() != true && device["recovery_required"]?.GetValue<bool>() == true)
-                handGuideRecoveryMessage = state?["message"]?.GetValue<string>() ?? "The controller could not verify return to holding. Open Settings → Diagnostics for the exact reason.";
+                SetRecoveryGuideMessage(state?["message"]?.GetValue<string>() ?? "The controller could not verify return to holding. Open Settings → Diagnostics for the exact reason.");
             return;
         }
-        if (handGuideRecovery is not { } gate) return;
+        if (guide.HandGuideGate is not { } gate) return;
         if (gate.Identity != RecoveryIdentity(device))
         {
             // Reset retires the old obstruction evidence, but the same arm's
             // visible guide must remain available for range/holding checks.
-            handGuideRecovery = null; handGuideRecoveryCommandSent = false;
-            handGuideRecoveryMessage = "The previous recovery record changed. Use the current step shown above; no earlier target or hand-guiding proof will be reused.";
+            UpdateRecoveryGuide(current => current.HandGuideGate is null ? current : current.Disarmed(
+                "The previous recovery record changed. Use the current step shown above; no earlier target or hand-guiding proof will be reused."));
             return;
         }
+        if (guide is not RecoveryGuide.Armed) return; // The one return was already claimed; never retried.
         var mode = TeachingState.Inspect(device);
-        if (mode.HandGuiding) handGuideRecoveryMessage = "Hand guiding active. Move to a clear pose, then single-click the arm button to turn the green light off.";
-        else if (gate.SawGuiding) handGuideRecoveryMessage = device["teaching"]?["recover_at_pose_reason"]?.GetValue<string>() is { Length: > 0 } why
-            ? why : "Hold still while the controller checks the hand-guided pose.";
+        var observed = gate.Observe(RecoveryIdentity(device), mode);
+        if (observed != gate)
+            UpdateRecoveryGuide(current => current is RecoveryGuide.Armed armed && armed.Gate == gate ? armed with { Gate = observed } : current);
+        if (mode.HandGuiding) SetRecoveryGuideMessage("Hand guiding active. Move to a clear pose, then single-click the arm button to turn the green light off.");
+        else if (observed.SawGuiding) SetRecoveryGuideMessage(device["teaching"]?["recover_at_pose_reason"]?.GetValue<string>() is { Length: > 0 } why
+            ? why : "Hold still while the controller checks the hand-guided pose.");
         if (!await commands.WaitAsync(0, cancellation)) return;
         try
         {
             device = Device();
-            if (!gate.Observe(RecoveryIdentity(device), TeachingState.Inspect(device), device["teaching"]?["can_recover_at_pose"]?.GetValue<bool>() == true)) return;
-            await Command("recover-at-pose", new() { ["button_off"] = true, ["same_pose_confirmed"] = true }, cancellation, recoveryAcknowledged: true);
-            handGuideRecoveryCommandSent = true;
-            handGuideRecoveryMessage = "Restoring holding control at the measured pose · no power change, homing or replay";
+            if (GroupFollowActive || CurrentGuide is not RecoveryGuide.Armed armed ||
+                !armed.Gate.Qualifies(RecoveryIdentity(device), TeachingState.Inspect(device), device["teaching"]?["can_recover_at_pose"]?.GetValue<bool>() == true))
+                return;
+            // Claim the single return before sending, so a failure is never retried.
+            var claimed = new RecoveryGuide.Attempted(armed.Scope, armed.Gate, armed.Message, armed.SupportedStop);
+            if (!ReferenceEquals(Interlocked.CompareExchange(ref recoveryGuide, claimed, armed), armed)) return;
+            await Command("recover-at-pose", new() { ["button_off"] = true, ["same_pose_confirmed"] = true }, cancellation,
+                CommandPurpose.Recovery, expectedPermissionEpoch: expectedPermission);
+            UpdateRecoveryGuide(current => current is RecoveryGuide.Attempted ? current.Sent("Restoring holding control at the measured pose · no power change, homing or replay") : current);
         }
-        catch (InvalidOperationException error) { handGuideRecoveryMessage = error.Message; }
+        catch (InvalidOperationException error) { SetRecoveryGuideMessage(error.Message); }
         finally { commands.Release(); }
     }
 
-    private void StartSupportedStopRecovery(JsonObject initial)
+    private void StartSupportedStopRecovery(JsonObject initial, long permissionEpoch, CancellationToken cancellation)
     {
-        if (supportedRecoveryBusy) throw new InvalidOperationException("Supported recovery is already in progress.");
-        string expectedToken = token, expectedProfile = ActiveProfile.Id, expectedDevice = initial["id"]!.GetValue<string>();
-        long expectedGeneration = initial["generation"]!.GetValue<long>(), expectedPermission = Interlocked.Read(ref targetPermissionEpoch);
-        supportedRecoveryBackend = expectedToken; supportedRecoveryDevice = expectedDevice; supportedRecoveryProfile = expectedProfile;
-        supportedRecoveryGeneration = expectedGeneration; supportedRecoveryPermission = expectedPermission;
-        supportedRecoveryResetting = false; supportedRecoveryResetAt = 0;
-        supportedRecoveryStop = initial["stop_event"] is JsonObject stopped ? (JsonObject)stopped.DeepClone() : new JsonObject { ["reason"] = initial["stop_reason"]?.DeepClone() };
-        supportedRecoveryCancellation?.Dispose();
-        supportedRecoveryCancellation = CancellationTokenSource.CreateLinkedTokenSource(shutdown.Token);
-        var operation = supportedRecoveryCancellation;
-        supportedRecoveryBusy = true;
-        approved = linkCommandsEnabled = false; ForgetControlApproval();
-        lease = followRequest = lastCommand = 0; followInput.End();
-        handGuideRecoveryMessage = "Supported recovery starting. Keep the arm supported; Cancel or Disable interrupts this sequence.";
-        supportedRecoveryWorker = Task.Run(async () =>
+        var operation = BeginRecovery(RecoveryKind.HoldHere, initial, permissionEpoch, cancellation);
+        var scope = operation.Scope;
+        const string starting = "Supported recovery starting. Keep the arm supported; Cancel or Disable interrupts this sequence.";
+        var stopped = initial["stop_event"] is JsonObject recorded ? (JsonObject)recorded.DeepClone() : new JsonObject { ["reason"] = initial["stop_reason"]?.DeepClone() };
+        UpdateRecoveryGuide(guide => guide with { SupportedStop = stopped, Message = starting });
+        operation.Worker = Task.Run(async () =>
         {
             bool entered = false;
-            string finalStatus = handGuideRecoveryMessage;
+            bool completedHolding = false;
+            SupportedRecoveryOutcome? outcome = null;
+            string finalStatus = starting;
             bool SameIdentity()
             {
                 var receipt = telemetry.Latest;
-                if (token != expectedToken || ActiveProfile.Id != expectedProfile || ActiveProfile.CanDeviceId != expectedDevice ||
-                    expectedPermission != Interlocked.Read(ref targetPermissionEpoch) || receipt is null || receipt.BackendToken != expectedToken ||
-                    receipt.State["selected"]?.GetValue<string>() != expectedDevice) return false;
-                return receipt.State["devices"]?.AsArray().OfType<JsonObject>().SingleOrDefault(d => d["id"]?.GetValue<string>() == expectedDevice)?["generation"]?.GetValue<long>() == expectedGeneration;
+                return RecoveryScopeCurrent(operation) && receipt is not null &&
+                    TelemetryScope.Read(receipt.State, scope.Device) == new TelemetryScope(scope.Backend, scope.Device, scope.Generation);
             }
             void Progress(string status)
             {
                 finalStatus = status;
-                if (SameIdentity()) handGuideRecoveryMessage = status;
+                if (SameIdentity()) SetRecoveryGuideMessage(status);
             }
             try
             {
                 await commands.WaitAsync(operation.Token); entered = true;
                 SupportedRecoverySnapshot Read()
                 {
-                    if (ActiveProfile.Id != expectedProfile || token != expectedToken || expectedPermission != Interlocked.Read(ref targetPermissionEpoch))
+                    if (!RecoveryScopeCurrent(operation))
                         throw new InvalidOperationException("Recovery cancelled because robot identity or control permission changed. No previous target will resume.");
                     var receipt = telemetry.Latest ?? throw new InvalidOperationException("Waiting for live recovery feedback.");
-                    bool expectedGap = SupportedRecoveryExpectedGap(receipt);
-                    var device = expectedGap ? RobotProfileRouting.Device(preferences, receipt.State) : Device(expectedDevice, expectedGeneration, expectedToken, receipt);
+                    bool expectedGap = RecoveryExpectedGap(receipt);
+                    var device = expectedGap ? RobotProfileRouting.Device(preferences, receipt.State) : Device(scope.Device, scope.Generation, scope.Backend, receipt);
                     if (expectedGap) { device = (JsonObject)device.DeepClone(); device["fresh"] = false; }
                     return new(device, receipt.State["motion"]?["active"]?.GetValue<bool>() == true,
                         receipt.State["motion"]?["request_id"]?.GetValue<long>() ?? 0, receipt.Sequence, receipt.ReceivedTicks, expectedGap);
@@ -302,22 +348,26 @@ public sealed partial class PipersPlugin
                     // Only reset's bounded missing-feedback interval is expected.
                     // Every command below still calls Device() and rejects stale
                     // evidence; only the runner's wait can consume a gap marker.
-                    if (action == "reset") { supportedRecoveryResetAt = Stopwatch.GetTimestamp(); supportedRecoveryResetting = true; }
-                    else supportedRecoveryResetting = false;
-                    var result = await Command(action, null, ct, recoveryAcknowledged: action != "disable",
-                        expectedDeviceId: expectedDevice, expectedGeneration: expectedGeneration, expectedToken: expectedToken,
-                        expectedPermissionEpoch: expectedPermission);
+                    Volatile.Write(ref operation.ResetAt, action == "reset" ? Stopwatch.GetTimestamp() : 0);
+                    // The runner never sends verify-reset; Command would refuse it without the operator's answer.
+                    var result = await Command(action, null, ct, action == "disable" ? CommandPurpose.Control : CommandPurpose.Recovery,
+                        scope, operation.Epoch);
                     return new(result["request_id"]?.GetValue<long>() ?? 0, telemetry.Latest?.Sequence ?? 0, Stopwatch.GetTimestamp());
                 }
-                bool held = await SupportedStopRecovery.Run(Read, Send, async ct =>
+                outcome = await SupportedStopRecovery.Run(Read, Send, async ct =>
                 {
-                    _ = Read(); approved = true;
-                    await Enable(ct, includePika: false, expectedDeviceId: expectedDevice, expectedGeneration: expectedGeneration, expectedToken: expectedToken);
-                    _ = Read(); RememberControlApproval();
+                    _ = Read();
+                    GrantRecoveryHolding(operation, ct);
+                    await Enable(ct, includePika: false, scope, operation.Epoch);
                 }, Progress, operation.Token);
                 if (SameIdentity())
                 {
-                    if (held) { handGuideRecovery = null; handGuideRecoveryCommandSent = false; recoveryGuideOpen = false; }
+                    if (outcome == SupportedRecoveryOutcome.Holding)
+                    {
+                        CompleteRecoveryHolding(operation);
+                        completedHolding = true;
+                        Volatile.Write(ref recoveryGuide, null);
+                    }
                     message = finalStatus;
                 }
             }
@@ -325,18 +375,17 @@ public sealed partial class PipersPlugin
             catch (Exception error) { Progress("Recovery paused: " + error.Message); }
             finally
             {
-                supportedRecoveryResetting = false; supportedRecoveryResetAt = 0; supportedRecoveryBusy = false;
+                if (!completedHolding)
+                    CommandAuthority.TryInEpoch(operation.Epoch, () =>
+                    {
+                        approved = linkCommandsEnabled = false;
+                        CommandAuthority.ForgetApproval(scope.ProfileId);
+                    });
+                RetireRecovery(operation);
                 if (entered) commands.Release();
+                if (outcome == SupportedRecoveryOutcome.ResetConfirmationRequired)
+                    RequestResetCompletion(scope, operation.Epoch);
             }
         }, CancellationToken.None);
-    }
-
-    private async Task StopSupportedRecoveryOnDispose()
-    {
-        try { supportedRecoveryCancellation?.Cancel(); } catch (ObjectDisposedException) { }
-        if (supportedRecoveryWorker is { } worker)
-            try { await worker.WaitAsync(TimeSpan.FromSeconds(5)); }
-            catch (Exception error) { System.Diagnostics.Trace.TraceWarning("Supported recovery shutdown: {0}", error.Message); }
-        supportedRecoveryCancellation?.Dispose();
     }
 }

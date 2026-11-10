@@ -3,13 +3,8 @@ using LuckyRobots.Piper.Pika;
 
 internal static class PikaFollowTests
 {
-    private static void Check(bool condition, string message) { if (!condition) throw new Exception(message); }
-    private static void Reject(Action action, string message)
-    {
-        try { action(); }
-        catch (Exception error) when (error is InvalidOperationException or ArgumentException) { return; }
-        throw new Exception(message);
-    }
+    private static void RejectInput(Action action, string message) =>
+        Reject<Exception>(action, message, error => error is InvalidOperationException or ArgumentException);
 
     internal static async Task RunAsync()
     {
@@ -21,11 +16,11 @@ internal static class PikaFollowTests
         follow.Update(first, 2, 40, .002);
         follow.Tick(.003, PikaProtocol.Angle(20), true);
         Check(writes.Count == 1 && Math.Abs(PikaProtocol.Width(writes[0]) - 40) < .00001, "Latest target did not replace pending opening.");
-        Reject(() => follow.Update(first, 2, 60, .004), "Duplicate sequence accepted.");
-        Reject(() => follow.Update(first, 1, 60, .005), "Old sequence accepted.");
-        Reject(() => follow.Update(Guid.NewGuid().ToString(), 3, 60, .006), "Foreign session accepted.");
-        Reject(() => follow.Update(first, 3, double.NaN, .007), "Nonfinite opening accepted.");
-        Reject(() => follow.Update(first, 3, 91, .008), "Out-of-range opening clipped/accepted.");
+        RejectInput(() => follow.Update(first, 2, 60, .004), "Duplicate sequence accepted.");
+        RejectInput(() => follow.Update(first, 1, 60, .005), "Old sequence accepted.");
+        RejectInput(() => follow.Update(Guid.NewGuid().ToString(), 3, 60, .006), "Foreign session accepted.");
+        RejectInput(() => follow.Update(first, 3, double.NaN, .007), "Nonfinite opening accepted.");
+        RejectInput(() => follow.Update(first, 3, 91, .008), "Out-of-range opening clipped/accepted.");
         follow.Update(first, 3, 55, .009);
         follow.Tick(.025, PikaProtocol.Angle(20), true);
         Check(writes.Count == 1, "Configured command period was bypassed.");
@@ -37,23 +32,23 @@ internal static class PikaFollowTests
         int heldWrites = writes.Count;
         follow.Tick(.4, null, false);
         Check(writes.Count == heldWrites, "Retired follow resumed after hold.");
-        Reject(() => follow.Update(first, 4, 90, .41), "Held session accepted another target.");
+        RejectInput(() => follow.Update(first, 4, 90, .41), "Held session accepted another target.");
         string second = follow.Start(.42);
         Check(second != first && follow.Sequence == 0 && follow.OpeningMm is null, "New session inherited a pending target/identity.");
-        Reject(() => follow.Update(first, 5, 90, .43), "Previous session crossed a new session boundary.");
+        RejectInput(() => follow.Update(first, 5, 90, .43), "Previous session crossed a new session boundary.");
         follow.Update(second, 1, 80, .44);
         follow.Tick(.70, PikaProtocol.Angle(24), true);
         Check(!follow.Active && follow.Holding && Math.Abs(PikaProtocol.Width(writes[^1]) - 24) < .00001,
             "Input deadline continued moving instead of holding the fresh measurement.");
         string third = follow.Start(.71);
         follow.Update(third, 1, 80, .72);
-        Reject(() => follow.Tick(.73, null, true), "Stale feedback kept following enabled.");
+        RejectInput(() => follow.Tick(.73, null, true), "Stale feedback kept following enabled.");
         Check(!follow.Active && follow.OpeningMm is null && !follow.Holding, "Unavailable feedback invented successful holding.");
         int beforeStale = writes.Count;
-        Reject(() => follow.Hold(null), "Hold fabricated a stale measured target.");
+        RejectInput(() => follow.Hold(null), "Hold fabricated a stale measured target.");
         Check(writes.Count == beforeStale, "Stale hold wrote a target.");
-        Reject(() => follow.Start(.6), "Backward clock accepted.");
-        Reject(() => new PikaFollowSession(writes.Add, .001), "Unbounded command rate accepted.");
+        RejectInput(() => follow.Start(.6), "Backward clock accepted.");
+        RejectInput(() => new PikaFollowSession(writes.Add, .001), "Unbounded command rate accepted.");
 
         var broken = new PikaFollowSession(_ => throw new IOException("fixture write failed"));
         string brokenId = broken.Start(0); broken.Update(brokenId, 1, 20, .01);
@@ -88,7 +83,7 @@ internal static class PikaFollowTests
         Check(!evidence.Active, "Diagnostic retirement automatically restarted a dead follow stream.");
         recorded = evidence.Start(.7); evidence.Update(recorded, 1, 30, .71);
         evidence.ObserveFeedback(.72, .6, 0, false, "0x00");
-        Reject(() => evidence.Tick(.72, .6, false), "A disabled feedback sample was hidden by diagnostics.");
+        RejectInput(() => evidence.Tick(.72, .6, false), "A disabled feedback sample was hidden by diagnostics.");
         var disabled = evidence.LastRetirement!;
         Check(disabled.Cause == "feedback-unavailable" && disabled.Enabled == false && disabled.InputAgeSeconds < .25 &&
             disabled.RecentFeedback[^1].MotorStatus == "0x00" && disabled.LastInputSequence == 1,
@@ -97,7 +92,7 @@ internal static class PikaFollowTests
         Check(ReferenceEquals(disabled, evidence.LastRetirement), "Cleanup lost transient disabled feedback proof.");
         recorded = evidence.Start(.74); evidence.Update(recorded, 1, 30, .75);
         evidence.ObserveFeedback(.76, 100, 0, true, "0x40");
-        Reject(() => evidence.Tick(.76, 100, true), "An out-of-range finite Pika angle was accepted.");
+        RejectInput(() => evidence.Tick(.76, 100, true), "An out-of-range finite Pika angle was accepted.");
         Check(evidence.LastRetirement!.MeasuredAngleRadians == 100 && evidence.LastRetirement.Enabled == true,
             "An invalid angle was indistinguishable from disabled feedback after retirement.");
         recorded = evidence.Start(.77); evidence.Update(recorded, 1, 30, .78); evidence.Hold(.6, now: .79);
