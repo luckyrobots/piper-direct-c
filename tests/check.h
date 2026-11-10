@@ -32,9 +32,18 @@ struct check_test {
     const char *expected_to_change;
 };
 
-static unsigned check_count;
-static jmp_buf check_recover;
-static bool check_running;
+/* One copy per test binary. The test's own file defines it; a helper that is
+   linked into the binary shares it (CHECK_STATE_SHARED), so a CHECK failing
+   inside the helper fails the running test like any other. */
+#ifdef CHECK_STATE_SHARED
+extern unsigned check_count;
+extern jmp_buf check_recover;
+extern bool check_running;
+#else
+unsigned check_count;
+jmp_buf check_recover;
+bool check_running;
+#endif
 
 static inline void check_fail(const char *file,int line,const char *expression)
 {

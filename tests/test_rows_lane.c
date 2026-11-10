@@ -315,7 +315,10 @@ static void p4_disable_completes(void)
     CHECK(rows_phase(&r,"complete")&&r.c.bus.sim_enabled==0&&rows_latch(&r,"clear",""));
     CHECK(fake_bus_sent(mark,0,0)==rows_sent(mark,0x471,-1));
     rows_close(&r);
-    /* keeps_recovery: the latch it started with is still there. */
+}
+/* keeps_recovery: the arm is still latched, but the latch it started with was rewritten. */
+static void p4_disable_keeps_recovery(void)
+{
     rows_open(&r,true);
     CHECK(rows_joint(&r,1,5)==202); LANE(&r.c)->op=OP_IDLE; rows_restart(&r);
     CHECK(rows_latch(&r,"latched","intent"));
@@ -484,7 +487,9 @@ static const struct check_test tests[]={
     {"CA.M1","a settled move completes and clears its intent",m1_move_completes,NULL},
     {"CA.P1","enable completes on six acknowledged drivers after settling, with power frames only",p1_enable_completes,NULL},
     {"CA.P3","power frames go one driver at a time, at least 20 ms apart",p3_power_pacing,NULL},
-    {"CA.P4","disable completes all-off; it clears only a latch it created",p4_disable_completes,NULL},
+    {"CA.P4","disable completes all-off and clears the latch it created",p4_disable_completes,NULL},
+    {"CA.P4/keeps-recovery","disable keeps an earlier latch but rewrites its kind to power",p4_disable_keeps_recovery,
+        "the spec leaves the kept record unchanged; today an intent latch becomes kind power"},
     {"CA.P5","a failed disable frame stops the lane and records the cleanup error",p5_disable_tx_failure,NULL},
     {"CA.R1","reset completes on all-off, error-free, stationary feedback and clears the pending reset",r1_reset_completes,NULL},
     {"CA.I1","an idle lane has no owner and no request, however it got there",i1_idle_retires_the_request,NULL},

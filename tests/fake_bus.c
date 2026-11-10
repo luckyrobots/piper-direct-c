@@ -1,5 +1,6 @@
 #define _GNU_SOURCE
 #include "fake_bus.h"
+#define CHECK_STATE_SHARED
 #include "check.h"
 #include <string.h>
 

@@ -460,7 +460,7 @@ Every row above names the tests that pin what the **current** core does for it. 
 | CA.P1 | `CA.P1`, `enable-sequence` | |
 | CA.P2 | `enable-sequence` | |
 | CA.P3 | `CA.P3`, `enable-sequence`, `disable-sequence` | |
-| CA.P4 | `CA.P4`, `disable-sequence` | |
+| CA.P4 | `CA.P4`, `CA.P4/keeps-recovery`, `disable-sequence` | |
 | CA.P5 | `CA.P5`, `disable-sequence` | |
 | CA.R1 | `CA.R1`, `reset-retry` | |
 | CA.G-1 | `gripper` | |
@@ -597,7 +597,7 @@ Every stage leaves the system shippable. Old and new paths coexist only behind o
 | Entry | Stage 0 C‑A/C‑C conversion merged, or at least its enum names fixed. |
 | Exit | Every row in 3.1 has a passing characterization test against the **current** core. Firmware quirks are captured explicitly: the busy-bit arrival hold (M2), the residual teach flag after STOP (A9), legacy vs seamless teach return. One pattern rule replaces about 30 Makefile rules. CI runs the C, managed and JS suites on both Linux and Windows legs. |
 | Risks | Characterization encodes current bugs: mark known-bad rows (B1, B6) as expected-to-change, not as golden. Timing-dependent tests flake: use only the injected clock, never the wall clock. |
-| Status | Native part done. `tests/fake_bus.h` is the fake CAN bus (injected clock, scripted feedback, send failures, a log of every frame) and every controller test runs on it. `tests/check.h` is the framework (Q11). Each of the 96 rows of 3.1 names passing tests in the "Row coverage" table and `make test` fails when one does not (`tests/check_rows.sh`); 47 rows have a test written for the row, the rest map to the scenario suite that already drove them. Five tests are marked expected to change (CC.L2, L11, L15, L16, C4). One Makefile pattern rule builds every C test. Known gaps inside covered rows: the M2 "hold could not be transmitted" branch and the T2 "mode outside the expected sequence" branch. Not done here: recorded (request, feedback script) → (frames, record, state JSON) trace files; the tests assert those outputs directly instead. The managed and JS halves of this stage are tracked separately. |
+| Status | Native part done. `tests/fake_bus.h` is the fake CAN bus (injected clock, scripted feedback, send failures, a log of every frame) and every controller test runs on it. `tests/check.h` is the framework (Q11). Each of the 96 rows of 3.1 names passing tests in the "Row coverage" table and `make test` fails when one does not (`tests/check_rows.sh`); 47 rows have a test written for the row, the rest map to the scenario suite that already drove them. Six tests are marked expected to change (CA.P4/keeps-recovery, CC.L2, L11, L15, L16, C4). One Makefile pattern rule builds every C test. Known gaps inside covered rows: the M2 "hold could not be transmitted" branch and the T2 "mode outside the expected sequence" branch. Not done here: recorded (request, feedback script) → (frames, record, state JSON) trace files; the tests assert those outputs directly instead. The managed and JS halves of this stage are tracked separately. |
 
 ### Stage 2 — controller safety core rebuilt against the spec on the fake bus
 
