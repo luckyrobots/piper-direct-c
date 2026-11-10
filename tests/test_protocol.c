@@ -1,11 +1,10 @@
 #include "protocol.h"
 #include "check.h"
-#include <assert.h>
 #include <stdio.h>
 #include <string.h>
 #include <math.h>
 
-int main(void)
+static void scenarios(void)
 {
     struct piper_feedback state = {0};
     const uint8_t status[8] = {1,0,1,0,0,0,0x12,0x34};
@@ -121,5 +120,6 @@ int main(void)
     CHECK(!piper_foreign_command(0x14f)&&!piper_foreign_command(0x190)&&!piper_foreign_command(0x472));
     for (unsigned t=0;t<9;++t) CHECK(piper_teach_active((uint8_t)t)==(t==1||t==3||t==4||t==5||t==7)&&piper_teach_idle((uint8_t)t)==(t==0||t==2||t==6));
     puts("Protocol fixtures passed: signs, units, status, freshness, bad frames, separate addresses.");
-    return 0;
 }
+static const struct check_test tests[]={{"protocol","every scenario of this file",scenarios,NULL}};
+int main(void) { return check_main("protocol",tests,1); }

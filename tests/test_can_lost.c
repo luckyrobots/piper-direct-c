@@ -16,7 +16,7 @@ static struct can_device *fake_open_device(struct can_bus *bus)
     fixture_still(d,5);
     return d;
 }
-int main(void)
+static void scenarios(void)
 {
     struct can_bus bus;
     struct can_device *d=fake_open_device(&bus);
@@ -34,5 +34,6 @@ int main(void)
     CHECK(can_bus_strict_still_for(d,10)==0);
     CHECK(!d->feedback.arm[0].status_seen&&strstr(d->problem,"bus-off"));
     puts("PASS CAN loss: bus-off closes the fake transport, clears link verification, feedback and stationary phase.");
-    return 0;
 }
+static const struct check_test tests[]={{"can-lost","every scenario of this file",scenarios,NULL}};
+int main(void) { return check_main("can-lost",tests,1); }

@@ -1,5 +1,6 @@
 #define _GNU_SOURCE
 #include "fixture.h"
+#include "fake_bus.h"
 
 /* A measured joint a hair past its limit (encoder noise at the stop) must be
    held on the limit, the same way a following hold does it. */
@@ -24,7 +25,7 @@ static void start_move(struct controller *c,struct can_device *d,const char *dir
     cJSON *body=command(d,"joint"); cJSON_AddNumberToObject(body,"joint",6); cJSON_AddNumberToObject(body,"degrees",1);
     CHECK(post(c,body)==202&&LANE(c)->op==OP_MOVE);
 }
-int main(void)
+static void scenarios(void)
 {
     char directory[96]; struct controller c; struct can_device *d=&c.bus.devices[0];
 
@@ -49,3 +50,5 @@ int main(void)
     fixture_cleanup(&c,directory);
     puts("Hold target: a measured pose within the limit slop is held on the limit; beyond it the hold stops instead of commanding an illegal target.");
 }
+static const struct check_test tests[]={{"hold-target","every scenario of this file",scenarios,NULL}};
+int main(void) { return check_main("hold-target",tests,1); }

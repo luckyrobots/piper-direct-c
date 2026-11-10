@@ -1,6 +1,6 @@
 #define _GNU_SOURCE
 #include "fixture.h"
-#include <assert.h>
+#include "fake_bus.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -9,7 +9,7 @@ static cJSON *event(struct controller *c) {
     cJSON *s=controller_state(c,"test"), *d=cJSON_GetArrayItem(cJSON_GetObjectItem(s,"devices"),0);
     cJSON *e=cJSON_Duplicate(cJSON_GetObjectItem(d,"stop_event"),true); cJSON_Delete(s); return e;
 }
-int main(void) {
+static void scenarios(void) {
     char dir[96]; fixture_directory(dir,sizeof dir,"piper-obstruction");
     struct controller c; CHECK(controller_init(&c,true,dir,""));
     double now=piper_now(); struct can_device *d=&c.bus.devices[0];
@@ -49,3 +49,5 @@ int main(void) {
     controller_close(&c);char path[256];snprintf(path,sizeof path,"%s/control-state.json",dir);unlink(path);rmdir(dir);
     puts("Controller obstruction passed: frozen feedback stops in 500–650 ms, first evidence survives repeated STOP and restart, no replay.");
 }
+static const struct check_test tests[]={{"obstruction-controller","every scenario of this file",scenarios,NULL}};
+int main(void) { return check_main("obstruction-controller",tests,1); }

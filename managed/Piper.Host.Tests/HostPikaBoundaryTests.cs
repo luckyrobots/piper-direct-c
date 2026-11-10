@@ -141,6 +141,61 @@ internal static class HostPikaBoundaryTests
         finally { directory.Delete(recursive: true); }
         await ControllerFailureIsConflict();
         await FaultedLoopStillStops();
+        await StalledSnapshotStillStops();
+    }
+
+    // P4 fault injection: a state read is stalled inside one gripper's snapshot
+    // and never returns. The coordinated STOP must still hold every gripper,
+    // the stalled one included, and another gripper's command must still run.
+    private static async Task StalledSnapshotStillStops()
+    {
+        const string first = "/dev/pika/by-host/11-4", peer = "/dev/pika/by-host/12-4";
+        string? distribution = OperatingSystem.IsWindows() ? "Ubuntu" : null;
+        string owner = Guid.NewGuid().ToString();
+        var directory = Directory.CreateTempSubdirectory("piper-host-stalled-snapshot-");
+        using var open = new ManualResetEventSlim(true);
+        try
+        {
+            using var controller = new ControllerService(simulated: true, directory.FullName);
+            int readers = 0;
+            var agents = new Dictionary<string, FakeSession>();
+            await using var registry = new PikaSessionRegistry(first, "never-launched", distribution,
+                factory: (path, _) => agents[path] = new(path == first ? () => { Interlocked.Increment(ref readers); open.Wait(); } : null));
+            var maintenance = new BackendMaintenance(controller.SnapshotJson, () => registry.Snapshots(), () => { }, Environment.ProcessId);
+            var context = new PiperRpcContext(controller, registry, false, owner, maintenance);
+            foreach (string device in new[] { first, peer })
+                await registry.ExecuteAsync("connect", JsonSerializer.SerializeToElement(new { owner, pika_device = device }), default);
+
+            open.Reset();
+            var state = Task.Run(() => context.Control.ReadState());
+            try
+            {
+                await Eventually(() => Volatile.Read(ref readers) == 1, () => "The state read never entered the stalled gripper snapshot.");
+                // Each call runs on its own task, so one that waits behind the
+                // stalled read fails at the liveness limit instead of hanging the runner.
+                var stop = Task.Run(() => Send(PiperApi.Paths.CoordinatedStop, new { owner = Guid.NewGuid().ToString() }));
+                await Eventually(() => stop.IsCompleted, () => "A stalled gripper snapshot blocked the coordinated STOP.");
+                var stopped = await stop;
+                Check(stopped.Status == 200 && stopped.Payload is CoordinatedStopResult { Ok: true } &&
+                    agents[first].Actions.Count(action => action == "hold") == 1 && agents[peer].Actions.Count(action => action == "hold") == 1,
+                    "Coordinated STOP did not hold every gripper while a state read was stalled: " + stopped.ToJson());
+                var command = Task.Run(() => Send("/api/pika/position", new { owner, pika_device = peer, value = .5 }));
+                await Eventually(() => command.IsCompleted, () => "A stalled gripper snapshot blocked another gripper's command.");
+                Check((await command).Status == 200 && agents[peer].Actions.Contains("position") && !state.IsCompleted,
+                    "Another gripper's command failed during the stalled state read, or the fixture did not stay stalled.");
+            }
+            finally { open.Set(); }
+            var released = await state;
+            Check(released["pikas"]!.AsArray().Count == 2 && released["pika"]?["device"]?.GetValue<string>() == first,
+                "The released state read did not carry both grippers.");
+
+            Task<HostControlResult> Send(string route, object body)
+            {
+                var input = JsonSerializer.SerializeToElement(body);
+                return context.Control.ExecuteAsync(route, input.GetRawText(), input, default);
+            }
+        }
+        finally { open.Set(); directory.Delete(recursive: true); }
     }
 
     // P4: a faulted tick loop refuses ordinary actions but still attempts STOP,

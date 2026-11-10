@@ -1,6 +1,6 @@
 #define _GNU_SOURCE
 #include "fixture.h"
-#include <assert.h>
+#include "fake_bus.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -8,8 +8,6 @@
 
 /* All protocol/receipt clocks use the same deterministic monotonic fixture.
    CPU load must not turn a reference-math test into a real 500-ms stale gap. */
-static double test_clock=1000;
-FIXTURE_WRAP_PIPER_NOW(test_clock)
 
 static cJSON *request(struct controller *c,const char *action,bool trajectory)
 {
@@ -29,7 +27,7 @@ static void action(struct controller *c,cJSON *j,int expected)
 }
 static void setup(struct controller *c,char *directory)
 {
-    CHECK(mkdtemp(directory)); CHECK(controller_init(c,true,directory,""));
+    CHECK(controller_init(c,true,directory,""));
     struct can_device *d=&c->bus.devices[0];
     memset(c->bus.sim_target,0,sizeof c->bus.sim_target); memset(d->feedback.arm[0].deg,0,sizeof d->feedback.arm[0].deg);
     c->bus.sim_enabled=63; double now=piper_now(); controller_tick(c,now);
@@ -40,17 +38,14 @@ static void setup(struct controller *c,char *directory)
     }
     fixture_still(d,now-1);
 }
-static void cleanup(struct controller *c,const char *directory)
-{
-    fixture_cleanup(c,directory);
-}
 static double tick(struct controller *c,double now,double dt)
 {
-    now+=dt; test_clock=now; LANE(c)->follow_updated=LANE(c)->heartbeat=now; controller_tick(c,now); return now;
+    now+=dt; fake_bus.now=now; LANE(c)->follow_updated=LANE(c)->heartbeat=now; controller_tick(c,now); return now;
 }
-int main(void)
+static void scenarios(void)
 {
-    struct controller c; char directory[]="/tmp/piper-trajectory-XXXXXX"; setup(&c,directory);
+    fake_bus.now=1000;
+    struct controller c; char directory[FIXTURE_DIRECTORY]; fixture_directory(directory,sizeof directory,"piper-trajectory"); setup(&c,directory);
     /* The removed streamed-position transport is no longer a known name: it is
        a malformed request like any other unknown transport, before any intent or TX. */
     unsigned long long tx_before=c.bus.devices[0].tx;
@@ -90,11 +85,11 @@ int main(void)
     CHECK(cJSON_IsTrue(cJSON_GetObjectItem(state,"trajectory_follow_supported")));
     CHECK(cJSON_IsTrue(cJSON_GetObjectItem(motion,"trajectory_follow")));
     CHECK(cJSON_GetArraySize(cJSON_GetObjectItem(motion,"reference_velocity_deg_s"))==6); cJSON_Delete(state);
-    test_clock=LANE(&c)->follow_updated+.251; controller_tick(&c,test_clock);
+    fake_bus.now=LANE(&c)->follow_updated+.251; controller_tick(&c,fake_bus.now);
     CHECK(LANE(&c)->op==OP_IDLE&&!(LANE(&c)->stage==STAGE_MOVE_TRAJECTORY)&&c.bus.sim_enabled==63&&strstr(LANE(&c)->message,"expired"));
-    cleanup(&c,directory);
+    fixture_cleanup(&c,directory);
 
-    char boundary[]="/tmp/piper-trajectory-boundary-XXXXXX"; setup(&c,boundary);
+    char boundary[FIXTURE_DIRECTORY]; fixture_directory(boundary,sizeof boundary,"piper-trajectory-boundary"); setup(&c,boundary);
     action(&c,request(&c,"follow-start",true),202); now=LANE(&c)->last_tick;
     for (unsigned n=0;n<1500;++n) {
         for (unsigned i=0;i<6;++i) LANE(&c)->target[i]=n<500?12:-12;
@@ -104,36 +99,36 @@ int main(void)
         for (unsigned i=0;i<6;++i) CHECK(LANE(&c)->command[i]>=-12&&LANE(&c)->command[i]<=12);
     }
     for (unsigned i=0;i<6;++i) CHECK(fabs(LANE(&c)->command[i]+12)<.003);
-    test_clock=LANE(&c)->follow_updated+.251; controller_tick(&c,test_clock); cleanup(&c,boundary);
+    fake_bus.now=LANE(&c)->follow_updated+.251; controller_tick(&c,fake_bus.now); fixture_cleanup(&c,boundary);
 
-    char changed[]="/tmp/piper-trajectory-limit-XXXXXX"; setup(&c,changed);
+    char changed[FIXTURE_DIRECTORY]; fixture_directory(changed,sizeof changed,"piper-trajectory-limit"); setup(&c,changed);
     action(&c,request(&c,"follow-start",true),202);
     LANE(&c)->target[0]=5; now=tick(&c,LANE(&c)->last_tick,.025);
     c.bus.devices[0].feedback.acceleration[0].max=.2;
-    tick(&c,now,.025); CHECK(LANE(&c)->op==OP_IDLE&&!(LANE(&c)->stage==STAGE_MOVE_TRAJECTORY)&&strstr(LANE(&c)->message,"limits changed")); cleanup(&c,changed);
+    tick(&c,now,.025); CHECK(LANE(&c)->op==OP_IDLE&&!(LANE(&c)->stage==STAGE_MOVE_TRAJECTORY)&&strstr(LANE(&c)->message,"limits changed")); fixture_cleanup(&c,changed);
 
-    char stale[]="/tmp/piper-trajectory-stale-XXXXXX"; setup(&c,stale);
+    char stale[FIXTURE_DIRECTORY]; fixture_directory(stale,sizeof stale,"piper-trajectory-stale"); setup(&c,stale);
     action(&c,request(&c,"follow-start",true),202); c.bus.devices[0].feedback.acceleration[3].seen=false;
-    tick(&c,LANE(&c)->last_tick,.025); CHECK(LANE(&c)->op==OP_IDLE&&!(LANE(&c)->stage==STAGE_MOVE_TRAJECTORY)&&strstr(LANE(&c)->message,"limits changed")); cleanup(&c,stale);
+    tick(&c,LANE(&c)->last_tick,.025); CHECK(LANE(&c)->op==OP_IDLE&&!(LANE(&c)->stage==STAGE_MOVE_TRAJECTORY)&&strstr(LANE(&c)->message,"limits changed")); fixture_cleanup(&c,stale);
 
-    char range[]="/tmp/piper-trajectory-range-XXXXXX"; setup(&c,range);
+    char range[FIXTURE_DIRECTORY]; fixture_directory(range,sizeof range,"piper-trajectory-range"); setup(&c,range);
     c.bus.devices[0].feedback.arm[0].deg[0]=-12.05;
-    action(&c,request(&c,"follow-start",true),409); CHECK(LANE(&c)->op==OP_IDLE); cleanup(&c,range);
+    action(&c,request(&c,"follow-start",true),409); CHECK(LANE(&c)->op==OP_IDLE); fixture_cleanup(&c,range);
 
-    char invalid[]="/tmp/piper-trajectory-invalid-XXXXXX"; setup(&c,invalid);
+    char invalid[FIXTURE_DIRECTORY]; fixture_directory(invalid,sizeof invalid,"piper-trajectory-invalid"); setup(&c,invalid);
     c.bus.devices[0].feedback.acceleration[0].max=0; action(&c,request(&c,"follow-start",true),409); CHECK(LANE(&c)->op==OP_IDLE);
     c.bus.devices[0].feedback.acceleration[0].max=.001; action(&c,request(&c,"follow-start",true),409); CHECK(LANE(&c)->op==OP_IDLE);
     c.bus.devices[0].feedback.acceleration[0].max=.5;
     cJSON *bad=request(&c,"follow-start",false); cJSON_AddStringToObject(bad,"trajectory","yes"); action(&c,bad,400);
     action(&c,request(&c,"pose",true),400); CHECK(LANE(&c)->op==OP_IDLE);
-    action(&c,request(&c,"follow-start",false),202); CHECK(!(LANE(&c)->stage==STAGE_MOVE_TRAJECTORY)); cleanup(&c,invalid);
+    action(&c,request(&c,"follow-start",false),202); CHECK(!(LANE(&c)->stage==STAGE_MOVE_TRAJECTORY)); fixture_cleanup(&c,invalid);
 
-    char fault[]="/tmp/piper-trajectory-fault-XXXXXX"; setup(&c,fault);
+    char fault[FIXTURE_DIRECTORY]; fixture_directory(fault,sizeof fault,"piper-trajectory-fault"); setup(&c,fault);
     action(&c,request(&c,"follow-start",true),202); LANE(&c)->target[0]=4;
     now=tick(&c,LANE(&c)->last_tick,.025); c.bus.devices[0].feedback.arm[0].arm_status=1;
-    tick(&c,now,.025); CHECK(LANE(&c)->op==OP_IDLE&&!(LANE(&c)->stage==STAGE_MOVE_TRAJECTORY)); cleanup(&c,fault);
+    tick(&c,now,.025); CHECK(LANE(&c)->op==OP_IDLE&&!(LANE(&c)->stage==STAGE_MOVE_TRAJECTORY)); fixture_cleanup(&c,fault);
 
-    char delayed[]="/tmp/piper-trajectory-delayed-XXXXXX"; setup(&c,delayed);
+    char delayed[FIXTURE_DIRECTORY]; fixture_directory(delayed,sizeof delayed,"piper-trajectory-delayed"); setup(&c,delayed);
     action(&c,request(&c,"follow-start",true),202); LANE(&c)->target[0]=4;
     now=tick(&c,LANE(&c)->last_tick,.025); uint64_t before_hold=c.bus.devices[0].tx;
     now=tick(&c,now,.053);
@@ -145,14 +140,16 @@ int main(void)
     before_hold=c.bus.devices[0].tx;
     for (unsigned i=0;i<10;++i) now=tick(&c,now,.025);
     CHECK(LANE(&c)->op==OP_IDLE&&c.bus.devices[0].tx==before_hold); /* Refresh/input cannot revive the retired trajectory. */
-    cleanup(&c,delayed);
+    fixture_cleanup(&c,delayed);
 
-    char lead[]="/tmp/piper-trajectory-lead-XXXXXX"; setup(&c,lead);
+    char lead[FIXTURE_DIRECTORY]; fixture_directory(lead,sizeof lead,"piper-trajectory-lead"); setup(&c,lead);
     action(&c,request(&c,"follow-start",true),202); LANE(&c)->target[0]=10;
     now=LANE(&c)->last_tick;
     for (unsigned n=0;n<100&&LANE(&c)->op!=OP_IDLE;++n) {
         c.bus.sim_target[0]=0; now=tick(&c,now,.025);
     }
-    CHECK(LANE(&c)->op==OP_IDLE&&!(LANE(&c)->stage==STAGE_MOVE_TRAJECTORY)); cleanup(&c,lead);
+    CHECK(LANE(&c)->op==OP_IDLE&&!(LANE(&c)->stage==STAGE_MOVE_TRAJECTORY)); fixture_cleanup(&c,lead);
     puts("Trajectory following: six encoded-reference speed/acceleration caps, reversal, variable dt, expiry hold, limits/fault cancellation and legacy isolation passed.");
 }
+static const struct check_test tests[]={{"trajectory-follow","every scenario of this file",scenarios,NULL}};
+int main(void) { return check_main("trajectory-follow",tests,1); }

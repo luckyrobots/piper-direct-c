@@ -1,7 +1,6 @@
 /* Pure fake Cando callbacks: no adapter enumeration, open, or Windows USB I/O. */
 #include "../src/canbus.c"
 #include "check.h"
-#include <assert.h>
 #include <stdio.h>
 static struct win_frame received[4];
 static unsigned next_frame,reads,sends;
@@ -43,7 +42,7 @@ static void rejected_batch(struct can_bus *bus,struct can_device *d,const struct
     CHECK(!can_bus_send(bus,d,d->generation,frames,count));
     CHECK(sends==previous_sends&&d->tx==previous_tx&&expected_sent==0);
 }
-int main(void)
+static void scenarios(void)
 {
     struct can_bus bus={0}; for (unsigned i=0;i<CANBUS_MAX;++i) bus.devices[i].fd=-1;
     struct can_device *d=&bus.devices[0]; d->fd=0; d->present=d->up=true; d->generation=7;
@@ -92,3 +91,5 @@ int main(void)
     CHECK(!strncmp(d->problem,"Windows USB-CAN receive failed",30));
     puts("PASS fake native Windows pump: real batch validation and Windows packing preserve a complete mode plus six-angle transaction; malformed or 0xAD transactions send nothing, ordered RX timestamps and echo filtering remain intact.");
 }
+static const struct check_test tests[]={{"can-windows-pump","every scenario of this file",scenarios,NULL}};
+int main(void) { return check_main("can-windows-pump",tests,1); }

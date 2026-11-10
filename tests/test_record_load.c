@@ -1,5 +1,6 @@
 #define _GNU_SOURCE
 #include "fixture.h"
+#include "fake_bus.h"
 
 /* controller_init reads control-state.json from disk. These records are
    written as files, the way an older build, an editor or a damaged disk would
@@ -63,7 +64,7 @@ static void refused(const char *record)
     cJSON *after=fixture_read_json(path); CHECK(cJSON_Compare(before,after,true));
     cJSON_Delete(before); cJSON_Delete(after);
 }
-int main(void)
+static void scenarios(void)
 {
     fixture_directory(directory,sizeof directory,"piper-record-load");
     snprintf(path,sizeof path,"%s/control-state.json",directory);
@@ -116,3 +117,5 @@ int main(void)
     CHECK(!unlink(path)); CHECK(!rmdir(directory));
     puts("Record load: legacy, current, tampered-kind, unknown-state and disagreeing records loaded from disk; unknown values refuse startup and disagreement resolves to the stricter latch.");
 }
+static const struct check_test tests[]={{"record-load","every scenario of this file",scenarios,NULL}};
+int main(void) { return check_main("record-load",tests,1); }

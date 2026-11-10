@@ -12,6 +12,7 @@ Projects:
 | Piper.Core / Piper.Host | Native controller ABI, state loop and local HTTP/gRPC host |
 | Piper.Contracts | Public controller protobuf contracts |
 | Piper.Pika / Piper.Pika.Agent | Pika protocol, ownership and Linux serial worker |
+| Piper.Processes | The one bounded child-process runner, shared by the Pika transport and the plugin |
 | Piper.Plugin | Native Lucky Engine widgets and public scene API integration |
 | Piper.Camera / Piper.RealSense | Isolated C# OpenCV capture/calibration and official RealSense wrapper |
 

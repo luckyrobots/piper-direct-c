@@ -1,6 +1,6 @@
 #define _GNU_SOURCE
 #include "fixture.h"
-#include <assert.h>
+#include "fake_bus.h"
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -14,12 +14,10 @@ static enum injection injection;
 static struct controller *subject;
 static unsigned stops,power;
 static double post_hold_timestamp;
-void __real_can_bus_receive(struct can_bus *,double);
-bool __real_can_bus_send(struct can_bus *,struct can_device *,unsigned,const struct can_frame *,size_t);
-void __wrap_can_bus_receive(struct can_bus *bus,double now)
+static void mcu_receive(struct can_bus *bus,double now)
 {
     if (injection!=NONE) memcpy(bus->sim_target,bus->devices[0].feedback.arm[0].deg,sizeof bus->sim_target);
-    __real_can_bus_receive(bus,now);
+    fake_bus_simulator_receive(bus,now);
     if (injection==NONE) return;
     struct can_device *d=&bus->devices[0];
     d->feedback.arm[0].motion_status=injection==HOLD_ACK_IDLE&&(LANE(subject)->pose_phase==POSE_ARRIVAL_HOLD)?0:1;
@@ -34,13 +32,13 @@ void __wrap_can_bus_receive(struct can_bus *bus,double now)
         for (unsigned i=0;i<6;++i) { d->feedback.arm[0].joint_at[i]=post_hold_timestamp; d->feedback.motor[i].high_at=post_hold_timestamp; }
     }
 }
-bool __wrap_can_bus_send(struct can_bus *bus,struct can_device *d,unsigned generation,const struct can_frame *frames,size_t count)
+static bool mcu_send(struct can_bus *bus,struct can_device *d,unsigned generation,const struct can_frame *frames,size_t count)
 {
     for (size_t i=0;i<count;++i) {
         if (frames[i].can_id==0x150) ++stops;
         if (frames[i].can_id==0x471) ++power;
     }
-    return __real_can_bus_send(bus,d,generation,frames,count);
+    return fake_bus_simulator_send(bus,d,generation,frames,count);
 }
 struct fixture { struct controller c; char directory[96]; double now; };
 static void setup(struct fixture *f,double speed,double target)
@@ -64,7 +62,7 @@ static void setup(struct fixture *f,double speed,double target)
 }
 static void tick(struct fixture *f)
 {
-    f->now+=.025; LANE(&f->c)->heartbeat=f->now; controller_tick(&f->c,f->now);
+    fake_bus.now=f->now+=.025; LANE(&f->c)->heartbeat=f->now; controller_tick(&f->c,f->now);
 }
 static void cleanup(struct fixture *f)
 {
@@ -78,8 +76,9 @@ static void reach_hold(struct fixture *f)
     for (unsigned i=0;i<60&&!(LANE(&f->c)->pose_phase==POSE_ARRIVAL_HOLD);++i) tick(f);
     CHECK((LANE(&f->c)->pose_phase==POSE_ARRIVAL_HOLD)&&LANE(&f->c)->op==OP_MOVE&&stops==0);
 }
-int main(void)
+static void scenarios(void)
 {
+    fake_bus_model(mcu_receive,mcu_send);
     struct fixture f;
     for (unsigned variant=0;variant<2;++variant) {
         setup(&f,10,.167); injection=variant?HOLD_ACK_IDLE:BUSY;
@@ -124,17 +123,16 @@ int main(void)
         if (variant==1) ++d->generation;
         if (variant==2) LANE(&f.c)->heartbeat=f.now-1;
         if (variant==3) { d->feedback.arm[0].control=2; d->feedback.arm[0].teach=1; d->feedback.arm[0].arm_status=11; }
-        f.now+=.025; controller_tick(&f.c,f.now);
+        fake_bus.now=f.now+=.025; controller_tick(&f.c,f.now);
         CHECK(LANE(&f.c)->op==OP_IDLE&&!(LANE(&f.c)->pose_phase==POSE_ARRIVAL_HOLD));
         uint64_t tx=d->tx;
-        for (unsigned i=0;i<20;++i) { f.now+=.025; controller_tick(&f.c,f.now); }
+        for (unsigned i=0;i<20;++i) { fake_bus.now=f.now+=.025; controller_tick(&f.c,f.now); }
         CHECK(LANE(&f.c)->op==OP_IDLE&&!(LANE(&f.c)->pose_phase==POSE_ARRIVAL_HOLD)&&d->tx==tx);
         cleanup(&f);
     }
     reach_hold(&f);
-    /* Bring wall time up to the synthetic fixture time before calling the real
-       API (which deliberately reads its own clock and guards sample freshness). */
-    double wait=f.now-piper_now()+.01; if (wait>0) usleep((useconds_t)ceil(wait*1000000));
+    /* The API reads the clock itself and guards sample freshness against it. */
+    fake_bus.now=f.now+.01;
     struct can_device *d=&f.c.bus.devices[0];
     cJSON *hold=cJSON_CreateObject();
     cJSON_AddStringToObject(hold,"device_id",d->id); cJSON_AddNumberToObject(hold,"generation",d->generation);
@@ -145,3 +143,5 @@ int main(void)
     cJSON_Delete(reply); cJSON_Delete(hold); cleanup(&f);
     puts("Arrival tolerance passed: latched MCU busy completes only after final fresh stationary/velocity checks and a verified measured hold; moving/nonfinal/stale/fault/unstable cases reject and 500ms obstruction remains active.");
 }
+static const struct check_test tests[]={{"arrival-tolerance","every scenario of this file",scenarios,NULL}};
+int main(void) { return check_main("arrival-tolerance",tests,1); }

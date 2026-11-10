@@ -1,6 +1,6 @@
 #define _GNU_SOURCE
 #include "fixture.h"
-#include <assert.h>
+#include "fake_bus.h"
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -9,8 +9,7 @@
 
 static void run_case(double measured,const char *action,unsigned joint,double degrees,int expected)
 {
-    char directory[]="/tmp/piper-range-drift-XXXXXX";
-    CHECK(mkdtemp(directory));
+    char directory[FIXTURE_DIRECTORY]; fixture_directory(directory,sizeof directory,"piper-range-drift");
     struct controller c;
     CHECK(controller_init(&c,true,directory,""));
     struct can_device *d=&c.bus.devices[0];
@@ -94,7 +93,7 @@ static void run_case(double measured,const char *action,unsigned joint,double de
     fixture_cleanup(&c,directory);
 }
 
-int main(void)
+static void scenarios(void)
 {
     run_case(70.007,"joint",6,2,202); /* Other joints remain usable. */
     run_case(-70.007,"joint",6,2,202);
@@ -116,3 +115,5 @@ int main(void)
     run_case(72.501,"move-to-zero",0,0,409); /* Includes the .5 degree entry margin. */
     puts("Range drift passed: normal inward and other-joint moves, strict emitted limits, larger excursion rejection, synchronized all-zero pose.");
 }
+static const struct check_test tests[]={{"range-drift","every scenario of this file",scenarios,NULL}};
+int main(void) { return check_main("range-drift",tests,1); }

@@ -1,18 +1,17 @@
 #define _GNU_SOURCE
 #include "fixture.h"
-#include <assert.h>
+#include "fake_bus.h"
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 
-static double clock_now=100,batch_at[2],frozen[6];
+static double batch_at[2],frozen[6];
 static unsigned batches,stops,fail_batch,fail_frame;
 static int stale_joint=-1,stale_high=-1;
 static double stale_at;
-FIXTURE_WRAP_PIPER_NOW(clock_now)
-void __wrap_can_bus_receive(struct can_bus *bus,double now)
+static void mcu_receive(struct can_bus *bus,double now)
 {
     struct can_device *d=&bus->devices[0]; struct piper_sample *s=&d->feedback.arm[0];
     s->status_at=now; s->status_seen=true;
@@ -23,17 +22,17 @@ void __wrap_can_bus_receive(struct can_bus *bus,double now)
         d->feedback.motor[i].position_raw=(int32_t)llround(s->deg[i]*1000*3.141592653589793/180);
     }
 }
-bool __wrap_can_bus_send(struct can_bus *bus,struct can_device *d,unsigned generation,const struct can_frame *frames,size_t count)
+static bool mcu_send(struct can_bus *bus,struct can_device *d,unsigned generation,const struct can_frame *frames,size_t count)
 {
     CHECK(bus->simulated&&generation==d->generation);
     if (count==1&&frames[0].can_id==0x150) {
         CHECK(frames[0].data[0]==1); ++stops;
         /* A later failed STOP must not replace the original persisted cause. */
         strcpy(d->problem,"Later STOP transfer failed"); can_bus_record_tx_failure(d,generation,1,1,0x150,31,14);
-        d->tx_failure.at=clock_now;
+        d->tx_failure.at=fake_bus.now;
         return false;
     }
-    CHECK(batches<2); batch_at[batches]=clock_now; ++batches;
+    CHECK(batches<2); batch_at[batches]=fake_bus.now; ++batches;
     CHECK(count==(batches==1?3:4)&&d->feedback.arm[0].control==2);
     struct can_frame expected[4]; unsigned offset=batches==1?0:1;
     if (offset) { CHECK(batch_at[1]-batch_at[0]>=.02); expected[0]=piper_mode(1); }
@@ -44,7 +43,7 @@ bool __wrap_can_bus_send(struct can_bus *bus,struct can_device *d,unsigned gener
             strcpy(d->problem,"Windows USB-CAN send failed (transport 14, WinUSB 121)");
             can_bus_record_tx_failure(d,generation,i+1,(unsigned)count,frames[i].can_id,121,14);
             /* piper_now in the recorder shares its translation unit and is not linker-wrapped. */
-            d->tx_failure.at=clock_now;
+            d->tx_failure.at=fake_bus.now;
             return false;
         }
         if (frames[i].can_id==0x151) d->feedback.arm[0].control=1;
@@ -55,17 +54,17 @@ bool __wrap_can_bus_send(struct can_bus *bus,struct can_device *d,unsigned gener
 static void fixture(struct controller *c,char directory[96])
 {
     fixture_directory(directory,96,"piper-teach-batches");
-    clock_now+=10; CHECK(controller_init(c,true,directory,""));
+    fake_bus.now+=10; CHECK(controller_init(c,true,directory,""));
     batches=stops=fail_batch=fail_frame=0; stale_joint=stale_high=-1;
     struct can_device *d=&c->bus.devices[0];
     /* Exercise the real encoder/freshness guards on a wholly mocked transport. */
-    d->simulated=false; d->fd=FIXTURE_FD; fixture_still(d,clock_now-1);
+    d->simulated=false; d->fd=FIXTURE_FD; fixture_still(d,fake_bus.now-1);
     strcpy(d->feedback.hardware,"H-V1.2-1"); strcpy(d->feedback.version,"S-V1.9-0");
     d->feedback.arm[0].control=2; d->feedback.arm[0].teach=2; d->feedback.arm[0].motion_mode=1;
     const double pose[6]={2,25,-25,-20,60,8}; memcpy(frozen,pose,sizeof frozen); memcpy(d->feedback.arm[0].deg,pose,sizeof pose);
-    fixture_vendor_limits(d,.3,clock_now);
+    fixture_vendor_limits(d,.3,fake_bus.now);
     for (unsigned i=0;i<6;++i) d->feedback.motor[i].enabled=true;
-    d->rx=123; d->local=45; __wrap_can_bus_receive(&c->bus,clock_now);
+    d->rx=123; d->local=45; can_bus_receive(&c->bus,fake_bus.now);
 }
 static void start(struct controller *c,int expected)
 {
@@ -76,7 +75,7 @@ static void start(struct controller *c,int expected)
     cJSON_AddBoolToObject(j,"button_off",true); cJSON_AddBoolToObject(j,"same_pose_confirmed",true);
     int status; cJSON *r=controller_action(c,"/api/command",j,&status); CHECK(status==expected); cJSON_Delete(r); cJSON_Delete(j);
 }
-static void tick(struct controller *c,double dt) { clock_now+=dt; LANE(c)->heartbeat=clock_now; controller_tick(c,clock_now); }
+static void tick(struct controller *c,double dt) { fake_bus.now+=dt; LANE(c)->heartbeat=fake_bus.now; controller_tick(c,fake_bus.now); }
 static void close_fixture(struct controller *c,const char *directory)
 {
     CHECK(LANE(c)->op==OP_IDLE); c->bus.devices[0].fd=-1; fixture_cleanup(c,directory);
@@ -97,8 +96,9 @@ static void check_persisted_failure(struct controller *c,const char *directory,u
     const char *problem=cJSON_GetStringValue(cJSON_GetObjectItem(transport,"failure"));
     CHECK(problem&&strstr(problem,"WinUSB 121")); cJSON_Delete(saved);
 }
-int main(void)
+static void scenarios(void)
 {
+    fake_bus_model(mcu_receive,mcu_send);
     struct controller c; char directory[96]; fixture(&c,directory); start(&c,202);
     CHECK(batches==1&&LANE(&c)->stage==STAGE_TEACH_SEEDED&&c.bus.devices[0].feedback.arm[0].control==2);
     tick(&c,.01); CHECK(batches==1); tick(&c,.015); CHECK(batches==2&&LANE(&c)->stage==STAGE_TEACH_MODE&&LANE(&c)->op==OP_TEACH_RETURN);
@@ -121,8 +121,8 @@ int main(void)
         if (failure==2) { d->feedback.arm[0].teach=1; d->feedback.arm[0].arm_status=11; }
         if (failure==3) d->feedback.arm[0].deg[5]+=.501;
         if (failure==4) d->feedback.motor[3].enabled=false;
-        if (failure==5) { clock_now+=1; LANE(&c)->heartbeat=clock_now-1; }
-        if (failure==5) controller_tick(&c,clock_now); else tick(&c,.025);
+        if (failure==5) { fake_bus.now+=1; LANE(&c)->heartbeat=fake_bus.now-1; }
+        if (failure==5) controller_tick(&c,fake_bus.now); else tick(&c,.025);
         CHECK(LANE(&c)->op==OP_IDLE&&batches==1); close_fixture(&c,directory);
     }
     fixture(&c,directory); start(&c,202); tick(&c,.025); c.bus.devices[0].feedback.arm[0].deg[5]+=.501; tick(&c,.01);
@@ -134,3 +134,5 @@ int main(void)
     CHECK(LANE(&c)->op==OP_IDLE&&batches==2&&stops==1); check_persisted_failure(&c,directory,4,4,0x157); close_fixture(&c,directory);
     puts("Teach batches passed: frozen 3+4 sequence with receive gap, final fresh ACKs, pre-mode cancellation, drift and partial-transfer STOP with persistent original transport evidence.");
 }
+static const struct check_test tests[]={{"teach-batches","every scenario of this file",scenarios,NULL}};
+int main(void) { return check_main("teach-batches",tests,1); }

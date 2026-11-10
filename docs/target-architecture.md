@@ -142,8 +142,8 @@ C does not contain HTTP, static files, camera children, route parsing or project
 ### P7. Standard testing
 
 **Rule.**
-- Use one framework per language: xUnit for C#, and one C framework (open, Q11).
-- A **fake CAN bus** scripts frames and feedback with an injected clock and asserts the emitted frames.
+- Use one framework per language: xUnit for C#, and the in-repo `tests/check.h` for C (Q11): `CHECK()` always evaluates, tests carry stable IDs, and `check_main()` prints one `ok <id> - <name>` line per test.
+- A **fake CAN bus** (`tests/fake_bus.h`) scripts frames and feedback with an injected clock and asserts the emitted frames. Every controller test links it through the same three link seams (`piper_now`, `can_bus_receive`, `can_bus_send`).
 - Scenario tests derived from the section 3 tables run in CI on every leg.
 - No test exists only to keep dead code reachable.
 - Fixtures are shared (`tests/fixture.h`, `TestKit`).
@@ -157,7 +157,7 @@ C does not contain HTTP, static files, camera children, route parsing or project
 | §8 | The C tests repeat the device fixture 29 times, `mkdtemp` 24 times and the `__wrap_piper_now` boilerplate 16 times. About 30 near-identical Makefile rules. |
 | §8 | `test_camera.c` silently skips half the test without `ffmpeg`. `Piper.Host.Tests` runs only on Ubuntu. The managed Linux fixture fails on the `null`/`""`/`"Ubuntu"` distribution convention. |
 
-**Check.** Every section 3 row maps to a test ID. Coverage of the tables is reported in CI.
+**Check.** Every section 3 row maps to a test ID. Coverage of the tables is reported in CI. For section 3.1 this is in place: the "Row coverage" table there names the tests of each row, and `make test` runs `tests/check_rows.sh`, which prints the table and fails when a row has no test, a named test did not pass, or the table and the tests disagree.
 
 ## 2. Target component diagram
 
@@ -401,6 +401,109 @@ Persisted per device in `control-state.json`:
 | C4 | No client field can move the state. Attestations are recorded alongside the transition, with the confirmation ID, for audit. |
 | C5 | A restart preserves the state. `INTENT` after a restart means "interrupted before verified completion". |
 
+#### Row coverage — characterization tests of the current core
+
+Every row above names the tests that pin what the **current** core does for it. A test ID is the first word of the line the runner prints (`ok <id> - <name>`, `tests/check.h`): `CA.G2` is a test written for that row (`tests/test_rows_lane.c`, `tests/test_rows_latch.c`), a bare name such as `teaching` is the older scenario suite `tests/test_teaching.c` that already drives the row. `make test` runs `tests/check_rows.sh` over this table: a row without a line, a named test that did not pass, or a row test missing from its line fails the build. `none` plus a reason is the allowlist of rows without a test; it is empty. A test marked *expected to change* pins behaviour the spec says is wrong; it is not a golden result, and stage 2 replaces it.
+
+| Row | Tests | Notes |
+|---|---|---|
+| CA.G1 | `CA.G1`, `stop-generation` | Current core: an emergency STOP with a stale generation still sends STOP but answers 409. |
+| CA.G2 | `CA.G2` | |
+| CA.G3 | `teaching`, `teach-batches` | |
+| CA.G4 | `CA.G4` | |
+| CA.G5 | `teaching` | |
+| CA.G6 | `CA.G6`, `disable-sequence`, `reset-retry` | |
+| CA.G7 | `CA.G7` | |
+| CA.G8 | `CA.G8`, `teaching` | |
+| CA.G9 | `CA.G9` | Both halves: enable lost and control mode lost. |
+| CA.G10 | `obstruction-controller` | |
+| CA.G11 | `trajectory-viability` | |
+| CA.G12 | `CA.G12`, `teaching` | |
+| CA.G13 | `CA.G13` | |
+| CA.A1 | `CA.A1` | |
+| CA.A2 | `CA.A2`, `range-drift` | |
+| CA.A3 | `range-transition`, `range-drift` | |
+| CA.A4 | `startup` | |
+| CA.A5 | `cycle` | |
+| CA.A6 | `follow`, `trajectory-follow` | |
+| CA.A7 | `gripper` | |
+| CA.A8 | `CA.A8`, `disable-sequence` | |
+| CA.A9 | `CA.A9`, `reset-retry` | Firmware quirk: the residual teach flag after STOP. |
+| CA.A10 | `teaching` | |
+| CA.A11 | `teaching`, `teach-batches` | |
+| CA.A12 | `recover-at-pose` | |
+| CA.A13 | `CA.A13` | |
+| CA.A14 | `teaching` | |
+| CA.S1 | `pose-entry-order` | |
+| CA.S2 | `pose-entry-order` | |
+| CA.S3 | `pose-entry-order` | |
+| CA.M1 | `CA.M1` | |
+| CA.M2 | `arrival-tolerance` | Firmware quirk: the busy-bit arrival hold. The "hold could not be transmitted" branch has no test. |
+| CA.M3 | `hold-target`, `cycle` | |
+| CA.M4 | `arrival-tolerance` | |
+| CA.L1 | `range-transition` | |
+| CA.L2 | `range-transition` | |
+| CA.L3 | `CA.L3` | |
+| CA.L4 | `startup` | |
+| CA.Y1 | `cycle` | |
+| CA.Y2 | `CA.Y2` | |
+| CA.Y3 | `cycle` | |
+| CA.Y4 | `cycle` | |
+| CA.F1 | `follow` | |
+| CA.F2 | `follow`, `trajectory-follow` | |
+| CA.F3 | `follow` | |
+| CA.F4 | `follow` | |
+| CA.F5 | `trajectory-follow` | |
+| CA.F6 | `trajectory-viability` | |
+| CA.F7 | `follow` | |
+| CA.F8 | `follow` | |
+| CA.P1 | `CA.P1`, `enable-sequence` | |
+| CA.P2 | `enable-sequence` | |
+| CA.P3 | `CA.P3`, `enable-sequence`, `disable-sequence` | |
+| CA.P4 | `CA.P4`, `CA.P4/keeps-recovery`, `disable-sequence` | |
+| CA.P5 | `CA.P5`, `disable-sequence` | |
+| CA.R1 | `CA.R1`, `reset-retry` | |
+| CA.G-1 | `gripper` | |
+| CA.G-2 | `gripper` | |
+| CA.T1 | `teaching`, `teach-batches` | Legacy and seamless teach return both run in `teaching`. |
+| CA.T2 | `teaching` | The "mode outside the expected sequence" branch has no test. |
+| CA.T3 | `teaching` | |
+| CA.T4 | `teaching` | |
+| CA.T5 | `CA.T5` | |
+| CA.T6 | `teaching`, `teach-batches` | |
+| CA.T7 | `teaching` | |
+| CA.H5 | `recover-at-pose` | |
+| CA.I1 | `CA.I1` | |
+| CA.I2 | `follow` | |
+| CA.I3 | `CC.C2` | The same property seen from the record. |
+| CA.I4 | `CA.G4`, `stop-generation`, `pose-entry-order` | |
+| CA.I5 | `CA.I5`, `range-drift` | |
+| CA.I6 | `CA.I6` | |
+| CA.I7 | `teaching` | |
+| CA.I8 | `CA.G2`, `follow` | |
+| CA.I9 | `CA.I9` | |
+| CC.L1 | `CC.L1` | |
+| CC.L2 | `CC.L2` | Expected to change: the current core saves kind `power`, not an intent. |
+| CC.L3 | `CC.L3` | |
+| CC.L4 | `CC.L4` | |
+| CC.L5 | `CC.L5` | |
+| CC.L6 | `CC.L6` | |
+| CC.L7 | `CC.L7` | |
+| CC.L8 | `CC.L8` | |
+| CC.L9 | `CC.L9` | |
+| CC.L10 | `CC.L10` | |
+| CC.L11 | `CC.L11` | Expected to change (B1): needs the client's `reset_completed`. |
+| CC.L12 | `CC.L12` | |
+| CC.L13 | `CC.L13` | |
+| CC.L14 | `recover-at-pose` | |
+| CC.L15 | `CC.L15` | Expected to change: the unsaved latch stays in memory. |
+| CC.L16 | `CC.L16` | Expected to change: a legacy stop is not converted on load. |
+| CC.C1 | `CC.C1`, `record-load` | |
+| CC.C2 | `CC.C2` | |
+| CC.C3 | `CC.C3` | |
+| CC.C4 | `CC.C4` | Expected to change (B1): client fields gate transitions and no attestation is recorded. |
+| CC.C5 | `CC.C5` | |
+
 #### Other native machines
 
 | Machine | S | Target states | Key transitions | Invariants |
@@ -494,6 +597,7 @@ Every stage leaves the system shippable. Old and new paths coexist only behind o
 | Entry | Stage 0 C‑A/C‑C conversion merged, or at least its enum names fixed. |
 | Exit | Every row in 3.1 has a passing characterization test against the **current** core. Firmware quirks are captured explicitly: the busy-bit arrival hold (M2), the residual teach flag after STOP (A9), legacy vs seamless teach return. One pattern rule replaces about 30 Makefile rules. CI runs the C, managed and JS suites on both Linux and Windows legs. |
 | Risks | Characterization encodes current bugs: mark known-bad rows (B1, B6) as expected-to-change, not as golden. Timing-dependent tests flake: use only the injected clock, never the wall clock. |
+| Status | Native part done. `tests/fake_bus.h` is the fake CAN bus (injected clock, scripted feedback, send failures, a log of every frame) and every controller test runs on it. `tests/check.h` is the framework (Q11). Each of the 96 rows of 3.1 names passing tests in the "Row coverage" table and `make test` fails when one does not (`tests/check_rows.sh`); 47 rows have a test written for the row, the rest map to the scenario suite that already drove them. Six tests are marked expected to change (CA.P4/keeps-recovery, CC.L2, L11, L15, L16, C4). One Makefile pattern rule builds every C test. Known gaps inside covered rows: the M2 "hold could not be transmitted" branch and the T2 "mode outside the expected sequence" branch. Not done here: recorded (request, feedback script) → (frames, record, state JSON) trace files; the tests assert those outputs directly instead. The managed and JS halves of this stage are tracked separately. |
 
 ### Stage 2 — controller safety core rebuilt against the spec on the fake bus
 
@@ -530,7 +634,7 @@ Every stage leaves the system shippable. Old and new paths coexist only behind o
 |---|---|
 | Scope | Agent: a serial reader task; a watchdog on its own timer that drives Pika‑E to `Disabling`; stdout through a bounded non-blocking queue (state frames are drop-oldest; ACKs and errors are never dropped, and if the queue overflows the watchdog treats the Host as lost). Host: Pika‑A `Faulted` phase with tree kill and awaited pump (B2, B16); skip-and-count bad lines instead of ending the pump; one `BoundedProcess.RunAsync`; one snapshot schema (it is defined 3 times today). Native: confirm the lease watchdog is independent of `gate` contention (P4). |
 | Entry | Stage 0 B2 tactical fix merged. Pika‑A/E enums from `i8/pika`. |
-| Status | Agent part done: `PikaAgent` (logic under one lock, injected clock, serial and output), `PikaAgentRunner` (serial reader, input reader and watchdog timer on three threads), `AgentOutput` (bounded queue with its own writer thread), signal and process-exit handling in `AgentProgram`. `PikaAgentFaultTests` covers blocked stdout, malformed input, stalled serial, Host silence, the holding grace, closed input and termination in-process, and on Linux launches the real agent binary on a pty through the native launch branch (heartbeat loss, SIGTERM). Not yet tested: a killed WSL parent (Windows with WSL only) and a stalled Host snapshot. |
+| Status | Agent part done: `PikaAgent` (logic under one lock, injected clock, serial and output), `PikaAgentRunner` (serial reader, input reader and watchdog timer on three threads), `AgentOutput` (bounded queue with its own writer thread), signal and process-exit handling in `AgentProgram`. `PikaAgentFaultTests` covers blocked stdout, malformed input, stalled serial, Host silence, the holding grace, closed input and termination in-process, and on Linux launches the real agent binary on a pty through the native launch branch (heartbeat loss, SIGTERM). Host part done except where listed: the Pika‑A `Faulted` slot with `BoundedProcess.KillTree` and a pump awaited in `CloseAsync`, and malformed agent lines skipped (counted consecutively; 32 in a row fault the session), both covered by the garbage and garbage-hang fixtures in `Piper.Pika.Tests`. The Host-owned snapshot fields have one definition, `PikaSessionFields`, used by a live `PikaProcessService` and by the registry placeholder (`PikaSnapshotTests`). A stalled snapshot no longer delays a hold, heartbeat, routing or another reader: `PikaSessionRegistry` copies identities under its gate and samples sessions outside it, and `PikaProcessService` composes JSON outside `stateGate`. Fault-injected in `PikaSnapshotTests` (two real fixture agents) and `HostPikaBoundaryTests` (coordinated STOP through the dispatcher); the compose step inside `PikaProcessService` has no injection seam and is not stalled directly. `BoundedProcess` (`managed/Piper.Processes`, a leaf assembly under `Piper.Pika` and `Piper.Plugin`) is the only bounded child-process runner in `Piper.Pika`, `Piper.Host` and `Piper.Plugin`: the plugin's WSL check and camera tools run through `BoundedProcess.RunAsync`. The long-lived children (the Pika agent, the bundled Host, a camera capture worker) keep their own lifecycle and share its start settings, start failure and tree kill. Not done: the snapshot's readers are still string-keyed and the snapshot is not in `piper-api.json`; a killed WSL parent is not tested (Windows with WSL only); the native lease-watchdog check and the workstation check. |
 | Exit | Fault-injection tests in CI: blocked stdout, malformed JSON, stalled serial, a killed WSL parent, a stalled Host snapshot. Each reaches safe power within (bound + one loop) and reports `Uncertain` where proof is missing. A workstation check with empty jaws. |
 | Risks | Disabling on the agent's own heartbeat loss drops a grasp. That is the existing behaviour outside `FollowHolding`, and `FollowHolding` is Q6. Firmware behaviour on serial silence is unknown: do not rely on it (Q6). This stage runs late because it depends on stage 1 tooling, so B2 is mitigated in stage 0. |
 
@@ -557,7 +661,7 @@ Every stage leaves the system shippable. Old and new paths coexist only behind o
 | Q8 | **Which attestations remain human?** `clear`, `supported`, `standalone`, `button_off`, `same_pose_confirmed`/`zero_pose_confirmed`. | Keep them as per-action confirmations; or derive some (for example `button_off` from the teach status) | Product and UX decision. P1 forbids blanket flags either way. |
 | Q9 | **Legacy stop records.** Do deployed `state-dir`s still contain `legacy_stops`? | Convert on load (L16), then delete the reader | Needs an inventory of deployed machines. |
 | Q10 | **Lane addressing.** Today the API acts on the "selected" lane. | Require `device_id` on every mutating request; selection becomes UI-only | Recommended with C‑F removal (stage 2/3). |
-| Q11 | **C test framework.** | Unity, cmocka, greatest, or a small in-repo `CHECK` header | Must keep `--wrap` or link-seam fakes working on Linux and Windows. |
+| Q11 | **C test framework.** | Unity, cmocka, greatest, or a small in-repo `CHECK` header | **Decided (stage 1): the in-repo header, `tests/check.h`.** It is about 70 lines, has no dependency to vendor or to build with MinGW, and keeps the `-Wl,--wrap` link seams working unchanged on Linux and Windows. What a framework would add is already there: `CHECK()` that always evaluates and counts, a test table with stable IDs (`struct check_test`), an "expected to change" marker for rows that pin a known bug, and a TAP-like `ok <id> - <name>` line per test that `tests/check_rows.sh` reads. Mocks are not needed: the fake bus is the only test double. Revisit only if tests need fixtures per test case or parameterized cases that a table of functions cannot express. |
 | Q12 | **Unused UI states.** The `"controller"` settings category has no button. `backendSetupOpen`. | Delete, or add the button | Workspace owner. |
 | Q13 | **Real-time requirement.** The 20 ms power cadence, the 50 ms trajectory tick ceiling and the 0.25 s and 0.8 s leases run on general-purpose OS timers in a .NET-hosted thread. Is soft real-time enough, or does the core need its own thread with a priority? | Measure jitter on the Windows and Linux workstations | Stage 2 measurement. |
 | Q14 | **Lucky Engine SDK threading.** Which threads deliver UI events and RPC callbacks, and what may block them? It governs the Shell actor and STOP latency (B13). | Confirm with the SDK documentation or maintainers | Before stage 4. |

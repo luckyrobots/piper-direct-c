@@ -3,7 +3,6 @@
    real driver callback or robot command is executed by this fixture. */
 #include "../src/canbus.c"
 #include "fixture.h"
-#include <assert.h>
 #include <stdio.h>
 
 struct fake_handle { unsigned device; bool open,freed; };
@@ -97,7 +96,7 @@ static void fake_tick(struct controller *controller,double now) { (void)controll
 #undef can_bus_check_connections
 #undef controller_tick
 
-int main(void)
+static void scenarios(void)
 {
     struct can_bus bus;can_bus_init(&bus,false);bus.sequence=7;
     struct can_device *first=&bus.devices[0];
@@ -183,3 +182,5 @@ int main(void)
     CHECK(full_scans==1&&connection_checks==2&&controller_ticks==4);
     puts("PASS offline Windows hotplug: discovery/reorder/removal and targeted stale-peer reconnect preserve the healthy adapter's exact handle, generation, firmware and feedback; discovery is deferred until idle.");
 }
+static const struct check_test tests[]={{"can-windows-hotplug","every scenario of this file",scenarios,NULL}};
+int main(void) { return check_main("can-windows-hotplug",tests,1); }
