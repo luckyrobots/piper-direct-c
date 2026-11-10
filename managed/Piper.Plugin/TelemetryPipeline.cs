@@ -100,8 +100,8 @@ public sealed partial class PipersPlugin
             recovery.Teaching.Release();
         }, forgetAllApprovals);
         CurrentRecovery?.Cancel();
-        CancelGroupSimulationFollowingInput(reason);
-        StopViewportDrag();
+        follow.CancelInput(reason);
+        follow.Viewport.Stop();
         acknowledgedScenePose = null; linkErrorDegrees = null;
         if (clearLink) link = null;
     }
@@ -113,7 +113,7 @@ public sealed partial class PipersPlugin
         // heartbeats and fresh measured joint controls remain independent.
         Interlocked.Increment(ref scenePermissionEpoch);
         long request = followRequest;
-        StopViewportDrag();
+        follow.Viewport.Stop();
         if (CommandAuthority.Current.Lease is { } lease && lease.Request == request) CommandAuthority.EndLease(lease);
         linkCommandsEnabled = false;
         acknowledgedScenePose = null; linkErrorDegrees = null;
@@ -169,7 +169,7 @@ public sealed partial class PipersPlugin
                 });
             }
             approved = linkCommandsEnabled = false;
-            StopViewportDrag();
+            follow.Viewport.Stop();
             CommandAuthority.ClearTracked();
         }
     }
@@ -280,7 +280,7 @@ public sealed partial class PipersPlugin
     /// <summary>One 200 ms watchdog pass: disarm on stale feedback, otherwise renew the tracked lease.</summary>
     internal async Task ArmHeartbeatTick(CancellationToken cancellation)
     {
-        var group = Volatile.Read(ref groupSimulation);
+        var group = follow.Session;
         var receipt = telemetry.Latest;
         if (group is null && !HasFreshControlTelemetry(out receipt))
         {
@@ -429,11 +429,11 @@ public sealed partial class PipersPlugin
 
     internal async Task PublishMeasuredScene(CancellationToken cancellation)
     {
-        var group = Volatile.Read(ref groupSimulation);
+        var group = follow.Session;
         if (group is not null && !GroupWaitingForUserPlay(group)) return;
         if (link is not { } linked) return;
         bool SamePublishingScope() => ReferenceEquals(link, linked) &&
-            ReferenceEquals(Volatile.Read(ref groupSimulation), group) &&
+            ReferenceEquals(follow.Session, group) &&
             (group is null || GroupWaitingForUserPlay(group));
         // Arming Follow in Edit does not transfer pose ownership. Keep the
         // measured pose lease alive until the actual Play runtime takes over;
@@ -504,7 +504,7 @@ public sealed partial class PipersPlugin
         {
             // A rejected old publication cannot revoke a replacement link or
             // the runtime leader that took ownership while it was pending.
-            if (!ReferenceEquals(link, linked) || !ReferenceEquals(Volatile.Read(ref groupSimulation), group)) return;
+            if (!ReferenceEquals(link, linked) || !ReferenceEquals(follow.Session, group)) return;
             if (group is not null && GroupScopeCurrent(group) && !GroupWaitingForUserPlay(group) &&
                 error.Message.Contains("Robot linking requires an open scene in Edit mode", StringComparison.Ordinal))
             {

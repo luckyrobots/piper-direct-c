@@ -5,7 +5,7 @@ using LuckyRobots.Piper.Pika;
 
 internal static partial class SimulationFollowingTests
 {
-    private static string DiagnosticPath(Fixture fixture, PipersPlugin.GroupSession session, string profileId) => Path.Combine(
+    private static string DiagnosticPath(Fixture fixture, GroupSession session, string profileId) => Path.Combine(
         fixture.Plugin.engine.Start.SettingsDirectory, "diagnostics", "simulation-follow",
         session.PrepareId + "-" + profileId + ".json");
 
@@ -57,7 +57,7 @@ internal static partial class SimulationFollowingTests
         await using (var f = new Fixture())
         {
             f.ConfigureGroup(); f.SelectGroupFollowers("piper-2"); f.UseUiDispatcher();
-            long before = f.Plugin.groupControlEpoch;
+            long before = f.Plugin.follow.ControlEpoch;
             await f.GroupEvent("toggle");
             var authority = f.Plugin.CommandAuthority;
             authority.TryAcknowledge(authority.Epoch, new("piper-1", f.Plugin.telemetry.BackendToken, "can-a", 7), 77);
@@ -68,13 +68,13 @@ internal static partial class SimulationFollowingTests
             });
             f.FocusGroupSecond();
             await f.Gap(f.Plugin.ArmHeartbeats);
-            Check(f.GroupArmedForPlay && f.Plugin.groupControlEpoch == before + 1 &&
+            Check(f.GroupArmedForPlay && f.Plugin.follow.ControlEpoch == before + 1 &&
                 f.Rpc.Requests.Any(r => r.Route == "/api/heartbeat" && r.Body["device_id"]?.GetValue<string>() == "can-a" &&
                     r.Body["generation"]?.GetValue<long>() == 7 && r.Body["request_id"]?.GetValue<long>() == 77),
                 "An armed follower suppressed an independent ordinary heartbeat or rebound it to the viewed robot");
             f.RequestGroupPlay();
             await Until(() => !f.GroupActive, "An independent lease appearing after arming did not block physical admission");
-            Check(f.Plugin.groupControlEpoch == before + 2 &&
+            Check(f.Plugin.follow.ControlEpoch == before + 2 &&
                 !f.Rpc.Requests.Any(r => r.Body["action"]?.GetValue<string>() is "pose" or "follow-start" or "follow-update"),
                 "Retired group ownership failed to fence stale controls or admitted hardware alongside the ordinary lease");
         }
@@ -183,7 +183,7 @@ internal static partial class SimulationFollowingTests
                 "Single-participant arming entered Play or sent a target before user Play");
             f.RequestGroupPlay();
             await Until(() => f.GroupPhase == GroupFollowPhase.Following || !f.GroupActive, "One grouped participant did not start");
-            Check(f.GroupActive && f.Mode == "play", "The shared executor rejected a single selected participant: " + f.Plugin.groupFollowStatus);
+            Check(f.GroupActive && f.Mode == "play", "The shared executor rejected a single selected participant: " + f.Plugin.follow.Status.Headline);
             string can = selected == "piper-1" ? "can-a" : "can-b", pika = selected == "piper-1" ? "/dev/pika-a" : "/dev/pika-b";
             Check(f.Rpc.Requests.Where(r => r.Body["action"]?.GetValue<string>() == "follow-start").All(r => r.Body["device_id"]?.GetValue<string>() == can) &&
                 f.Rpc.Requests.Where(r => r.Route == "/api/pika/follow-start").All(r => r.Body["pika_device"]?.GetValue<string>() == pika),
@@ -232,7 +232,7 @@ internal static partial class SimulationFollowingTests
             f.Rpc.DelayedOperation = delayed;
             await f.Click("group.follow.toggle"); await Until(() => f.GroupArmedForPlay, "Late-admission fixture did not arm");
             f.RequestGroupPlay(); await f.Rpc.DelayedReached.Task.WaitAsync(TimeSpan.FromSeconds(3));
-            var old = f.Plugin.groupSimulation;
+            var old = f.Plugin.follow.Session;
             await f.ClickSidebarGroupStop().WaitAsync(TimeSpan.FromSeconds(1));
             Check(f.GroupPhase == GroupFollowPhase.Retiring && ReferenceEquals(old, f.Session) && !f.EngineRequests.Any(r => r.Action == "activate-start"),
                 "Stop blocked the dispatcher, or an in-flight admission released its identity or activated after Stop");
@@ -258,7 +258,7 @@ internal static partial class SimulationFollowingTests
         {
             await using var f = new Fixture(); f.ConfigureGroup(); f.SelectGroupFollowers("piper-1"); f.UseUiDispatcher(); change(f);
             await f.Click("group.follow.toggle"); await Until(() => f.GroupArmedForPlay, "A boundary fixture did not arm: " + name);
-            var session = f.Plugin.groupSimulation!;
+            var session = f.Plugin.follow.Session!;
             f.RequestGroupPlay(); await Until(() => !f.GroupActive, "A bad runtime boundary retained following: " + name);
             Check(f.Mode == "pause" && f.Plugin.uiActionError.Length > 0 && f.SidebarStatus().Contains("Following stopped"),
                 "Runtime failure lost its original error or final pause: " + name);
@@ -297,7 +297,7 @@ internal static partial class SimulationFollowingTests
             await f.Click("group.follow.toggle"); await Until(() => f.GroupArmedForPlay, "Missed-grasp fixture did not arm");
             f.RequestGroupPlay(); await Until(() => !f.GroupActive, "A missed grasp failed to complete release and home");
             var openings = f.Rpc.Requests.Where(r => r.Route == "/api/pika/follow-update").Select(r => r.Body["opening_mm"]!.GetValue<double>()).ToArray();
-            Check(f.Plugin.groupFollowStatus.Contains("Grasp not confirmed") && !f.EngineRequests.Any(r => r.Action == "ack-episode") &&
+            Check(f.Plugin.follow.Status.Headline.Contains("Grasp not confirmed") && !f.EngineRequests.Any(r => r.Action == "ack-episode") &&
                 openings.Contains(10) && openings.Last() == 20 && f.Mode == "pause" && f.Snapshot["devices"]![0]!["joints"]!.AsArray().All(j => j!["enabled"]!.GetValue<bool>()),
                 "Source/physical grasp failure skipped home, claimed success, or disabled the arm");
         }
@@ -338,7 +338,7 @@ internal static partial class SimulationFollowingTests
         {
             await using var f = new Fixture(); f.ConfigureGroup(); f.SelectGroupFollowers("piper-1"); f.UseUiDispatcher();
             await f.Click("group.follow.toggle"); await Until(() => f.GroupArmedForPlay, "Pika-audit fixture did not arm");
-            var group = f.Plugin.groupSimulation!;
+            var group = f.Plugin.follow.Session!;
             f.RequestGroupPlay(); await Until(() => f.GroupPhase == GroupFollowPhase.Following, "Pika-audit fixture did not start");
             var stream = new PikaFollowSession(_ => { }); string id = stream.Start(0); stream.Update(id, 12, 20, .01); stream.Tick(.27, PikaProtocol.Angle(20), true);
             f.Rpc.FailArmWithPikaAudit = both; f.Rpc.PikaFailureAudit = stream.Audit;
@@ -396,7 +396,7 @@ internal static partial class SimulationFollowingTests
             await f.Click("group.follow.toggle");
             if (action == "activate-start") { await Until(() => f.GroupArmedForPlay, "Delayed activation did not arm"); f.RequestGroupPlay(); }
             await f.RuntimeReached.Task.WaitAsync(TimeSpan.FromSeconds(3));
-            var original = f.Plugin.groupSimulation!;
+            var original = f.Plugin.follow.Session!;
             if (backendChanged) f.Plugin.telemetry.AdoptBackend("replacement-backend");
             await f.ClickSidebarGroupStop().WaitAsync(TimeSpan.FromSeconds(1));
             Check(f.GroupPhase == GroupFollowPhase.Retiring && ReferenceEquals(original, f.Session),

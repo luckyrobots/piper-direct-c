@@ -216,8 +216,8 @@ public sealed partial class PipersPlugin
         bool canReleasePower = controllerStopped || !TeachingState.Inspect(device).Active;
         bool groupParticipant = GroupFollowIncludes(ActiveProfile.Id);
         patches["workspace.connection"] = new() {
-            ["text"] = groupParticipant ? groupFollowStatus : ResumeControlsBusy ? "Reconnecting controls" : readiness.Label,
-            ["hint"] = groupParticipant ? groupFollowDetail : readiness.Detail };
+            ["text"] = groupParticipant ? follow.Status.Headline : ResumeControlsBusy ? "Reconnecting controls" : readiness.Label,
+            ["hint"] = groupParticipant ? follow.Status.Detail : readiness.Detail };
         patches["enable"] = new() { ["text"] = ResumeControlsBusy ? "Resuming controls…" : readiness.Action, ["visible"] = controls,
             ["enabled"] = controls && readiness.Enabled && !PrimaryActionBusy && PrimaryActionAvailable,
             ["hint"] = readiness.Detail };

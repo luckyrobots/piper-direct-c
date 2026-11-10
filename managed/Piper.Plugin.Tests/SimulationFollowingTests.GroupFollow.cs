@@ -49,7 +49,7 @@ internal static partial class SimulationFollowingTests
             Directory.CreateDirectory(Path.GetDirectoryName(path)!);
             if (saved != "missing") await File.WriteAllTextAsync(path, saved == "malformed" ? "not-json" : JsonSerializer.Serialize(value, PluginProtocol.Json));
             await reference.Click("group.follow.toggle"); await WaitFor(() => reference.GroupArmedForPlay, "Saved-reference fixture did not arm: " + saved);
-            var lane = reference.Plugin.groupSimulation!.Lanes[0];
+            var lane = reference.Plugin.follow.Session!.Lanes[0];
             var captured = lane.ClosedReference;
             Check(captured == (saved == "valid" ? -.0354 : null) && reference.Rpc.Requests.IsEmpty,
                 "Inlined display-reference load changed missing/invalid fallback or exact profile/device/distribution matching: " + saved);
@@ -192,9 +192,9 @@ internal static partial class SimulationFollowingTests
             f.EngineRequests.Count(r => r.Action == "arm-next-play") == 1 && !f.EngineRequests.Any(r => r.Action == "prepare-start"),
             "The global arm button entered Play or moved hardware before the user pressed Play");
         f.RequestGroupPlay();
-        Task Until(Func<bool> test, string why) => Eventually(test, () => why + " / " + f.Plugin.groupFollowStatus);
+        Task Until(Func<bool> test, string why) => Eventually(test, () => why + " / " + f.Plugin.follow.Status.Headline);
         await Until(() => f.GroupPhase == GroupFollowPhase.Following || !f.GroupActive, "The grouped preparation never activated");
-        Check(f.GroupActive && f.Mode == "play", "The group did not activate one shared user-requested Play run: " + f.Plugin.groupFollowStatus);
+        Check(f.GroupActive && f.Mode == "play", "The group did not activate one shared user-requested Play run: " + f.Plugin.follow.Status.Headline);
         Check(f.Rpc.Requests.Where(r => r.Body["action"]?.GetValue<string>() == "follow-start").Select(r => r.Body["device_id"]!.GetValue<string>()).Order().SequenceEqual(new[] { "can-a", "can-b" }),
             "Both native device lanes were not independently admitted");
         Check(f.Rpc.Requests.Where(r => r.Route == "/api/pika/follow-start").Select(r => r.Body["pika_device"]!.GetValue<string>()).Order().SequenceEqual(new[] { "/dev/pika-a", "/dev/pika-b" }) &&
@@ -241,7 +241,7 @@ internal static partial class SimulationFollowingTests
         await using var expired = new Fixture(followClock: expiryClock); expired.ConfigureGroup();
         await expired.GroupEvent("toggle"); expired.RequestGroupPlay();
         await Eventually(() => expired.GroupPhase == GroupFollowPhase.Following || !expired.GroupActive, "Group expiry fixture did not activate");
-        Check(expired.GroupActive, "Group expiry fixture retired before it activated: " + expired.Plugin.groupFollowStatus);
+        Check(expired.GroupActive, "Group expiry fixture retired before it activated: " + expired.Plugin.follow.Status.Headline);
         expired.LoseNextOrderedReply = true;
         await expired.OrderedReplyLost.Task.WaitAsync(LivenessLimit);
         expired.RuntimeReadTimeout = true;

@@ -42,7 +42,7 @@ public sealed partial class PipersPlugin
                 !double.IsFinite(timeScale))
                 throw new InvalidOperationException("The prepared Play run has no valid time scale.");
             originalScale = timeScale;
-            group.RunId = run;
+            group.BindRun(run);
             return true;
         }
 
