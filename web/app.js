@@ -28,7 +28,11 @@ const cards = [];
 
    question; cancelling, dismissing, or STOP resolves false. A question asked
 
-   while another is open is refused (false): nothing queues behind the operator. */
+   while another is open is refused (false): nothing queues behind the operator.
+
+   The prompt is not a modal dialog: a modal makes the header inert, and STOP
+
+   must stay clickable. Only the workspace below the header is made inert. */
 
 let prompting = null;
 
@@ -38,13 +42,13 @@ function ask({ title, text, confirm }) {
 
   return new Promise(resolve => {
 
-    const dialog = $('safety-prompt');
+    const dialog = $('safety-prompt'), workspace = $('shell');
 
     $('safety-title').textContent = title; $('safety-text').textContent = text; $('safety-continue').textContent = confirm;
 
     $('safety-continue').disabled = false; $('safety-cancel').disabled = false;
 
-    const finish = answer => { if (prompting !== finish) return; prompting = null; dialog.close(); resolve(answer); };
+    const finish = answer => { if (prompting !== finish) return; prompting = null; workspace.inert = false; dialog.close(); resolve(answer); };
 
     prompting = finish;
 
@@ -52,9 +56,7 @@ function ask({ title, text, confirm }) {
 
     $('safety-cancel').onclick = () => finish(false);
 
-    dialog.oncancel = event => { event.preventDefault(); finish(false); };
-
-    dialog.showModal();
+    workspace.inert = true; dialog.show(); $('safety-cancel').focus();
 
   });
 

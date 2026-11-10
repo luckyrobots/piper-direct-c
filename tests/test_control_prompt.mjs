@@ -11,6 +11,12 @@ assert.doesNotMatch(html, /id="recover"/, 'The always-hidden recover button is g
 for (const id of ['safety-prompt', 'safety-title', 'safety-text', 'safety-continue', 'safety-cancel']) assert.match(html, new RegExp(`id="${id}"`), `The prompt needs #${id}`);
 assert.doesNotMatch(source, /window\.confirm\(|confirmPiperControl/, 'Every confirmation goes through the one operator prompt');
 
+// A modal dialog makes the rest of the page inert, STOP included. The prompt blocks only the workspace.
+
+assert.doesNotMatch(source, /showModal/, 'The operator prompt must not be modal: STOP stays clickable');
+
+assert(html.indexOf('id="stop"') < html.indexOf('id="shell"') && html.indexOf('id="safety-prompt"') < html.indexOf('id="shell"'), 'STOP and the prompt live outside the workspace the prompt makes inert');
+
 function fake(initial = {}) {
   const store = { ...initial };
   return new Proxy(function () {}, {
@@ -36,7 +42,7 @@ function boot(served = serverState()) {
   const dom = new Map(), listeners = new Map(), timers = [];
   const values = { speed: '17', tolerance: '0.2', step: '1', 'gripper-effort': '0.1', width: '25', 'gripper-step': '1' };
   const listen = (key, fn) => listeners.set(key, [...(listeners.get(key) || []), fn]);
-  page.byId = id => { if (!dom.has(id)) dom.set(id, fake({ value: values[id] ?? '', addEventListener: (name, fn) => listen(`${id}:${name}`, fn), showModal() { page.shown++; }, close() { page.closed++; } })); return dom.get(id); };
+  page.byId = id => { if (!dom.has(id)) dom.set(id, fake({ value: values[id] ?? '', addEventListener: (name, fn) => listen(`${id}:${name}`, fn), show() { page.shown++; }, focus() {}, close() { page.closed++; } })); return dom.get(id); };
   page.fire = (key, event = {}) => { for (const fn of listeners.get(key) || []) fn(event); };
   page.app = vm.createContext({
     window: { addEventListener: (name, fn) => listen(`window:${name}`, fn), dispatchEvent: event => page.dispatched.push(event) },
