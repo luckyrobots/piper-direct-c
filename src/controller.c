@@ -1353,10 +1353,6 @@ static cJSON *admit_motion(struct controller *c,struct controller_lane *l,struct
     if (field(body,"trajectory")&&(!cJSON_IsBool(field(body,"trajectory"))||action!=ACTION_FOLLOW_START))
         return reply(status,400,"trajectory is a boolean available only on follow-start.");
     bool trajectory=yes(body,"trajectory");
-    /* The experimental streamed-position transport was removed; the name is
-       still recognized so old clients get the same explicit rejection. */
-    if (trajectory&&!strcmp(text_field(body,"trajectory_transport"),"streamed-position"))
-        return reply(status,409,"Experimental streamed-position transport is disabled in this build. Use position-velocity; no action or motor command was admitted.");
     if (!yes(body,"clear")) return reply(status,400,"Confirm that the full motion path is clear and the arm is attended.");
     /* The MCU's target-arrival bit can remain unset after a disabled arm
        settles away from its last target. Require measured stillness. */
@@ -1505,8 +1501,8 @@ static cJSON *lane_action(struct controller *c,struct controller_lane *l,enum ap
     const char *owner=text_field(body,"owner");
     if (route==ROUTE_COMMAND&&field(body,"trajectory_transport")&&
         (!cJSON_IsString(field(body,"trajectory_transport"))||action!=ACTION_FOLLOW_START||!yes(body,"trajectory")||
-         (strcmp(text_field(body,"trajectory_transport"),"position-velocity")&&strcmp(text_field(body,"trajectory_transport"),"streamed-position"))))
-        return reply(status,400,"trajectory_transport must be position-velocity or streamed-position, only on trajectory follow-start.");
+         strcmp(text_field(body,"trajectory_transport"),"position-velocity")))
+        return reply(status,400,"trajectory_transport must be position-velocity, only on trajectory follow-start.");
     observe_teaching_cycle(l,d,now);
     relinquish_to_teaching(c,l,d,now);
     if (route==ROUTE_HEARTBEAT) return lane_heartbeat(c,l,d,body,now,status);
