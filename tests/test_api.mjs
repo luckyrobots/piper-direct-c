@@ -97,7 +97,7 @@ function checkContract(spec, backend) {
   // The routes the server source defines are exactly the documented ones.
   const literals = file => new Set([...readFileSync(new URL(`../${file}`, import.meta.url), 'utf8').matchAll(/"(\/api\/[a-z./]*)"/g)].map(match => match[1]));
   const defined = backend === 'c' ? new Set([...literals('src/controller.c'), ...literals('src/server.c')]) :
-    new Set([...literals('managed/Piper.Host/HostRoutes.cs')].map(route => route === '/api/pika/' ? '/api/pika/{action}' : route).concat(['/api/pika/state', '/api/pika/devices']));
+    new Set(['managed/Piper.Host/HostRoutes.cs', 'managed/Piper.Core/ControllerService.cs', 'managed/Piper.Core/CoordinatedStop.cs'].flatMap(file => [...literals(file)]).map(route => route === '/api/pika/' ? '/api/pika/{action}' : route).concat(['/api/pika/state', '/api/pika/devices']));
   assert.deepEqual([...paths].sort(), [...defined].sort(), 'Documented routes and the routes in the server source differ');
 }
 async function query() { await post('/api/query', {}, 202); await until(() => !state.query_active); assert.equal(selected().firmware, 'S-V1.8-2'); }
@@ -217,15 +217,11 @@ try {
   await post('/api/command', { action: 'verify-reset', reset_completed: false }, 409);
   await post('/api/command', { action: 'verify-reset', reset_completed: true });
   await refresh(); assert(!selected().recovery_required);
-  /* W1: the operator STOP. A stop that pins a generation, or carries cleanup
-     fields without a device, is refused, so the dashboard sends neither: its
-     STOP names only its sender and stops another owner's motion at once. */
+  /* W1: the operator STOP is an emergency stop: it names only its sender,
+     stops another owner's motion at once and is never refused. */
   await sleep(350); await action({ action: 'enable' });
   await startAction({ action: 'joint', joint: 1, degrees: 10 }); await sleep(200);
   const dashboard = randomUUID();
-  await post('/api/stop', { owner: dashboard, generation: selected().generation + 1 }, 409);
-  await post('/api/stop', { owner: dashboard, device_id: undefined }, 409);
-  await refresh(); assert(state.motion.active, 'A refused STOP stopped nothing');
   if (managed) await post('/api/shutdown', {}, 409);
   const operatorStop = await call('POST', managed ? '/api/stop/coordinated' : '/api/stop', { headers: { 'Content-Type': 'application/json', 'X-Piper-Token': state.token }, body: JSON.stringify({ owner: dashboard }) });
   const stopReply = await operatorStop.json();
@@ -241,6 +237,16 @@ try {
   await post('/api/command', { action: 'enable' }, 409);
   // Repeating the operator STOP on the arm-only route is accepted on both backends.
   assert.equal((await post('/api/stop', { owner: dashboard, device_id: undefined, generation: undefined })).stops.length, 1);
+  // A stale generation never prevents an emergency stop of the named arm.
+  const staleStop = await post('/api/stop', { owner: dashboard, generation: selected().generation + 1 }, 409);
+  assert.equal(staleStop.stop_intent, 'emergency'); assert.equal(staleStop.stop_scope, 'device'); assert.equal(staleStop.stop_scope_degraded, true);
+  assert.deepEqual(staleStop.stops.map(stop => stop.ok), [true]);
+  // A generation that names no arm cannot be scoped: every arm stops and the reply says so.
+  const widened = await post('/api/stop', { owner: dashboard, device_id: undefined }, 409);
+  assert.equal(widened.stop_scope, 'all'); assert.equal(widened.stop_scope_degraded, true);
+  assert(widened.stop_scope_reason); assert.deepEqual(widened.stops.map(stop => stop.ok), [true]);
+  // The coordinated route reports the same widened scope as a failed arm leg, and still holds.
+  if (managed) { const both = await post('/api/stop/coordinated', { owner: dashboard, device_id: undefined }, 409); assert.equal(both.arm.ok, false); assert.equal(both.pika.ok, false); assert.match(both.pika.message, /Every Pika was asked to hold instead\. All Pika holds acknowledged\./); }
   // The emergency coordinated stop names nobody and is still honoured.
   if (managed) assert.equal((await post('/api/stop/coordinated', { owner: undefined, device_id: undefined, generation: undefined })).pika.ok, true);
   await until(() => selected().status.stationary_s >= .4);

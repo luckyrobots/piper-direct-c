@@ -67,19 +67,27 @@ internal static class HostControlDispatchTests
         emptyScope["generation"] = device["generation"]?.DeepClone();
         var staleScope = await Post("/api/stop/coordinated", emptyScope.ToJsonString());
         Check(staleScope.Status == HttpStatusCode.Conflict && staleScope.Body["arm"]?["ok"]?.GetValue<bool>() == false &&
-            staleScope.Body["pika"]?["ok"]?.GetValue<bool>() == false, "Malformed scoped cleanup became a global STOP");
+            staleScope.Body["pika"]?["ok"]?.GetValue<bool>() == false &&
+            staleScope.Body["pika"]?["message"]?.GetValue<string>().Contains("Every Pika was asked to hold instead. All Pika holds acknowledged.", StringComparison.Ordinal) == true,
+            "A STOP whose scope names no arm was refused instead of holding everything and saying so: " + staleScope.Body);
         emptyScope.Remove("generation");
         emptyScope["device_id"] = null;
         var malformed = await Post("/api/stop/coordinated", emptyScope.ToJsonString());
         Check(malformed.Status == HttpStatusCode.Conflict && malformed.Body["arm"]?["ok"]?.GetValue<bool>() == false &&
-            malformed.Body["pika"]?["message"]?.GetValue<string>().Contains("device_id", StringComparison.Ordinal) == true,
-            "Malformed arm selector fell back to an unrelated Pika");
+            malformed.Body["pika"]?["ok"]?.GetValue<bool>() == false &&
+            malformed.Body["pika"]?["message"]?.GetValue<string>().Contains("device_id is not an adapter identity. Every Pika was asked to hold instead.", StringComparison.Ordinal) == true,
+            "A STOP with a malformed arm selector was refused instead of holding everything and saying so: " + malformed.Body);
         emptyScope["device_id"] = device["id"]?.DeepClone();
         var scoped = await Execute("/api/stop/coordinated", emptyScope.ToJsonString());
         var scopeResult = JsonNode.Parse(scoped.Json);
         Check(scoped.Status == 409 && scopeResult?["arm"]?["ok"]?.GetValue<bool>() == true &&
-            scopeResult?["pika"]?["message"]?.GetValue<string>().Contains("explicit pika_device", StringComparison.Ordinal) == true,
-            "Missing Pika identity blocked the independent arm STOP or resolved through default Pika");
+            scopeResult?["pika"]?["ok"]?.GetValue<bool>() == false &&
+            scopeResult?["pika"]?["message"]?.GetValue<string>().Contains("it names an arm but no pika_device. Every Pika was asked to hold instead.", StringComparison.Ordinal) == true,
+            "An emergency STOP that names no gripper blocked the arm STOP or did not hold everything: " + scoped.Json);
+        emptyScope["request_id"] = 1;
+        var cancel = JsonNode.Parse((await Execute("/api/stop/coordinated", emptyScope.ToJsonString())).Json);
+        Check(cancel?["pika"]?["message"]?.GetValue<string>().Contains("explicit pika_device", StringComparison.Ordinal) == true,
+            "A cancel that names no gripper held an unrelated Pika: " + cancel);
         Console.WriteLine("Host dispatch passed: common snapshots, simulated Pika rejection, legacy HTTP routes, gRPC route rejection and independent STOP results.");
 
         async Task<(HttpStatusCode Status, JsonObject Body)> Post(string route, string json)

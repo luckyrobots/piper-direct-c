@@ -378,7 +378,7 @@
       "x-piper-backend": "managed",
       "post": {
         "summary": "Stop arms and hold Pika grippers as two independent attempts",
-        "description": "Runs the arm STOP and the Pika hold concurrently, each with its own bounded attempt; a failure, timeout or block in one never suppresses the other. Admitted during maintenance like /api/stop. With a non-empty device_id the STOP is scoped to that arm and pika_device is required. Without it this is the emergency stop: every arm is stopped and every Pika is held, whoever owns them and whoever asks; owner is not needed, and a plugin-owned host admits it from any authenticated caller. generation or request_id without device_id still stops every arm but is reported as a failed scope (409).",
+        "description": "Runs the arm STOP and the Pika hold concurrently, each with its own bounded attempt; a failure, timeout or block in one never suppresses the other. Admitted during maintenance like /api/stop. With a non-empty device_id the STOP is scoped to that arm and pika_device is required. Without it this is the emergency stop: every arm is stopped and every Pika is held, whoever owns them and whoever asks; owner is not needed, and a plugin-owned host admits it from any authenticated caller. A STOP whose scope cannot be honoured (generation or request_id without device_id, a device_id that is not a string, or an arm without pika_device and without request_id) still stops and holds everything and reports the failed scope (409). A cancel (device_id with request_id) holds only the pika_device it names.",
         "requestBody": {
           "required": true,
           "content": {
