@@ -23,7 +23,7 @@ public sealed partial class PipersPlugin
         LoadCalibrationPreferences();
         if (wizardProfile == ActiveProfile.Id && calibrationWizard is not null) return;
         sheetEditingRow = -1;
-        wizardProfile = ActiveProfile.Id; wizardMessage = ""; wizardDiscoveredSites = []; wizardModelPoint = "Show the point, then compare its marker with the real jaw tips."; wizardReferenceRetryRequired = false;
+        wizardProfile = ActiveProfile.Id; wizardMessage = ""; wizardDiscoveredSites = []; wizardModelPoint = "Show the point, then compare its marker with the real jaw tips."; calibration.Markers.ClearRetry();
         calibrationWizard = CalibrationWizardFlow.New(ActiveProfile.Id);
         try
         {

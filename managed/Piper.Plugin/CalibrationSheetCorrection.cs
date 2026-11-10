@@ -24,7 +24,7 @@ public sealed partial class PipersPlugin
             Wizard.Answers[$"p{sheetEditingRow}left"] = CalibrationNumber(current.Measurement.LeftMm);
             Wizard.Answers[$"p{sheetEditingRow}back"] = CalibrationNumber(current.Measurement.BackMm);
         }
-        sheetMarkersDirty = true;
+        calibration.Markers.InvalidateSheet();
         wizardMessage = sheetEditingRow < 0 ? "Edit cancelled. The captured measurements are unchanged."
             : $"Correct {SheetPointName(row)}'s BACK / LEFT values, then Save entry. Its recorded joint pose and contact point are preserved.";
         await SaveWizard(cancellation);
@@ -85,7 +85,7 @@ public sealed partial class PipersPlugin
         calibrationFit = null;
         try { await SaveCalibration(cancellation); }
         catch { calibrationSamples[index] = sample; calibrationFit = oldFit; throw; }
-        sheetEditingRow = -1; sheetMarkersDirty = true;
+        sheetEditingRow = -1; calibration.Markers.InvalidateSheet();
         wizardMessage = $"{SheetPointName(row)} measurements corrected and saved. Its captured arm pose is unchanged; the original report is retained. Calculate alignment again.";
         await SaveWizard(cancellation);
     }

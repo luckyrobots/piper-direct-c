@@ -9,6 +9,7 @@ namespace LuckyRobots.Piper.Plugin;
 /// <code>
 ///   part     machine                          table on
 ///   Height   Cal-D jaw-height check           HeightCheckSession
+///   Markers  Cal-C marker ownership           CalibrationMarkers
 /// </code>
 /// <b>Relation to <see cref="RobotCommandAuthority"/>.</b> The authority stays
 /// the only owner of permission epochs. No calibration state grants motion and
@@ -22,4 +23,5 @@ namespace LuckyRobots.Piper.Plugin;
 internal sealed class CalibrationComponent
 {
     public HeightCheckSession Height { get; } = new();
+    public CalibrationMarkers Markers { get; } = new();
 }

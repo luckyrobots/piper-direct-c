@@ -34,20 +34,10 @@ internal abstract record MarkerState
 
 public sealed partial class PipersPlugin
 {
-    private readonly SemaphoreSlim wizardHighlightGate = new(1);
-    // Written only through SetMarker/MoveMarker; ClearWizardHighlight may run
-    // outside wizardHighlightGate, so conditional moves compare and swap.
-    internal MarkerState wizardMarker = MarkerState.None;
-    private long wizardHighlightAttempt;
+    internal MarkerState wizardMarker => calibration.Markers.Marker;
 
-    private WizardHighlightScope? ToolMarker => (wizardMarker as MarkerState.Tool)?.Scope;
-    private WizardReferenceHighlightScope? EdgeMarker => (wizardMarker as MarkerState.Edge)?.Scope;
-    private void SetMarker(MarkerState next) => Interlocked.Exchange(ref wizardMarker, next);
-    private bool MoveMarker(MarkerState from, MarkerState to) => ReferenceEquals(Interlocked.CompareExchange(ref wizardMarker, to, from), from);
-    private void UnacknowledgeEdge()
-    {
-        if (wizardMarker is MarkerState.Edge { AcknowledgedAt: not 0 } edge) MoveMarker(edge, edge with { AcknowledgedAt = 0 });
-    }
+    private WizardHighlightScope? ToolMarker => calibration.Markers.Tool;
+    private WizardReferenceHighlightScope? EdgeMarker => calibration.Markers.Edge;
 
     private bool WizardHighlightCurrent(WizardHighlightScope scope)
     {
@@ -77,19 +67,19 @@ public sealed partial class PipersPlugin
         bool entered = false;
         try
         {
-            entered = await wizardHighlightGate.WaitAsync(TimeSpan.FromMilliseconds(800), cancellation);
+            entered = await calibration.Markers.Gate.WaitAsync(TimeSpan.FromMilliseconds(800), cancellation);
             if (!entered) throw new InvalidOperationException("Tool marker is busy; read the named point again.");
             if (!WizardHighlightCurrent(shown.Scope)) throw new InvalidOperationException("Fresh matching robot subscription is required for the temporary marker.");
-            SetMarker(shown); wizardHighlightAttempt = Stopwatch.GetTimestamp();
+            calibration.Markers.Show(shown, Stopwatch.GetTimestamp());
             await RequestWizardHighlight(shown.Scope, true, cancellation);
             wizardMessage = "Compare the simulation marker with the midpoint between the real jaw tips. Continue only if they represent the same point.";
         }
         catch (Exception error)
         {
-            MoveMarker(shown, MarkerState.None);
+            calibration.Markers.Move(shown, MarkerState.None);
             wizardMessage = "Named point coordinates are available, but the temporary marker is unavailable: " + error.Message;
         }
-        finally { if (entered) wizardHighlightGate.Release(); }
+        finally { if (entered) calibration.Markers.Gate.Release(); }
     }
 
     // Called after measured scene publication. Marker refresh is visual only and
@@ -100,15 +90,15 @@ public sealed partial class PipersPlugin
         bool entered = false;
         try
         {
-            entered = await wizardHighlightGate.WaitAsync(0, cancellation);
+            entered = await calibration.Markers.Gate.WaitAsync(0, cancellation);
             if (entered) await MaintainWizardMarkerWithinGate(cancellation);
         }
         catch (Exception error)
         {
-            if (wizardMarker is MarkerState.Tool tool) MoveMarker(tool, MarkerState.None);
+            if (wizardMarker is MarkerState.Tool tool) calibration.Markers.Move(tool, MarkerState.None);
             wizardMessage = "Temporary tool marker paused: " + error.Message;
         }
-        finally { if (entered) wizardHighlightGate.Release(); }
+        finally { if (entered) calibration.Markers.Gate.Release(); }
     }
 
     private async Task MaintainWizardMarkerWithinGate(CancellationToken cancellation)
@@ -120,17 +110,17 @@ public sealed partial class PipersPlugin
                 await MaintainWizardReferenceWithinGate(cancellation);
                 break;
             case MarkerState.Edge edge:
-                MoveMarker(edge, MarkerState.None);
+                calibration.Markers.Move(edge, MarkerState.None);
                 await TryMarkerRequest(RequestWizardReference(edge.Scope, false, cancellation), "The desk pointer will expire: ");
                 break;
             case MarkerState.Tool tool when !WizardHighlightCurrent(tool.Scope):
-                MoveMarker(tool, MarkerState.None);
+                calibration.Markers.Move(tool, MarkerState.None);
                 await TryMarkerRequest(RequestWizardHighlight(tool.Scope, false, cancellation), "Tool marker paused after its context changed: ");
                 break;
-            case MarkerState.Tool tool when Stopwatch.GetElapsedTime(wizardHighlightAttempt).TotalSeconds >= 10:
-                wizardHighlightAttempt = Stopwatch.GetTimestamp();
+            case MarkerState.Tool tool when Stopwatch.GetElapsedTime(calibration.Markers.AttemptedAt).TotalSeconds >= 10:
+                calibration.Markers.MarkAttempt(Stopwatch.GetTimestamp());
                 if (!await TryMarkerRequest(RequestWizardHighlight(tool.Scope, true, cancellation), "Temporary tool marker paused; read the named point again. "))
-                    MoveMarker(tool, MarkerState.None);
+                    calibration.Markers.Move(tool, MarkerState.None);
                 break;
         }
     }
@@ -146,14 +136,13 @@ public sealed partial class PipersPlugin
     // never substitute a newly selected robot while leaving the wizard.
     private async Task ClearWizardHighlight(CancellationToken cancellation)
     {
-        var previous = Interlocked.Exchange(ref wizardMarker, MarkerState.None);
-        bool clearSheet = sheetMarkersPublished;
-        sheetMarkersPublished = false;
+        var previous = calibration.Markers.Take();
+        bool clearSheet = calibration.Markers.TakeSheetPublished();
         if (previous is MarkerState.Hidden && !clearSheet) return;
         bool entered = false;
         try
         {
-            entered = await wizardHighlightGate.WaitAsync(TimeSpan.FromMilliseconds(800), cancellation);
+            entered = await calibration.Markers.Gate.WaitAsync(TimeSpan.FromMilliseconds(800), cancellation);
             if (!entered) return; // Native marker expires and clears on unload.
             if (wizardMarker is not MarkerState.Hidden) return; // A newer marker owns this process now.
             try
@@ -166,7 +155,7 @@ public sealed partial class PipersPlugin
             }
             catch (Exception error) { wizardMessage = "Temporary marker clear was not acknowledged; it will expire. " + error.Message; }
         }
-        catch (OperationCanceledException) { SetMarker(MarkerState.None); }
-        finally { if (entered) wizardHighlightGate.Release(); }
+        catch (OperationCanceledException) { calibration.Markers.Hide(); }
+        finally { if (entered) calibration.Markers.Gate.Release(); }
     }
 }

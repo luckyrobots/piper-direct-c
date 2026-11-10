@@ -53,8 +53,8 @@ public sealed partial class PipersPlugin
         calibrationWizard = Wizard with { ModelAssetId = calibrationIdentity!.ModelAssetId, ModelRevision = revision,
             Setup = new(), Step = CalibrationWizardStep.ModelPoint };
         Wizard.Answers["reevaluatedscene"] = calibrationIdentity.SceneId;
-        SetMarker(MarkerState.None);
-        sheetMarkersDirty = true; sheetMarkersPublished = false;
+        calibration.Markers.Hide();
+        calibration.Markers.ResetSheet();
     }
 
     // A report may commit before its wizard draft. Restore the authoritative

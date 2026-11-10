@@ -171,8 +171,8 @@ public sealed partial class PipersPlugin
         string text = value.GetString() ?? "";
         if (text.Length > 32) throw new InvalidOperationException("Enter a measurement in millimetres.");
         Wizard.Answers[key] = text;
-        if (desk && key != "precision") { UpdateSetup(setup => setup.ClearEdges()); UnacknowledgeEdge(); }
-        sheetMarkersDirty = true;
+        if (desk && key != "precision") { UpdateSetup(setup => setup.ClearEdges()); calibration.Markers.UnacknowledgeEdge(); }
+        calibration.Markers.InvalidateSheet();
         await SaveWizard(cancellation);
     }
 

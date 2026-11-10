@@ -5,9 +5,6 @@ namespace LuckyRobots.Piper.Plugin;
 
 public sealed partial class PipersPlugin
 {
-    private bool sheetMarkersDirty = true;
-    private long sheetMarkersAt;
-    private bool sheetMarkersPublished;
     internal string sheetSaveStatus = "Measurements save automatically as you type.";
 
     // Reading a visual reference must not fabricate any physical confirmation.
@@ -47,9 +44,9 @@ public sealed partial class PipersPlugin
 
     private async Task ShowSheetMarks(CancellationToken cancellation, int frameRow = -1)
     {
-        await wizardHighlightGate.WaitAsync(cancellation);
+        await calibration.Markers.Gate.WaitAsync(cancellation);
         try { await PublishSheetMarksWithinGate(cancellation, frameRow, frameAll: frameRow < 0); }
-        finally { wizardHighlightGate.Release(); }
+        finally { calibration.Markers.Gate.Release(); }
     }
 
     private async Task PublishSheetMarksWithinGate(CancellationToken cancellation, int frameRow = -1, bool frameAll = false)
@@ -62,7 +59,7 @@ public sealed partial class PipersPlugin
         if (frameRow >= 0)
         {
             Wizard.Answers["sheetselected"] = frameRow.ToString();
-            sheetMarkersDirty = true;
+            calibration.Markers.InvalidateSheet();
         }
         int selected = SheetSelectedRow;
         var all = new JsonArray(points.Where(p => p.HasValue).Select(p => (JsonNode)p!.Value.Json()).ToArray());
@@ -88,7 +85,7 @@ public sealed partial class PipersPlugin
             var response = await engine.RequestAsync("robot.highlightReference", request, cancellation);
             if (!scope.Acknowledged(response, frame) || !response.TryGetProperty("markerId", out var returnedId) || returnedId.GetString() != "desk-point-" + row)
                 throw new InvalidOperationException("Update Lucky Engine: the editor did not acknowledge the numbered desk marker.");
-            sheetMarkersPublished = true;
+            calibration.Markers.MarkSheetPublished();
         }
     }
 
@@ -97,9 +94,9 @@ public sealed partial class PipersPlugin
     private async Task MaintainSheetMarks(CancellationToken cancellation)
     {
         if (!calibrationOpen || calibrationWizard is null || !Wizard.Answers.ContainsKey("sheetready") || link is null) return;
-        if (!sheetMarkersDirty && Stopwatch.GetElapsedTime(sheetMarkersAt).TotalSeconds < 10) return;
-        sheetMarkersDirty = false; sheetMarkersAt = Stopwatch.GetTimestamp();
-        try { await PublishSheetMarksWithinGate(cancellation, frameAll: !sheetMarkersPublished); }
+        if (!calibration.Markers.SheetDirty && Stopwatch.GetElapsedTime(calibration.Markers.SheetAttemptedAt).TotalSeconds < 10) return;
+        calibration.Markers.BeginSheetPublish(Stopwatch.GetTimestamp());
+        try { await PublishSheetMarksWithinGate(cancellation, frameAll: !calibration.Markers.SheetPublished); }
         catch (Exception error) when (error is not OperationCanceledException) { Trace.TraceWarning("Desk marks unavailable: {0}", error.Message); }
     }
 }
