@@ -58,4 +58,36 @@ internal static class PikaMonitorConnectionTests
         }
         finally { plugin.channel.Dispose(); plugin.commands.Dispose(); }
     }
+
+    /// <summary>Each attempt owns its cancellation: cancelling one that already ended
+    /// (the UI actor racing the telemetry loop's next retry) cannot fault or reach its successor.</summary>
+    public static async Task RunAttemptCancellation()
+    {
+        var retry = new PikaMonitorRetry(TimeSpan.FromSeconds(3));
+        using var lifetime = new CancellationTokenSource();
+        static async Task UntilCancelled(CancellationToken cancellation)
+        {
+            try { await Task.Delay(Timeout.Infinite, cancellation); }
+            catch (OperationCanceledException) { }
+        }
+        Check(retry.TryStart(lifetime.Token, _ => Task.CompletedTask), "The first monitor attempt did not start");
+        var first = retry.Attempt!;
+        await first.Worker.WaitAsync(TimeSpan.FromSeconds(5));
+        Check(!retry.TryStart(lifetime.Token, UntilCancelled), "A monitor attempt started inside the backoff");
+        retry.ExpireBackoff();
+        Check(retry.TryStart(lifetime.Token, UntilCancelled) && !ReferenceEquals(retry.Attempt, first), "An elapsed backoff did not start a new attempt");
+        var second = retry.Attempt!;
+        await first.CancelAsync().WaitAsync(TimeSpan.FromSeconds(5));
+        Check(second.Running && retry.Running, "Cancelling a finished attempt cancelled the attempt that replaced it");
+        await retry.CancelAsync().WaitAsync(TimeSpan.FromSeconds(5));
+        Check(!second.Running && !retry.Running, "Cancel did not end the running attempt");
+        Check(!retry.TryStart(lifetime.Token, UntilCancelled), "A cancelled attempt did not restart the backoff");
+        retry.ExpireBackoff();
+        Check(retry.TryStart(lifetime.Token, UntilCancelled), "The monitor did not retry after a cancelled attempt");
+        var third = retry.Attempt!;
+        await retry.StopAsync().WaitAsync(TimeSpan.FromSeconds(5));
+        retry.ExpireBackoff();
+        Check(!third.Running && retry.Stopped && !retry.TryStart(lifetime.Token, UntilCancelled), "A stopped monitor started another attempt");
+        await lifetime.CancelAsync();
+    }
 }

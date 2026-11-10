@@ -132,16 +132,44 @@ public sealed partial class PipersPlugin
 /// <summary>One monitor outcome and the exact role observation it describes.</summary>
 internal sealed record PikaMonitorOutcome(PikaRoleObservation Role, string Text);
 
+/// <summary>One connect attempt and the only cancellation that can end it. A
+/// retry never reuses an attempt, so cancelling a finished attempt cannot reach
+/// the attempt that replaced it.</summary>
+internal sealed class PikaMonitorAttempt
+{
+    // Never disposed: it holds no timer or wait handle, so Cancel stays safe after the worker ended.
+    private readonly CancellationTokenSource cancel = new();
+    public Task Worker { get; }
+
+    public PikaMonitorAttempt(CancellationToken lifetime, Func<CancellationToken, Task> body) =>
+        Worker = Task.Run(async () =>
+        {
+            using var scope = CancellationTokenSource.CreateLinkedTokenSource(lifetime, cancel.Token);
+            await body(scope.Token);
+        }, CancellationToken.None);
+
+    public bool Running => !Worker.IsCompleted;
+
+    /// <summary>Cancels this attempt (a no-op once it ended) and waits for it.</summary>
+    public async Task CancelAsync()
+    {
+        await cancel.CancelAsync();
+        await Worker;
+    }
+}
+
 /// <summary>The read-only Pika monitor's connect attempts, one at a time.
 /// <code>
 ///   Idle --TryStart (backoff elapsed)--> Running --attempt ends--> Idle
 ///   Running --CancelAsync--> Idle (backoff restarts)
 ///   any --Stop--> Stopped (terminal: no further attempts)
-/// </code></summary>
+/// </code>
+/// TryStart runs on the telemetry-processing loop and CancelAsync on the UI
+/// actor, so the attempt and the backoff stamp are published with volatile
+/// writes and each attempt carries its own cancellation.</summary>
 internal sealed class PikaMonitorRetry(TimeSpan backoff)
 {
-    private Task? worker;
-    private CancellationTokenSource? cancellation;
+    private volatile PikaMonitorAttempt? attempt;
     private long attemptAt;
     private volatile bool stopped;
     private PikaMonitorOutcome? outcome;
@@ -150,30 +178,28 @@ internal sealed class PikaMonitorRetry(TimeSpan backoff)
     /// <summary>The latest attempt's outcome, the only source of monitor status text.</summary>
     public PikaMonitorOutcome? Outcome => Volatile.Read(ref outcome);
     public void Report(PikaMonitorOutcome latest) => Volatile.Write(ref outcome, latest);
-    public bool Running => worker is { IsCompleted: false };
-    /// <summary>The latest attempt, for callers that must drain it.</summary>
-    public Task? Worker => worker;
+    public bool Running => attempt is { Running: true };
+    /// <summary>The latest attempt, for callers that must drain or cancel exactly it.</summary>
+    public PikaMonitorAttempt? Attempt => attempt;
+    public Task? Worker => attempt?.Worker;
 
-    /// <summary>Runs <paramref name="attempt"/> on the thread pool unless stopped,
+    /// <summary>Runs <paramref name="body"/> on the thread pool unless stopped,
     /// already running or still inside the backoff after the previous attempt.</summary>
-    public bool TryStart(CancellationToken lifetime, Func<CancellationToken, Task> attempt)
+    public bool TryStart(CancellationToken lifetime, Func<CancellationToken, Task> body)
     {
-        if (stopped || Running || attemptAt != 0 && Stopwatch.GetElapsedTime(attemptAt) < backoff) return false;
-        attemptAt = Stopwatch.GetTimestamp();
-        cancellation?.Dispose();
-        cancellation = CancellationTokenSource.CreateLinkedTokenSource(lifetime);
-        var token = cancellation.Token;
-        worker = Task.Run(() => attempt(token), CancellationToken.None);
+        long previous = Volatile.Read(ref attemptAt);
+        if (stopped || Running || previous != 0 && Stopwatch.GetElapsedTime(previous) < backoff) return false;
+        Volatile.Write(ref attemptAt, Stopwatch.GetTimestamp());
+        attempt = new(lifetime, body);
         return true;
     }
 
     /// <summary>Cancels a running attempt and waits for it; the backoff restarts now.</summary>
     public async Task CancelAsync()
     {
-        if (worker is not { IsCompleted: false } running) return;
-        attemptAt = Stopwatch.GetTimestamp();
-        if (cancellation is not null) await cancellation.CancelAsync();
-        await running;
+        if (attempt is not { Running: true } running) return;
+        Volatile.Write(ref attemptAt, Stopwatch.GetTimestamp());
+        await running.CancelAsync();
     }
 
     /// <summary>Refuses every later attempt; a running one continues until cancelled.</summary>
@@ -182,10 +208,9 @@ internal sealed class PikaMonitorRetry(TimeSpan backoff)
     public async Task StopAsync()
     {
         Stop();
-        try { await CancelAsync(); }
-        finally { cancellation?.Dispose(); }
+        await CancelAsync();
     }
 
     /// <summary>Lets the next <see cref="TryStart"/> run without waiting out the backoff.</summary>
-    internal void ExpireBackoff() => attemptAt = 0;
+    internal void ExpireBackoff() => Volatile.Write(ref attemptAt, 0);
 }
