@@ -13,9 +13,6 @@ public static class SimulationTrajectoryTransport
     public static string Name(string? transport) => transport is PositionVelocity or StreamedPosition
         ? transport : throw new InvalidOperationException("Unknown simulation trajectory transport; use position-velocity.");
 
-    // Backends predating the transport field default to position-velocity.
-    public static JsonObject StartFields() => new() { ["trajectory"] = true };
-
     public static void ValidateAcknowledgement(JsonObject acknowledgement)
     {
         if ((acknowledgement["trajectory_transport"]?.GetValue<string>() ?? PositionVelocity) != PositionVelocity)

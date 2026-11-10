@@ -5,7 +5,7 @@ namespace LuckyRobots.Piper.Plugin;
 
 public static class BackendRestartRequest
 {
-    public static JsonObject Create(JsonObject? state, string owner, bool following, bool grippersEmptyConfirmed)
+    public static ApiRequest Create(JsonObject? state, string owner, bool following, bool grippersEmptyConfirmed)
     {
         if (!grippersEmptyConfirmed) throw new InvalidOperationException("Empty the grippers and confirm before restarting; Pika holding torque will be released.");
         if (following || BackendActivity.AnyMotion(state) || BackendActivity.AnyQuery(state))
@@ -20,8 +20,7 @@ public static class BackendRestartRequest
         if (state["backend_restart"]?["mode"]?.GetValue<string>() == "plugin" &&
             state["backend_restart"]?["plugin_owner"]?.GetValue<string>() != owner)
             throw new InvalidOperationException("This backend belongs to another plugin session. Restart it from that session; no process was stopped.");
-        return new() { ["owner"] = owner, ["backend_process_id"] = pid,
-            ["backend_instance_id"] = instance, ["release_grippers"] = true };
+        return PiperApi.Requests.Restart(owner, pid, instance, releaseGrippers: true);
     }
 }
 
@@ -37,17 +36,17 @@ public sealed partial class PipersPlugin
         if (relaunchOwned && (owned is null || owned.Process.HasExited ||
             !BackendGuards.IsOwned(state!, owned.Process.Id, owned.Token)))
             throw new InvalidOperationException("This panel does not own the backend process. Restart from the plugin session that started it; no shutdown was requested.");
-        string previousInstance = request["backend_instance_id"]!.GetValue<string>();
+        string previousInstance = request.Body["backend_instance_id"]!.GetValue<string>();
         backendRestart = BackendRestartPhase.Requested;
         try { await RequestBackendRestart(request, relaunchOwned, owned?.Process, previousInstance, cancellation); }
         finally { backendRestart = BackendRestartPhase.Idle; }
     }
 
-    private async Task RequestBackendRestart(JsonObject request, bool relaunchOwned, Process? process, string previousInstance, CancellationToken cancellation)
+    private async Task RequestBackendRestart(ApiRequest request, bool relaunchOwned, Process? process, string previousInstance, CancellationToken cancellation)
     {
         backendStatus = "Requesting an idle backend restart…";
         await Update(cancellation);
-        await Call("/api/maintenance/restart", request, cancellation);
+        await Call(request, cancellation);
         // Once accepted, finish the exact monitoring-only restart even if a UI
         // gesture is cancelled. Plugin shutdown still cancels any owned relaunch.
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(shutdown.Token);

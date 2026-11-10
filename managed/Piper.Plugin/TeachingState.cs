@@ -17,9 +17,9 @@ public sealed record TeachingState(TeachingPhase Phase, bool Active, bool Return
     public string ReturnConfirmation => SamePoseReturn
         ? "Keep the teach light OFF and hold still. Return to CAN will hold the measured pose and discard previous targets. It will not home, replay or change motor power."
         : "Confirm the physical arm is at zero, the teach light is OFF and the workspace is clear. Support the arm during the standby/CAN handoff.";
-    public JsonObject ReturnFlags() => SamePoseReturn
-        ? new() { ["button_off"] = true, ["same_pose_confirmed"] = true }
-        : new() { ["button_off"] = true, ["zero_pose_confirmed"] = true };
+    internal ArmCommandFields ReturnFlags() => SamePoseReturn
+        ? new(ButtonOff: true, SamePoseConfirmed: true)
+        : new(ButtonOff: true, ZeroPoseConfirmed: true);
 
     public static TeachingState Inspect(JsonObject? device)
     {

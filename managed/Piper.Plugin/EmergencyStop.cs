@@ -37,15 +37,15 @@ public sealed partial class PipersPlugin
         try
         {
             if (!groupActive && deviceId.Length == 0) throw new InvalidOperationException("Assign this robot's CAN adapter before sending its STOP.");
-            var body = new JsonObject { ["owner"] = owner, ["device_id"] = deviceId,
-                ["pika_device"] = profile.PikaDevice, ["pika_distribution"] = profile.PikaDistribution };
-            if (groupActive) { body.Remove("device_id"); body.Remove("pika_device"); body.Remove("pika_distribution"); }
+            // A group STOP names no arm or gripper: the backend stops and holds everything.
+            var armStop = groupActive ? PiperApi.Requests.Stop(owner) : PiperApi.Requests.Stop(owner, deviceId);
+            var first = !ownPika ? armStop : groupActive ? PiperApi.Requests.CoordinatedStop(owner)
+                : PiperApi.Requests.CoordinatedStop(owner, deviceId, pikaDevice: profile.PikaDevice, pikaDistribution: profile.PikaDistribution);
             ControlReply reply;
             bool legacyCoordinator = false;
             try
             {
-                reply = await client.ExecuteAsync(new ControlRequest {
-                    Route = ownPika ? "/api/stop/coordinated" : "/api/stop", Json = body.ToJsonString() },
+                reply = await client.ExecuteAsync(new ControlRequest { Route = first.Route.Path, Json = first.Json },
                     new Metadata { { "x-piper-token", expectedToken } },
                     deadline: DateTime.UtcNow.AddSeconds(4), cancellationToken: timeout.Token);
                 legacyCoordinator = ownPika && reply.Status == 404;
@@ -58,7 +58,7 @@ public sealed partial class PipersPlugin
             if (legacyCoordinator)
             {
                 // Older external backends must still receive the arm STOP.
-                reply = await client.ExecuteAsync(new ControlRequest { Route = "/api/stop", Json = body.ToJsonString() },
+                reply = await client.ExecuteAsync(new ControlRequest { Route = armStop.Route.Path, Json = armStop.Json },
                     new Metadata { { "x-piper-token", expectedToken } },
                     deadline: DateTime.UtcNow.AddSeconds(2), cancellationToken: timeout.Token);
                 message = reply.Status is >= 200 and < 300

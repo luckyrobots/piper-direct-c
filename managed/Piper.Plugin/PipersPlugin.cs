@@ -124,17 +124,14 @@ public sealed partial class PipersPlugin : ILuckyPlugin
         return Device(expected.Device, expected.Generation, expected.Backend, sourceReceipt);
     }
 
-    private async Task<JsonObject> Call(string route, JsonObject body, CancellationToken cancellation, string? expectedToken = null)
+    /// <summary>Sends one Host request over the tunnel. The request comes from the generated
+    /// builders (<see cref="PiperApi.Requests"/>); nothing is added to it here.</summary>
+    private async Task<JsonObject> Call(ApiRequest request, CancellationToken cancellation, string? expectedToken = null)
     {
-        if (route.StartsWith("/api/pika/", StringComparison.Ordinal) && route != "/api/pika/devices")
-        {
-            body["pika_device"] ??= ActiveProfile.PikaDevice;
-            if (!body.ContainsKey("pika_distribution")) body["pika_distribution"] = ActiveProfile.PikaDistribution;
-        }
         string authorization = expectedToken ?? token;
         if (expectedToken is not null && token != expectedToken) throw new InvalidOperationException("The controller session changed; no command was sent under the old confirmation.");
-        var reply = await client.ExecuteAsync(new ControlRequest { Route = route, Json = body.ToJsonString() },
-            new Metadata { { "x-piper-token", authorization } }, deadline: DateTime.UtcNow.AddSeconds(route.EndsWith("/connect") ? 20 : 3), cancellationToken: cancellation);
+        var reply = await client.ExecuteAsync(new ControlRequest { Route = request.Route.Path, Json = request.Json },
+            new Metadata { { "x-piper-token", authorization } }, deadline: DateTime.UtcNow.AddSeconds(request.Route == PiperApi.PikaConnect ? 20 : 3), cancellationToken: cancellation);
         var result = JsonNode.Parse(reply.Json)!.AsObject();
         if (reply.Status >= 400)
         {
@@ -163,7 +160,7 @@ public sealed partial class PipersPlugin : ILuckyPlugin
     }
 
     /// <param name="expected">The connection a prior confirmation authorized; null uses the current one.</param>
-    internal async Task<JsonObject> Command(string action, JsonObject? fields, CancellationToken cancellation,
+    internal async Task<JsonObject> Command(string action, ArmCommandFields? fields, CancellationToken cancellation,
         CommandPurpose purpose = CommandPurpose.Control, RobotCommandScope? expected = null, long? expectedPermissionEpoch = null,
         double? speedOverridePercent = null, ResetCompletionPrompt? resetCompletion = null)
     {
@@ -186,37 +183,21 @@ public sealed partial class PipersPlugin : ILuckyPlugin
             throw new InvalidOperationException("Stop following in the left sidebar before changing arm control.");
         if (!teachingOnly && !recoveryOnly && !releasingPower && TeachingState.Inspect(device).BlocksTargets)
             throw new InvalidOperationException("The physical teaching controller owns the arm. End teaching and return to CAN before sending new targets.");
-        var body = fields ?? new();
-        body["action"] = action;
-        body["device_id"] = scope.Device;
-        body["generation"] = scope.Generation;
-        body["owner"] = owner;
-        AddOperatorConfirmations(body, action, resetConfirmed: recoveryOnly && resetCompletion is not null);
-        body["speed_percent"] = speedOverridePercent ?? preferences.Speed; body["tolerance_deg"] = preferences.Tolerance;
+        var chosen = fields ?? new();
+        var confirmations = OperatorConfirmations.For(action, resetConfirmed: recoveryOnly && resetCompletion is not null);
+        var request = PiperApi.Requests.Command(scope.Device, scope.Generation, action, owner,
+            standalone: confirmations.Standalone, clear: confirmations.Clear, supported: confirmations.Supported,
+            resetCompleted: confirmations.ResetCompleted, buttonOff: chosen.ButtonOff, zeroPoseConfirmed: chosen.ZeroPoseConfirmed,
+            samePoseConfirmed: chosen.SamePoseConfirmed, joint: chosen.Joint, degrees: chosen.Degrees, synchronized: chosen.Synchronized,
+            requestId: chosen.RequestId, speedPercent: speedOverridePercent ?? preferences.Speed, toleranceDeg: preferences.Tolerance);
         if (permissionEpoch != CommandAuthority.Epoch) throw new InvalidOperationException("Control permission changed while preparing the command; start a new action.");
         cancellation.ThrowIfCancellationRequested();
-        var result = await Call("/api/command", body, cancellation, expectedToken);
+        var result = await Call(request, cancellation, expectedToken);
         if (token != scope.Backend || ActiveProfile.Id != scope.ProfileId ||
             !CommandAuthority.TryAcknowledge(permissionEpoch, scope, result["request_id"]?.GetValue<long>()))
             throw new InvalidOperationException("Control permission changed before acknowledgement; the old action will not be renewed or resumed.");
         message = result["message"]?.GetValue<string>() ?? "Command accepted.";
         return result;
-    }
-
-    /// <summary>Attaches only the operator confirmations that the controller's
-    /// admission of <paramref name="action"/> reads (src/controller.c). Each flag
-    /// is a gate: sending it on every request would make the gate meaningless.</summary>
-    internal static void AddOperatorConfirmations(JsonObject body, string action, bool resetConfirmed)
-    {
-        // Every /api/command admission requires the standalone acknowledgement.
-        body["standalone"] = true;
-        // Power release and recovery verification do not read the clear-path flag.
-        if (action is not ("disable" or "verify-reset" or "verify-disabled")) body["clear"] = true;
-        // Motor-power and recovery transitions require a supported arm.
-        if (action is "enable" or "disable" or "reset" or "verify-reset" or "verify-disabled" or "verify-current" or "teach-return" or "recover-at-pose")
-            body["supported"] = true;
-        // Only the operator's explicit answer to the reset question confirms that a reset completed.
-        if (resetConfirmed && action == "verify-reset") body["reset_completed"] = true;
     }
 
     internal long ControlInputEpoch => CommandAuthority.Epoch + follow.ControlEpoch;
@@ -383,7 +364,7 @@ public sealed partial class PipersPlugin : ILuckyPlugin
         {
             link = null;
             await Command("disable", null, cancellation);
-            if (telemetry.Pika.Owned) await Call("/api/pika/disable", new JsonObject { ["owner"] = owner }, cancellation);
+            if (telemetry.Pika.Owned) await Call(PiperApi.Requests.PikaDisable(owner, ActiveProfile.PikaDevice, ActiveProfile.PikaDistribution), cancellation);
         }
         else if (id == "recovery.home") await StartRecoveryHome(cancellation);
         else if (id is "recovery.card.run" or "recovery.run") await RunRecoveryCard(cancellation, verifyOnly: id == "recovery.run");
@@ -440,7 +421,7 @@ public sealed partial class PipersPlugin : ILuckyPlugin
             if (state?["motion"]?["active"]?.GetValue<bool>() == true && state["motion"]?["owner"]?.GetValue<string>() == owner)
             {
                 if (followRequest != 0) await HoldFollowing(cancellation);
-                else await Command("hold", new JsonObject { ["request_id"] = state["motion"]!["request_id"]!.DeepClone() }, cancellation);
+                else await Command("hold", new() { RequestId = state["motion"]!["request_id"]!.GetValue<long>() }, cancellation);
                 message = "Movement stopped · holding measured pose";
             }
         }
@@ -452,7 +433,7 @@ public sealed partial class PipersPlugin : ILuckyPlugin
         {
             if (!linkCommandsEnabled) throw new InvalidOperationException("Scene tracking is read-only after a stop. Recover, then Enable robot before sending a new target.");
             var target = JsonNode.Parse(input.Value.GetRawText())!.AsObject();
-            await Command("pose", new JsonObject { ["degrees"] = JsonSerializer.SerializeToNode(linked.Target(target, Device())), ["synchronized"] = true }, cancellation);
+            await Command("pose", new() { Degrees = linked.Target(target, Device()), Synchronized = true }, cancellation);
         }
         else if (id == "speed" || id == "step" || id == "tolerance")
         {
@@ -468,7 +449,7 @@ public sealed partial class PipersPlugin : ILuckyPlugin
             string[] parts = id.Split('.'); int joint = int.Parse(parts[1]);
             string action = parts[2];
             await Command(action == "target" ? "joint" : action == "zero" ? "zero" : "jog",
-                new() { ["joint"] = joint, ["degrees"] = action == "target" ? input.Value.GetDouble() : action == "plus" ? preferences.Step : action == "minus" ? -preferences.Step : 0 }, cancellation);
+                new() { Joint = joint, Degrees = action == "target" ? input.Value.GetDouble() : action == "plus" ? preferences.Step : action == "minus" ? -preferences.Step : 0 }, cancellation);
         }
         else if (id is "pika.target" or "pika.plus" or "pika.minus" or "pika.zero")
         {
@@ -489,8 +470,8 @@ public sealed partial class PipersPlugin : ILuckyPlugin
             }
             if (epoch != CommandAuthority.Epoch || profile != ActiveProfile)
                 throw new InvalidOperationException("Control permission changed before the gripper target was sent.");
-            await Call("/api/pika/position", new JsonObject { ["owner"] = owner, ["value"] = PikaProtocol.Angle(opening),
-                ["pika_device"] = profile.PikaDevice, ["pika_distribution"] = profile.PikaDistribution }, cancellation, receipt.BackendToken);
+            await Call(PiperApi.Requests.PikaPosition(owner, PikaProtocol.Angle(opening), profile.PikaDevice, profile.PikaDistribution),
+                cancellation, receipt.BackendToken);
         }
     }
 
@@ -547,7 +528,7 @@ public sealed partial class PipersPlugin : ILuckyPlugin
             if (!gripperAlreadyReady)
             {
                 var role = telemetry.Pika.Observe();
-                await Call("/api/pika/connect", new JsonObject { ["owner"] = owner, ["take_over"] = true }, cancellation, expectedToken);
+                await Call(PiperApi.Requests.PikaConnect(owner, ActiveProfile.PikaDevice, ActiveProfile.PikaDistribution, takeOver: true), cancellation, expectedToken);
                 CheckEnableScope();
                 if (!telemetry.Pika.TryAdvance(role, PikaSessionRole.Owned))
                     throw new InvalidOperationException("The Pika session was released while Enable connected it. Enable again when the gripper is reconnected.");
@@ -563,7 +544,7 @@ public sealed partial class PipersPlugin : ILuckyPlugin
                 if (current["recovery_required"]?.GetValue<bool>() == true ||
                     current["reset_pending"]?.GetValue<bool>() == true || !RobotPowerState.Inspect(current).AllEnabled)
                     throw new InvalidOperationException("Arm holding control changed before the gripper could be enabled. Check the robot status.");
-                await Call("/api/pika/enable", new JsonObject { ["owner"] = owner, ["clear"] = true }, cancellation, expectedToken);
+                await Call(PiperApi.Requests.PikaEnable(owner, ActiveProfile.PikaDevice, ActiveProfile.PikaDistribution, clear: true), cancellation, expectedToken);
                 CheckEnableScope();
             }
         }

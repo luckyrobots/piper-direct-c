@@ -48,9 +48,7 @@ public sealed partial class PipersPlugin
         string expectedToken = linkBackendToken;
         if (request == 0 || link is not { } linked) return;
         if (state?["motion"]?["request_id"]?.GetValue<long>() == request && state["motion"]?["active"]?.GetValue<bool>() == false) return;
-        await Call("/api/command", new JsonObject {
-            ["action"] = "follow-end", ["request_id"] = request, ["owner"] = owner,
-            ["device_id"] = linked.DeviceId, ["generation"] = linked.Generation }, cancellation, expectedToken);
+        await Call(PiperApi.Requests.Command(linked.DeviceId, linked.Generation, "follow-end", owner, requestId: request), cancellation, expectedToken);
     }
 
     private async Task PauseTeleoperation(CancellationToken cancellation)
@@ -107,11 +105,8 @@ public sealed partial class PipersPlugin
             if (followRequest == 0) throw new InvalidOperationException("Following expired. Start a new drag.");
             if (permissionEpoch != CommandAuthority.Epoch || sceneEpoch != Interlocked.Read(ref scenePermissionEpoch) || !ReferenceEquals(link, linked))
                 throw new InvalidOperationException("The previous gesture is no longer authorized; start a new drag.");
-            await Call("/api/command", new JsonObject {
-                ["action"] = phase == "commit" ? "follow-commit" : "follow-update", ["request_id"] = followRequest, ["owner"] = owner,
-                ["device_id"] = linked.DeviceId, ["generation"] = linked.Generation,
-                ["sequence"] = input["sequence"]!.DeepClone(),
-                ["degrees"] = JsonSerializer.SerializeToNode(target) }, cancellation, expectedToken);
+            await Call(PiperApi.Requests.Command(linked.DeviceId, linked.Generation, phase == "commit" ? "follow-commit" : "follow-update", owner,
+                requestId: followRequest, sequence: input["sequence"]!.GetValue<long>(), degrees: target), cancellation, expectedToken);
             if (phase == "commit") message = "Movement in progress to released target";
         }
         catch
