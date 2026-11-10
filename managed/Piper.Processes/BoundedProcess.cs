@@ -1,25 +1,40 @@
 using System.Diagnostics;
 
-namespace LuckyRobots.Piper.Pika;
+namespace LuckyRobots.Piper.Processes;
 
-/// <summary>Runs a short helper process (usbipd, wslpath, chmod) with closed
-/// stdin and both output streams read, under a deadline that kills its whole
-/// process tree. The process has exited when this returns or throws, unless
-/// the operating system refused the kill; that wait is bounded too. It also
-/// owns the two process primitives every Pika launch shares: a start whose
+/// <summary>The one child-process runner of the Host, the Pika transport and
+/// the plugin. <see cref="RunAsync"/> runs a short helper (usbipd, wslpath,
+/// chmod, a WSL probe, a camera tool) with closed stdin and both output
+/// streams read, under a deadline that kills its whole process tree. The
+/// process has exited when it returns or throws, unless the operating system
+/// refused the kill; that wait is bounded too. A long-lived child (the Pika
+/// agent, a camera capture worker) keeps its own lifecycle and is built from
+/// the same primitives: <see cref="Redirected"/> start settings, a start whose
 /// failure is a control error, and a tree kill that never throws.</summary>
-internal static class BoundedProcess
+public static class BoundedProcess
 {
-    internal readonly record struct Result(int ExitCode, string Output, string Error);
+    public readonly record struct Result(int ExitCode, string Output, string Error);
 
-    internal static readonly TimeSpan DefaultTimeout = TimeSpan.FromSeconds(10);
+    public static readonly TimeSpan DefaultTimeout = TimeSpan.FromSeconds(10);
 
-    internal static async Task<Result> RunAsync(string executable, IEnumerable<string> arguments, string startFailure,
-        string timeoutMessage, CancellationToken cancellation, TimeSpan? timeout = null)
+    /// <summary>How long a killed helper may take to disappear before the caller stops waiting.</summary>
+    public static readonly TimeSpan KillWait = TimeSpan.FromSeconds(5);
+
+    /// <summary>Start settings for a windowless child that shares none of this
+    /// process's standard streams: all three are pipes owned by the caller.</summary>
+    public static ProcessStartInfo Redirected(string executable, IEnumerable<string> arguments, string? workingDirectory = null)
     {
         var start = new ProcessStartInfo(executable) { UseShellExecute = false, CreateNoWindow = true,
             RedirectStandardInput = true, RedirectStandardOutput = true, RedirectStandardError = true };
+        if (workingDirectory is not null) start.WorkingDirectory = workingDirectory;
         foreach (string argument in arguments) start.ArgumentList.Add(argument);
+        return start;
+    }
+
+    public static async Task<Result> RunAsync(string executable, IEnumerable<string> arguments, string startFailure,
+        string timeoutMessage, CancellationToken cancellation, TimeSpan? timeout = null, string? workingDirectory = null)
+    {
+        var start = Redirected(executable, arguments, workingDirectory);
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellation);
         deadline.CancelAfter(timeout ?? DefaultTimeout);
         using var process = Start(start, startFailure);
@@ -40,13 +55,10 @@ internal static class BoundedProcess
         }
     }
 
-    /// <summary>How long a killed helper may take to disappear before the caller stops waiting.</summary>
-    internal static readonly TimeSpan KillWait = TimeSpan.FromSeconds(5);
-
     /// <summary>Starts a process. A missing or non-executable binary is an
-    /// <see cref="IOException"/> naming the operation, which both transports
-    /// report as a control error instead of an unhandled server fault.</summary>
-    internal static Process Start(ProcessStartInfo start, string startFailure)
+    /// <see cref="IOException"/> naming the operation, which callers report as
+    /// a control error instead of an unhandled fault.</summary>
+    public static Process Start(ProcessStartInfo start, string startFailure)
     {
         try { return Process.Start(start) ?? throw new IOException(startFailure); }
         catch (Exception e) when (e is System.ComponentModel.Win32Exception or InvalidOperationException or PlatformNotSupportedException)
@@ -54,9 +66,9 @@ internal static class BoundedProcess
     }
 
     /// <summary>Kills a process tree. It runs on timer and cancellation
-    /// callbacks, where an escaping exception would end the Host, so every
-    /// failure the runtime documents is reported as <c>false</c> instead.</summary>
-    internal static bool KillTree(Process process) => KillTree(process, static target => target.Kill(entireProcessTree: true));
+    /// callbacks, where an escaping exception would end the caller's process,
+    /// so every failure the runtime documents is reported as <c>false</c> instead.</summary>
+    public static bool KillTree(Process process) => KillTree(process, static target => target.Kill(entireProcessTree: true));
 
     internal static bool KillTree(Process process, Action<Process> kill)
     {

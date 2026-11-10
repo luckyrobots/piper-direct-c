@@ -1,12 +1,13 @@
 using System.Diagnostics;
 using System.Globalization;
-using LuckyRobots.Piper.Pika;
+using LuckyRobots.Piper.Processes;
 
-// BoundedProcess runs usbipd, wslpath and chmod. A helper that hangs past its
+// BoundedProcess runs usbipd, wslpath and chmod for the Pika transport, and
+// the WSL probe and camera tools for the plugin. A helper that hangs past its
 // deadline must end as a timeout with its whole process tree gone.
 internal static class BoundedProcessTests
 {
-    internal const string TreeFixture = "--bounded-tree-fixture", TreeChild = "--bounded-tree-child";
+    internal const string TreeFixture = "--bounded-tree-fixture", TreeChild = "--bounded-tree-child", StreamsFixture = "--bounded-streams-fixture";
 
     internal static async Task Run()
     {
@@ -31,6 +32,52 @@ internal static class BoundedProcessTests
         finally { File.Delete(pidFile); }
         await StartFailureIsControlError();
         KillFailureNeverEscapes();
+        await CompletedRunReportsItsStreams();
+        RedirectedSharesNoStream();
+    }
+
+    // The camera tools load their libraries from their own folder, so a run
+    // starts in the directory it was given. It ends with the exit code and
+    // both streams, and its stdin is at end of file: the fixture reads stdin
+    // to the end before it writes, so an open stdin would end as a timeout.
+    private static async Task CompletedRunReportsItsStreams()
+    {
+        string directory = Path.Combine(Path.GetTempPath(), "pika-bounded-directory-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        try
+        {
+            const string marker = "marker";
+            File.WriteAllText(Path.Combine(directory, marker), "");
+            var inside = await BoundedProcess.RunAsync(Environment.ProcessPath!, [StreamsFixture, marker], "Could not start the fixture.",
+                "Fixture deadline.", default, TimeSpan.FromSeconds(20), directory);
+            Check(inside is { ExitCode: 7, Output: "marker present", Error: "stdin ended after 0 characters" },
+                $"A completed helper did not report its exit code and streams from its working directory: {inside}");
+            var elsewhere = await BoundedProcess.RunAsync(Environment.ProcessPath!, [StreamsFixture, marker], "Could not start the fixture.",
+                "Fixture deadline.", default, TimeSpan.FromSeconds(20));
+            Check(elsewhere is { ExitCode: 7, Output: "marker absent" }, $"A helper without a working directory did not inherit this one: {elsewhere}");
+        }
+        finally { Directory.Delete(directory, true); }
+    }
+
+    // A long-lived child is started from the same settings: no window, no
+    // shell, and none of this process's standard streams.
+    private static void RedirectedSharesNoStream()
+    {
+        var start = BoundedProcess.Redirected("helper", ["one", "two words"], "folder");
+        Check(start is { FileName: "helper", WorkingDirectory: "folder", UseShellExecute: false, CreateNoWindow: true,
+            RedirectStandardInput: true, RedirectStandardOutput: true, RedirectStandardError: true }
+            && start.ArgumentList.SequenceEqual(["one", "two words"]), "Redirected start settings share a stream, a shell or a window");
+        Check(BoundedProcess.Redirected("helper", []).WorkingDirectory.Length == 0, "Redirected start settings invented a working directory");
+    }
+
+    // Fixture: reports whether a relative file exists, after stdin has ended.
+    internal static void RunStreamsFixture(string marker)
+    {
+        int read = Console.In.ReadToEnd().Length;
+        Console.Out.Write(File.Exists(marker) ? "marker present" : "marker absent");
+        Console.Error.Write($"stdin ended after {read} characters");
+        Console.Out.Flush(); Console.Error.Flush();
+        Environment.Exit(7);
     }
 
     // P6: a missing helper binary is an IOException (a 409 control error on
