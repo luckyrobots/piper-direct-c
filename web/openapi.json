@@ -3,7 +3,7 @@
   "info": {
     "title": "PiPer Direct C position-control API",
     "version": "1.0.0",
-    "description": "Loopback-only Piper arm controller, served by two backends that share this native control core and dashboard: the C server (SocketCAN) and the managed .NET host (Windows or Linux), which adds a gRPC port, independent Pika gripper sessions and maintenance routes. No Python or robot SDK. Each path's x-piper-backend names the backends that serve it: c, managed or both. Read /api/state for the per-process token, stable selected device_id and current connection generation. Every POST requires X-Piper-Token and application/json. Accepted actions are asynchronous: poll state and renew the matching owner/request_id lease every 200 ms. Lease expires at 800 ms. Commands never resume automatically after reconnect or restart. A single-joint command sends a six-angle MoveJ pose, holding other joints at their initial measured positions. This API does not bypass the onboard MCU or expose raw torque/MIT/calibration/firmware writes. State includes controller teach_state, fault masks, persisted last_fault and per-joint max_acceleration_rad_s2/acceleration_fresh/acceleration_age_s. New motion and enable require valid angle, speed and acceleration limits read on this connection. Static configuration remains valid while the connection is uninterrupted; there is no periodic refresh or 60-second expiry. USB/CAN reconnection, a robot status-stream gap or an explicit information query invalidates the cache. Live position, motor and fault feedback still use the normal short freshness checks. Acceleration limits must be finite, greater than zero and at most 5 rad/s\u00b2. Queries are read-only and preserve unresolved recovery locks. The limits_fresh, acceleration_fresh and gripper configuration_fresh fields mean valid for this connection; their age fields report elapsed time without imposing an expiry. Missing optional standard CAN gripper settings do not block the arm or Pika."
+    "description": "Loopback-only Piper arm controller, served by two backends that share this native control core and dashboard: the C server (SocketCAN) and the managed .NET host (Windows or Linux), which adds a gRPC port, independent Pika gripper sessions and maintenance routes. No Python or robot SDK. Each path's x-piper-backend names the backends that serve it: c, managed or both. Read /api/state for the per-process token, stable selected device_id and current connection generation. Every POST requires X-Piper-Token and application/json. Accepted actions are asynchronous: poll state and renew the matching owner/request_id lease every 200 ms. Lease expires at 800 ms. Commands never resume automatically after reconnect or restart. A single-joint command sends a six-angle MoveJ pose, holding other joints at their initial measured positions. This API does not bypass the onboard MCU or expose raw torque/MIT/calibration/firmware writes. State includes controller teach_state, fault masks, persisted last_fault and per-joint max_acceleration_rad_s2/acceleration_fresh/acceleration_age_s. New motion and enable require valid angle, speed and acceleration limits read on this connection. Static configuration remains valid while the connection is uninterrupted; there is no periodic refresh or 60-second expiry. USB/CAN reconnection, a robot status-stream gap or an explicit information query invalidates the cache. Live position, motor and fault feedback still use the normal short freshness checks. Acceleration limits must be finite, greater than zero and at most 5 rad/s\u00b2. Queries are read-only and preserve unresolved recovery locks. The limits_fresh, acceleration_fresh and gripper configuration_fresh fields mean valid for this connection; their age fields report elapsed time without imposing an expiry. Missing optional standard CAN gripper settings do not block the arm or Pika. Statuses common to every route are documented here once: 403 for a wrong or missing X-Piper-Token, a foreign Origin or a non-loopback Host; 400 for a body that is not a JSON object and 413 for one that is too large. The managed host also answers 409 to every POST except /api/stop and /api/stop/coordinated while a maintenance restart is pending, and, when a plugin session owns it, 409 to every POST except /api/query whose owner is not that session. The operator STOP is POST /api/stop (C server) or POST /api/stop/coordinated (managed host) with no device_id, generation or request_id: it is never pinned to a connection generation and stops every arm."
   },
   "servers": [
     {
@@ -122,8 +122,8 @@
           "404": {
             "description": "Adapter absent"
           },
-          "409": {
-            "description": "Action active"
+          "500": {
+            "description": "The selection could not be saved; it is unchanged"
           }
         }
       },
@@ -150,13 +150,25 @@
     "/api/reconnect": {
       "post": {
         "summary": "Reopen CAN sockets and refresh selected arm firmware/limits; no network configuration or motion",
-        "description": "Invalidates cached feedback, then starts one bounded information query on the selected adapter if its CAN socket is available. Motion and stop recovery remain explicit. Poll query_active for completion; 200 does not guarantee robot replies.",
+        "description": "Invalidates cached feedback, then starts one bounded information query on the selected adapter if its CAN socket is available. Motion and stop recovery remain explicit. Poll query_active for completion; 200 does not guarantee robot replies. With generation the request is pinned: device_id (or the selected adapter) must still be at that connection generation. With neither device_id nor generation every CAN socket is reopened.",
         "requestBody": {
           "required": true,
           "content": {
             "application/json": {
               "schema": {
-                "type": "object"
+                "type": "object",
+                "properties": {
+                  "device_id": {
+                    "type": "string",
+                    "description": "Adapter to reopen; omitted means the selected adapter, or every adapter when generation is omitted too"
+                  },
+                  "generation": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 4294967295,
+                    "description": "Pins the request to this connection generation"
+                  }
+                }
               }
             }
           }
@@ -166,7 +178,7 @@
             "description": "Sockets reopened; selected adapter information read started if available"
           },
           "409": {
-            "description": "Action active"
+            "description": "Action or information read active, or the pinned generation is stale"
           }
         }
       },
@@ -288,6 +300,16 @@
                   "request_id": {
                     "type": "integer",
                     "minimum": 1
+                  },
+                  "device_id": {
+                    "type": "string",
+                    "description": "Pins the heartbeat to this adapter; requires generation"
+                  },
+                  "generation": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 4294967295,
+                    "description": "Connection generation of device_id from /api/state"
                   }
                 }
               }
@@ -299,16 +321,17 @@
             "description": "Lease renewed"
           },
           "409": {
-            "description": "No matching active lease or already expired"
+            "description": "No matching active lease, lease already expired, or the pinned adapter or generation no longer matches"
           }
-        }
+        },
+        "description": "Renews the lease of the action that owner started with request_id. With device_id the heartbeat is pinned: that adapter must still be the one running the action and generation must equal its current connection generation. Without device_id the selected adapter is used and generation is ignored."
       },
       "x-piper-backend": "both"
     },
     "/api/stop": {
       "post": {
-        "summary": "Best-effort software stop on selected arm; persist recovery requirement",
-        "description": "Does not require motion health checks or matching owner. An optional generation must match the selected adapter connection; malformed or stale generations are rejected before sending STOP. Manual callers may omit generation. Fast stop can allow damped descent; it is not a power cut or guaranteed hold. Active gripper motion also gets a gripper disable request. Disconnected hardware cannot receive the stop. Inspect physical state before recovery.",
+        "summary": "Best-effort software stop of every arm, or of one arm for automatic cleanup; persist recovery requirement",
+        "description": "Two forms. Operator STOP: no device_id. Every known arm gets an independent stop attempt, whoever owns the running action; owner is not checked and no motion health check is required. generation and request_id are refused in this form (409), so a stale client can never turn an operator STOP into a no-op: send neither. The reply lists one result per arm in stops; 409 means at least one delivery could not be verified. Scoped cleanup stop: device_id names one arm, for a client releasing its own action. The adapter must be the one running the action, an optional generation must equal its connection generation, and an optional request_id with owner must match the active action; otherwise 409 and nothing is sent. Fast stop can allow damped descent; it is not a power cut or guaranteed hold. Active gripper motion also gets a gripper disable request. Disconnected hardware cannot receive the stop. Inspect physical state before recovery.",
         "requestBody": {
           "required": true,
           "content": {
@@ -316,13 +339,24 @@
               "schema": {
                 "type": "object",
                 "properties": {
+                  "owner": {
+                    "type": "string",
+                    "description": "Sender ID. Compared only by a scoped stop that carries request_id; a session-owned managed host requires its plugin owner."
+                  },
                   "device_id": {
-                    "type": "string"
+                    "type": "string",
+                    "description": "Omitted: operator STOP of every arm. Present: scoped cleanup stop of this arm."
                   },
                   "generation": {
                     "type": "integer",
                     "minimum": 1,
-                    "maximum": 4294967295
+                    "maximum": 4294967295,
+                    "description": "Scoped stop only"
+                  },
+                  "request_id": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "Scoped stop only: the action being released"
                   }
                 }
               }
@@ -331,10 +365,10 @@
         },
         "responses": {
           "200": {
-            "description": "Stop attempted; read message and physical state"
+            "description": "Stop attempted on every addressed arm; read message, stops and physical state"
           },
           "409": {
-            "description": "Adapter identity, optional generation or automatic-stop action no longer matches"
+            "description": "Operator STOP: a delivery is unverified, or generation/request_id was sent without device_id. Scoped stop: adapter, generation or action no longer matches; nothing was sent."
           }
         }
       },
