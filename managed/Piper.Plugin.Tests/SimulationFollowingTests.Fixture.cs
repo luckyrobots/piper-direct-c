@@ -265,8 +265,11 @@ internal static partial class SimulationFollowingTests
                         if (InvalidModel) pose["actuators"]![0]!["positionControl"] = false;
                         if (UnsettledStart) pose["joints"]![0]!["position"] = .2;
                         if (action == "activate-start" && ChangeActivationFrame) pose["joints"]![0]!["position"] = .3;
-                        pose["episodeId"] = EpisodeId; pose["episodeOrdinal"] = 0L; pose["episodeComplete"] = TerminalFrame;
-                        pose["episodeSucceeded"] = TerminalFrame;
+                        // One read per request: the test thread sets TerminalFrame while this
+                        // handler runs, and a frame sealed as the last must itself be complete.
+                        bool terminal = TerminalFrame;
+                        pose["episodeId"] = EpisodeId; pose["episodeOrdinal"] = 0L; pose["episodeComplete"] = terminal;
+                        pose["episodeSucceeded"] = terminal;
                         if (method == "robot.runtime.frames")
                         {
                             if (GroupMode && action == "start") capturedGroupTracks = body["tracks"]!.AsArray().Select(t => t!["id"]!.GetValue<string>()).ToArray();
@@ -280,7 +283,7 @@ internal static partial class SimulationFollowingTests
                                 ["measuredJoints"] = JsonSerializer.SerializeToNode(source.MeasuredDegrees.Select(q => q * Math.PI / 180)),
                                 ["commandOpeningMm"] = source.CommandOpeningMm, ["measuredOpeningMm"] = source.MeasuredOpeningMm,
                                 ["episodeId"] = EpisodeId, ["episodeOrdinal"] = 0L, ["phase"] = simulationTime < .015 ? "begin:0" : "wait:1",
-                                ["episodeComplete"] = TerminalFrame, ["episodeSucceeded"] = TerminalFrame };
+                                ["episodeComplete"] = terminal, ["episodeSucceeded"] = terminal };
                             if (GroupMode)
                             {
                                 var rows = new JsonArray();
@@ -301,17 +304,17 @@ internal static partial class SimulationFollowingTests
                                     4 => prefix + "gripper:3", 5 => prefix + "home:4", _ => prefix + "finish:5" };
                                 nextFrame["commandOpeningMm"] = row is 2 or 3 ? 10d : 20d;
                                 nextFrame["measuredOpeningMm"] = row is 2 or 3 ? 14d : 20d;
-                                nextFrame["episodeComplete"] = TerminalFrame = row >= 6;
-                                nextFrame["episodeSucceeded"] = TerminalFrame && !ScriptedSourceMiss;
-                                pose["episodeComplete"] = TerminalFrame;
-                                pose["episodeSucceeded"] = TerminalFrame && !ScriptedSourceMiss;
+                                nextFrame["episodeComplete"] = TerminalFrame = terminal = row >= 6;
+                                nextFrame["episodeSucceeded"] = terminal && !ScriptedSourceMiss;
+                                pose["episodeComplete"] = terminal;
+                                pose["episodeSucceeded"] = terminal && !ScriptedSourceMiss;
                                 if (nextFrame["tracks"] is JsonArray scriptedTracks)
                                     foreach (var track in scriptedTracks)
                                         foreach (string key in new[] { "commandJoints", "measuredJoints", "commandOpeningMm", "measuredOpeningMm" })
                                             track![key] = nextFrame[key]!.DeepClone();
                             }
                             sourceFrames.Add(nextFrame);
-                            if (TerminalFrame) SealedFrameCursor = frameCursor;
+                            if (terminal) SealedFrameCursor = frameCursor;
                             }
                             ulong after = ulong.Parse(body["afterFrameCursor"]!.GetValue<string>());
                             pose["oldestCursor"] = "1"; pose["newestCursor"] = frameCursor.ToString(); pose["sourcePausedForFollower"] = false;
