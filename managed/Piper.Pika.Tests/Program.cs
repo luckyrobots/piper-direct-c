@@ -5,6 +5,7 @@ using LuckyRobots.Piper.Pika.Agent;
 
 if (args.Length == 2 && args[0] == BoundedProcessTests.TreeFixture) { BoundedProcessTests.RunTreeFixture(args[1]); return; }
 if (args.Length == 1 && args[0] == BoundedProcessTests.TreeChild) { Thread.Sleep(Timeout.Infinite); return; }
+if (args.Length == 2 && args[0] == BoundedProcessTests.StreamsFixture) { BoundedProcessTests.RunStreamsFixture(args[1]); return; }
 if (args.Length >= 2 && args[0] == "--device" && args[1] is "/dev/pika-garbage-fixture" or "/dev/pika-garbage-hang-fixture")
 {
     // B2 fixture: interleaves malformed stdout lines with valid ones, then floods

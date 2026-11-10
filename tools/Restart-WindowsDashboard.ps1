@@ -53,8 +53,11 @@ $deadline=(Get-Date).AddSeconds(15)
 while((Get-Process -Id $serverId -ErrorAction SilentlyContinue) -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 200 }
 if(Get-Process -Id $serverId -ErrorAction SilentlyContinue) { throw 'Backend did not exit cleanly; no process was killed.' }
 # Apply already-built transport/core updates only after the old backend exits.
-$pikaUpdate=Join-Path $repo 'managed\Piper.Pika\bin\Release\net9.0\Piper.Pika.dll'
-if(Test-Path -LiteralPath $pikaUpdate) { Copy-Item -LiteralPath $pikaUpdate -Destination (Join-Path $publish 'Piper.Pika.dll') -Force }
+# Piper.Pika.dll and the process runner it references are replaced together.
+foreach($update in @('Piper.Pika.dll','Piper.Processes.dll')) {
+    $pikaUpdate=Join-Path $repo "managed\Piper.Pika\bin\Release\net9.0\$update"
+    if(Test-Path -LiteralPath $pikaUpdate) { Copy-Item -LiteralPath $pikaUpdate -Destination (Join-Path $publish $update) -Force }
+}
 & (Join-Path $PSScriptRoot 'build-windows.ps1') -StageOnly -StageTo $publish
 # The old supervisor notices the exit within its 2 s monitor tick, or later when
 # a USB attach is in progress. Starting before it lets go would be refused.
