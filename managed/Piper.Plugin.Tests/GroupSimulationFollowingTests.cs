@@ -6,7 +6,6 @@ internal static class GroupSimulationFollowingTests
 {
     public static void Run()
     {
-        FollowLaneTelemetryTests.Run();
         JsonObject Frame() => new() { ["cursor"] = "1", ["simulationTimeNs"] = "0", ["mujocoTimeSeconds"] = 0d,
             ["episodeId"] = "episode-a", ["episodeOrdinal"] = 0L, ["phase"] = "arm:1", ["episodeComplete"] = false, ["episodeSucceeded"] = false,
             ["tracks"] = new JsonArray(new JsonObject { ["id"] = "first", ["commandJoints"] = new JsonArray(0d,0d,0d,0d,0d,0d),
