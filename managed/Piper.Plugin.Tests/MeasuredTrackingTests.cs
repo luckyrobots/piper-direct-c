@@ -98,7 +98,7 @@ internal static class MeasuredTrackingTests
             f.AfterRequest = method =>
             {
                 if (method != awaitPoint) return;
-                if (changed == "backend") { f.Snapshot["token"] = "backend-b"; f.Plugin.token = "backend-b"; }
+                if (changed == "backend") { f.Snapshot["token"] = "backend-b"; f.Plugin.telemetry.AdoptBackend("backend-b"); }
                 if (changed == "generation") f.Snapshot["devices"]![0]!["generation"] = 8L;
                 if (changed == "profile") f.SetPreferences(f.Profile with { Id = "other-profile" });
                 if (changed == "permission") f.Authority.Revoke();
@@ -176,7 +176,7 @@ internal static class MeasuredTrackingTests
         public void SetPreferences(RobotProfile profile) => plugin.preferences = RobotProfileRouting.Normalize(new Preferences(Robots: [profile], ActiveRobotId: profile.Id));
         public void Fresh()
         {
-            plugin.state = Snapshot;
+            plugin.telemetry.PublishState(Snapshot);
             plugin.telemetry.Publish(new(Snapshot, Snapshot["token"]!.GetValue<string>(), 1, Stopwatch.GetTimestamp(), 0));
         }
         public async Task DrainMonitor()
@@ -190,7 +190,7 @@ internal static class MeasuredTrackingTests
         {
             Directory.CreateDirectory(Folder);
             SetPreferences(new("piper-1", "Fixture", "can-a", RobotId: "robot-a", PikaDevice: "/dev/pika-a"));
-            plugin.token = "backend-a"; plugin.client = new PiperControl.PiperControlClient(Rpc);
+            plugin.telemetry.AdoptBackend("backend-a"); plugin.client = new PiperControl.PiperControlClient(Rpc);
             plugin.passiveMeasuredTrackingStarted = started;
             Snapshot = new JsonObject
             {

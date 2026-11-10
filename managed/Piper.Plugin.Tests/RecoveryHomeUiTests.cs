@@ -33,7 +33,7 @@ internal static class RecoveryHomeUiTests
                     return Task.CompletedTask;
                 }),
                 (Func<string, JsonObject, CancellationToken, Task<JsonElement>>)((_, _, _) => Task.FromResult(JsonSerializer.SerializeToElement(new { }))));
-        plugin.engine = engine; plugin.client = new PiperControl.PiperControlClient(calls); plugin.token = "home-ui-fixture";
+        plugin.engine = engine; plugin.client = new PiperControl.PiperControlClient(calls); plugin.telemetry.AdoptBackend("home-ui-fixture");
         plugin.preferences = RobotProfileRouting.Normalize(new Preferences(Robots: [new("piper-1", "Fixture", "resting-arm")], ActiveRobotId: "piper-1"));
         static IEnumerable<JsonObject> Walk(JsonObject node)
         {
@@ -46,7 +46,7 @@ internal static class RecoveryHomeUiTests
         {
             JsonObject snapshot = calls.Snapshot();
             PipersPlugin.Materialize(snapshot);
-            plugin.state = snapshot;
+            plugin.telemetry.PublishState(snapshot);
             plugin.telemetry.Publish(new(snapshot, "home-ui-fixture", Interlocked.Increment(ref sequence), Stopwatch.GetTimestamp(), 0));
         }
         Publish();

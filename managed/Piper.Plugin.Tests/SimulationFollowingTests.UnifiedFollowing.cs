@@ -28,7 +28,7 @@ internal static partial class SimulationFollowingTests
             {
                 recovery = plugin.BeginRecovery(PipersPlugin.RecoveryKind.HoldHere, f.Snapshot["devices"]![0]!.AsObject(), authority.Epoch, CancellationToken.None);
             }
-            else authority.TryAcknowledge(authority.Epoch, new("piper-1", f.Plugin.token, "can-a", 7), 77);
+            else authority.TryAcknowledge(authority.Epoch, new("piper-1", f.Plugin.telemetry.BackendToken, "can-a", 7), 77);
             try
             {
                 await f.Click("group.follow.toggle");
@@ -65,7 +65,7 @@ internal static partial class SimulationFollowingTests
             long before = f.Plugin.groupControlEpoch;
             await f.GroupEvent("toggle");
             var authority = f.Plugin.CommandAuthority;
-            authority.TryAcknowledge(authority.Epoch, new("piper-1", f.Plugin.token, "can-a", 7), 77);
+            authority.TryAcknowledge(authority.Epoch, new("piper-1", f.Plugin.telemetry.BackendToken, "can-a", 7), 77);
             var motion = f.Snapshot["devices"]![0]!["motion"]!;
             motion["active"] = true; motion["request_id"] = 77L; motion["owner"] = f.Plugin.owner;
             f.FocusGroupSecond();
@@ -399,7 +399,7 @@ internal static partial class SimulationFollowingTests
             if (action == "activate-start") { await Until(() => f.GroupArmedForPlay, "Delayed activation did not arm"); f.RequestGroupPlay(); }
             await f.RuntimeReached.Task.WaitAsync(TimeSpan.FromSeconds(3));
             var original = f.Plugin.groupSimulation!;
-            if (backendChanged) f.Plugin.token = "replacement-backend";
+            if (backendChanged) f.Plugin.telemetry.AdoptBackend("replacement-backend");
             await f.ClickSidebarGroupStop().WaitAsync(TimeSpan.FromSeconds(1));
             Check(f.GroupPhase == GroupFollowPhase.Retiring && ReferenceEquals(original, f.Session),
                 "Stop blocked the dispatcher or a pending editor ACK released the preparation identity before retiring: " + action);

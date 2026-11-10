@@ -89,7 +89,7 @@ internal static class PikaDisplayReferenceTests
         string folder = Path.Combine(Path.GetTempPath(), "piper-display-reference-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(folder);
         var prefs = RobotProfileRouting.Normalize(new Preferences(Robots: [Profile], ActiveRobotId: "piper-1"));
-        plugin.preferences = prefs; plugin.token = "fixture-session"; plugin.pikaRole = (long)PikaSessionRole.Monitoring;
+        plugin.preferences = prefs; plugin.telemetry.AdoptBackend("fixture-session"); plugin.pikaRole = (long)PikaSessionRole.Monitoring;
         var model = new JsonArray(Enumerable.Range(1, 6).Select(i => (JsonNode)new JsonObject { ["name"] = "joint" + i, ["unit"] = "rad" }).ToArray());
         const double travel = .0470221912391186;
         model.Add(new JsonObject { ["name"] = "joint7", ["unit"] = "m", ["limited"] = true, ["min"] = -travel, ["max"] = 0 });
@@ -97,7 +97,7 @@ internal static class PikaDisplayReferenceTests
         var device = Fixtures.Arm(generation: 1, enabled: false);
         var pika = Pika();
         var state = Fixtures.Snapshot("fixture-session", device, pika, new JsonObject { ["active"] = false });
-        plugin.state = state;
+        plugin.telemetry.PublishState(state);
         void Fresh() => plugin.telemetry.Publish(new(state, "fixture-session", 1, Stopwatch.GetTimestamp(), 0));
         var engineCalls = new List<string>(); var feedback = new List<JsonObject>();
         var rpc = new FakeCalls(); plugin.client = new PiperControl.PiperControlClient(rpc);

@@ -101,7 +101,7 @@ internal static partial class SimulationFollowingTests
             plugin.client = new PiperControl.PiperControlClient(Rpc);
             plugin.preferences = RobotProfileRouting.Normalize(new Preferences(Robots:
                 [new("piper-1", "Fixture", "can-a", RobotId: "robot-a", PikaDevice: "/dev/pika-a")], ActiveRobotId: "piper-1"));
-            plugin.token = "fixture-backend"; plugin.approved = true; plugin.pikaRole = (long)PikaSessionRole.Owned; plugin.linkCommandsEnabled = true;
+            plugin.telemetry.AdoptBackend("fixture-backend"); plugin.approved = true; plugin.pikaRole = (long)PikaSessionRole.Owned; plugin.linkCommandsEnabled = true;
             var model = Fixtures.SimulationPose();
             var sample = SimulationFollowSample.Read(model);
             var arm = Fixtures.Arm(joint: (index, joint) =>
@@ -115,7 +115,7 @@ internal static partial class SimulationFollowingTests
                 new JsonObject { ["active"] = false, ["request_id"] = 0L, ["owner"] = plugin.owner,
                     ["following"] = false, ["trajectory_follow"] = false, ["follow_sequence"] = 0L });
             Snapshot["trajectory_follow_supported"] = true;
-            plugin.state = Snapshot; plugin.telemetryScope = new TelemetryScope("fixture-backend", "can-a", 7);
+            plugin.telemetry.PublishState(Snapshot); plugin.telemetry.AdoptScope(new TelemetryScope("fixture-backend", "can-a", 7));
             Rpc.Accepted = (route, body) =>
             {
                 string action = body["action"]?.GetValue<string>() ?? "";
@@ -356,7 +356,7 @@ internal static partial class SimulationFollowingTests
                 {
                     // Resume can retain a receipt across several checks.
                     var frame = Snapshot.DeepClone().AsObject();
-                    plugin.state = frame;
+                    plugin.telemetry.PublishState(frame);
                     Publish(frame);
                 }
                 return;

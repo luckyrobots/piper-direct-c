@@ -33,8 +33,10 @@ public sealed partial class PipersPlugin : ILuckyPlugin
     internal PluginContext engine = null!;
     internal PiperControl.PiperControlClient client = null!;
     internal Preferences preferences = new();
-    internal volatile JsonObject? state;
-    internal string token = "", message = "Connecting to the existing Piper server…";
+    // Published by the Telemetry component; this shell only reads them.
+    private JsonObject? state => telemetry.State;
+    private string token => telemetry.BackendToken;
+    internal string message = "Connecting to the existing Piper server…";
     internal string uiActionError = "";
     internal RobotCommandAuthority CommandAuthority { get; } = new();
     internal volatile bool approved;

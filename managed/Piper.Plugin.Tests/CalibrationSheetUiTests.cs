@@ -52,7 +52,7 @@ internal static class CalibrationSheetUiTests
                     };
                     return Task.FromResult(JsonSerializer.SerializeToElement(result));
                 }));
-        plugin.preferences = prefs; plugin.engine = context; plugin.state = state; plugin.token = "fixture-session";
+        plugin.preferences = prefs; plugin.engine = context; plugin.telemetry.PublishState(state); plugin.telemetry.AdoptBackend("fixture-session");
         plugin.calibrationProfile = "piper-1"; plugin.wizardProfile = "piper-1"; plugin.Navigation = WorkspaceNavigation.Calibration;
         plugin.link = new RobotLink("scene-a", "robot-a", joints, device);
         plugin.telemetry.Publish(new(state, "fixture-session", 1, Stopwatch.GetTimestamp(), 0));

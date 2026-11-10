@@ -45,9 +45,9 @@ internal static class EmergencyStopTests
                     var next = first.State.DeepClone().AsObject();
                     next["devices"]![0]!["generation"] = 2L;
                     var replacementReceipt = first with { State = next, Sequence = 2 };
-                    fixture.Plugin.telemetryScope = new TelemetryScope(backend, "can-one", 1);
+                    fixture.Plugin.telemetry.AdoptScope(new TelemetryScope(backend, "can-one", 1));
                     fixture.Plugin.ApplyIncomingScope(replacementReceipt);
-                    fixture.Plugin.state = next;
+                    fixture.Plugin.telemetry.PublishState(next);
                     telemetry.Publish(replacementReceipt);
                     break;
             }
@@ -102,7 +102,7 @@ internal static class EmergencyStopTests
             var telemetry = fixture.Plugin.telemetry;
             var first = telemetry.Latest!;
             var profile = RobotProfileRouting.Active(fixture.Plugin.preferences);
-            fixture.Plugin.telemetryScope = new TelemetryScope(backend, "can-one", 1);
+            fixture.Plugin.telemetry.AdoptScope(new TelemetryScope(backend, "can-one", 1));
             fixture.Authority.TrySaveApproval(fixture.Authority.Epoch, profile.Id,
                 new(backend, "can-one", 1, profile.RobotId, profile.RobotJointPrefix, profile.PikaDevice, profile.WslDistribution));
             fixture.Plugin.approved = true;
@@ -113,7 +113,7 @@ internal static class EmergencyStopTests
             fixture.Plugin.RestoreControlApproval();
             Check(telemetry.Latest?.Connected == false && !fixture.Plugin.approved,
                 "Old measured evidence restored approval between scope revocation and telemetry publication");
-            fixture.Plugin.state = next;
+            fixture.Plugin.telemetry.PublishState(next);
             telemetry.Publish(replacementReceipt);
             fixture.Plugin.RestoreControlApproval();
             Check(!fixture.Plugin.approved && fixture.Authority.Current.Approvals.Count == 0,
@@ -242,7 +242,7 @@ internal static class EmergencyStopTests
                 var newReceipt = receipt with { State = changed, Sequence = 2 };
                 fixture.Plugin.ApplyIncomingScope(newReceipt);
                 telemetry.Publish(newReceipt);
-                fixture.Plugin.state = changed;
+                fixture.Plugin.telemetry.PublishState(changed);
                 fixture.Rpc.ConnectReply.TrySetResult(new ControlReply { Status = 200, Json = "{\"ok\":true}" });
                 await accept.WaitAsync(TimeSpan.FromSeconds(2));
                 Check(fixture.Rpc.Routes.SequenceEqual(new[] { "/api/pika/connect" }) &&
@@ -260,7 +260,7 @@ internal static class EmergencyStopTests
             gripper["aliases"] = new JsonArray("/dev/pika-one");
             gripper["device"] = "/dev/pika/by-host/fixture";
             snapshot["pikas"] = new JsonArray(gripper.DeepClone());
-            fixture.Plugin.state = snapshot;
+            fixture.Plugin.telemetry.PublishState(snapshot);
             telemetry.Publish(receipt with { State = snapshot, Sequence = 2 });
             fixture.Plugin.approved = true;
             fixture.Plugin.pikaRole = (long)PikaSessionRole.Owned;
@@ -329,7 +329,7 @@ internal static class EmergencyStopTests
             var snapshot = receipt.State.DeepClone().AsObject();
             snapshot["devices"]![0]!["recovery_required"] = true;
             snapshot["devices"]![0]!["reset_pending"] = resetPending;
-            fixture.Plugin.state = snapshot;
+            fixture.Plugin.telemetry.PublishState(snapshot);
             telemetry.Publish(receipt with { State = snapshot, Sequence = 2 });
             fixture.Plugin.approved = true;
             bool refused = false;
@@ -395,7 +395,7 @@ internal static class EmergencyStopTests
     {
         using var fixture = new Fixture();
         var plugin = fixture.Plugin;
-        var arm = plugin.state!["devices"]![0]!;
+        var arm = plugin.telemetry.State!["devices"]![0]!;
         foreach (var joint in arm["joints"]!.AsArray()) joint!["enabled"] = false;
         plugin.approved = true;
         fixture.Rpc.DelayCommand = true;
@@ -409,8 +409,8 @@ internal static class EmergencyStopTests
         // The controller finishes the enable, and telemetry ends the lease, before
         // Enable resumes from its command.
         foreach (var joint in arm["joints"]!.AsArray()) joint!["enabled"] = true;
-        plugin.state["motion"] = new JsonObject { ["active"] = false, ["request_id"] = 42L };
-        plugin.telemetry.Publish(new(plugin.state, "fake-backend-session", 2, Stopwatch.GetTimestamp(), 0));
+        plugin.telemetry.State["motion"] = new JsonObject { ["active"] = false, ["request_id"] = 42L };
+        plugin.telemetry.Publish(new(plugin.telemetry.State, "fake-backend-session", 2, Stopwatch.GetTimestamp(), 0));
         fixture.Rpc.CommandReply.TrySetResult(new ControlReply { Status = 200, Json = "{\"ok\":true,\"request_id\":42}" });
         string failure = "";
         try { await enable.WaitAsync(TimeSpan.FromSeconds(3)); }
@@ -461,10 +461,10 @@ internal static class EmergencyStopTests
             plugin.client = new PiperControl.PiperControlClient(Rpc);
             plugin.preferences = RobotProfileRouting.Normalize(new Preferences(Robots:
                 [new("piper-1", "Fixture", "can-one", PikaDevice: "/dev/pika-one")], ActiveRobotId: "piper-1"));
-            plugin.token = "fake-backend-session";
+            plugin.telemetry.AdoptBackend("fake-backend-session");
             var snapshot = Fixtures.Snapshot("fake-backend-session", Fixtures.Arm("can-one", generation: 1),
                 Fixtures.Pika("/dev/pika-one", RobotProfileRouting.Active(plugin.preferences).PikaDistribution, plugin.owner, enabled: true, position: .1));
-            plugin.state = snapshot;
+            plugin.telemetry.PublishState(snapshot);
             plugin.telemetry.Publish(new(snapshot, "fake-backend-session", 1, Stopwatch.GetTimestamp(), 0));
             var context = Fixtures.Context(new PluginStart("fixture", Path.Combine(Path.GetTempPath(), "piper-emergency-" + Guid.NewGuid().ToString("N")), Path.GetTempPath()),
                     send ?? ((_, _) => Task.CompletedTask),

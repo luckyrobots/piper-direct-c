@@ -98,7 +98,7 @@ internal static class MeasuredGhostPublicationTests
             plugin.passiveMeasuredTrackingStarted = true;
             plugin.ghostCapabilities = new("backend", Ghosts: true, Visibility: true);
             plugin.publishedGhostVisibility = true;
-            plugin.token = "backend";
+            plugin.telemetry.AdoptBackend("backend");
             var joints = new JsonArray();
             foreach (string prefix in new[] { "", "piper3_" })
             {
