@@ -1,5 +1,5 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup><OutputType>Exe</OutputType><TargetFramework>net9.0</TargetFramework><ImplicitUsings>enable</ImplicitUsings><Nullable>enable</Nullable><TreatWarningsAsErrors>true</TreatWarningsAsErrors></PropertyGroup>
-  <ItemGroup><ProjectReference Include="../Piper.Pika/Piper.Pika.csproj" /><ProjectReference Include="../Piper.Core/Piper.Core.csproj" /><Compile Include="../Piper.Pika.Agent/PikaPowerFeedback.cs" Link="Agent/PikaPowerFeedback.cs" /></ItemGroup>
+  <ItemGroup><ProjectReference Include="../Piper.Pika/Piper.Pika.csproj" /><ProjectReference Include="../Piper.Core/Piper.Core.csproj" /><ProjectReference Include="../Piper.Pika.Agent/Piper.Pika.Agent.csproj" /></ItemGroup>
   <ItemGroup><Compile Include="../Testing/TestKit.cs" Link="Testing/TestKit.cs" /><Using Include="LuckyRobots.Piper.Testing.TestKit" Static="true" /></ItemGroup>
 </Project>

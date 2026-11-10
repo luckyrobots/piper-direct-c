@@ -288,6 +288,46 @@ internal static class PikaMultiDeviceTests
                 "Colliding by-id symlink was incorrectly assigned to both grippers.");
         }
         finally { Directory.Delete(temporary, true); }
+        VerifyPortIdentity();
+    }
+
+    // P7: native Linux without USBIP or a udev by-path link. The identity is
+    // the USB port, never the tty name, so it follows the adapter when the two
+    // ttys enumerate in the opposite order.
+    private static void VerifyPortIdentity()
+    {
+        IReadOnlyList<PikaSerialDevice> Enumerate(bool swapped, bool hub = true)
+        {
+            string temporary = Path.Combine(Path.GetTempPath(), "pika-sysfs-port-" + Guid.NewGuid().ToString("N"));
+            string sys = Path.Combine(temporary, "sys"), dev = Path.Combine(temporary, "dev");
+            Directory.CreateDirectory(Path.Combine(sys, "class/tty")); Directory.CreateDirectory(dev);
+            try
+            {
+                for (int port = 0; port < 2; port++)
+                {
+                    int index = swapped ? 1 - port : port;
+                    string name = "3-4." + (port + 1);
+                    string usb = Path.Combine(sys, "devices/pci0000:00/0000:00:14.0", hub ? "usb3" : "nohub", "3-4", name);
+                    string tty = Path.Combine(usb, name + ":1.0", "ttyUSB" + index, "tty", "ttyUSB" + index);
+                    Directory.CreateDirectory(tty);
+                    File.WriteAllText(Path.Combine(usb, "idVendor"), "1a86\n"); File.WriteAllText(Path.Combine(usb, "idProduct"), "7522\n");
+                    Directory.CreateSymbolicLink(Path.Combine(tty, "device"), "../../../ttyUSB" + index);
+                    Directory.CreateSymbolicLink(Path.Combine(sys, "class/tty", "ttyUSB" + index), tty);
+                    File.WriteAllText(Path.Combine(dev, "ttyUSB" + index), "fixture, not a serial port");
+                }
+                return PikaSerialDevices.EnumerateLinux(sys, dev).OrderBy(item => item.Device, StringComparer.Ordinal).ToArray();
+            }
+            finally { Directory.Delete(temporary, true); }
+        }
+        const string first = "/dev/pika/by-port/pci0000:00+0000:00:14.0+port-4.1", second = "/dev/pika/by-port/pci0000:00+0000:00:14.0+port-4.2";
+        var straight = Enumerate(swapped: false); var swapped = Enumerate(swapped: true);
+        Check(straight.Count == 2 && straight[0].Device == first && straight[1].Device == second &&
+            straight.All(item => item.HostBusId is null && item.Aliases.Contains(item.Device)),
+            "A native Linux adapter without a by-path link did not get its USB port identity: " + string.Join(", ", straight.Select(item => item.Device)));
+        Check(straight[0].SystemDevice.EndsWith("ttyUSB0", StringComparison.Ordinal) && swapped.Count == 2 && swapped[0].Device == first &&
+            swapped[0].SystemDevice.EndsWith("ttyUSB1", StringComparison.Ordinal) && swapped[1].SystemDevice.EndsWith("ttyUSB0", StringComparison.Ordinal),
+            "A gripper identity followed tty enumeration order instead of its USB port");
+        Check(Enumerate(swapped: false, hub: false).Count == 0, "An adapter without a readable USB port was listed under its unstable tty name");
     }
 
     private sealed class Discovery(params string[] devices) : IPikaDeviceDiscovery

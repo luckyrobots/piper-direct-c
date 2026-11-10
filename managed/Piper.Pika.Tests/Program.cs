@@ -70,7 +70,7 @@ if (args.Length >= 2 && args[0] == "--device" && args[1] is "/dev/pika-fixture" 
         if (ok && action is "enable" or "position" or "disable")
         { last_motor_request = root.GetProperty("id").GetString()!; request_time_s = fixtureClock.Elapsed.TotalSeconds; }
         double feedback_time_s = dyingPower && args[1] == "/dev/pika-powered-buffered-die-fixture" ? request_time_s - .01 : fixtureClock.Elapsed.TotalSeconds;
-        Console.WriteLine(JsonSerializer.Serialize(new { type = "state", connected = true, fresh = true, enabled, armed = enabled && !monitoringFixture, pending, following = false, age_s,
+        Console.WriteLine(JsonSerializer.Serialize(new { type = "state", connected = true, fresh = true, enabled, armed = enabled && !monitoringFixture, pending, following = false, resuming_hold = false, age_s,
             last_motor_request, request_time_s, feedback_time_s,
             telemetry = new { motor = new { Position = .5756, Speed = 0 }, motorstatus = new { Status = enabled ? "0x40" : "0x00" } } }));
         Console.WriteLine(JsonSerializer.Serialize(new { type = "ack", id = root.GetProperty("id").GetString(), ok, message = ok ? "fixture accepted" : "finger-clear required" }));
@@ -93,6 +93,7 @@ foreach (bool requested in new[] { false, true })
 await PikaFollowTests.RunAsync();
 await PikaMultiDeviceTests.Run();
 await BoundedProcessTests.Run();
+await PikaAgentFaultTests.Run();
 await PikaReadOnlyAdoptionTests.Run();
 PikaMeasuredHoldResumeTests.Run();
 await PikaDisabledEvidenceTests.Run();
@@ -201,7 +202,7 @@ foreach (string garbage in new[] { "/dev/pika-garbage-fixture", "/dev/pika-garba
     await using (var failedMonitor = Fixture("/dev/pika-fixture", "/nonexistent-pika-agent-" + Guid.NewGuid()))
     {
         bool failed = false;
-        try { await failedMonitor.ExecuteAsync("connect", Input(owner), default); } catch (System.ComponentModel.Win32Exception) { failed = true; }
+        try { await failedMonitor.ExecuteAsync("connect", Input(owner), default); } catch (IOException error) when (error.Message.StartsWith("Could not start the Pika serial agent.", StringComparison.Ordinal)) { failed = true; }
         Check(failed && failedMonitor.Snapshot()["owner"] is null && !failedMonitor.Snapshot()["configuration_blocked"]!.GetValue<bool>(), "Failed monitor setup stranded serial ownership before process start");
     }
     await using (var exitedMonitor = Fixture("/dev/pika-monitor-die-fixture"))

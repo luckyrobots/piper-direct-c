@@ -28,6 +28,18 @@ public static class PikaProtocol
     public const double FeedbackFreshSeconds = 2;
     /// <summary>The agent disables an armed gripper whose client heartbeat is older than this.</summary>
     public const double HeartbeatTimeoutSeconds = 1.5;
+    /// <summary>The agent disables an ordinary position target that has not arrived within this.</summary>
+    public const double TargetDeadlineSeconds = 6;
+    /// <summary>The agent exits when no heartbeat arrived for this long and it is not holding.</summary>
+    public const double ClientGoneSeconds = 8;
+    /// <summary>How long a holding gripper keeps torque with no client heartbeat
+    /// or no telemetry before the agent disables it (target-architecture Q6).
+    /// Holding exists so that STOP and a follow deadline never drop a grasp, and
+    /// a client may be away briefly: an editor reload plus one reconnect (READY
+    /// is allowed 15 s) fits inside 30 s with margin. Past that nobody is
+    /// supervising an energized jaw and no hardware watchdog is established, so
+    /// the grasp is given up rather than held for ever. Fixed; not configurable.</summary>
+    public const double HoldingGraceSeconds = 30;
     /// <summary>True for a finite opening inside the commandable range.</summary>
     public static bool ValidOpening(double millimeters) => double.IsFinite(millimeters) &&
         millimeters >= MinimumOpeningMm && millimeters <= MaximumOpeningMm;

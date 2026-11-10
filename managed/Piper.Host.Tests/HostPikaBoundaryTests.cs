@@ -131,6 +131,34 @@ internal static class HostPikaBoundaryTests
         }
         finally { directory.Delete(recursive: true); }
         await ControllerFailureIsConflict();
+        await FaultedLoopStillStops();
+    }
+
+    // P4: a faulted tick loop refuses ordinary actions but still attempts STOP,
+    // alone and as the arm leg of a coordinated STOP.
+    private static async Task FaultedLoopStillStops()
+    {
+        var directory = Directory.CreateTempSubdirectory("piper-host-faulted-");
+        try
+        {
+            using var controller = new ControllerService(simulated: true, directory.FullName);
+            await using var registry = new PikaSessionRegistry("", "never-launched");
+            var maintenance = new BackendMaintenance(() => new JsonObject(), () => [], () => { }, Environment.ProcessId);
+            var context = new PiperRpcContext(controller, registry, false, "", maintenance);
+            controller.FaultLoopForTest("fixture tick fault");
+            var input = JsonSerializer.SerializeToElement(new { });
+            var refused = await context.Control.ExecuteAsync("/api/reconnect", input.GetRawText(), input, default);
+            Check(refused.Status == 409 && refused.Error?.Contains("fixture tick fault") == true,
+                "A faulted controller loop admitted an ordinary action.");
+            var stopped = await context.Control.ExecuteAsync("/api/stop", input.GetRawText(), input, default);
+            Check(stopped.Status == 200 && JsonNode.Parse(stopped.ToJson())?["ok"]?.GetValue<bool>() != false,
+                "A faulted controller loop refused STOP instead of attempting it: " + stopped.ToJson());
+            var owner = JsonSerializer.SerializeToElement(new { owner = Guid.NewGuid().ToString() });
+            var coordinated = await context.Control.ExecuteAsync("/api/stop/coordinated", owner.GetRawText(), owner, default);
+            Check(JsonNode.Parse(coordinated.ToJson())?["arm"]?["ok"]?.GetValue<bool>() == true,
+                "A faulted controller loop failed the arm leg of a coordinated STOP: " + coordinated.ToJson());
+        }
+        finally { directory.Delete(recursive: true); }
     }
 
     // B23: a controller-operation exception maps to 409 in the dispatcher,

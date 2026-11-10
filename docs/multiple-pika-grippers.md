@@ -19,6 +19,9 @@ open a serial port, enable a motor or send a position target.
 On Windows persist the returned `device` and `distribution` in the robot's
 profile. A device such as `/dev/pika/by-host/11-4` identifies the host USBIP
 bus/port; the agent resolves it to the current Linux tty at connection time.
+On native Linux the identity is the udev `by-path` link or, without one,
+`/dev/pika/by-port/<controller>+port-<chain>` read from sysfs. An adapter whose
+USB port cannot be read is not listed: a tty name is never an identity.
 If the gripper is moved to another USB port, explicitly reassign it in Settings.
 Do not identify two serial-number-free CH340 grippers by `/dev/ttyUSB0` order
 or their identical `/dev/serial/by-id/usb-1a86_USB_Serial-if00-port0` name.

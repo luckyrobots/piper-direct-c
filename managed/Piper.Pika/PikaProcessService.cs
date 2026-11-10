@@ -19,7 +19,8 @@ namespace LuckyRobots.Piper.Pika;
 internal enum PikaAgentPhase { Idle, Launching, Ready, Exited, Faulted, Closing }
 
 // Pika-A power evidence for motor requests this service sent.
-//   None | Uncertain ──motor request──▶ Requested ──matching ACK──▶ Acked
+//   any ──motor request──▶ Requested ──matching ACK──▶ Acked
+//   Requested ──matching rejection (the agent wrote nothing)──▶ the evidence held before the request
 //   Acked ──fresh post-request disabled feedback──▶ VerifiedDisabled
 //   VerifiedDisabled ──fresh feedback that is not verified disabled──▶ Acked
 //   Uncertain ──fresh disabled feedback──▶ None
@@ -317,7 +318,7 @@ public sealed class PikaProcessService : IPikaSession
             // launch, must release a read-only reservation as well.
             var info = await AgentStartInfoAsync(cancellation);
             var ready = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-            var agent = Process.Start(info) ?? throw new IOException("Could not start the Pika serial agent");
+            var agent = BoundedProcess.Start(info, "Could not start the Pika serial agent.");
             var stderr = agent.StandardError.ReadToEndAsync();
             var launched = new AgentProcess(agent, stderr);
             lock (stateGate) slot = new LaunchingSlot(requestedOwner, launched);
@@ -367,12 +368,20 @@ public sealed class PikaProcessService : IPikaSession
         // already verified free-jaw state into a failed servo command or a
         // new unresolved power reservation. Both ownership and the private
         // acknowledged-request evidence remain serialized with mutations.
-        bool alreadyDisabled = false;
+        // A gripper this session never powered has no servo to hold: fresh
+        // disabled feedback with no power evidence is the same verified result.
+        string? disabledMessage = null;
         if (action == "hold")
-            lock (stateGate) alreadyDisabled = KnownDisabled() && PikaDisabledEvidence.Confirmed(Snapshot(), requestedOwner);
-        if (alreadyDisabled)
-            return new JsonObject { ["ok"] = true, ["state"] = "disabled",
-                ["message"] = "Pika already verified disabled; no motor command sent." };
+            lock (stateGate)
+                if (KnownDisabled())
+                {
+                    var current = Snapshot();
+                    disabledMessage = PikaDisabledEvidence.Confirmed(current, requestedOwner) ? "Pika already verified disabled; no motor command sent." :
+                        power is NoPower && PikaDisabledEvidence.NeverPowered(current, requestedOwner)
+                            ? "Pika was never powered by this session and reports disabled; no motor command sent." : null;
+                }
+        if (disabledMessage is not null)
+            return new JsonObject { ["ok"] = true, ["state"] = "disabled", ["message"] = disabledMessage };
         string id = Guid.NewGuid().ToString("N");
         var command = new JsonObject { ["id"] = id, ["action"] = action };
         if (action == "enable") command["clear"] = input.TryGetProperty("clear", out var clear) && clear.ValueKind == JsonValueKind.True;
@@ -407,10 +416,11 @@ public sealed class PikaProcessService : IPikaSession
         pending[id] = completion;
         bool motorRequest = action is "enable" or "position" or "disable" or "hold" or "follow-update" or "resume-hold";
         bool disconnected = false;
+        PowerState? beforeRequest = null;
         try
         {
             if (motorRequest)
-                lock (stateGate) power = new RequestedPower(requestedOwner, id);
+                lock (stateGate) { beforeRequest = power; power = new RequestedPower(requestedOwner, id); }
             await agent.StandardInput.WriteLineAsync(command.ToJsonString().AsMemory(), cancellation);
             await agent.StandardInput.FlushAsync(cancellation);
             var response = await completion.Task.WaitAsync(TimeSpan.FromSeconds(3), cancellation);
@@ -418,7 +428,14 @@ public sealed class PikaProcessService : IPikaSession
             if (!response.GetProperty("ok").GetBoolean())
             {
                 PikaFollowAudit? rejected;
-                lock (stateGate) { RetainFollowAudit(response); rejected = followAudit; }
+                lock (stateGate)
+                {
+                    // A rejection is the agent's proof that it wrote nothing for
+                    // this request (a failed serial write ends the agent instead),
+                    // so the evidence held before the request still stands.
+                    if (beforeRequest is not null && power is RequestedPower refused && refused.RequestId == id) power = beforeRequest;
+                    RetainFollowAudit(response); rejected = followAudit;
+                }
                 string reason = AckMessage(response) ?? "Pika request rejected";
                 if (rejected is not null) throw new PikaFollowRejectedException(reason, rejected);
                 throw new InvalidOperationException(reason);
@@ -708,8 +725,7 @@ public sealed class PikaProcessService : IPikaSession
             try { agent.StandardInput.Close(); } catch (Exception e) when (e is IOException or InvalidOperationException) { }
             if (!await ExitedWithin(agent, ExitWait))
             {
-                try { agent.Kill(entireProcessTree: true); }
-                catch (Exception e) when (e is InvalidOperationException or System.ComponentModel.Win32Exception) { }
+                BoundedProcess.KillTree(agent);
                 await ExitedWithin(agent, ExitWait);
             }
             try { await Task.WhenAll(new[] { pump, stderr }.OfType<Task>()).WaitAsync(ExitWait); }

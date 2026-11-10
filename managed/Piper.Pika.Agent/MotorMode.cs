@@ -7,6 +7,12 @@ namespace LuckyRobots.Piper.Pika.Agent;
 //   Armed ──follow-start──▶ Armed + follow Following ──hold──▶ Armed + follow Holding
 //   ReadOnly ──resume-hold──▶ Resuming ──verified──▶ Armed | ──failed or cancelled──▶ ReadOnly
 //   any ──Disable (operator, watchdog, disconnect, agent exit)──▶ ReadOnly
+// The watchdog (PikaAgent.Step, on its own timer) disables Armed/Targeting when
+// telemetry is stale, the client heartbeat expired or a target passed its
+// deadline. A Holding follow session is exempt from those, so STOP never drops
+// a grasp, but only for PikaProtocol.HoldingGraceSeconds without a heartbeat
+// or without telemetry. Agent exit (closed input, a signal, a Host that
+// stopped reading output, a fault) disables in every mode once power was written.
 // Invariants: Targeting ⇒ no follow session; a Following or Holding follow
 // session ⇒ Armed; Resuming ⇔ the measured-hold resume is pending.
 //
