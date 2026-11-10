@@ -113,8 +113,7 @@ public sealed partial class PipersPlugin
                     {
                         try
                         {
-                            await Call("/api/heartbeat", new() { ["device_id"] = expectedDevice, ["generation"] = expectedGeneration,
-                                ["request_id"] = request, ["owner"] = owner }, cancellation, expectedToken);
+                            await Call(PiperApi.Requests.Heartbeat(owner, request, expectedDevice, expectedGeneration), cancellation, expectedToken);
                         }
                         catch (Exception error) when (error is InvalidOperationException or RpcException)
                         {

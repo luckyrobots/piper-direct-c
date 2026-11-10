@@ -282,8 +282,8 @@ public sealed partial class PipersPlugin
         if (active && snapshot is not null)
         {
             var device = RobotProfileRouting.Device(preferences, snapshot);
-            await Call("/api/command", new JsonObject { ["action"] = "hold", ["owner"] = owner, ["standalone"] = true,
-                ["device_id"] = device["id"]!.DeepClone(), ["generation"] = device["generation"]!.DeepClone(), ["request_id"] = snapshot["motion"]!["request_id"]!.DeepClone() }, cancellation);
+            await Call(PiperApi.Requests.Command(device["id"]!.GetValue<string>(), device["generation"]!.GetValue<long>(), "hold", owner,
+                standalone: true, requestId: snapshot["motion"]!["request_id"]!.GetValue<long>()), cancellation);
             long started = Stopwatch.GetTimestamp();
             while (state?["motion"]?["active"]?.GetValue<bool>() == true)
             {
@@ -334,7 +334,7 @@ public sealed partial class PipersPlugin
             string? selectionError = null;
             if (profile.CanDeviceId.Length > 0 && state?["selected"]?.GetValue<string>() != profile.CanDeviceId)
             {
-                try { await Call("/api/select", new JsonObject { ["device_id"] = profile.CanDeviceId, ["owner"] = owner }, cancellation); }
+                try { await Call(PiperApi.Requests.Select(profile.CanDeviceId, owner), cancellation); }
                 catch (InvalidOperationException error) { selectionError = error.Message; }
             }
             foreach (string id in new[] { "gripper", "depth" }) await RestartCamera(id);
@@ -350,8 +350,8 @@ public sealed partial class PipersPlugin
     {
         if (ActiveProfile.PikaDevice.Length == 0 || PikaMatchesProfile()) return;
         if (state?["motion"]?["active"]?.GetValue<bool>() == true) throw new InvalidOperationException("Finish arm movement before changing the Pika assignment.");
-        await Call("/api/pika/configure", new JsonObject { ["owner"] = owner, ["device"] = ActiveProfile.PikaDevice,
-            ["distribution"] = ActiveProfile.PikaDistribution }, cancellation, expectedToken);
+        await Call(PiperApi.Requests.PikaConfigure(owner, device: ActiveProfile.PikaDevice, pikaDevice: ActiveProfile.PikaDevice,
+            pikaDistribution: ActiveProfile.PikaDistribution, distribution: ActiveProfile.PikaDistribution), cancellation, expectedToken);
         long started = Stopwatch.GetTimestamp();
         while (!PikaMatchesProfile())
         {

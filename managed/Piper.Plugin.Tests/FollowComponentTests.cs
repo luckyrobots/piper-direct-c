@@ -25,7 +25,7 @@ internal static class FollowComponentTests
         var robot = new RobotLink("scene", "robot-a", joints, new JsonObject { ["id"] = "can-a", ["generation"] = 7L });
         return new(profile, robot, new FollowControlApproval("backend", "can-a", 7, "robot-a", "", "", null), null,
             new FollowLaneTelemetry(profile, 7, null, () => null, clock),
-            new FollowLaneController("backend", "owner", profile, 7, (_, _, _, _) => Task.FromResult(new JsonObject { ["ok"] = true })));
+            new FollowLaneController("backend", "owner", profile, 7, (_, _, _) => Task.FromResult(new JsonObject { ["ok"] = true })));
     }
 
     /// <summary>Plugin-B: every outer transition, including the ones that must not happen.</summary>

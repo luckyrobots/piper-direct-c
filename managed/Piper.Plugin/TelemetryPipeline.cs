@@ -327,8 +327,7 @@ public sealed partial class PipersPlugin
         if (reportedRequest != request || motion?["active"]?.GetValue<bool>() != true || motion["owner"]?.GetValue<string>() != owner)
         { CommandAuthority.EndLease(lease); return; }
         if (!ReferenceEquals(CommandAuthority.Current.Lease, lease)) return;
-        try { await Call("/api/heartbeat", new JsonObject { ["request_id"] = request, ["owner"] = owner,
-            ["device_id"] = scope.Device, ["generation"] = scope.Generation }, cancellation, scope.Backend); }
+        try { await Call(PiperApi.Requests.Heartbeat(owner, request, scope.Device, scope.Generation), cancellation, scope.Backend); }
         catch (Exception error) when (!cancellation.IsCancellationRequested)
         { CommandAuthority.EndLease(lease); message = "Arm heartbeat unavailable: " + error.Message; }
     }
@@ -359,8 +358,7 @@ public sealed partial class PipersPlugin
         {
             try
             {
-                await Call("/api/pika/heartbeat", new JsonObject { ["owner"] = owner, ["pika_device"] = key.Device,
-                    ["pika_distribution"] = key.Distribution }, cancellation, key.Backend);
+                await Call(PiperApi.Requests.PikaHeartbeat(owner, key.Device, key.Distribution), cancellation, key.Backend);
             }
             catch (Exception error)
             {

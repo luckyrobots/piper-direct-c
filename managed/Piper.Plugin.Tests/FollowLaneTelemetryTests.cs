@@ -30,15 +30,15 @@ internal static class FollowLaneTelemetryTests
             "Typed admission confused delayed source evidence or a cached sequence with post-ACK proof");
 
         var sent = new List<(string Route, JsonObject Body, bool Cancelable, string? Backend)>();
-        var controller = new FollowLaneController("backend", "owner", profile, 7, (route, body, cancellation, backend) =>
+        var controller = new FollowLaneController("backend", "owner", profile, 7, (request, cancellation, backend) =>
         {
-            sent.Add((route, (JsonObject)body.DeepClone(), cancellation.CanBeCanceled, backend));
+            sent.Add((request.Route.Path, (JsonObject)request.Body.DeepClone(), cancellation.CanBeCanceled, backend));
             return Task.FromResult(new JsonObject { ["ok"] = true });
         });
         clock.AdvanceMilliseconds(199);
         _ = reader.Read("backend").Hardware("owner", clock.GetTimestamp());
-        controller.Arm(FollowOp.Update, new() { ["request_id"] = 77L, ["sequence"] = 13L }).GetAwaiter().GetResult();
-        controller.Pika(FollowOp.Hold, null).GetAwaiter().GetResult();
+        controller.Send(controller.UpdateArm(77, 13, new double[6])).GetAwaiter().GetResult();
+        controller.Send(controller.HoldPika()).GetAwaiter().GetResult();
         using var cancellation = new CancellationTokenSource();
         controller.Heartbeat(77, cancellation.Token).GetAwaiter().GetResult();
         Check(sent.Count == 3 && sent.All(s => s.Backend == "backend" && s.Body["owner"]?.GetValue<string>() == "owner") &&
@@ -53,8 +53,8 @@ internal static class FollowLaneTelemetryTests
             !sent[0].Body.ContainsKey("supported") && !sent[0].Body.ContainsKey("reset_completed"),
             "Follow update carried safety declarations that only other actions read");
         sent.Clear();
-        foreach (var action in new[] { FollowOp.Match, FollowOp.Start, FollowOp.Hold })
-            controller.Arm(action, null).GetAwaiter().GetResult();
+        foreach (var command in new[] { controller.MatchArm(new double[6]), controller.StartArm(), controller.HoldArm(null) })
+            controller.Send(command).GetAwaiter().GetResult();
         Check(sent.All(s => s.Body["standalone"]?.GetValue<bool>() == true && !s.Body.ContainsKey("supported") &&
                 !s.Body.ContainsKey("reset_completed")) &&
             sent[0].Body["clear"]?.GetValue<bool>() == true && sent[1].Body["clear"]?.GetValue<bool>() == true &&

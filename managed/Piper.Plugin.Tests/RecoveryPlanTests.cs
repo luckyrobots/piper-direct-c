@@ -1,4 +1,5 @@
 using System.Text.Json.Nodes;
+using LuckyRobots.Piper;
 using LuckyRobots.Piper.Plugin;
 
 internal static class RecoveryPlanTests
@@ -58,9 +59,9 @@ internal static class RecoveryPlanTests
             "Residual teach flag in verified STOP/all-off blocked an ordinary supported reset");
         JsonObject Confirmations(string action, bool reset)
         {
-            var body = new JsonObject();
-            PipersPlugin.AddOperatorConfirmations(body, action, reset);
-            return body;
+            var confirmations = OperatorConfirmations.For(action, reset);
+            return PiperApi.Requests.Command("device", 1, action, "owner", standalone: confirmations.Standalone, clear: confirmations.Clear,
+                supported: confirmations.Supported, resetCompleted: confirmations.ResetCompleted).Body;
         }
         bool Flags(JsonObject body, bool clear, bool supported, bool completed) => body["standalone"]?.GetValue<bool>() == true &&
             body.ContainsKey("clear") == clear && body.ContainsKey("supported") == supported && body.ContainsKey("reset_completed") == completed;

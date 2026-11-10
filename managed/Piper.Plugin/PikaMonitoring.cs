@@ -54,7 +54,7 @@ public sealed partial class PipersPlugin
             _ = Device(expectedLink.DeviceId, expectedLink.Generation, expectedToken);
             // Monitoring never configures, enables, disables or positions hardware.
             // An explicit Enable action remains the only upgrade to power ownership.
-            await Call("/api/pika/connect", new JsonObject { ["owner"] = owner, ["take_over"] = false }, cancellation, expectedToken);
+            await Call(PiperApi.Requests.PikaConnect(owner, ActiveProfile.PikaDevice, ActiveProfile.PikaDistribution, takeOver: false), cancellation, expectedToken);
             _ = Device(expectedLink.DeviceId, expectedLink.Generation, expectedToken);
             if (!ReferenceEquals(link, expectedLink) || token != expectedToken || ActiveProfile.Id != expectedProfile || !PikaMatchesProfile())
             {
