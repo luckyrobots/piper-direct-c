@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using System.Diagnostics;
+using LuckyRobots.Piper.Processes;
 using System.Text.Json.Nodes;
 
 namespace LuckyRobots.Piper.Plugin;
@@ -133,28 +134,8 @@ public sealed partial class PipersPlugin
         { lens = lens.WithStatus("Camera runtime: " + error.Message + " Reinstall the Pipers package if a bundled library is missing."); }
     }
 
-    private async Task<(int ExitCode, string Output, string Error)> RunCameraTool(string[] arguments, TimeSpan timeout, CancellationToken cancellation)
-    {
-        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellation);
-        deadline.CancelAfter(timeout);
-        using var process = CameraRuntime.Start(engine.Start.PackageDirectory, arguments);
-        using var stop = deadline.Token.Register(() => CameraRuntime.Kill(process));
-        var output = process.StandardOutput.ReadToEndAsync(deadline.Token);
-        var errors = process.StandardError.ReadToEndAsync(deadline.Token);
-        try
-        {
-            await process.WaitForExitAsync(deadline.Token);
-            string error = await errors;
-            return (process.ExitCode, await output, error.Length > 1000 ? error[^1000..] : error);
-        }
-        catch (OperationCanceledException) when (!cancellation.IsCancellationRequested)
-        { throw new TimeoutException("Camera operation timed out; its worker was stopped."); }
-        finally
-        {
-            await CameraRuntime.Retire(process);
-            try { await Task.WhenAll(output, errors); } catch (OperationCanceledException) { }
-        }
-    }
+    private Task<BoundedProcess.Result> RunCameraTool(string[] arguments, TimeSpan timeout, CancellationToken cancellation) =>
+        CameraRuntime.RunAsync(engine.Start.PackageDirectory, arguments, timeout, cancellation);
 
     private async Task SolveCameraCalibration(string session, CancellationToken cancellation)
     {

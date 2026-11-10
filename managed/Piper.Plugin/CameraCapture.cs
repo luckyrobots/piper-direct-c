@@ -3,6 +3,7 @@ using System.Text;
 using System.Threading.Channels;
 using System.Text.Json.Nodes;
 using LuckyEngine.PluginSdk;
+using LuckyRobots.Piper.Processes;
 
 namespace LuckyRobots.Piper.Plugin;
 
@@ -17,36 +18,51 @@ public static class D405View
         : throw new ArgumentOutOfRangeException(nameof(index), "Choose Color or Depth.");
 }
 
-/// <summary>Launches the bundled camera worker, the only process that opens cameras.</summary>
+/// <summary>Launches the bundled camera worker, the only process that opens
+/// cameras: as a bounded tool run, or as a long-lived capture worker whose
+/// lifecycle <see cref="CameraCapture"/> owns. Both go through
+/// <see cref="BoundedProcess"/>, with stdin a closed pipe of their own so the
+/// worker never shares the engine's live plugin-protocol pipe.</summary>
 internal static class CameraRuntime
 {
+    private const string StartFailure = "Could not start the bundled camera runtime.";
+
+    /// <summary>Runs one camera tool to completion under a deadline. Only the
+    /// last 1000 characters of its error stream are kept.</summary>
+    public static async Task<BoundedProcess.Result> RunAsync(string packageDirectory, IEnumerable<string> arguments, TimeSpan timeout, CancellationToken cancellation)
+    {
+        var (folder, executable) = Locate(packageDirectory);
+        var result = await BoundedProcess.RunAsync(executable, arguments, StartFailure,
+            "Camera operation timed out; its worker was stopped.", cancellation, timeout, folder);
+        return result with { Error = result.Error.Length > 1000 ? result.Error[^1000..] : result.Error };
+    }
+
+    /// <summary>Starts a capture worker. The caller reads both output streams and retires it.</summary>
     public static Process Start(string packageDirectory, IEnumerable<string> arguments)
     {
-        string folder = Path.Combine(packageDirectory, "camera-runtime");
-        string executable = Path.Combine(folder, OperatingSystem.IsWindows() ? "LuckyRobots.Piper.Camera.exe" : "LuckyRobots.Piper.Camera");
-        if (!File.Exists(executable)) throw new FileNotFoundException("The bundled camera runtime is missing. Reinstall the Pipers package.", executable);
-        if (OperatingSystem.IsLinux()) File.SetUnixFileMode(executable, File.GetUnixFileMode(executable) | UnixFileMode.UserExecute);
-        // Separate stdin avoids sharing the engine's live plugin-protocol pipe.
-        var info = new ProcessStartInfo(executable) { WorkingDirectory = folder, UseShellExecute = false, CreateNoWindow = true,
-            RedirectStandardInput = true, RedirectStandardOutput = true, RedirectStandardError = true };
-        foreach (string argument in arguments) info.ArgumentList.Add(argument);
-        var process = Process.Start(info) ?? throw new IOException("Could not start the bundled camera runtime.");
+        var (folder, executable) = Locate(packageDirectory);
+        var process = BoundedProcess.Start(BoundedProcess.Redirected(executable, arguments, folder), StartFailure);
         process.StandardInput.Close();
         return process;
     }
 
     /// <summary>Stops the worker and its children. Safe to call from any path, including after it exited.</summary>
-    public static void Kill(Process process)
-    {
-        try { if (!process.HasExited) process.Kill(true); }
-        catch (InvalidOperationException) { }
-    }
+    public static void Kill(Process process) => BoundedProcess.KillTree(process);
 
     /// <summary>Kills the worker and waits for it, so no camera handle outlives the caller.</summary>
     public static async Task Retire(Process process)
     {
         Kill(process);
         await process.WaitForExitAsync(CancellationToken.None);
+    }
+
+    private static (string Folder, string Executable) Locate(string packageDirectory)
+    {
+        string folder = Path.Combine(packageDirectory, "camera-runtime");
+        string executable = Path.Combine(folder, OperatingSystem.IsWindows() ? "LuckyRobots.Piper.Camera.exe" : "LuckyRobots.Piper.Camera");
+        if (!File.Exists(executable)) throw new FileNotFoundException("The bundled camera runtime is missing. Reinstall the Pipers package.", executable);
+        if (OperatingSystem.IsLinux()) File.SetUnixFileMode(executable, File.GetUnixFileMode(executable) | UnixFileMode.UserExecute);
+        return (folder, executable);
     }
 }
 

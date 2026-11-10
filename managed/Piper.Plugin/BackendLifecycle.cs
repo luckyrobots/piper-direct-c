@@ -4,6 +4,7 @@ using System.Text;
 using System.Text.Json.Nodes;
 using LuckyEngine.PluginSdk;
 using LuckyRobots.Piper.Pika;
+using LuckyRobots.Piper.Processes;
 
 namespace LuckyRobots.Piper.Plugin;
 
@@ -127,14 +128,12 @@ public sealed partial class PipersPlugin
             string executable = Path.Combine(directory, OperatingSystem.IsWindows() ? "Piper.Host.exe" : "Piper.Host");
             if (!File.Exists(executable)) throw new FileNotFoundException("The bundled controller is missing. Reinstall Pipers.", executable);
             if (OperatingSystem.IsLinux()) File.SetUnixFileMode(executable, File.GetUnixFileMode(executable) | UnixFileMode.UserExecute);
-            var start = new ProcessStartInfo(executable) { WorkingDirectory = directory, UseShellExecute = false, CreateNoWindow = true,
-                RedirectStandardInput = true, RedirectStandardOutput = true, RedirectStandardError = true };
-            foreach (string argument in new[] { "--port", ControllerEndpoint.HttpPort.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            var start = BoundedProcess.Redirected(executable, ["--port", ControllerEndpoint.HttpPort.ToString(System.Globalization.CultureInfo.InvariantCulture),
                 "--grpc-port", ControllerEndpoint.GrpcPort.ToString(System.Globalization.CultureInfo.InvariantCulture), "--web-root", Path.Combine(engine.Start.PackageDirectory, "web"),
-                "--state-dir", Path.Combine(global, "controller"), "--session-owner", owner, "--pika-device", BackendOptions.PikaDevice }) start.ArgumentList.Add(argument);
+                "--state-dir", Path.Combine(global, "controller"), "--session-owner", owner, "--pika-device", BackendOptions.PikaDevice], directory);
             if (OperatingSystem.IsWindows()) { start.ArgumentList.Add("--pika-wsl"); start.ArgumentList.Add(BackendOptions.WslDistribution); }
             Interlocked.Exchange(ref ownedBackend, null)?.Process.Dispose();
-            var process = Process.Start(start) ?? throw new IOException("Could not start the bundled controller.");
+            var process = BoundedProcess.Start(start, "Could not start the bundled controller.");
             Volatile.Write(ref ownedBackend, new(process, null));
             process.StandardInput.Close();
             _ = DrainBackendOutput(process.StandardOutput, Path.Combine(global, "server-output.log"));
@@ -187,29 +186,15 @@ public sealed partial class PipersPlugin
         if (!OperatingSystem.IsWindows()) { setupStatus = "The Pika transport is supported on Windows + WSL and Linux."; return; }
         string usbipd = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "usbipd-win", "usbipd.exe");
         if (!File.Exists(usbipd)) { setupStatus = "Install usbipd-win and WSL 2 with a Linux distribution, then follow the Pika-only USB sharing steps in setup instructions. No driver settings were changed."; return; }
-        var start = new ProcessStartInfo("wsl.exe") { UseShellExecute = false, CreateNoWindow = true, RedirectStandardInput = true, RedirectStandardOutput = true, RedirectStandardError = true };
-        foreach (string argument in new[] { "--distribution", BackendOptions.WslDistribution, "--exec", "test", "-w", BackendOptions.PikaDevice }) start.ArgumentList.Add(argument);
-        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellation);
-        deadline.CancelAfter(TimeSpan.FromSeconds(10));
-        using var check = Process.Start(start) ?? throw new IOException("Could not start WSL. Install WSL 2 and the selected Linux distribution.");
-        check.StandardInput.Close();
-        var output = check.StandardOutput.ReadToEndAsync(deadline.Token);
-        var error = check.StandardError.ReadToEndAsync(deadline.Token);
         try
         {
-            await check.WaitForExitAsync(deadline.Token);
-            await output; await error;
+            var check = await BoundedProcess.RunAsync("wsl.exe", ["--distribution", BackendOptions.WslDistribution, "--exec", "test", "-w", BackendOptions.PikaDevice],
+                "Could not start WSL. Install WSL 2 and the selected Linux distribution.", "WSL setup check timed out.", cancellation, TimeSpan.FromSeconds(10));
             setupStatus = check.ExitCode == 0 ? "WSL can access the Pika serial device. The Linux agent is bundled; no /opt installation is required. No motor commands were sent."
                 : "WSL cannot write the selected Pika serial device. Check distro name, Pika-only usbipd attachment and Linux serial permissions. See setup instructions; no driver settings were changed.";
         }
-        catch (OperationCanceledException) when (!cancellation.IsCancellationRequested)
+        catch (TimeoutException)
         { setupStatus = "WSL setup check timed out. Start the selected Linux distribution and check its Pika USB attachment before retrying."; }
-        finally
-        {
-            if (!check.HasExited) check.Kill(true);
-            await check.WaitForExitAsync(CancellationToken.None);
-            try { await Task.WhenAll(output, error); } catch (OperationCanceledException) { }
-        }
     }
 
     private async Task StopOwnedBackend()

@@ -7,5 +7,6 @@
     <PackageReference Include="Grpc.Net.Client" Version="2.76.0" />
     <ProjectReference Include="../Piper.Contracts/Piper.Contracts.csproj" />
     <ProjectReference Include="../Piper.Pika/Piper.Pika.csproj" />
+    <ProjectReference Include="../Piper.Processes/Piper.Processes.csproj" />
   </ItemGroup>
 </Project>
