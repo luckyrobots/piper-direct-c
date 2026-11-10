@@ -5,7 +5,7 @@ namespace LuckyRobots.Piper.Plugin;
 
 public sealed partial class PipersPlugin
 {
-    private readonly SemaphoreSlim workspacePublicationGate = new(1, 1);
+    internal readonly SemaphoreSlim workspacePublicationGate = new(1, 1);
     private long nextWorkspaceViewEpoch;
     private int workspacePublicationUncertain;
     private sealed record SimulationCameraChoices(string SceneId, (string Id, string Name)[] Cameras);

@@ -175,7 +175,6 @@ internal static class RecoveryHomeTests
                 "Failure to persist the initial recovery stage still admitted a reset");
         }
         Check(WorkspaceCommandPolicy.RequiresControls("recovery.home"), "Recovery home bypassed Controls/calibration command policy");
-        await RecoveryHomeUiTests.Run();
     }
 
     private sealed class Fixture

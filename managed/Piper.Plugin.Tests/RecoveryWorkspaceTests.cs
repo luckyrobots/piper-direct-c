@@ -166,6 +166,15 @@ internal static class RecoveryWorkspaceTests
             try { await plugin.Command("verify-reset", null, CancellationToken.None, CommandPurpose.Recovery); }
             catch (InvalidOperationException) { refused = true; }
             Check(refused && calls.Actions.Count == 1, "A recovery-purpose verify-reset was sent without the operator's reset confirmation");
+            // The answer attests one pending reset. If the controller stops reporting
+            // it before the operator answers, the attestation is not sent.
+            calls.Actions.Clear(); calls.Bodies.Clear();
+            Fresh(); await Click("recovery.run");
+            Check(calls.Actions.Count == 0 && plugin.resetCompletionPrompt is not null, "The reset question was not raised again for a still-pending reset");
+            device["reset_pending"] = false;
+            Fresh(); await Click("recovery.reset.confirm");
+            Check(calls.Actions.Count == 0 && plugin.resetCompletionPrompt is null,
+                "A reset confirmation attested a latch that the controller no longer reports as a pending reset");
             calls.Actions.Clear(); calls.Bodies.Clear(); device["reset_pending"] = false; device["recovery_required"] = false;
             device["blocker"] = "Another controller is sending commands on this CAN bus.";
             plugin.approved = true;

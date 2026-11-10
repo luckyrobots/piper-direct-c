@@ -355,7 +355,6 @@ public sealed partial class PipersPlugin
     {
         // A recording cannot start while a report is unsaved or saving, and retry
         // queues only when idle, so a second save would silently drop a report.
-        Debug.Assert(!pikaTeaching.Saving);
         if (pikaTeaching.Saving) throw new InvalidOperationException("A Pika teaching save is already running; the report was not replaced.");
         string path = Path.Combine(engine.Start.SettingsDirectory, "pika-teaching", report.Identity.ProfileId,
             report.StartedUtc.ToString("yyyyMMdd-HHmmss") + "-" + report.SessionId + ".json");

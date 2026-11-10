@@ -30,24 +30,23 @@ public sealed partial class PipersPlugin
     //   WritePending -> Applied     verified apply, or inspect finds the proposal
     //   WritePending -> Fitted      verified rollback, a failed pre-send check, or inspect finds the original
     //   any -> None                 new/archive (WritePending and Applied ask first) or a profile change
-    // Illegal and asserted: placement or samples without an identity, or an
-    // applied placement without the fit that proposed it.
+    // Illegal (see CalibrationSessionFault): placement or samples without an
+    // identity, or an applied placement without the fit that proposed it. Such a
+    // session is never saved; New discards it and says so.
     private enum CalibrationPhase { None, Capturing, Fitted, WritePending, Applied }
 
-    private CalibrationPhase CalibrationSessionPhase
-    {
-        get
-        {
-            Debug.Assert(calibrationIdentity is not null || calibrationOriginal is null && calibrationApplied is null && calibrationFit is null &&
-                !calibrationPlacementUnverified && calibrationSamples.Count == 0, "Calibration session data exists without its identity.");
-            Debug.Assert(calibrationApplied is null || calibrationFit is not null, "An applied placement lost the fit that proposed it.");
-            return calibrationIdentity is null ? CalibrationPhase.None
-                : calibrationPlacementUnverified ? CalibrationPhase.WritePending
-                : calibrationApplied is not null ? CalibrationPhase.Applied
-                : calibrationFit is not null ? CalibrationPhase.Fitted
-                : CalibrationPhase.Capturing;
-        }
-    }
+    private CalibrationPhase CalibrationSessionPhase =>
+        calibrationIdentity is null ? CalibrationPhase.None
+        : calibrationPlacementUnverified ? CalibrationPhase.WritePending
+        : calibrationApplied is not null ? CalibrationPhase.Applied
+        : calibrationFit is not null ? CalibrationPhase.Fitted
+        : CalibrationPhase.Capturing;
+
+    internal string? CalibrationSessionFault =>
+        calibrationIdentity is null && (calibrationOriginal is not null || calibrationApplied is not null || calibrationFit is not null ||
+            calibrationPlacementUnverified || calibrationSamples.Count > 0) ? "Calibration session data exists without its identity."
+        : calibrationApplied is not null && calibrationFit is null ? "An applied placement lost the fit that proposed it."
+        : null;
 
     // The one exit to CalibrationPhase.None.
     private void ClearCalibrationSession()
@@ -162,6 +161,12 @@ public sealed partial class PipersPlugin
         if (action == "archive.cancel") { calibrationArchiveConfirmation = false; await Render(cancellation); return; }
         if (action is "new" or "archive")
         {
+            if (CalibrationSessionFault is { } fault)
+            {
+                ClearCalibrationSession();
+                await Render(cancellation);
+                throw new InvalidOperationException(fault + " The inconsistent session was discarded without saving; earlier saved reports are unchanged.");
+            }
             if (action == "new" && CalibrationSessionPhase is CalibrationPhase.WritePending or CalibrationPhase.Applied)
             { calibrationArchiveConfirmation = true; await Render(cancellation); return; }
             if (action == "archive" && !calibrationArchiveConfirmation) throw new InvalidOperationException("Review the saved-placement archive warning first.");
@@ -256,9 +261,11 @@ public sealed partial class PipersPlugin
         }
     }
 
-    private async Task SaveCalibration(CancellationToken cancellation)
+    internal async Task SaveCalibration(CancellationToken cancellation)
     {
-        _ = CalibrationSessionPhase; // Asserts the session invariants before they are persisted.
+        // An inconsistent session is never persisted as a calibration report.
+        if (CalibrationSessionFault is { } fault)
+            throw new InvalidOperationException(fault + " Nothing was saved. Use New calibration to discard this session.");
         Directory.CreateDirectory(RobotCalibrationDirectory);
         await File.WriteAllTextAsync(Path.Combine(RobotCalibrationDirectory, "settings.json"), JsonSerializer.Serialize(new CalibrationPreferences(calibrationDesk, calibrationMeasurement), PluginProtocol.Json), cancellation);
         if (calibrationIdentity is null || calibrationOriginal is null || calibrationPath.Length == 0) return;

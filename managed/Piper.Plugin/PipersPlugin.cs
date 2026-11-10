@@ -121,10 +121,6 @@ public sealed partial class PipersPlugin : ILuckyPlugin
         return Device(expected.Device, expected.Generation, expected.Backend, sourceReceipt);
     }
 
-    internal Task Watch(CancellationToken cancellation) => Task.WhenAll(
-        ReadTelemetry(cancellation), ProcessTelemetry(cancellation),
-        ArmHeartbeats(cancellation), PikaHeartbeats(cancellation), MonitorAssignedPikas(cancellation));
-
     private async Task<JsonObject> Call(string route, JsonObject body, CancellationToken cancellation, string? expectedToken = null)
     {
         if (route.StartsWith("/api/pika/", StringComparison.Ordinal) && route != "/api/pika/devices")
@@ -521,8 +517,10 @@ public sealed partial class PipersPlugin : ILuckyPlugin
         if (includePika) { await ConfigureProfilePika(expectedToken, cancellation); CheckEnableScope(); }
         if (!device["joints"]!.AsArray().All(j => j?["enabled"]?.GetValue<bool>() == true))
         {
-            await Command("enable", null, cancellation, expected: scope, expectedPermissionEpoch: enableEpoch);
-            long request = CommandAuthority.Current.Lease?.Request ?? 0;
+            // The id comes from this command's own acknowledgement. The tracked lease is
+            // shared state: telemetry may already have ended it for a fast enable.
+            var accepted = await Command("enable", null, cancellation, expected: scope, expectedPermissionEpoch: enableEpoch);
+            long request = accepted["request_id"]?.GetValue<long>() ?? 0;
             long started = Stopwatch.GetTimestamp();
             while (true)
             {
@@ -733,6 +731,7 @@ public sealed partial class PipersPlugin : ILuckyPlugin
         // verified. Closing an external backend must not strand its old owner.
         await Quietly(ReleaseOwnedPikas, TimeSpan.FromSeconds(3), "Pika release");
         await shutdown.CancelAsync();
+        await Quietly(StopFollowUp, "STOP follow-up");
         await Quietly(wizardHighlightMaintenance, "Calibration marker maintenance");
         await Quietly(HeightMaintenanceIdle, "Height guide maintenance");
         await Quietly(lensWorker, "Lens calibration");

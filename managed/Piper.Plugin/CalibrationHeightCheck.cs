@@ -21,16 +21,21 @@ public sealed partial class PipersPlugin
     internal HeightCheckPhase heightPhase;
     // Kept under its old field name so the B3 workspace-page lines stay untouched.
     private bool heightCheckActive => heightPhase != HeightCheckPhase.Inactive;
-    private void SetHeightPhase(HeightCheckPhase next)
+    internal void SetHeightPhase(HeightCheckPhase next)
     {
-        Debug.Assert(next switch
+        bool consistent = next switch
         {
             HeightCheckPhase.Live => heightFrozen is null,
             HeightCheckPhase.Pinned => heightFrozen is not null && !FrozenPoseInChecks,
             HeightCheckPhase.Saved => heightFrozen is not null && FrozenPoseInChecks,
             _ => true
-        }, "Jaw-height phase disagrees with its pinned pose.");
-        heightPhase = next;
+        };
+        if (consistent) { heightPhase = next; return; }
+        // A phase that disagrees with its pinned pose would show a measurement for
+        // the wrong pose. Close the check instead and tell the operator.
+        heightPhase = HeightCheckPhase.Inactive;
+        heightActionError = "The jaw-height check lost track of its pinned pose and was closed. Nothing was saved; start Check jaw height again.";
+        Trace.TraceError("Jaw-height phase {0} disagrees with its pinned pose.", next);
     }
     private bool heightGuidePublished, heightStorageBlocked;
     private string heightProfile = "", heightMeasuredText = "", heightStatus = "Move to a few different heights and compare them with a tape measure.";

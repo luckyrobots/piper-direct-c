@@ -70,7 +70,13 @@ internal readonly record struct WorkspaceNavigation(WorkspacePage Page, Settings
 
     public WorkspaceNavigation Navigate(string action)
     {
-        Debug.Assert(CameraReturn != WorkspacePage.Camera, "A camera detail page cannot return to itself.");
+        if (CameraReturn == WorkspacePage.Camera)
+        {
+            // A camera detail page cannot return to itself: Back would trap the
+            // operator there. Repair the return page to Controls and carry on.
+            Trace.TraceError("Workspace navigation held a camera page as its own return page; returning to Controls instead.");
+            return (this with { CameraReturn = WorkspacePage.Controls }).Navigate(action);
+        }
         if (action.StartsWith("settings.", StringComparison.Ordinal))
         {
             string[] parts = action[9..].Split('.');

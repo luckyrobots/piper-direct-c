@@ -92,6 +92,9 @@ internal static class RecoveryHomeUiTests
                 // B1: recovery to zero stops at the operator's reset question.
                 string question = Walk(rendered!).Single(node => node["id"]!.GetValue<string>().EndsWith(".recovery.reset", StringComparison.Ordinal))["id"]!.GetValue<string>();
                 string confirm = Walk(rendered!).Single(node => node["id"]!.GetValue<string>().EndsWith(".recovery.reset.confirm", StringComparison.Ordinal))["id"]!.GetValue<string>();
+                // The worker raises the question, then publishes it; wait for the publication.
+                started = Stopwatch.GetTimestamp();
+                while (patches?[question]?["visible"]?.GetValue<bool>() != true && Stopwatch.GetElapsedTime(started).TotalSeconds < 3) await Task.Delay(5);
                 Check(calls.Actions.Count == 0 && plugin.resetCompletionPrompt is not null && plugin.recoveryOperation is null &&
                     patches?[question]?["visible"]?.GetValue<bool>() == true,
                     "Recovery to zero verified a pending reset instead of stopping at the operator's confirmation: " + plugin.message);

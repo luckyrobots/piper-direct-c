@@ -233,7 +233,6 @@ internal static class TelemetryPipelineTests
             }
             Check(shutdown.IsCancellationRequested, "Disposal did not finish shutdown after recovery drained");
         }
-        await PikaShutdownTests.Run();
     }
 
     private sealed class FakeCalls(ChannelReader<StateFrame> frames) : CallInvoker

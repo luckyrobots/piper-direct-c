@@ -49,7 +49,8 @@ internal sealed class FollowLaneObservation
         this.timestampFrequency = timestampFrequency;
         // Receipts always carry a backend token, and preparation admits only
         // assigned CAN devices on a positive generation.
-        Debug.Assert(receipt.BackendToken.Length > 0 && profile.CanDeviceId.Length > 0 && generation > 0);
+        if (receipt.BackendToken.Length == 0 || profile.CanDeviceId.Length == 0 || generation <= 0)
+            throw new InvalidOperationException("Follower telemetry needs a controller session, an assigned CAN adapter and a live arm connection. Following was not started.");
         this.profile = profile;
         this.generation = generation;
         var (device, motion, pika) = GroupSimulationLaneTelemetry.Resolve(receipt, profile, generation);

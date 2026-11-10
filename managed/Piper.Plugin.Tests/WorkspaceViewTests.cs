@@ -108,7 +108,6 @@ internal static class WorkspaceViewTests
 
     public static async Task RunRendered()
     {
-        await WorkspacePublicationTests.Run();
         // The real renderer/event handler is exercised without StartAsync: no
         // background workers, sockets, camera captures or device commands run.
         var plugin = new PipersPlugin();
