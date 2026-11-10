@@ -13,8 +13,8 @@ internal static partial class SimulationFollowingTests
     /// <summary>Grouped-follow controls: sidebar, follower selection, scene bindings and the group pose.</summary>
     private sealed partial class Fixture
     {
-        public PipersPlugin.GroupSession? Session => plugin.groupSimulation;
-        public bool GroupActive => plugin.groupSimulation is not null;
+        public GroupSession? Session => plugin.follow.Session;
+        public bool GroupActive => plugin.follow.Active;
         public GroupFollowPhase? GroupPhase => Session?.Phase;
         public async Task GroupEvent(string action)
         { await plugin.GroupFollowEvent(action, CancellationToken.None); }

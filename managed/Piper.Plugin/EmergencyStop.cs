@@ -21,7 +21,7 @@ public sealed partial class PipersPlugin
     // for editor requests. The backend attempts the two channels independently.
     private async Task StopImmediately(RobotProfile profile, string expectedToken, bool groupActive)
     {
-        CancelGroupSimulationFollowingInput("Operator STOP · follower group discarded");
+        follow.CancelInput("Operator STOP · follower group discarded");
         string deviceId = profile.CanDeviceId;
         bool ownPika = groupActive;
         if (!ownPika && state is { } snapshot)

@@ -19,7 +19,7 @@ public sealed partial class PipersPlugin
         // The actor retires queued targets by epoch. Revoke under the original
         // admission epoch so STOP cannot turn this click into a fresh grant.
         long epoch = CommandAuthority.Revoke(forgetApproval: scope.ProfileId,
-            revokeLocalApproval: () => { approved = linkCommandsEnabled = false; StopViewportDrag(); },
+            revokeLocalApproval: () => { approved = linkCommandsEnabled = false; follow.Viewport.Stop(); },
             expectedEpoch: expectedEpoch);
         var lifetime = CancellationTokenSource.CreateLinkedTokenSource(cancellation, shutdown.Token);
         if (kind == RecoveryKind.ReturnToZero) lifetime.CancelAfter(TimeSpan.FromSeconds(90));
@@ -37,7 +37,7 @@ public sealed partial class PipersPlugin
             operation.Dispose();
             throw new InvalidOperationException("Finish the current recovery or stop following before starting recovery.");
         }
-        StopViewportDrag();
+        follow.Viewport.Stop();
         return operation;
     }
 

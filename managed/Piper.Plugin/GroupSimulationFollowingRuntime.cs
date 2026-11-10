@@ -39,10 +39,10 @@ public sealed partial class PipersPlugin
             _ = GroupHardware(group);
             await prepared.ArmAsync(ct);
             group.Advance(GroupFollowPhase.Armed);
-            groupFollowStatus = $"Armed · {group.Lanes.Length} robot(s) · press Play";
-            groupFollowDetail = "The editor is still in Edit mode. Your next Play pauses at its first frame, matches every selected robot and gripper, then starts the shared episode.";
+            follow.Report($"Armed · {group.Lanes.Length} robot(s) · press Play",
+                "The editor is still in Edit mode. Your next Play pauses at its first frame, matches every selected robot and gripper, then starts the shared episode.");
             group.Armed.TrySetResult();
-            group.Heartbeats = GroupHeartbeats(group, ct);
+            group.AttachHeartbeats(GroupHeartbeats(group, ct));
             while (true)
             {
                 _ = GroupHardware(group);
@@ -52,7 +52,7 @@ public sealed partial class PipersPlugin
             if (GroupStartConflict() is { } matchingConflict) throw new InvalidOperationException(matchingConflict);
             group.Advance(GroupFollowPhase.Matching);
             var raw = await prepared.PauseForMatchingAsync(ct);
-            groupFollowStatus = "Matching all selected robots to the first frame";
+            follow.Report("Matching all selected robots to the first frame");
             await MatchGroupStart(group, raw, ct);
             raw = await prepared.ReadMatchingFrameAsync(ct);
             // Each lane's validated paused frame and hardware; activation must present exactly these.
@@ -65,7 +65,7 @@ public sealed partial class PipersPlugin
                 SimulationFollowPolicy.ValidatePausedStart(sample, lane.First!);
                 SimulationFollowPolicy.ValidateStart(sample, sample.Identity, startHardware[i], group.Clock.GetUtcNow().ToUnixTimeMilliseconds(), 0);
                 starts[i] = (sample, startHardware[i]);
-                lane.Execution = new(sample, startHardware[i], lane.Profile.Speed / 100);
+                lane.BeginExecution(new(sample, startHardware[i], lane.Profile.Speed / 100));
             }
             var initial = await prepared.OpenFramesAsync(raw, ct);
             AppendGroupFrames(group, initial, initial: true);
@@ -79,7 +79,8 @@ public sealed partial class PipersPlugin
                 SimulationFollowPolicy.ValidateActivation(starts[i].Sample, starts[i].Hardware,
                     SimulationFollowSample.Read(activation, group.Lanes[i].Robot.JointPrefix), activationHardware[i],
                     group.Clock.GetUtcNow().ToUnixTimeMilliseconds(), 0);
-            group.Observation = new(SimulationFollowSample.Read(activation, group.Lanes[0].Robot.JointPrefix));
+            var observation = new OrderedSimulationObservation(SimulationFollowSample.Read(activation, group.Lanes[0].Robot.JointPrefix));
+            group.BeginObservation(observation);
             group.Advance(GroupFollowPhase.DrainingPrimer);
             if (group.Primer is { } primer) await primer;
             ct.ThrowIfCancellationRequested();
@@ -87,7 +88,7 @@ public sealed partial class PipersPlugin
             group.RecordValidatedSource(activationObserved);
             group.RequireOrderedSourceLease();
             group.Advance(GroupFollowPhase.Following);
-            group.Publisher = PublishGroupTargets(group, ct);
+            group.AttachPublisher(PublishGroupTargets(group, ct));
             while (!ct.IsCancellationRequested)
             {
                 ulong after; int space;
@@ -107,12 +108,12 @@ public sealed partial class PipersPlugin
                     group.RequireOrderedSourceLease();
                     if (!GroupScopeCurrent(group) || group.Publisher is not { IsCompleted: false }) throw;
                     // A lost reply consumes no frames and grants no new lease.
-                    groupFollowStatus = "Simulation view delayed · retrying retained group frames";
+                    follow.Report("Simulation view delayed · retrying retained group frames");
                     continue;
                 }
                 var sample = SimulationFollowSample.Read(raw, group.Lanes[0].Robot.JointPrefix);
                 bool paused = raw["sourcePausedForFollower"]?.GetValue<bool>() == true;
-                group.Observation.Validate(sample, group.Clock.GetUtcNow().ToUnixTimeMilliseconds(), group.Clock.GetElapsedTime(began).TotalMilliseconds,
+                observation.Validate(sample, group.Clock.GetUtcNow().ToUnixTimeMilliseconds(), group.Clock.GetElapsedTime(began).TotalMilliseconds,
                     paused, raw["episodeComplete"]?.GetValue<bool>() == true, raw["episodeId"]?.GetValue<string>() ?? "", group.AcknowledgedEpisode.Length > 0);
                 AppendGroupFrames(group, raw);
                 if (await CompleteGroupEpisode(group, prepared, ct)) break;
@@ -140,8 +141,8 @@ public sealed partial class PipersPlugin
                 await prepared.RetireAsync();
                 string heading = group.FirstFailure.Length > 0 ? "Following stopped\n" + group.FirstFailure :
                     group.EndReason.Length > 0 ? group.EndReason : "Following stopped";
-                groupFollowStatus = heading;
-                SetGroupOutcome(new(GroupFollowStage.Summary, new GroupRetirement(heading, lanes).Summary));
+                follow.Report(heading);
+                follow.Summarize(new GroupRetirement(heading, lanes).Summary);
                 foreach (var lane in group.Lanes)
                     if (lane.Diagnostics is { } diagnostics)
                         try { await diagnostics.Completion.WaitAsync(TimeSpan.FromSeconds(1)); }
@@ -151,8 +152,7 @@ public sealed partial class PipersPlugin
             {
                 group.Armed.TrySetCanceled(group.Stop.Token);
                 group.Advance(GroupFollowPhase.Retired);
-                Interlocked.Increment(ref groupControlEpoch);
-                Interlocked.CompareExchange(ref groupSimulation, null, group);
+                follow.Retire(group);
                 group.Retired.TrySetResult();
             }
         }
@@ -170,7 +170,7 @@ public sealed partial class PipersPlugin
             var lane = group.Lanes[i];
             var sample = SimulationFollowSample.Read(raw, lane.Robot.JointPrefix);
             SimulationFollowPolicy.ValidateCandidate(sample, identity, candidates[i], group.Clock.GetUtcNow().ToUnixTimeMilliseconds(), 0);
-            lane.First = lane.LastSample = sample;
+            lane.RecordFirst(sample);
             if (!SimulationFollowPolicy.MatchesStart(sample.CommandDegrees, sample.MeasuredDegrees, sample.CommandOpeningMm, sample.MeasuredOpeningMm))
                 throw new InvalidOperationException(lane.Profile.Name + ": simulated first-frame controls and measured pose disagree.");
         }
@@ -218,7 +218,7 @@ public sealed partial class PipersPlugin
     {
         if (GroupStartConflict() is { } conflict) throw new InvalidOperationException(conflict);
         group.Advance(GroupFollowPhase.Admitting);
-        groupFollowStatus = "Starting selected followers · simulation remains paused";
+        follow.Report("Starting selected followers · simulation remains paused");
         foreach (var lane in group.Lanes)
         {
             var admitted = await GroupCommand(group, lane, FollowChannel.Arm, FollowOp.Start, SimulationTrajectoryTransport.StartFields());
@@ -227,7 +227,7 @@ public sealed partial class PipersPlugin
             // Record an acknowledged request before validating it, so retirement can hold it.
             if (request > 0) lane.FollowAdmitted(request, group.Clock.GetTimestamp(), telemetry.Latest?.Sequence ?? 0);
             if (request <= 0 || admitted["trajectory_follow"]?.GetValue<bool>() != true) throw new InvalidOperationException(lane.Profile.Name + ": native following was not acknowledged.");
-            group.Primer ??= PrimeGroup(group, ct);
+            if (group.Primer is null) group.AttachPrimer(PrimeGroup(group, ct));
             var pika = await GroupCommand(group, lane, FollowChannel.Pika, FollowOp.Start);
             lane.PikaFollowing(pika["follow_session"]?.GetValue<string>() ?? throw new InvalidOperationException("Pika did not acknowledge its following session."));
         }
@@ -243,7 +243,7 @@ public sealed partial class PipersPlugin
                 _ = LaneHardware(group, lane, observations[i]);
                 if (lane.Arm is not LaneArm.Following arm)
                     throw new InvalidOperationException(lane.Profile.Name + ": native following admission has no valid request acknowledgement.");
-                all &= observations[i].AdmissionReady(owner, arm.FollowRequest, Interlocked.Read(ref lane.Sequence),
+                all &= observations[i].AdmissionReady(owner, arm.FollowRequest, lane.Sequence,
                     arm.AdmissionTicks, arm.AdmissionSequence, group.Clock.GetTimestamp());
             }
             if (all) return;
@@ -279,7 +279,7 @@ public sealed partial class PipersPlugin
             foreach (var lane in group.Lanes)
             {
                 var sample = SimulationFollowSample.Read(response, lane.Robot.JointPrefix);
-                lane.LastSample = sample;
+                lane.RecordSample(sample);
                 if (!sample.BindsTo(lane.First!)) throw new InvalidOperationException("A selected arm's source model mapping changed.");
                 var batch = frames[lane.Profile.Id];
                 if (initial && (batch.Count != 1 || batch[0].Cursor != 1 || batch[0].PhysicsTimeSeconds != lane.First!.SimTimeSeconds ||
@@ -312,18 +312,17 @@ public sealed partial class PipersPlugin
                     for (int i = 0; i < group.Lanes.Length; i++)
                     {
                         var lane = group.Lanes[i]; var observation = observations[i];
-                        lane.LastHardware = hardware[i];
-                        lane.LastStationary = observation.ArmStationary(group.Clock.GetTimestamp());
-                        lane.LastGripperSpeed = observation.PikaSpeed; lane.LastGripperFeedback = observation.PikaFeedbackTime;
+                        var measured = lane.RecordStep(new(hardware[i], observation.ArmStationary(group.Clock.GetTimestamp()),
+                            observation.PikaSpeed, observation.PikaFeedbackTime));
                         try
                         {
                             targets[lane.Profile.Id] = lane.Execution!.Step(group.Clock.GetTimestamp() / (double)group.Clock.TimestampFrequency,
-                                lane.LastHardware, lane.LastStationary, lane.LastGripperSpeed, lane.LastGripperFeedback, group.Barrier.MayStart(lane.Execution));
+                                measured.Hardware, measured.Stationary, measured.GripperSpeed, measured.GripperFeedback, group.Barrier.MayStart(lane.Execution));
                         }
                         catch (Exception error) { throw new InvalidOperationException(lane.Profile.Name + ": " + error.Message, error); }
                     }
-                    groupFollowStatus = $"Following {group.Lanes.Length} robots · {group.Lanes.Select(l => l.Execution!.ActivePhase?.End.Phase).FirstOrDefault(p => p is not null) ?? "holding"}";
-                    groupFollowDetail = "All selected arms share phase barriers. Faster arms hold their measured endpoint until their partners arrive; the next episode waits for every arm and gripper.";
+                    follow.Report($"Following {group.Lanes.Length} robots · {group.Lanes.Select(l => l.Execution!.ActivePhase?.End.Phase).FirstOrDefault(p => p is not null) ?? "holding"}",
+                        "All selected arms share phase barriers. Faster arms hold their measured endpoint until their partners arrive; the next episode waits for every arm and gripper.");
                 }
                 await SendGroupTargets(group, targets, ct);
                 await cadence.WaitAfterPublication(group.Clock, ct);
@@ -352,7 +351,7 @@ public sealed partial class PipersPlugin
             foreach (var lane in group.Lanes.Where(l => targets.ContainsKey(l.Profile.Id)))
             {
                 var target = targets[lane.Profile.Id];
-                long sequence = Interlocked.Increment(ref lane.Sequence);
+                long sequence = lane.NextSequence();
                 var timing = lane.Publications.Begin(sequence, Stopwatch.GetTimestamp());
                 attempts.Add((lane, timing));
                 writes.Add(lane.Publications.Observe(timing, GroupCommand(group, lane, FollowChannel.Arm, FollowOp.Update, new() { ["request_id"] = followRequests[lane.Profile.Id],
@@ -378,7 +377,7 @@ public sealed partial class PipersPlugin
         {
             try { await operation; }
             catch (PikaFollowRejectedException error)
-            { Interlocked.CompareExchange(ref lane.RejectedPikaAudit, error.Audit, null); throw; }
+            { lane.TryRecordRejectedPika(error.Audit); throw; }
         }
     }
 
@@ -423,13 +422,13 @@ public sealed partial class PipersPlugin
                 if (!group.Lanes[i].Execution!.ReturnedHome(LaneHardware(group, group.Lanes[i], observations[i], native: true),
                     observations[i].ArmStationary(group.Clock.GetTimestamp()), observations[i].PikaSpeed))
                     throw new InvalidOperationException("A missed grasp finished without every selected robot at its verified home and opened-jaw endpoint.");
-            group.EndReason = "Grasp not confirmed · all selected robots finished at home";
+            group.EndWith("Grasp not confirmed · all selected robots finished at home");
             return true;
         }
         if (!complete.EpisodeSucceeded) throw new InvalidOperationException("The source episode failed; all selected followers stopped.");
         if (group.AcknowledgedEpisode == complete.EpisodeId) return false;
         await prepared.AcknowledgeEpisodeAsync(complete, ct);
-        group.AcknowledgedEpisode = complete.EpisodeId;
+        group.AcknowledgeEpisode(complete.EpisodeId);
         return false;
     }
 
@@ -458,7 +457,7 @@ public sealed partial class PipersPlugin
                 var device = receipt?.State["devices"]?.AsArray().OfType<JsonObject>().SingleOrDefault(d => d["id"]?.GetValue<string>() == lane.Robot.DeviceId);
                 if (device?["generation"]?.GetValue<long>() != lane.Robot.Generation)
                     throw new InvalidOperationException(lane.Profile.Name + ": arm hold could not be verified on the original CAN connection.");
-                long retired = Volatile.Read(ref lane.ArmAdmissionRetiredTicks);
+                long retired = lane.ArmAdmissionRetiredTicks;
                 bool measuredIdle = receipt!.BackendToken == group.Backend && retired > 0 &&
                     receipt.CapturedTicks(group.Clock.TimestampFrequency) > retired &&
                     receipt.HasFreshDevice(device, group.Clock.GetTimestamp()) && device["motion"]?["device_id"]?.GetValue<string>() == lane.Robot.DeviceId &&

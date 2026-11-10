@@ -28,10 +28,10 @@ public sealed partial class PipersPlugin
             })) return;
             // The controller has already yielded ownership to its physical teaching
             // mode. Discard the old gesture locally; do not inject a hold/STOP into it.
-            if (ownershipChanged) { CommandAuthority.ClearTracked(); EndViewportGesture(); }
+            if (ownershipChanged) { CommandAuthority.ClearTracked(); follow.Viewport.EndGesture(follow.Viewport.Current); }
             if (teleoperating)
             {
-                StopViewportDrag();
+                follow.Viewport.Stop();
                 if (link is { } current)
                     await engine.RequestAsync("robot.teleoperate", new JsonObject {
                         ["sceneId"] = current.SceneId, ["entityId"] = current.EntityId, ["enabled"] = false }, cancellation);
