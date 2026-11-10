@@ -348,6 +348,105 @@ internal static class EmergencyStopTests
         }
     }
 
+    // STOP returns once the hardware request is answered. Its follow-up
+    // (teaching save, panel refresh) runs detached, so a held publication gate
+    // cannot delay the next STOP, and a failed follow-up is reported.
+    public static async Task RunStopFollowUp()
+    {
+        const string stop = "robot.piper-1.stop";
+        using (var fixture = new Fixture())
+        {
+            await fixture.Plugin.Render(CancellationToken.None);
+            var gate = fixture.Plugin.workspacePublicationGate;
+            await gate.WaitAsync();
+            try
+            {
+                bool first = true, second = true;
+                try { await fixture.Event(stop, default).WaitAsync(TimeSpan.FromSeconds(1)); } catch (TimeoutException) { first = false; }
+                int sent = fixture.Rpc.Routes.Count;
+                try { await fixture.Event(stop, default).WaitAsync(TimeSpan.FromSeconds(1)); } catch (TimeoutException) { second = false; }
+                Check(first && sent > 0, "A STOP click waited for the held panel publication gate");
+                Check(second && fixture.Rpc.Routes.Count > sent && fixture.Rpc.Routes.All(route => route.StartsWith("/api/stop", StringComparison.Ordinal)),
+                    "A second STOP was not sent to the hardware while the first STOP's follow-up was still pending");
+                Check(!fixture.Plugin.StopFollowUp.IsCompleted, "The STOP follow-up refreshed the panel without the publication gate");
+            }
+            finally { gate.Release(); }
+            bool finished = true;
+            try { await fixture.Plugin.StopFollowUp.WaitAsync(TimeSpan.FromSeconds(5)); } catch (TimeoutException) { finished = false; }
+            Check(finished && fixture.Plugin.uiActionError.Length == 0, "A STOP follow-up did not finish cleanly once the publication gate was free: " + fixture.Plugin.uiActionError);
+        }
+        bool editorGone = false;
+        using (var fixture = new Fixture((_, _) => editorGone ? Task.FromException(new IOException("editor gone")) : Task.CompletedTask))
+        {
+            await fixture.Plugin.Render(CancellationToken.None);
+            fixture.Plugin.approved = true;
+            editorGone = true;
+            await fixture.Event(stop, default).WaitAsync(TimeSpan.FromSeconds(1));
+            await fixture.Plugin.StopFollowUp.WaitAsync(TimeSpan.FromSeconds(5));
+            Check(fixture.Rpc.Routes.Count > 0 && !fixture.Plugin.approved, "STOP was not sent, or kept motion permission, when its panel refresh failed");
+            Check(fixture.Plugin.uiActionError.Contains("STOP was sent", StringComparison.Ordinal) && fixture.Plugin.uiActionError.Contains("Panel refresh", StringComparison.Ordinal),
+                "A failed STOP follow-up was lost instead of reported: " + fixture.Plugin.uiActionError);
+        }
+    }
+
+    // Enable waits for the request its own command acknowledged, even when
+    // telemetry ends the shared lease before Enable looks at it.
+    public static async Task RunEnableAcknowledgement()
+    {
+        using var fixture = new Fixture();
+        var plugin = fixture.Plugin;
+        var arm = plugin.state!["devices"]![0]!;
+        foreach (var joint in arm["joints"]!.AsArray()) joint!["enabled"] = false;
+        plugin.approved = true;
+        fixture.Rpc.DelayCommand = true;
+        using var telemetryFirst = new LeaseEndingContext(fixture.Authority);
+        var caller = SynchronizationContext.Current;
+        Task enable;
+        SynchronizationContext.SetSynchronizationContext(telemetryFirst);
+        try { enable = plugin.Enable(CancellationToken.None, includePika: false); }
+        finally { SynchronizationContext.SetSynchronizationContext(caller); }
+        await fixture.Rpc.CommandReached.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        // The controller finishes the enable, and telemetry ends the lease, before
+        // Enable resumes from its command.
+        foreach (var joint in arm["joints"]!.AsArray()) joint!["enabled"] = true;
+        plugin.state["motion"] = new JsonObject { ["active"] = false, ["request_id"] = 42L };
+        plugin.telemetry.Publish(new(plugin.state, "fake-backend-session", 2, Stopwatch.GetTimestamp(), 0));
+        fixture.Rpc.CommandReply.TrySetResult(new ControlReply { Status = 200, Json = "{\"ok\":true,\"request_id\":42}" });
+        string failure = "";
+        try { await enable.WaitAsync(TimeSpan.FromSeconds(3)); }
+        catch (Exception error) { failure = error.GetType().Name + ": " + error.Message; }
+        await Task.Yield(); // leave the context's own thread before disposing it
+        Check(telemetryFirst.Ended > 0, "The fixture did not end the enable lease before Enable resumed");
+        Check(failure.Length == 0, "Enable lost its own request id when telemetry ended the lease first (" + failure + ")");
+    }
+
+    /// <summary>Runs each continuation of the awaiting operation on one thread and
+    /// ends any command lease after it, as a telemetry frame arriving between an
+    /// acknowledgement and the code that awaited it would.</summary>
+    private sealed class LeaseEndingContext : SynchronizationContext, IDisposable
+    {
+        private readonly System.Collections.Concurrent.BlockingCollection<(SendOrPostCallback Callback, object? State)> work = [];
+        private readonly Thread pump;
+        private int ended;
+        public int Ended => Volatile.Read(ref ended);
+
+        public LeaseEndingContext(RobotCommandAuthority authority)
+        {
+            pump = new Thread(() =>
+            {
+                foreach (var (callback, state) in work.GetConsumingEnumerable())
+                {
+                    callback(state);
+                    if (authority.Current.Lease is { } lease) { authority.EndLease(lease); Interlocked.Increment(ref ended); }
+                }
+            }) { IsBackground = true };
+            pump.Start();
+        }
+
+        public override void Post(SendOrPostCallback d, object? state) => work.Add((d, state));
+        public void Dispose() { work.CompleteAdding(); if (Thread.CurrentThread != pump) pump.Join(); }
+    }
+
     private sealed class Fixture : IDisposable
     {
         private readonly PipersPlugin plugin = new();
@@ -357,7 +456,7 @@ internal static class EmergencyStopTests
         public SemaphoreSlim Commands => plugin.commands;
         public Task Event(string wire, CancellationToken cancellation) => plugin.HandleEventAsync(new("fixture", wire, "click", JsonSerializer.SerializeToElement(true)), cancellation);
 
-        public Fixture()
+        public Fixture(Func<object, CancellationToken, Task>? send = null)
         {
             plugin.client = new PiperControl.PiperControlClient(Rpc);
             plugin.preferences = RobotProfileRouting.Normalize(new Preferences(Robots:
@@ -368,7 +467,7 @@ internal static class EmergencyStopTests
             plugin.state = snapshot;
             plugin.telemetry.Publish(new(snapshot, "fake-backend-session", 1, Stopwatch.GetTimestamp(), 0));
             var context = Fixtures.Context(new PluginStart("fixture", Path.Combine(Path.GetTempPath(), "piper-emergency-" + Guid.NewGuid().ToString("N")), Path.GetTempPath()),
-                    (Func<object, CancellationToken, Task>)((_, _) => Task.CompletedTask),
+                    send ?? ((_, _) => Task.CompletedTask),
                     (Func<string, JsonObject, CancellationToken, Task<JsonElement>>)((_, _, _) => Task.FromResult(JsonSerializer.SerializeToElement(new { applied = false }))));
             plugin.engine = context;
         }
