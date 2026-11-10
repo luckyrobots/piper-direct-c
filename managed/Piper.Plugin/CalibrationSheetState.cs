@@ -58,8 +58,6 @@ public sealed partial class PipersPlugin
     private bool SheetAppliedAlignmentMatchesModel => calibrationApplied is not null && calibrationIdentity is { } saved &&
         AcknowledgedModelRevision == saved.ModelRevision;
 
-    private void UpdateSetup(Func<SheetSetup, SheetSetup> change) => calibrationWizard = Wizard with { Setup = change(Wizard.Setup) };
-
     // The fingerprint LEFT and BACK must match: the current robot, desk size,
     // tabletop and pinned root. Null when there is no pinned root or valid desk.
     private string? SheetDeskProof()

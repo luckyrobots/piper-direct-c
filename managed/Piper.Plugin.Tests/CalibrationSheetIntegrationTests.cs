@@ -158,12 +158,12 @@ internal static class CalibrationSheetIntegrationTests
             Check(Status(".sheet.row.status.3").Contains("overlaps P2"), "Duplicate reference measurement was not explained beside its row before hand guiding");
             await Event("field.p3back", "440"); await Event("field.p3left", "800");
             Check(!Status(".sheet.row.status.3").Contains("overlaps"), "P4 at BACK 440 / LEFT 800 was rejected merely because P2 is BACK 450 / LEFT 800");
-            var validDraft = plugin.calibrationWizard;
-            plugin.calibrationWizard = validDraft with { ModelRevision = "changed-revision" };
+            var validDraft = plugin.calibrationWizard!;
+            plugin.calibration.Wizard.Edit(_ => validDraft with { ModelRevision = "changed-revision" });
             Fresh(); await plugin.Update(CancellationToken.None);
             Check(!CaptureEnabled(0) && Status(".sheet.next").Contains("Reconfirm"), "Stale identity-bound desk confirmations still enabled capture");
             Check(patches?[WidgetId(".sheet.left.confirm")]?["enabled"]?.GetValue<bool>() == true, "Stale LEFT confirmation left the repair button disabled");
-            plugin.calibrationWizard = validDraft;
+            plugin.calibration.Wizard.Edit(_ => validDraft);
             device["status"]!["teach_state"] = 0; device["status"]!["control"] = 1;
             Fresh(); await plugin.Update(CancellationToken.None);
             Check(!CaptureEnabled(0) && Status(".sheet.row.status.0").Contains("solid green"), "Inactive hand guiding silently blocked Capture");
@@ -242,9 +242,9 @@ internal static class CalibrationSheetIntegrationTests
                 "Corrected measurement and fit invalidation did not survive report persistence");
             // Simulate a crash after corrected report commit but before the draft
             // commit: restored report observations must own captured coordinates.
-            var resumedDraft = plugin.calibrationWizard;
-            resumedDraft.Answers["p1left"] = "800"; resumedDraft.Answers["p1back"] = "499";
+            plugin.calibration.Wizard.Answer(("p1left", "800"), ("p1back", "499"));
             plugin.LoadSheetRows();
+            var resumedDraft = plugin.calibrationWizard!;
             var resumedPoint = plugin.SheetPoint(1);
             Check(resumedDraft.Answers["p1left"] == "780" && resumedDraft.Answers["p1back"] == "450" &&
                 resumedPoint.HasValue && Math.Abs(resumedPoint.Value.X - correctedP2.MeasuredWorld.X) < 1e-12 &&

@@ -53,7 +53,7 @@ internal static class CalibrationSheetUiTests
                     return Task.FromResult(JsonSerializer.SerializeToElement(result));
                 }));
         plugin.preferences = prefs; plugin.engine = context; plugin.telemetry.PublishState(state); plugin.telemetry.AdoptBackend("fixture-session");
-        plugin.calibration.Desk.Reinstate(DeskSession.Unloaded with { Profile = "piper-1" }); plugin.wizardProfile = "piper-1"; plugin.workspace.Commit(WorkspaceNavigation.Calibration);
+        plugin.calibration.Desk.Reinstate(DeskSession.Unloaded with { Profile = "piper-1" }); plugin.workspace.Commit(WorkspaceNavigation.Calibration);
         plugin.link = new RobotLink("scene-a", "robot-a", joints, device);
         plugin.telemetry.Publish(new(state, "fixture-session", 1, Stopwatch.GetTimestamp(), 0));
         var draft = CalibrationWizardFlow.New("piper-1", 10) with { Step = CalibrationWizardStep.DeskBack, ModelAssetId = "asset-a", ModelRevision = "revision-a" };
@@ -63,11 +63,11 @@ internal static class CalibrationSheetUiTests
         string proof = WizardReferenceHighlightScope.DeskFingerprint(identity, 1400, 700, 750, root);
         draft = draft with { Setup = new(root.Json().ToJsonString(), proof, proof, SurfaceConfirmed: true) };
         foreach (var pair in new Dictionary<string, string> { ["p0back"] = "200", ["p0left"] = "697", ["p1back"] = "450", ["p1left"] = "800", ["p2back"] = "120", ["p2left"] = "900", ["p3back"] = "450", ["p3left"] = "800" }) draft.Answers[pair.Key] = pair.Value;
-        plugin.calibrationWizard = draft;
+        plugin.calibration.Wizard.Open("piper-1", draft);
         try
         {
             await plugin.Render(CancellationToken.None);
-            long page = plugin.workspace.Epoch, sheet = plugin.calibrationWizard.Epoch;
+            long page = plugin.workspace.Epoch, sheet = plugin.calibrationWizard!.Epoch;
             void Fresh() => plugin.telemetry.Publish(new(state, "fixture-session", 1, Stopwatch.GetTimestamp(), 0));
             async Task Click(string action)
             {
@@ -98,7 +98,7 @@ internal static class CalibrationSheetUiTests
             await Patches();
             Check(lastPatch![Fixed("sheet.row.status.3")]?["text"]?.GetValue<string>().Contains("overlaps P2") == true,
                 "Duplicate P4/P2 measurements did not show a visible row error before capture");
-            plugin.calibrationWizard.Answers["precision"] = "0";
+            plugin.calibration.Wizard.Answer("precision", "0");
             await Patches();
             Check(lastPatch![Fixed("sheet.next")]?["text"]?.GetValue<string>().Contains("accuracy cannot be 0") == true &&
                 lastPatch[Wire("capture.0")]?["enabled"]?.GetValue<bool>() == false,
@@ -109,8 +109,8 @@ internal static class CalibrationSheetUiTests
             // Error feedback must retain the same page, so correcting an input
             // does not require the operator to discover fresh button IDs.
             Check(plugin.workspace.Epoch == page, "A rejected capture rebuilt the page and invalidated visible controls");
-            plugin.calibrationWizard.Answers["precision"] = "5";
-            plugin.calibrationWizard = plugin.calibrationWizard with { Setup = plugin.calibrationWizard.Setup with { LeftProof = "stale-proof" } };
+            plugin.calibration.Wizard.Answer("precision", "5");
+            plugin.calibration.Wizard.ChangeSetup(setup => setup with { LeftProof = "stale-proof" });
             await Patches();
             Check(lastPatch![Wire("tool.confirm")]?["enabled"]?.GetValue<bool>() == false &&
                 lastPatch[Fixed("sheet.setup")]?["text"]?.GetValue<string>().Contains("LEFT pending") == true,

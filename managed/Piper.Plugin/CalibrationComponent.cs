@@ -9,6 +9,7 @@ namespace LuckyRobots.Piper.Plugin;
 /// <code>
 ///   part     machine                          table on
 ///   Desk     Cal-A desk calibration session   DeskCalibration
+///   Wizard   Cal-B calibration sheet          SheetWizard
 ///   Height   Cal-D jaw-height check           HeightCheckSession
 ///   Markers  Cal-C marker ownership           CalibrationMarkers
 ///   Lens     Cal-E lens calibration           LensCalibration
@@ -26,6 +27,7 @@ namespace LuckyRobots.Piper.Plugin;
 internal sealed class CalibrationComponent
 {
     public DeskCalibration Desk { get; } = new();
+    public SheetWizard Wizard { get; } = new();
     public HeightCheckSession Height { get; } = new();
     public CalibrationMarkers Markers { get; } = new();
     public LensCalibration Lens { get; } = new();

@@ -7,11 +7,13 @@ namespace LuckyRobots.Piper.Plugin;
 
 public sealed partial class PipersPlugin
 {
-    internal CalibrationWizardDraft? calibrationWizard;
-    private string[] wizardDiscoveredSites = [];
-    internal string wizardProfile = "", wizardMessage = "", wizardModelPoint = "Show the point, then compare its marker with the real jaw tips.";
-    private string wizardModelPointDetails = "Model coordinates and site identity are not a verified physical TCP calibration.";
-    private CalibrationWizardDraft Wizard => calibrationWizard ?? throw new InvalidOperationException("Open the calibration wizard first.");
+    internal CalibrationWizardDraft? calibrationWizard => calibration.Wizard.Session.Draft;
+    private string[] wizardDiscoveredSites => calibration.Wizard.Session.Sites;
+    internal string wizardProfile => calibration.Wizard.Session.Profile;
+    internal string wizardMessage => calibration.Wizard.Session.Message;
+    private string wizardModelPoint => calibration.Wizard.Session.ModelPoint;
+    private string wizardModelPointDetails => calibration.Wizard.Session.ModelPointDetails;
+    private CalibrationWizardDraft Wizard => calibration.Wizard.Draft;
     private string WizardId(string action) => "wizard." + Wizard.Epoch + "." + action;
     private int WizardTrainingCount => calibrationSamples.Count(s => !s.HeldOut);
     private int WizardValidationCount => calibrationSamples.Count(s => s.HeldOut);
@@ -22,9 +24,8 @@ public sealed partial class PipersPlugin
     {
         LoadCalibrationPreferences();
         if (wizardProfile == ActiveProfile.Id && calibrationWizard is not null) return;
-        sheetEditingRow = -1;
-        wizardProfile = ActiveProfile.Id; wizardMessage = ""; wizardDiscoveredSites = []; wizardModelPoint = "Show the point, then compare its marker with the real jaw tips."; calibration.Markers.ClearRetry();
-        calibrationWizard = CalibrationWizardFlow.New(ActiveProfile.Id);
+        calibration.Markers.ClearRetry();
+        calibration.Wizard.Open(ActiveProfile.Id, CalibrationWizardFlow.New(ActiveProfile.Id));
         try
         {
             if (File.Exists(WizardDraftPath) && new FileInfo(WizardDraftPath).Length <= 64 * 1024 &&
@@ -32,28 +33,28 @@ public sealed partial class PipersPlugin
             {
                 var saved = file.ToDraft();
                 CalibrationWizardFlow.ValidateDraft(saved, ActiveProfile.Id);
-                calibrationWizard = CalibrationWizardFlow.TabletopDefault(saved);
+                calibration.Wizard.Edit(_ => CalibrationWizardFlow.TabletopDefault(saved));
                 // Restore partial observations only from the draft's named report.
                 // Every later capture/write still rechecks the live pinned scope.
                 string reportPath = Path.Combine(RobotCalibrationDirectory, saved.ReportFile);
                 if (calibrationIdentity is null && saved.ReportFile.Length > 0 && File.Exists(reportPath) &&
                     JsonSerializer.Deserialize<CalibrationReport>(File.ReadAllText(reportPath), PluginProtocol.Json) is { } report)
                     RestoreCalibrationReport(report, reportPath);
-                wizardMessage = "Your saved answers and captured points are available. Nothing moves or applies automatically. If the robot connection or model changed, start a new check.";
+                calibration.Wizard.Report("Your saved answers and captured points are available. Nothing moves or applies automatically. If the robot connection or model changed, start a new check.");
             }
         }
         catch (Exception error) when (error is IOException or JsonException or InvalidOperationException or ArgumentException)
-        { calibrationWizard = CalibrationWizardFlow.New(ActiveProfile.Id); wizardMessage = "Saved draft could not be resumed; the report is retained. " + error.Message; }
+        { calibration.Wizard.Edit(_ => CalibrationWizardFlow.New(ActiveProfile.Id)); calibration.Wizard.Report("Saved draft could not be resumed; the report is retained. " + error.Message); }
         if (calibrationPlacementUnverified)
-            calibrationWizard = Wizard with { Step = CalibrationWizardStep.InspectSaved, Epoch = Wizard.Epoch + 1 };
+            calibration.Wizard.Edit(draft => draft with { Step = CalibrationWizardStep.InspectSaved, Epoch = draft.Epoch + 1 });
         else if (calibrationSamples.LastOrDefault() is { } last && CalibrationWizardFlow.AlreadyRecorded(Wizard, last))
-        { calibrationWizard = CalibrationWizardFlow.NextPoint(Wizard, WizardTrainingCount, WizardValidationCount); wizardMessage = "The last explicit Capture was already saved before interruption. Its observation is retained; no duplicate capture or motion was repeated."; }
+        { calibration.Wizard.Edit(draft => CalibrationWizardFlow.NextPoint(draft, WizardTrainingCount, WizardValidationCount)); calibration.Wizard.Report("The last explicit Capture was already saved before interruption. Its observation is retained; no duplicate capture or motion was repeated."); }
         else if (calibrationIdentity is not null && (int)Wizard.Step < (int)CalibrationWizardStep.PointIntro)
-            calibrationWizard = Wizard with { Step = CalibrationWizardStep.Review, Epoch = Wizard.Epoch + 1 };
+            calibration.Wizard.Edit(draft => draft with { Step = CalibrationWizardStep.Review, Epoch = draft.Epoch + 1 });
         if (calibrationIdentity is null && Wizard.Setup.SurfaceConfirmed)
         {
             try { calibration.Desk.UseDesk(calibrationDesk with { SurfaceY = CalibrationWizardFlow.Number(Wizard, "sceney", 0, 3000) / 1000 }); }
-            catch (InvalidOperationException) { UpdateSetup(setup => setup with { SurfaceConfirmed = false }); }
+            catch (InvalidOperationException) { calibration.Wizard.ChangeSetup(setup => setup with { SurfaceConfirmed = false }); }
         }
         ReconcileReevaluatedWizard();
     }
@@ -82,12 +83,13 @@ public sealed partial class PipersPlugin
     private async Task SaveWizard(CancellationToken cancellation)
     {
         Directory.CreateDirectory(RobotCalibrationDirectory);
-        calibrationWizard = Wizard with { ReportFile = calibrationIdentity is null ? "" : Path.GetFileName(calibrationPath) };
+        string reportFile = calibrationIdentity is null ? "" : Path.GetFileName(calibrationPath);
+        calibration.Wizard.Edit(draft => draft.ReportFile == reportFile ? draft : draft with { ReportFile = reportFile });
         string temporary = WizardDraftPath + ".tmp";
         var file = CalibrationWizardFile.From(Wizard);
         await File.WriteAllTextAsync(temporary, JsonSerializer.Serialize(file, PluginProtocol.Json), cancellation);
         File.Move(temporary, WizardDraftPath, true);
-        sheetSaveStatus = "Saved locally · measurements restore next session.";
+        calibration.Wizard.ReportSave("Saved locally · measurements restore next session.");
         if (calibrationIdentity is null && BenchReference.FromAnswers(Wizard.Answers, calibrationDesk.SurfaceY) is { } shared && preferences.BenchReference != shared)
         { preferences = preferences with { BenchReference = shared }; await Save(cancellation); }
         if (calibrationIdentity is not null && calibrationPath.Length > 0)
@@ -115,14 +117,15 @@ public sealed partial class PipersPlugin
                 await CalibrationSheetEvent(parts[1][6..], value, cancellation);
             else if (parts[1] == "camera")
             {
-                calibrationWizard = Wizard with { HelpCamera = new[] { "bench", "gripper", "depth" }[Math.Clamp(value.GetInt32(), 0, 2)] };
+                string camera = new[] { "bench", "gripper", "depth" }[Math.Clamp(value.GetInt32(), 0, 2)];
+                calibration.Wizard.Edit(draft => draft with { HelpCamera = camera });
                 await SaveWizard(cancellation);
                 await Render(cancellation);
             }
         }
         catch (Exception error) when (error is not OperationCanceledException)
         {
-            wizardMessage = error.Message;
+            calibration.Wizard.Report(error.Message);
             // Sheet validation errors must not destroy the active input view.
             if (!action.Contains(".sheet.", StringComparison.Ordinal)) await Render(cancellation);
             await Update(cancellation);
@@ -135,16 +138,16 @@ public sealed partial class PipersPlugin
         string name = Wizard.Answers.GetValueOrDefault("tool", "").Trim();
         const string unavailable = "The current model does not expose one exact named metric site. Select/fix the correct model point before continuing.";
         var (_, pose) = await ReadMetricPose("Link this robot before inspecting a model point.", unavailable, cancellation);
-        wizardDiscoveredSites = pose["toolSites"]?.AsArray().Select(s => s?["name"]?.GetValue<string>() ?? "").Where(s => s.Length > 0).ToArray() ?? [];
+        calibration.Wizard.Discovered(pose["toolSites"]?.AsArray().Select(s => s?["name"]?.GetValue<string>() ?? "").Where(s => s.Length > 0).ToArray() ?? []);
         var site = CalibrationPose.ReadToolSite(pose, name, unavailable, unavailable);
         if (pose["modelAssetId"]?.GetValue<string>() is not { Length: > 0 } asset || pose["modelRevision"]?.GetValue<string>() is not { Length: > 0 } revision)
             throw new InvalidOperationException(unavailable);
         bool samePoint = Wizard.ModelAssetId == asset && Wizard.ModelRevision == revision &&
             (ToolMarker is not { } shown || shown.SiteName == name);
-        calibrationWizard = Wizard with { ModelAssetId = asset, ModelRevision = revision, Setup = Wizard.Setup with { JawTipsConfirmed = samePoint && Wizard.Setup.JawTipsConfirmed } };
+        calibration.Wizard.Edit(draft => draft with { ModelAssetId = asset, ModelRevision = revision, Setup = draft.Setup with { JawTipsConfirmed = samePoint && draft.Setup.JawTipsConfirmed } });
         _ = CalibrationPlacement.Read(pose["rootPlacement"]);
-        wizardModelPoint = "Look for the marker between the simulated jaw tips, then compare it with the real jaw-tip midpoint.";
-        wizardModelPointDetails = $"Marker coordinates ({site.X * 1000:F1}, {site.Y * 1000:F1}, {site.Z * 1000:F1}) mm. Site '{name}' world coordinates {site.Json().ToJsonString()} m; compiled model {asset}, revision {revision}. The marker identifies a model point only. Continue records the operator's comparison, not independent physical calibration.";
+        calibration.Wizard.DescribeModelPoint("Look for the marker between the simulated jaw tips, then compare it with the real jaw-tip midpoint.",
+            $"Marker coordinates ({site.X * 1000:F1}, {site.Y * 1000:F1}, {site.Z * 1000:F1}) mm. Site '{name}' world coordinates {site.Json().ToJsonString()} m; compiled model {asset}, revision {revision}. The marker identifies a model point only. Continue records the operator's comparison, not independent physical calibration.");
         await ShowWizardHighlight(cancellation);
     }
 
@@ -192,6 +195,6 @@ public sealed partial class PipersPlugin
         if (calibrationIdentity!.ModelAssetId != Wizard.ModelAssetId || calibrationIdentity.ModelRevision != Wizard.ModelRevision)
             throw new InvalidOperationException("The compiled model changed since the point comparison. Start over and identify the point on the current model.");
         await CalibrationEvent(WizardValidation ? "validate" : "capture", cancellation);
-        calibrationWizard = CalibrationWizardFlow.NextPoint(Wizard, WizardTrainingCount, WizardValidationCount);
+        calibration.Wizard.Edit(draft => CalibrationWizardFlow.NextPoint(draft, WizardTrainingCount, WizardValidationCount));
     }
 }

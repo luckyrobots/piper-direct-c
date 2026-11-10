@@ -16,22 +16,27 @@ public sealed partial class PipersPlugin
     {
         // The saved report is authoritative after a correction commits. A crash
         // before the draft write must not restore old ruler values in markers.
+        var answers = new List<(string Key, string Value)>();
         for (int row = 0; row < 5; row++)
             if (row != sheetEditingRow && SheetSample(row) is { } captured)
             {
-                Wizard.Answers[$"p{row}left"] = CalibrationNumber(captured.Measurement.LeftMm);
-                Wizard.Answers[$"p{row}back"] = CalibrationNumber(captured.Measurement.BackMm);
+                answers.Add(($"p{row}left", CalibrationNumber(captured.Measurement.LeftMm)));
+                answers.Add(($"p{row}back", CalibrationNumber(captured.Measurement.BackMm)));
             }
-        if (Wizard.Answers.ContainsKey("sheetready")) return;
+        calibration.Wizard.Answer([.. answers]);
+        var draft = Wizard;
+        if (draft.Answers.ContainsKey("sheetready")) return;
+        answers.Clear();
         // Preserve the current unrecorded XY entry, but never migrate a hover
         // height into this explicitly tabletop-contact workflow.
         int current = Math.Min(WizardTrainingCount, 4);
         foreach (string axis in new[] { "left", "back" })
-            if (Wizard.Answers.TryGetValue(axis, out string? text)) Wizard.Answers[$"p{current}{axis}"] = text;
-        Wizard.Answers["sheetready"] = "tabletop-contact";
-        if (!Wizard.Answers.ContainsKey("width")) Wizard.Answers["width"] = CalibrationNumber(calibrationDesk.Width * 1000);
-        if (!Wizard.Answers.ContainsKey("depth")) Wizard.Answers["depth"] = CalibrationNumber(calibrationDesk.Depth * 1000);
-        if (!Wizard.Answers.ContainsKey("precision")) Wizard.Answers["precision"] = "5";
+            if (draft.Answers.TryGetValue(axis, out string? text)) answers.Add(($"p{current}{axis}", text));
+        answers.Add(("sheetready", "tabletop-contact"));
+        if (!draft.Answers.ContainsKey("width")) answers.Add(("width", CalibrationNumber(calibrationDesk.Width * 1000)));
+        if (!draft.Answers.ContainsKey("depth")) answers.Add(("depth", CalibrationNumber(calibrationDesk.Depth * 1000)));
+        if (!draft.Answers.ContainsKey("precision")) answers.Add(("precision", "5"));
+        calibration.Wizard.Answer([.. answers]);
     }
 
     private Widget SheetInput(string key, string hint, bool enabled = true, string? text = null) =>
@@ -107,21 +112,21 @@ public sealed partial class PipersPlugin
         if (action == "precision.default")
         {
             if (calibrationIdentity is not null) throw new InvalidOperationException("Accuracy is fixed after the first capture.");
-            Wizard.Answers["precision"] = "5";
+            calibration.Wizard.Answer("precision", "5");
         }
         else if (action == "tool.show") await ShowSheetJawTips(cancellation);
         else if (action == "tool.confirm")
         {
             if (ToolMarker is not { } marker || !WizardHighlightCurrent(marker)) throw new InvalidOperationException("Show the jaw-tip marker first, then compare it with the real midpoint.");
-            UpdateSetup(setup => setup with { JawTipsConfirmed = true });
-            wizardMessage = "Jaw tips confirmed. Next, confirm that the robot base rests on the tabletop.";
+            calibration.Wizard.ChangeSetup(setup => setup with { JawTipsConfirmed = true });
+            calibration.Wizard.Report("Jaw tips confirmed. Next, confirm that the robot base rests on the tabletop.");
         }
         else if (action == "surface") await ConfirmSheetSurface(cancellation);
         else if (action is "left.show" or "back.show" or "left.confirm" or "back.confirm")
         {
             await ReadSheetReference(cancellation);
             var step = action.StartsWith("left", StringComparison.Ordinal) ? CalibrationWizardStep.DeskFrame : CalibrationWizardStep.DeskBack;
-            if (Wizard.Step != step) calibrationWizard = Wizard with { Step = step };
+            calibration.Wizard.Edit(draft => draft.Step == step ? draft : draft with { Step = step });
             await ShowWizardReference(cancellation, frame: action.EndsWith("show", StringComparison.Ordinal));
             if (action.EndsWith("confirm", StringComparison.Ordinal)) ConfirmWizardReference();
         }
@@ -143,8 +148,8 @@ public sealed partial class PipersPlugin
             if (action is "fit" or "apply" && (SavedModelChanged || calibrationReevaluation is not null && SheetSetupBlocker().Length > 0))
                 throw new InvalidOperationException("Re-evaluate the corrected model and reconfirm its LEFT, BACK, jaw tips and desk references before calculating or applying alignment.");
             await CalibrationEvent(action, cancellation);
-            if (action == "fit") wizardMessage = calibrationFit?.CanApply == true ? "Alignment calculated. Review the result before Apply to simulation." : calibrationFit?.Reason ?? "Alignment calculation did not return a result.";
-            if (action is "new" or "archive" && calibrationIdentity is null) calibrationWizard = CalibrationWizardFlow.New(ActiveProfile.Id, Wizard.Epoch + 1);
+            if (action == "fit") calibration.Wizard.Report(calibrationFit?.CanApply == true ? "Alignment calculated. Review the result before Apply to simulation." : calibrationFit?.Reason ?? "Alignment calculation did not return a result.");
+            if (action is "new" or "archive" && calibrationIdentity is null) calibration.Wizard.Edit(draft => CalibrationWizardFlow.New(ActiveProfile.Id, draft.Epoch + 1));
         }
         else return;
         await SaveWizard(cancellation);
@@ -170,8 +175,8 @@ public sealed partial class PipersPlugin
             throw new InvalidOperationException("Recorded measurements are fixed. Start a new calibration to change them; the old report is kept.");
         string text = value.GetString() ?? "";
         if (text.Length > 32) throw new InvalidOperationException("Enter a measurement in millimetres.");
-        Wizard.Answers[key] = text;
-        if (desk && key != "precision") { UpdateSetup(setup => setup.ClearEdges()); calibration.Markers.UnacknowledgeEdge(); }
+        calibration.Wizard.Answer(key, text);
+        if (desk && key != "precision") { calibration.Wizard.ChangeSetup(setup => setup.ClearEdges()); calibration.Markers.UnacknowledgeEdge(); }
         calibration.Markers.InvalidateSheet();
         await SaveWizard(cancellation);
     }
@@ -180,13 +185,12 @@ public sealed partial class PipersPlugin
     {
         // Leave the legacy edge step before showing a tool marker. Otherwise
         // background edge renewal immediately replaces it and clears its proof.
-        if (Wizard.Step != CalibrationWizardStep.ModelPoint)
-            calibrationWizard = Wizard with { Step = CalibrationWizardStep.ModelPoint };
+        calibration.Wizard.Edit(draft => draft.Step == CalibrationWizardStep.ModelPoint ? draft : draft with { Step = CalibrationWizardStep.ModelPoint });
         if (calibrationIdentity is not null) { await ShowWizardHighlight(cancellation); return; }
         if (!SheetContactCompatible) throw new InvalidOperationException("Start a new tabletop calibration; the existing report contains raised or grid points and is retained.");
         await ShowWizardModelPoint(cancellation);
         if (wizardDiscoveredSites.Count(s => s == "calibration_jaw_tips") == 1 && Wizard.Answers.GetValueOrDefault("tool") != "calibration_jaw_tips")
-        { Wizard.Answers["tool"] = "calibration_jaw_tips"; await ShowWizardModelPoint(cancellation); }
+        { calibration.Wizard.Answer("tool", "calibration_jaw_tips"); await ShowWizardModelPoint(cancellation); }
     }
 
     private async Task ConfirmSheetSurface(CancellationToken cancellation)
@@ -195,16 +199,16 @@ public sealed partial class PipersPlugin
         var root = await ReadWizardMetricRoot(cancellation);
         if (calibrationIdentity is not null && (calibrationOriginal is null || !calibrationOriginal.Same(root) || Math.Abs(root.Position.Y - calibrationDesk.SurfaceY) > 1e-6))
             throw new InvalidOperationException("Reconfirming a corrected model cannot change the saved original placement or tabletop height.");
-        Wizard.Answers["sceney"] = CalibrationNumber(root.Position.Y * 1000);
+        calibration.Wizard.Answer("sceney", CalibrationNumber(root.Position.Y * 1000));
         calibration.Desk.UseDesk(calibrationDesk with { SurfaceY = root.Position.Y });
         bool rootMoved = Wizard.Setup.EdgeRoot.Length > 0 && !CalibrationPlacement.Read(JsonNode.Parse(Wizard.Setup.EdgeRoot)).Same(root);
-        UpdateSetup(setup => (rootMoved ? setup.ClearEdges() : setup) with { SurfaceConfirmed = true });
+        calibration.Wizard.ChangeSetup(setup => (rootMoved ? setup.ClearEdges() : setup) with { SurfaceConfirmed = true });
     }
 
     private async Task SelectSheetRow(int row, CancellationToken cancellation)
     {
         await ShowSheetMarks(cancellation, frameRow: row);
-        wizardMessage = $"{(row == 4 ? "CHECK" : "P" + (row + 1))} is highlighted in the viewport. In solid-green hand guiding, gently touch this physical cross with the jaw-tip midpoint, hold still, then Capture its row. The preview does not move the real arm.";
+        calibration.Wizard.Report($"{(row == 4 ? "CHECK" : "P" + (row + 1))} is highlighted in the viewport. In solid-green hand guiding, gently touch this physical cross with the jaw-tip midpoint, hold still, then Capture its row. The preview does not move the real arm.");
     }
 
     private async Task CaptureSheetRow(int row, CancellationToken cancellation)
@@ -213,13 +217,13 @@ public sealed partial class PipersPlugin
         if (blocked.Length > 0) throw new InvalidOperationException(blocked);
         if (row < 4 && row != WizardTrainingCount) throw new InvalidOperationException("Capture reference rows in order: Point " + (WizardTrainingCount + 1) + " is next. You can enter all measurements now.");
         if (row == 4 && WizardTrainingCount < 4) throw new InvalidOperationException("Capture the four reference points before the final check.");
-        Wizard.Answers["left"] = Wizard.Answers.GetValueOrDefault($"p{row}left", "");
-        Wizard.Answers["back"] = Wizard.Answers.GetValueOrDefault($"p{row}back", "");
-        Wizard.Answers["height"] = "0"; Wizard.Answers["method"] = "edge measurements"; Wizard.Answers["role"] = row == 4 ? "validation" : "training";
-        calibrationWizard = Wizard with { Step = CalibrationWizardStep.Capture };
+        var entered = Wizard.Answers;
+        calibration.Wizard.Answer(("left", entered.GetValueOrDefault($"p{row}left", "")), ("back", entered.GetValueOrDefault($"p{row}back", "")),
+            ("height", "0"), ("method", "edge measurements"), ("role", row == 4 ? "validation" : "training"));
+        calibration.Wizard.Edit(draft => draft with { Step = CalibrationWizardStep.Capture });
         await CaptureWizardPoint(cancellation);
-        Wizard.Answers["sheetselected"] = Math.Min(WizardTrainingCount, 4).ToString();
-        wizardMessage = $"Saved {(row == 4 ? "the final check" : "Point " + (row + 1))}. " + (row < 4 ? "Move by hand to the next mark and capture its row." : "Click Calculate alignment to check the result.");
+        calibration.Wizard.Answer("sheetselected", Math.Min(WizardTrainingCount, 4).ToString());
+        calibration.Wizard.Report($"Saved {(row == 4 ? "the final check" : "Point " + (row + 1))}. " + (row < 4 ? "Move by hand to the next mark and capture its row." : "Click Calculate alignment to check the result."));
     }
 
     private void AddCalibrationSheetPatches(Dictionary<string, JsonObject> patches, JsonObject? device)

@@ -4,7 +4,7 @@ namespace LuckyRobots.Piper.Plugin;
 
 public sealed partial class PipersPlugin
 {
-    internal int sheetEditingRow = -1;
+    internal int sheetEditingRow => calibration.Wizard.Session.EditingRow;
     private bool SheetCanCorrect => calibrationIdentity is not null && link is not null && calibrationIdentity == CurrentCalibrationIdentity() &&
         calibrationApplied is null && !calibrationPlacementUnverified && SheetContactCompatible;
 
@@ -14,19 +14,19 @@ public sealed partial class PipersPlugin
         if (sheetEditingRow >= 0)
         {
             var previous = SheetSample(sheetEditingRow)!;
-            Wizard.Answers[$"p{sheetEditingRow}left"] = CalibrationNumber(previous.Measurement.LeftMm);
-            Wizard.Answers[$"p{sheetEditingRow}back"] = CalibrationNumber(previous.Measurement.BackMm);
+            calibration.Wizard.Answer(($"p{sheetEditingRow}left", CalibrationNumber(previous.Measurement.LeftMm)),
+                ($"p{sheetEditingRow}back", CalibrationNumber(previous.Measurement.BackMm)));
         }
-        sheetEditingRow = sheetEditingRow == row ? -1 : row;
+        if (sheetEditingRow == row) calibration.Wizard.StopEditing(); else calibration.Wizard.EditRow(row);
         if (sheetEditingRow >= 0)
         {
             var current = SheetSample(sheetEditingRow)!;
-            Wizard.Answers[$"p{sheetEditingRow}left"] = CalibrationNumber(current.Measurement.LeftMm);
-            Wizard.Answers[$"p{sheetEditingRow}back"] = CalibrationNumber(current.Measurement.BackMm);
+            calibration.Wizard.Answer(($"p{sheetEditingRow}left", CalibrationNumber(current.Measurement.LeftMm)),
+                ($"p{sheetEditingRow}back", CalibrationNumber(current.Measurement.BackMm)));
         }
         calibration.Markers.InvalidateSheet();
-        wizardMessage = sheetEditingRow < 0 ? "Edit cancelled. The captured measurements are unchanged."
-            : $"Correct {SheetPointName(row)}'s BACK / LEFT values, then Save entry. Its recorded joint pose and contact point are preserved.";
+        calibration.Wizard.Report(sheetEditingRow < 0 ? "Edit cancelled. The captured measurements are unchanged."
+            : $"Correct {SheetPointName(row)}'s BACK / LEFT values, then Save entry. Its recorded joint pose and contact point are preserved.");
         await SaveWizard(cancellation);
     }
 
@@ -68,7 +68,7 @@ public sealed partial class PipersPlugin
         var sample = SheetSample(row) ?? throw new InvalidOperationException("This point has not been captured.");
         var (correction, blocker) = ValidateSheetCorrection(row, sample);
         if (correction is null) throw new InvalidOperationException(blocker);
-        if (sample.Measurement == correction.Measurement) { sheetEditingRow = -1; await SaveWizard(cancellation); return; }
+        if (sample.Measurement == correction.Measurement) { calibration.Wizard.StopEditing(); await SaveWizard(cancellation); return; }
         // Keep the original report and exact captured evidence before replacing
         // entered ruler coordinates. Audit files are never auto-loaded as reports.
         string audit = Path.Combine(RobotCalibrationDirectory, "measurement-corrections");
@@ -83,8 +83,8 @@ public sealed partial class PipersPlugin
         calibration.Desk.Correct(sample, correction);
         try { await SaveCalibration(cancellation); }
         catch { calibration.Desk.Reinstate(before); throw; }
-        sheetEditingRow = -1; calibration.Markers.InvalidateSheet();
-        wizardMessage = $"{SheetPointName(row)} measurements corrected and saved. Its captured arm pose is unchanged; the original report is retained. Calculate alignment again.";
+        calibration.Wizard.StopEditing(); calibration.Markers.InvalidateSheet();
+        calibration.Wizard.Report($"{SheetPointName(row)} measurements corrected and saved. Its captured arm pose is unchanged; the original report is retained. Calculate alignment again.");
         await SaveWizard(cancellation);
     }
 }

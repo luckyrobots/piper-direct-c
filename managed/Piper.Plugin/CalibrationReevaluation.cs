@@ -50,9 +50,10 @@ public sealed partial class PipersPlugin
 
     private void InvalidateReevaluationSetup(string revision)
     {
-        calibrationWizard = Wizard with { ModelAssetId = calibrationIdentity!.ModelAssetId, ModelRevision = revision,
-            Setup = new(), Step = CalibrationWizardStep.ModelPoint };
-        Wizard.Answers["reevaluatedscene"] = calibrationIdentity.SceneId;
+        var identity = calibrationIdentity!;
+        calibration.Wizard.Edit(draft => draft with { ModelAssetId = identity.ModelAssetId, ModelRevision = revision,
+            Setup = new(), Step = CalibrationWizardStep.ModelPoint });
+        calibration.Wizard.Answer("reevaluatedscene", identity.SceneId);
         calibration.Markers.Hide();
         calibration.Markers.ResetSheet();
     }
@@ -66,7 +67,7 @@ public sealed partial class PipersPlugin
                 calibrationReevaluation.SceneId.Length > 0 && Wizard.Answers.GetValueOrDefault("reevaluatedscene") != saved.SceneId))
         {
             InvalidateReevaluationSetup(saved.ModelRevision);
-            wizardMessage = "Saved poses were re-evaluated in the current scene and model. Reconfirm LEFT, BACK, jaw tips and the desk, then Calculate alignment.";
+            calibration.Wizard.Report("Saved poses were re-evaluated in the current scene and model. Reconfirm LEFT, BACK, jaw tips and the desk, then Calculate alignment.");
         }
     }
 
@@ -138,7 +139,7 @@ public sealed partial class PipersPlugin
         try { await SaveCalibration(cancellation); }
         catch { calibration.Desk.Reinstate(before); throw; }
         InvalidateReevaluationSetup(revision);
-        wizardMessage = "Saved poses re-evaluated in the current scene and model; all physical angles, measurements and capture times are preserved. Reconfirm LEFT, BACK, jaw tips and the desk, then Calculate alignment. Nothing has moved or been applied.";
+        calibration.Wizard.Report("Saved poses re-evaluated in the current scene and model; all physical angles, measurements and capture times are preserved. Reconfirm LEFT, BACK, jaw tips and the desk, then Calculate alignment. Nothing has moved or been applied.");
         await SaveWizard(cancellation);
     }
 }

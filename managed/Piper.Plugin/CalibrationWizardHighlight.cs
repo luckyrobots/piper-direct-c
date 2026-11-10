@@ -72,12 +72,12 @@ public sealed partial class PipersPlugin
             if (!WizardHighlightCurrent(shown.Scope)) throw new InvalidOperationException("Fresh matching robot subscription is required for the temporary marker.");
             calibration.Markers.Show(shown, Stopwatch.GetTimestamp());
             await RequestWizardHighlight(shown.Scope, true, cancellation);
-            wizardMessage = "Compare the simulation marker with the midpoint between the real jaw tips. Continue only if they represent the same point.";
+            calibration.Wizard.Report("Compare the simulation marker with the midpoint between the real jaw tips. Continue only if they represent the same point.");
         }
         catch (Exception error)
         {
             calibration.Markers.Move(shown, MarkerState.None);
-            wizardMessage = "Named point coordinates are available, but the temporary marker is unavailable: " + error.Message;
+            calibration.Wizard.Report("Named point coordinates are available, but the temporary marker is unavailable: " + error.Message);
         }
         finally { if (entered) calibration.Markers.Gate.Release(); }
     }
@@ -96,7 +96,7 @@ public sealed partial class PipersPlugin
         catch (Exception error)
         {
             if (wizardMarker is MarkerState.Tool tool) calibration.Markers.Move(tool, MarkerState.None);
-            wizardMessage = "Temporary tool marker paused: " + error.Message;
+            calibration.Wizard.Report("Temporary tool marker paused: " + error.Message);
         }
         finally { if (entered) calibration.Markers.Gate.Release(); }
     }
@@ -129,7 +129,7 @@ public sealed partial class PipersPlugin
     private async Task<bool> TryMarkerRequest(Task request, string failure)
     {
         try { await request; return true; }
-        catch (Exception error) { wizardMessage = failure + error.Message; return false; }
+        catch (Exception error) { calibration.Wizard.Report(failure + error.Message); return false; }
     }
 
     // Clear only the exact previously pinned scene/root/model. In particular,
@@ -153,7 +153,7 @@ public sealed partial class PipersPlugin
                 if (previous is MarkerState.Edge edge) await RequestWizardReference(edge.Scope, false, cancellation);
                 else if (previous is MarkerState.Tool tool) await RequestWizardHighlight(tool.Scope, false, cancellation);
             }
-            catch (Exception error) { wizardMessage = "Temporary marker clear was not acknowledged; it will expire. " + error.Message; }
+            catch (Exception error) { calibration.Wizard.Report("Temporary marker clear was not acknowledged; it will expire. " + error.Message); }
         }
         catch (OperationCanceledException) { calibration.Markers.Hide(); }
         finally { if (entered) calibration.Markers.Gate.Release(); }

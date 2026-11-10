@@ -278,8 +278,7 @@ internal static class WorkspaceViewTests
                 "Replay review hid the requirement for fresh reported acceleration caps");
             foreach (CalibrationWizardStep step in Enum.GetValues<CalibrationWizardStep>())
             {
-                plugin.wizardProfile = "piper-1";
-                plugin.calibrationWizard = CalibrationWizardFlow.New("piper-1") with { Step = step };
+                plugin.calibration.Wizard.Open("piper-1", CalibrationWizardFlow.New("piper-1") with { Step = step });
                 if (step == CalibrationWizardStep.InspectSaved) plugin.calibration.Desk.AskArchive(); else plugin.calibration.Desk.CancelArchive();
                 await CheckView("settings", "bench");
             }
@@ -287,7 +286,7 @@ internal static class WorkspaceViewTests
             // Exercise the actual edit/save/reload path without starting any
             // hardware, camera, backend or editor workers.
             var savedDraft = CalibrationWizardFlow.New("piper-1", 77);
-            plugin.calibrationWizard = savedDraft;
+            plugin.calibration.Wizard.Edit(_ => savedDraft);
             await plugin.WizardEvent("77.sheet.field.p0back", JsonSerializer.SerializeToElement("200"), CancellationToken.None);
             await plugin.WizardEvent("77.sheet.field.p0left", JsonSerializer.SerializeToElement("697"), CancellationToken.None);
             var freshPlugin = new PipersPlugin();

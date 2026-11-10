@@ -44,7 +44,7 @@ internal static class CalibrationReevaluationTests
             using var fixture = new Fixture();
             if (blocked == "calibrationApplied") fixture.Plugin.calibration.Desk.PlacementVerified(fixture.Root);
             else if (blocked == "calibrationPlacementUnverified") fixture.Plugin.calibration.Desk.MarkWritePending();
-            else if (blocked == "sheetEditingRow") fixture.Plugin.sheetEditingRow = 1;
+            else if (blocked == "sheetEditingRow") fixture.Plugin.calibration.Wizard.EditRow(1);
             else if (blocked == "stale") fixture.State["devices"]![0]!["fresh"] = false;
             else fixture.State["motion"]!["active"] = true;
             await RejectAsync<InvalidOperationException>(() => fixture.Reevaluate(), blocked + " allowed re-evaluation");
@@ -72,10 +72,10 @@ internal static class CalibrationReevaluationTests
         Check(audit["previousSceneId"]!.GetValue<string>() == "scene-a" && audit["sceneId"]!.GetValue<string>() == "reopened-scene" &&
             audit["previousReport"]!["identity"]!["sceneId"]!.GetValue<string>() == "scene-a", "Scene rebinding lost its original-scene provenance");
         var draft = f.Plugin.calibrationWizard!;
-        draft.Answers["reevaluatedscene"] = "scene-a";
-        f.Plugin.calibrationWizard = draft with { Setup = new("old-root", "old-proof", "old-proof", JawTipsConfirmed: true) };
+        f.Plugin.calibration.Wizard.Answer("reevaluatedscene", "scene-a");
+        f.Plugin.calibration.Wizard.ChangeSetup(_ => new("old-root", "old-proof", "old-proof", JawTipsConfirmed: true));
         f.Plugin.ReconcileReevaluatedWizard();
-        draft = f.Plugin.calibrationWizard;
+        draft = f.Plugin.calibrationWizard!;
         Check(draft.Answers["reevaluatedscene"] == "reopened-scene" && draft.Setup == new SheetSetup(),
             "An interrupted scene-only rebind restored confirmations from the old scene when the model revision was unchanged");
         foreach (string action in new[] { "left.show", "left.confirm", "back.show", "back.confirm", "tool.show", "tool.confirm", "surface", "fit" })
@@ -133,9 +133,10 @@ internal static class CalibrationReevaluationTests
             "Reconfirming the corrected model changed the fixed tabletop, recaptured poses or wrote placement");
 
         // Simulate report commit followed by an interrupted wizard-draft write.
-        f.Plugin.calibrationWizard = draft with { ModelRevision = "old-model", Setup = new("old-root", "old-proof", "old-proof", JawTipsConfirmed: true) };
+        var stale = draft with { ModelRevision = "old-model", Setup = new("old-root", "old-proof", "old-proof", JawTipsConfirmed: true) };
+        f.Plugin.calibration.Wizard.Edit(_ => stale);
         f.Plugin.ReconcileReevaluatedWizard();
-        draft = f.Plugin.calibrationWizard;
+        draft = f.Plugin.calibrationWizard!;
         Check(draft.ModelRevision == "new-model" && draft.Setup == new SheetSetup(),
             "A stale wizard draft restored the old model and approvals after the recomputed report committed");
     }
@@ -199,14 +200,13 @@ internal static class CalibrationReevaluationTests
             Plugin.engine = context; Plugin.preferences = prefs; Plugin.telemetry.PublishState(State); Plugin.telemetry.AdoptBackend("session");
             Plugin.link = new RobotLink(liveScene, liveEntity, Pose()["joints"]!.AsArray(), device);
             Plugin.linkBackendToken = "session"; Plugin.workspace.Commit(WorkspaceNavigation.Calibration);
-            Plugin.wizardProfile = "piper-1";
             Plugin.calibration.Desk.Reinstate(DeskSession.Unloaded with { Profile = "piper-1", Identity = Identity, Original = Root, Fit = originalFit,
                 Desk = desk, Path = ReportPath, Samples = [.. Originals] });
             var wizard = CalibrationWizardFlow.New("piper-1") with { ModelAssetId = "asset-a", ModelRevision = "old-model",
                 Setup = new(Root.Json().ToJsonString(), "old-left", "old-back", JawTipsConfirmed: true, SurfaceConfirmed: true) };
             foreach (var (key, text) in new[] { ("tool", "calibration_jaw_tips"), ("width", "1400"), ("depth", "700"), ("precision", "5"),
                 ("sceney", "750") }) wizard.Answers[key] = text;
-            Plugin.calibrationWizard = wizard; Fresh();
+            Plugin.calibration.Wizard.Open("piper-1", wizard); Fresh();
         }
 
         public JsonObject Pose() => new()

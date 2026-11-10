@@ -131,7 +131,7 @@ public sealed partial class PipersPlugin
         await RequestWizardReference(scope, true, cancellation, frame);
         if (!WizardReferenceCurrent(scope)) throw new InvalidOperationException("The robot or question changed while the pointer was being shown. Show it again.");
         calibration.Markers.Move(pending, pending with { AcknowledgedAt = Stopwatch.GetTimestamp() });
-        wizardMessage = "The simulation pointer marks the " + (scope.Step == CalibrationWizardStep.DeskFrame ? "LEFT" : "BACK") + " desk edge. Compare it with the edge of your real desk before confirming.";
+        calibration.Wizard.Report("The simulation pointer marks the " + (scope.Step == CalibrationWizardStep.DeskFrame ? "LEFT" : "BACK") + " desk edge. Compare it with the edge of your real desk before confirming.");
     }
 
     private async Task ShowWizardReference(CancellationToken cancellation, bool frame = true)
@@ -147,7 +147,7 @@ public sealed partial class PipersPlugin
         catch (Exception error)
         {
             calibration.Markers.UnacknowledgeEdge(); calibration.Markers.RequireRetry();
-            wizardMessage = WizardReferenceHighlightScope.FailureMessage(error);
+            calibration.Wizard.Report(WizardReferenceHighlightScope.FailureMessage(error));
         }
         finally { if (entered) calibration.Markers.Gate.Release(); }
     }
@@ -164,7 +164,7 @@ public sealed partial class PipersPlugin
         if (!WizardReferenceHighlightScope.RefreshDue(edge, Wizard, Stopwatch.GetElapsedTime(calibration.Markers.AttemptedAt))) return;
         calibration.Markers.MarkAttempt(Stopwatch.GetTimestamp());
         try { await ShowWizardReferenceWithinGate(cancellation, firstQuestionMarker); }
-        catch (Exception error) { calibration.Markers.UnacknowledgeEdge(); calibration.Markers.RequireRetry(); wizardMessage = WizardReferenceHighlightScope.FailureMessage(error); }
+        catch (Exception error) { calibration.Markers.UnacknowledgeEdge(); calibration.Markers.RequireRetry(); calibration.Wizard.Report(WizardReferenceHighlightScope.FailureMessage(error)); }
     }
 
     private void ConfirmWizardReference()
@@ -173,7 +173,7 @@ public sealed partial class PipersPlugin
             throw new InvalidOperationException(calibration.Markers.RetryRequired && wizardMessage.Length > 0 ? wizardMessage :
                 "First show the pointer in the simulation, then compare it with the matching real desk edge.");
         string proof = scope.DeskFingerprint();
-        UpdateSetup(setup => Wizard.Step == CalibrationWizardStep.DeskFrame
+        calibration.Wizard.ChangeSetup(setup => Wizard.Step == CalibrationWizardStep.DeskFrame
             ? setup.ConfirmLeft(scope.RootPlacement.Json().ToJsonString(), proof)
             : setup.ConfirmBack(proof));
     }
