@@ -16,11 +16,11 @@ internal static class SuiteRunner
     // Local filters. Each names suites by "Class." or "Class.Method" prefix.
     private static readonly Dictionary<string, string[]> filters = new(StringComparer.Ordinal)
     {
-        ["--teaching-resume"] = ["TeachingResumeTests.", "SimulationFollowingTests.RunTeachingResume"],
-        ["--primary-ui"] = ["SimulationFollowingTests.RunPrimaryWorkspaceAction"],
-        ["--unified-follow"] = ["SimulationFollowingTests.RunUnifiedFollowing"],
-        ["--group-follow"] = ["GroupSimulationFollowingTests.", "SimulationFollowingTests.RunGroupFollow", "SimulationFollowingTests.RunPrimaryWorkspaceAction"],
-        ["--endpoint-stationary"] = ["SimulationEndpointStationaryTests.", "OrderedSimulationExecutionTests.", "SimulationFollowingTests.RunGroupFollow", "SimulationFollowingTests.RunUnifiedFollowing"],
+        ["--teaching-resume"] = ["TeachingResumeTests.", "RecoveryTeachingResumeTests."],
+        ["--primary-ui"] = ["WorkspacePrimaryActionTests."],
+        ["--unified-follow"] = ["FollowUnifiedSessionTests."],
+        ["--group-follow"] = ["GroupSimulationFollowingTests.", "FollowGroupSessionTests.", "WorkspacePrimaryActionTests."],
+        ["--endpoint-stationary"] = ["SimulationEndpointStationaryTests.", "OrderedSimulationExecutionTests.", "FollowGroupSessionTests.", "FollowUnifiedSessionTests."],
         ["--telemetry-connection"] = ["TelemetryConnectionPresentationTests."],
         ["--recovery-ui"] = ["RecoveryWorkspaceTests."],
     };

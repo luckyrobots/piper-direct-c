@@ -8,7 +8,7 @@ using LuckyRobots.Piper.Grpc;
 using LuckyRobots.Piper.Pika;
 using LuckyRobots.Piper.Plugin;
 
-internal static partial class SimulationFollowingTests
+internal static class FollowGroupSessionTests
 {
     public static async Task RunGroupFollow()
     {
@@ -16,7 +16,7 @@ internal static partial class SimulationFollowingTests
         foreach (var (profile, name, transport) in new[] { ("piper-1", "First", SimulationTrajectoryTransport.StreamedPosition),
             ("piper-2", "Second", SimulationTrajectoryTransport.StreamedPosition), ("piper-2", "Second", "unknown-wire-mode") })
         {
-            await using var unsupported = new Fixture(); unsupported.ConfigureGroup(); unsupported.UseUiDispatcher();
+            await using var unsupported = new FollowFixture(); unsupported.ConfigureGroup(); unsupported.UseUiDispatcher();
             unsupported.SetProfileTransport(profile, transport);
             // A backend capability advertisement cannot qualify a transport
             // that this coordinator deliberately does not support.
@@ -41,7 +41,7 @@ internal static partial class SimulationFollowingTests
         }
         foreach (string saved in new[] { "valid", "missing", "malformed", "other-profile", "other-device", "other-distribution" })
         {
-            await using var reference = new Fixture(); reference.ConfigureGroup(); reference.SelectGroupFollowers("piper-2"); reference.UseUiDispatcher();
+            await using var reference = new FollowFixture(); reference.ConfigureGroup(); reference.SelectGroupFollowers("piper-2"); reference.UseUiDispatcher();
             string? distribution = new RobotProfile("piper-2", "Second").PikaDistribution;
             var value = new PikaClosedDisplayReference(1, saved == "other-profile" ? "piper-1" : "piper-2",
                 saved == "other-device" ? "/dev/other" : "/dev/pika-b", saved == "other-distribution" ? "other" : distribution, -.0354, DateTimeOffset.UtcNow);
@@ -59,7 +59,7 @@ internal static partial class SimulationFollowingTests
         }
         foreach (string scenario in new[] { "missing cache", "stale cache", "invalid current scene" })
         {
-            await using var refresh = new Fixture(); refresh.ConfigureGroup(); refresh.UseUiDispatcher();
+            await using var refresh = new FollowFixture(); refresh.ConfigureGroup(); refresh.UseUiDispatcher();
             var cached = refresh.Plugin.scene!;
             var current = cached.DeepClone().AsObject();
             cached["robots"]![0]!["joints"]!.AsArray().RemoveAt(8);
@@ -80,7 +80,7 @@ internal static partial class SimulationFollowingTests
         }
         foreach (string robotId in new[] { "", "robot-a" })
         {
-            await using var assignment = new Fixture(); assignment.ConfigureGroup(); assignment.UseUiDispatcher();
+            await using var assignment = new FollowFixture(); assignment.ConfigureGroup(); assignment.UseUiDispatcher();
             assignment.SetSecondSceneBinding(robotId, "");
             assignment.SetGroupSceneEvidence(null);
             await assignment.Click("group.follow.toggle");
@@ -92,7 +92,7 @@ internal static partial class SimulationFollowingTests
         }
         // Exercise the same pure report used by admission and sidebar patches,
         // including a nonselected participant rather than only the visible arm.
-        foreach (var (code, change) in new (string, Action<Fixture>)[] {
+        foreach (var (code, change) in new (string, Action<FollowFixture>)[] {
             ("approval", f => f.Snapshot["devices"]![1]!["generation"] = 9L),
             ("teaching", f => { f.Snapshot["devices"]![1]!["status"]!["control"] = 2; f.Snapshot["devices"]![1]!["status"]!["teach_state"] = 1; }),
             ("teaching-return", f => { f.Snapshot["devices"]![1]!["status"]!["control"] = 2; f.Snapshot["devices"]![1]!["status"]!["teach_state"] = 2; }),
@@ -113,12 +113,12 @@ internal static partial class SimulationFollowingTests
             ("scene-binding", f => f.Plugin.scene!["robots"]![0]!["joints"]!.AsArray().RemoveAt(8)),
         })
         {
-            await using var invalid = new Fixture(); invalid.ConfigureGroup(); invalid.Edit(_ => change(invalid));
+            await using var invalid = new FollowFixture(); invalid.ConfigureGroup(); invalid.Edit(_ => change(invalid));
             var report = invalid.Preparation();
             Check(!report.Ready && report.Issues.Any(i => i.ProfileId == "piper-2" && i.RobotName == "Second" && i.Code == code),
                 "Group preparation hid a nonselected robot's named " + code + " blocker");
         }
-        await using (var blocked = new Fixture())
+        await using (var blocked = new FollowFixture())
         {
             blocked.ConfigureGroup(); blocked.UseUiDispatcher();
             var arm = blocked.Snapshot["devices"]![0]!;
@@ -141,7 +141,7 @@ internal static partial class SimulationFollowingTests
             Check(blocked.GroupActive && blocked.Mode == "edit" && blocked.EngineRequests.Count(r => r.Action == "arm-next-play") == 1 && blocked.Rpc.Requests.IsEmpty,
                 "Retrying a ready group failed to arm exactly once in Edit or retained a superseded setup failure");
         }
-        await using (var stopped = new Fixture())
+        await using (var stopped = new FollowFixture())
         {
             stopped.ConfigureGroup(); stopped.UseUiDispatcher();
             stopped.SetGroupSceneEvidence(null);
@@ -157,7 +157,7 @@ internal static partial class SimulationFollowingTests
                 !stopped.EngineRequests.Any(r => r.Method == "scene.robots" || r.Action == "arm-next-play"),
                 "Follow admission cleared a recorded STOP or concealed the stopped partner");
         }
-        await using (var idle = new Fixture())
+        await using (var idle = new FollowFixture())
         {
             idle.ConfigureGroup();
             idle.Edit(snapshot =>
@@ -167,7 +167,7 @@ internal static partial class SimulationFollowingTests
             });
             Check(idle.Preparation().Ready && idle.SidebarFollowEnabled(), "Transient encoder stillness disabled the explicit global Follow action");
         }
-        await using (var armed = new Fixture())
+        await using (var armed = new FollowFixture())
         {
             armed.ConfigureGroup(); armed.UseUiDispatcher();
             await armed.GroupEvent("toggle");
@@ -185,7 +185,7 @@ internal static partial class SimulationFollowingTests
             }
             finally { armed.Commands.Release(); }
         }
-        await using var f = new Fixture(); f.ConfigureGroup(); f.UseUiDispatcher();
+        await using var f = new FollowFixture(); f.ConfigureGroup(); f.UseUiDispatcher();
         await f.Click("group.follow.toggle");
         await WaitFor(() => f.GroupActive && f.EngineRequests.Any(r => r.Action == "arm-next-play"), "The public Follow event never armed its ready group");
         Check(f.GroupActive && f.Mode == "edit" && f.Rpc.Requests.IsEmpty &&
@@ -238,7 +238,7 @@ internal static partial class SimulationFollowingTests
             f.Plugin.uiActionError.Contains("CAN connection changed"), "Grouped cleanup removed power or lost the actual first generation-change failure");
 
         var expiryClock = new FollowTestClock();
-        await using var expired = new Fixture(followClock: expiryClock); expired.ConfigureGroup();
+        await using var expired = new FollowFixture(followClock: expiryClock); expired.ConfigureGroup();
         await expired.GroupEvent("toggle"); expired.RequestGroupPlay();
         await Eventually(() => expired.GroupPhase == GroupFollowPhase.Following || !expired.GroupActive, "Group expiry fixture did not activate");
         Check(expired.GroupActive, "Group expiry fixture retired before it activated: " + expired.Plugin.follow.Status.Headline);
