@@ -35,7 +35,7 @@ static int request(struct fixture *f,const char *action)
 }
 static void tick(struct fixture *f,bool heartbeat)
 {
-    f->now+=.025; if (heartbeat) LANE(&f->c)->heartbeat=f->now; controller_tick(&f->c,f->now);
+    fake_bus.now=f->now+=.025; if (heartbeat) LANE(&f->c)->heartbeat=f->now; controller_tick(&f->c,f->now);
 }
 static void cleanup(struct fixture *f)
 {

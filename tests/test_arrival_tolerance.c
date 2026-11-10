@@ -62,7 +62,7 @@ static void setup(struct fixture *f,double speed,double target)
 }
 static void tick(struct fixture *f)
 {
-    f->now+=.025; LANE(&f->c)->heartbeat=f->now; controller_tick(&f->c,f->now);
+    fake_bus.now=f->now+=.025; LANE(&f->c)->heartbeat=f->now; controller_tick(&f->c,f->now);
 }
 static void cleanup(struct fixture *f)
 {
@@ -123,10 +123,10 @@ static void scenarios(void)
         if (variant==1) ++d->generation;
         if (variant==2) LANE(&f.c)->heartbeat=f.now-1;
         if (variant==3) { d->feedback.arm[0].control=2; d->feedback.arm[0].teach=1; d->feedback.arm[0].arm_status=11; }
-        f.now+=.025; controller_tick(&f.c,f.now);
+        fake_bus.now=f.now+=.025; controller_tick(&f.c,f.now);
         CHECK(LANE(&f.c)->op==OP_IDLE&&!(LANE(&f.c)->pose_phase==POSE_ARRIVAL_HOLD));
         uint64_t tx=d->tx;
-        for (unsigned i=0;i<20;++i) { f.now+=.025; controller_tick(&f.c,f.now); }
+        for (unsigned i=0;i<20;++i) { fake_bus.now=f.now+=.025; controller_tick(&f.c,f.now); }
         CHECK(LANE(&f.c)->op==OP_IDLE&&!(LANE(&f.c)->pose_phase==POSE_ARRIVAL_HOLD)&&d->tx==tx);
         cleanup(&f);
     }
