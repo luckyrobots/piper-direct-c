@@ -27,8 +27,11 @@ internal static partial class SimulationFollowingTests
         private readonly PipersPlugin plugin;
         public PipersPlugin Plugin => plugin;
         private readonly TimeProvider followClock;
-        private readonly object resumeFrameGate = new();
-        private bool publishResumeFrameCopies;
+        // Every writer of Snapshot holds this gate, and the plugin only ever
+        // receives a copy made under it. The telemetry worker, the RPC
+        // handlers (plugin threads) and the test thread all write here.
+        private readonly object snapshotGate = new();
+        private bool resumeFrames;
         public readonly FakeCalls Rpc = new();
         public ConcurrentQueue<(string Method, string Action, JsonObject Body)> EngineRequests { get; } = new();
         public ConcurrentQueue<(string Method, string Action, JsonObject Body)> AppliedEngineRequests { get; } = new();
@@ -118,6 +121,10 @@ internal static partial class SimulationFollowingTests
             plugin.state = Snapshot; plugin.telemetryScope = new TelemetryScope("fixture-backend", "can-a", 7);
             Rpc.Accepted = (route, body) =>
             {
+                lock (snapshotGate) Accept(route, body);
+            };
+            void Accept(string route, JsonObject body)
+            {
                 string action = body["action"]?.GetValue<string>() ?? "";
                 if (route == "/api/command" && action == "pose")
                 {
@@ -155,8 +162,8 @@ internal static partial class SimulationFollowingTests
                 if (route == "/api/command" && action == "hold") { Snapshot["motion"]!["active"] = false; Snapshot["motion"]!["following"] = false; }
                 if (ScriptedMissedGrasp && route == "/api/pika/follow-update")
                     Snapshot["pika"]!["telemetry"]!["motor"]!["Position"] = PikaProtocol.Angle(body["opening_mm"]!.GetValue<double>());
-            };
-            Rpc.ArmActive = () => Snapshot["motion"]?["active"]?.GetValue<bool>() == true;
+            }
+            Rpc.ArmActive = () => { lock (snapshotGate) return Snapshot["motion"]?["active"]?.GetValue<bool>() == true; };
             plugin.linkBackendToken = "fixture-backend";
             plugin.link = new RobotLink("source-a", "robot-a", model["joints"]!.AsArray(), Snapshot["devices"]![0]!.AsObject());
             plugin.scene = new JsonObject { ["sceneId"] = "source-a", ["robots"] = new JsonArray(new JsonObject
@@ -347,30 +354,32 @@ internal static partial class SimulationFollowingTests
             Refresh();
         }
 
+        /* Change the telemetry and publish the result as one frame. */
+        public void Edit(Action<JsonObject> change)
+        {
+            lock (snapshotGate) { change(Snapshot); Refresh(); }
+        }
+
         public void Refresh()
         {
             if (FreezeTelemetry) return;
-            if (publishResumeFrameCopies)
+            lock (snapshotGate)
             {
-                lock (resumeFrameGate)
+                if (!resumeFrames)
                 {
-                    // Resume can retain a receipt across several checks.
-                    var frame = Snapshot.DeepClone().AsObject();
-                    plugin.state = frame;
-                    Publish(frame);
+                    double now = Stopwatch.GetTimestamp() / (double)Stopwatch.Frequency;
+                    Snapshot["pika"]!["last_motor_request"] = "pika-position-fixture";
+                    Snapshot["pika"]!["request_time_s"] = pikaRequestAt;
+                    Snapshot["pika"]!["feedback_time_s"] = now;
+                    Snapshot["pika"]!["pending"] = false;
+                    if (GroupMode) foreach (var pika in Snapshot["pikas"]!.AsArray().OfType<JsonObject>()) pika["feedback_time_s"] = now;
                 }
-                return;
+                var frame = Snapshot.DeepClone().AsObject();
+                // Resume can retain a receipt across several checks.
+                if (resumeFrames) plugin.state = frame;
+                plugin.telemetry.Publish(
+                    new(frame, "fixture-backend", Interlocked.Increment(ref sequence), followClock.GetTimestamp(), EnvelopeAgeMs));
             }
-            double now = Stopwatch.GetTimestamp() / (double)Stopwatch.Frequency;
-            Snapshot["pika"]!["last_motor_request"] = "pika-position-fixture";
-            Snapshot["pika"]!["request_time_s"] = pikaRequestAt;
-            Snapshot["pika"]!["feedback_time_s"] = now;
-            Snapshot["pika"]!["pending"] = false;
-            if (GroupMode) foreach (var pika in Snapshot["pikas"]!.AsArray().OfType<JsonObject>()) pika["feedback_time_s"] = now;
-            Publish(Snapshot);
-
-            void Publish(JsonObject frame) => plugin.telemetry.Publish(
-                new(frame, "fixture-backend", Interlocked.Increment(ref sequence), followClock.GetTimestamp(), EnvelopeAgeMs));
         }
         public void RemoveMeasuredLink(int editorDelayMilliseconds) { plugin.link = null; LinkEditorDelayMilliseconds = editorDelayMilliseconds; }
         public ConcurrentQueue<UiEvent> DiscardedUiEvents { get; } = new();
