@@ -87,6 +87,9 @@ static bool persist(struct controller *c)
                                                      verified recovery
      "kind":  why it is latched (intent, stop, obstruction, power, reset); empty
               when clear. Recovery eligibility uses kind, never message text.
+              While latched it only moves toward the stricter value
+              (intent < obstruction < power < stop < reset): cleanup after an
+              operator STOP cannot turn the record back into an obstruction.
      "reason": the operator-facing text of the latch; empty when clear.
      "kind_reason": the reason that "kind" was set for. This build writes
               reason and kind_reason together, so a mismatch means an older
@@ -111,6 +114,23 @@ static const char obstruction_prefix[]="Possible obstruction at J";
 static bool record_state_valid(const char *state)
 {
     return !strcmp(state,RECORD_CLEAR)||!strcmp(state,RECORD_LATCHED)||!strcmp(state,RECORD_RESET_PENDING);
+}
+/* Strictness of a kind: 0 for a clear record's empty kind, then the known
+   kinds from the one with the most recovery paths to the one with the fewest.
+   -1 is not a kind this build knows. */
+static int kind_rank(const char *kind)
+{
+    const char *order[]={"",KIND_INTENT,KIND_OBSTRUCTION,KIND_POWER,KIND_STOP,KIND_RESET};
+    for (int i=0;i<(int)(sizeof order/sizeof order[0]);++i) if (!strcmp(kind,order[i])) return i;
+    return -1;
+}
+/* The kind a latched record keeps when another latch offers `offered`. A
+   value this build does not know counts as the plain STOP kind. */
+static const char *stricter_kind(const char *held,const char *offered)
+{
+    if (kind_rank(held)<0) held=KIND_STOP;
+    if (kind_rank(offered)<0) offered=KIND_STOP;
+    return kind_rank(held)>kind_rank(offered)?held:offered;
 }
 /* Legacy derivation only: string matching is confined to records that predate
    the explicit kind field. */
@@ -187,12 +207,18 @@ static bool reset_pending(struct controller *c,const char *id)
     return record_is(record(c,id),RECORD_RESET_PENDING)||
         (legacy_unacknowledged(c,id)&&!strcmp(text_field(legacy_stop(c,id),"source"),"reset_intent"));
 }
-static bool latch(struct controller *c,const char *id,const char *reason,const char *kind,bool pending)
+/* Latch the in-memory record. The caller persists it before reporting success. */
+static void latch_record(struct controller *c,const char *id,const char *reason,const char *kind,bool pending)
 {
     cJSON *r=record(c,id);
-    str(r,"state",pending?RECORD_RESET_PENDING:RECORD_LATCHED); str(r,"kind",kind); str(r,"reason",reason); str(r,"kind_reason",reason);
+    const char *kept=record_is(r,RECORD_CLEAR)?kind:stricter_kind(text_field(r,"kind"),kind);
+    char next[16]; snprintf(next,sizeof next,"%s",kept);
+    str(r,"state",pending?RECORD_RESET_PENDING:RECORD_LATCHED); str(r,"kind",next); str(r,"reason",reason); str(r,"kind_reason",reason);
     flag(r,"blocked",true); flag(r,"reset_pending",pending);
-    return persist(c);
+}
+static bool latch(struct controller *c,const char *id,const char *reason,const char *kind,bool pending)
+{
+    latch_record(c,id,reason,kind,pending); return persist(c);
 }
 static bool clear_latch(struct controller *c,const char *id)
 {
@@ -681,7 +707,11 @@ static void lane_stop(struct controller *c,struct controller_lane *l,const char 
     unsigned generation=had_job?l->generation:(d?d->generation:0);
     if (d) {
         cJSON *r=record(c,d->id);
-        if (!yes(r,"stop_event_active")) {
+        /* The first STOP's evidence is kept. It is marked active only once
+           the record is latched below, so the record never reads as active
+           evidence on a clear state. */
+        bool incident=yes(r,"stop_event_active");
+        if (!incident) {
             cJSON_DeleteItemFromObjectCaseSensitive(r,"last_fault");
             cJSON *event=cJSON_CreateObject(), *joints=cJSON_CreateArray();
             str(event,"reason",reason); str(event,"kind",kind); num(event,"unix_time",(double)time(NULL));
@@ -723,7 +753,7 @@ static void lane_stop(struct controller *c,struct controller_lane *l,const char 
                 num(j,"progress_reference_deg",had_job?l->obstruction[i].progress_position:NAN);
                 cJSON_AddItemToArray(joints,j);
             }
-            put(event,"joints",joints); put(r,"stop_event",event); flag(r,"stop_event_active",true);
+            put(event,"joints",joints); put(r,"stop_event",event);
         }
         /* Save the robot's fault before a stop changes its reported state. */
         struct piper_sample *s=&d->feedback.arm[0];
@@ -731,7 +761,7 @@ static void lane_stop(struct controller *c,struct controller_lane *l,const char 
             cJSON *fault=cJSON_CreateObject(); num(fault,"arm_status",s->arm_status);
             num(fault,"error",s->error); num(fault,"teach_state",s->teach);
             num(fault,"control",s->control); num(fault,"observed_monotonic_s",s->status_at);
-            put(record(c,d->id),"last_fault",fault);
+            put(r,"last_fault",fault);
         }
         struct can_frame f=piper_stop_frame();
         sent=can_bus_send(&c->bus,d,generation,&f,1);
@@ -739,10 +769,12 @@ static void lane_stop(struct controller *c,struct controller_lane *l,const char 
         /* Removing power is recovery cleanup, not a replacement for the
            incident that made cleanup necessary. Keep its primary evidence
            and reason while retaining the latest cleanup failure separately. */
-        bool cleanup=l->op==OP_DISABLE&&yes(r,"stop_event_active");
+        bool cleanup=l->op==OP_DISABLE;
         if(cleanup)str(r,"last_cleanup_error",reason);
         const char *latched_kind=kind,*latched=cleanup?active_incident(c,d->id,reason,&latched_kind):reason;
-        latch(c,d->id,latched,latched_kind,reset_pending(c,d->id));
+        latch_record(c,d->id,latched,latched_kind,reset_pending(c,d->id));
+        flag(r,"stop_event_active",true);
+        persist(c);
     }
     lane_go_idle(l); l->query=QUERY_IDLE;
     l->stop_delivered=sent;
@@ -834,7 +866,7 @@ static bool controller_init_devices(struct controller *c,bool simulation,unsigne
         const char *keys[]={"blocked","reset_pending","stop_event_active"};
         for (unsigned i=0;i<3;++i) if (field(saved_record,keys[i])&&!cJSON_IsBool(field(saved_record,keys[i]))) return false;
         if (field(saved_record,"state")&&(!cJSON_IsString(field(saved_record,"state"))||!record_state_valid(text_field(saved_record,"state")))) return false;
-        if (field(saved_record,"kind")&&!cJSON_IsString(field(saved_record,"kind"))) return false;
+        if (field(saved_record,"kind")&&(!cJSON_IsString(field(saved_record,"kind"))||kind_rank(text_field(saved_record,"kind"))<0)) return false;
         record_normalize(saved_record);
     }
     if (!simulation&&*legacy) {

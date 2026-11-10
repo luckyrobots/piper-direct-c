@@ -43,7 +43,7 @@ build/test-camera: tests/test_camera.c src/camera.c src/camera.h src/canbus.c sr
 CONTROLLER_TESTS = speed-units control range-drift range-transition arrival-tolerance configuration-cache \
 	idle-reconnect multi-lanes pose-entry-order startup reset-retry enable-sequence disable-sequence cycle \
 	gripper obstruction-controller follow follow-noop trajectory-follow trajectory-viability teaching \
-	teach-batches stationary recover-at-pose stop-generation hold-target
+	teach-batches stationary recover-at-pose stop-generation hold-target record-load
 FAKE_CLOCK = piper_now
 FAKE_BUS = piper_now can_bus_receive can_bus_send
 WRAP_arrival-tolerance = can_bus_receive can_bus_send
