@@ -509,6 +509,14 @@ static bool valid_target(struct controller_lane *l,struct can_device *d,const do
     }
     return true;
 }
+/* Every hold retargets the lane through here, so each one applies the same
+   limit clamp. False leaves the reason in l->error; the caller stops. */
+static bool hold_measured_pose(struct controller_lane *l,struct can_device *d)
+{
+    measured_hold_target(d,l->target);
+    if (!valid_target(l,d,l->target)) return false;
+    memcpy(l->command,l->target,sizeof l->command); return true;
+}
 static bool enabled(struct can_device *d,bool wanted,double after)
 {
     for (unsigned i=0;i<6;++i) {
@@ -953,13 +961,11 @@ static bool follow_hold(struct controller *c,struct controller_lane *l,struct ca
             why?why:"Motor enable or adapter changed during following.");
         stop_lane(c,l,failure); return false;
     }
-    measured_hold_target(d,l->target);
-    if (!valid_target(l,d,l->target)||!send_pose(c,l,d,l->target)) {
+    if (!hold_measured_pose(l,d)||!send_pose(c,l,d,l->target)) {
         char failure[512];
         snprintf(failure,sizeof failure,"%s Measured-pose hold failed: %s",reason,*d->problem?d->problem:l->error);
         stop_lane(c,l,failure); return false;
     }
-    memcpy(l->command,l->target,sizeof l->command);
     finish(c,l,d,reason,true);
     return true;
 }
@@ -1168,7 +1174,10 @@ static cJSON *lane_hold(struct controller *c,struct controller_lane *l,struct ca
         }
         const char *why=health(d,now,CHECK_CONTROL); if (why) return reply(status,409,why);
         leave_arrival_hold(l);
-        memcpy(l->target,d->feedback.arm[0].deg,sizeof l->target); memcpy(l->command,l->target,sizeof l->command);
+        if (!hold_measured_pose(l,d)) {
+            char failure[512]; snprintf(failure,sizeof failure,"Measured-pose hold failed: %s",l->error);
+            stop_lane(c,l,failure); return reply(status,409,l->message);
+        }
         bool was_cycle=l->op==OP_CYCLE; l->op=OP_MOVE; l->stage=STAGE_NONE;
         if (was_cycle) { l->started=l->progress_at=now; l->best_error=1e9; }
         l->settled_at=l->final_sent_at=0; l->heartbeat=now;
