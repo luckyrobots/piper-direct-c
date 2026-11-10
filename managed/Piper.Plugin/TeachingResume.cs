@@ -41,8 +41,10 @@ public static class TeachingResumeCheck
 
 public sealed partial class PipersPlugin
 {
-    private async Task ResumeControls(CancellationToken cancellation)
+    internal async Task ResumeControls(CancellationToken cancellation)
     {
+        if (primaryAction.Phase != PrimaryActionPhase.Running)
+            throw new InvalidOperationException("Resume controls runs only as the primary robot action. Nothing was sent; click Resume controls again.");
         string expectedProfile = ActiveProfile.Id, expectedToken = token;
         long expectedPermission = CommandAuthority.Epoch;
         var first = Device(expectedToken: expectedToken);
@@ -57,7 +59,6 @@ public sealed partial class PipersPlugin
             return Device(expectedDevice, expectedGeneration, expectedToken);
         }
 
-        Debug.Assert(primaryAction.Phase == PrimaryActionPhase.Running, "Resume runs only as the primary robot action.");
         primaryAction = primaryAction with { Phase = PrimaryActionPhase.ResumingControls };
         approved = linkCommandsEnabled = false;
         teachingSession.InvalidateReturn();
