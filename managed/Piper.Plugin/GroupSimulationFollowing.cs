@@ -146,14 +146,12 @@ public sealed partial class PipersPlugin
         return hardware;
     }
 
-    private enum FollowChannel { Arm, Pika }
-
     /// <summary>The single path for every arm and Pika Follow command. Match and
     /// Start belong to their group phases and mark the channel touched, so
     /// retirement holds it; Hold runs only while retiring.</summary>
-    private async Task<JsonObject> GroupCommand(GroupSession group, GroupLane lane, FollowChannel channel, FollowOp op, JsonObject? fields = null,
-        bool prevalidated = false)
+    private async Task<JsonObject> GroupCommand(GroupSession group, GroupLane lane, FollowCommand command, bool prevalidated = false)
     {
+        var op = command.Op;
         GroupFollowPhase? phase = op switch
         {
             FollowOp.Match => GroupFollowPhase.Matching, FollowOp.Start => GroupFollowPhase.Admitting,
@@ -163,13 +161,13 @@ public sealed partial class PipersPlugin
         if (op != FollowOp.Hold && !prevalidated) _ = LaneHardware(group, lane, ObserveLane(group, lane));
         if (op == FollowOp.Update) group.RequireTargetPublication();
         bool admission = op is FollowOp.Match or FollowOp.Start;
-        if (channel == FollowChannel.Pika)
+        if (command.Channel == FollowChannel.Pika)
         {
             if (admission) lane.TouchPika();
-            return await lane.Controller.Pika(op, fields);
+            return await lane.Controller.Send(command);
         }
         if (admission) lane.TouchArm();
-        try { return await lane.Controller.Arm(op, fields); }
+        try { return await lane.Controller.Send(command); }
         finally { if (admission) lane.ArmAdmissionReturned(group.Clock.GetTimestamp()); }
     }
 }

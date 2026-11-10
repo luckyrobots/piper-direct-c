@@ -115,7 +115,7 @@ public static partial class PiperApi
             return new ApiRequest(PiperApi.Reconnect, body);
         }
         /// <summary>POST /api/command: Control joints, a pose, motor power, gripper or recovery.</summary>
-        public static ApiRequest Command(string deviceId, long generation, string action, string owner, bool? standalone = null, bool? clear = null, bool? supported = null, bool? resetCompleted = null, bool? buttonOff = null, bool? zeroPoseConfirmed = null, bool? samePoseConfirmed = null, long? joint = null, JsonNode? degrees = null, double? speedDegS = null, double? toleranceDeg = null, double? widthMm = null, double? effortNm = null, bool? allowClosedOffset = null, bool? synchronized = null, double? speedPercent = null, long? requestId = null, long? sequence = null, bool? trajectory = null, string? trajectoryTransport = null)
+        public static ApiRequest Command(string deviceId, long generation, string action, string owner, bool? standalone = null, bool? clear = null, bool? supported = null, bool? resetCompleted = null, bool? buttonOff = null, bool? zeroPoseConfirmed = null, bool? samePoseConfirmed = null, long? joint = null, ApiNumbers? degrees = null, double? speedDegS = null, double? toleranceDeg = null, double? widthMm = null, double? effortNm = null, bool? allowClosedOffset = null, bool? synchronized = null, double? speedPercent = null, long? requestId = null, long? sequence = null, bool? trajectory = null, string? trajectoryTransport = null)
         {
             var body = new JsonObject();
             body["device_id"] = deviceId;
@@ -130,7 +130,7 @@ public static partial class PiperApi
             if (zeroPoseConfirmed is not null) body["zero_pose_confirmed"] = zeroPoseConfirmed.Value;
             if (samePoseConfirmed is not null) body["same_pose_confirmed"] = samePoseConfirmed.Value;
             if (joint is not null) body["joint"] = joint.Value;
-            if (degrees is not null) body["degrees"] = degrees!.DeepClone();
+            if (degrees is not null) body["degrees"] = degrees.Value.ToNode();
             if (speedDegS is not null) body["speed_deg_s"] = speedDegS.Value;
             if (toleranceDeg is not null) body["tolerance_deg"] = toleranceDeg.Value;
             if (widthMm is not null) body["width_mm"] = widthMm.Value;

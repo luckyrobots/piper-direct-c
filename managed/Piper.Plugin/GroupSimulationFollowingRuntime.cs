@@ -179,12 +179,11 @@ public sealed partial class PipersPlugin
             var hardware = LaneHardware(group, lane, ObserveLane(group, lane)); var first = lane.First!;
             if (!SimulationFollowPolicy.JointsMatchStart(first.CommandDegrees, hardware.JointDegrees))
             {
-                var admitted = await GroupCommand(group, lane, FollowChannel.Arm, FollowOp.Match,
-                    new() { ["degrees"] = JsonSerializer.SerializeToNode(first.CommandDegrees), ["synchronized"] = true });
+                var admitted = await GroupCommand(group, lane, lane.Controller.MatchArm(first.CommandDegrees));
                 lane.MatchRequested(admitted["request_id"]?.GetValue<long>() ?? throw new InvalidOperationException("Start matching has no arm request identity."));
             }
             if (!SimulationFollowPolicy.OpeningMatchesStart(first.CommandOpeningMm, hardware.GripperOpeningMm))
-                await GroupCommand(group, lane, FollowChannel.Pika, FollowOp.Match, new() { ["value"] = PikaProtocol.Angle(first.CommandOpeningMm) });
+                await GroupCommand(group, lane, lane.Controller.MatchPika(PikaProtocol.Angle(first.CommandOpeningMm)));
         }
         // Settling is local to matching: it starts at the first fresh at-pose
         // receipt and needs newer controller and Pika feedback after the dwell.
@@ -221,14 +220,14 @@ public sealed partial class PipersPlugin
         follow.Report("Starting selected followers · simulation remains paused");
         foreach (var lane in group.Lanes)
         {
-            var admitted = await GroupCommand(group, lane, FollowChannel.Arm, FollowOp.Start, SimulationTrajectoryTransport.StartFields());
+            var admitted = await GroupCommand(group, lane, lane.Controller.StartArm());
             SimulationTrajectoryTransport.ValidateAcknowledgement(admitted);
             long request = admitted["request_id"]?.GetValue<long>() ?? 0;
             // Record an acknowledged request before validating it, so retirement can hold it.
             if (request > 0) lane.FollowAdmitted(request, group.Clock.GetTimestamp(), telemetry.Latest?.Sequence ?? 0);
             if (request <= 0 || admitted["trajectory_follow"]?.GetValue<bool>() != true) throw new InvalidOperationException(lane.Profile.Name + ": native following was not acknowledged.");
             if (group.Primer is null) group.AttachPrimer(PrimeGroup(group, ct));
-            var pika = await GroupCommand(group, lane, FollowChannel.Pika, FollowOp.Start);
+            var pika = await GroupCommand(group, lane, lane.Controller.StartPika());
             lane.PikaFollowing(pika["follow_session"]?.GetValue<string>() ?? throw new InvalidOperationException("Pika did not acknowledge its following session."));
         }
         long began = group.Clock.GetTimestamp();
@@ -354,11 +353,11 @@ public sealed partial class PipersPlugin
                 long sequence = lane.NextSequence();
                 var timing = lane.Publications.Begin(sequence, Stopwatch.GetTimestamp());
                 attempts.Add((lane, timing));
-                writes.Add(lane.Publications.Observe(timing, GroupCommand(group, lane, FollowChannel.Arm, FollowOp.Update, new() { ["request_id"] = followRequests[lane.Profile.Id],
-                    ["sequence"] = sequence, ["degrees"] = JsonSerializer.SerializeToNode(target.JointDegrees) }, prevalidated: true), arm: true));
+                writes.Add(lane.Publications.Observe(timing, GroupCommand(group, lane,
+                    lane.Controller.UpdateArm(followRequests[lane.Profile.Id], sequence, target.JointDegrees), prevalidated: true), arm: true));
                 if (lane.Pika.Session is { Length: > 0 } pikaSession)
-                    writes.Add(lane.Publications.Observe(timing, ObservePika(lane, GroupCommand(group, lane, FollowChannel.Pika, FollowOp.Update, new()
-                        { ["follow_session"] = pikaSession, ["sequence"] = sequence, ["opening_mm"] = target.OpeningMm }, prevalidated: true)), arm: false));
+                    writes.Add(lane.Publications.Observe(timing, ObservePika(lane, GroupCommand(group, lane,
+                        lane.Controller.UpdatePika(pikaSession, sequence, target.OpeningMm), prevalidated: true)), arm: false));
             }
             await Task.WhenAll(writes);
         }
@@ -464,7 +463,7 @@ public sealed partial class PipersPlugin
                     device["motion"]?["generation"]?.GetValue<long>() == lane.Robot.Generation && device["motion"]?["active"]?.GetValue<bool>() == false &&
                     (request == 0 || device["motion"]?["request_id"]?.GetValue<long>() == request);
                 if (measuredIdle) return GroupReleaseEvidence.MeasuredIdle;
-                await GroupCommand(group, lane, FollowChannel.Arm, FollowOp.Hold, request > 0 ? new() { ["request_id"] = request } : null);
+                await GroupCommand(group, lane, lane.Controller.HoldArm(request > 0 ? request : null));
                 return GroupReleaseEvidence.HoldAcknowledged;
             }
             catch (Exception error) { FailGroup(group, error); return GroupReleaseEvidence.Unverified; }
@@ -478,7 +477,7 @@ public sealed partial class PipersPlugin
                 var receipt = telemetry.Latest;
                 if (receipt is null || ProfilePikaRouting.Find(receipt.State, lane.Profile)?["owner"]?.GetValue<string>() != owner)
                     throw new InvalidOperationException(lane.Profile.Name + ": gripper hold could not be verified for its original assignment and owner.");
-                await GroupCommand(group, lane, FollowChannel.Pika, FollowOp.Hold);
+                await GroupCommand(group, lane, lane.Controller.HoldPika());
                 return GroupReleaseEvidence.HoldAcknowledged;
             }
             catch (Exception error) { FailGroup(group, error); return GroupReleaseEvidence.Unverified; }

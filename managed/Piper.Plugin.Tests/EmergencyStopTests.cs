@@ -173,7 +173,7 @@ internal static class EmergencyStopTests
         {
             fixture.Plugin.approved = true;
             fixture.Rpc.DelayCommand = true;
-            Task pending = fixture.Plugin.Command("jog", new JsonObject { ["joint"] = 6, ["delta_deg"] = 1.0 },
+            Task pending = fixture.Plugin.Command("jog", new() { Joint = 6, Degrees = 1.0 },
                 CancellationToken.None, CommandPurpose.Control, null, null, null);
             try
             {

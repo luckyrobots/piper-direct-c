@@ -13,7 +13,7 @@ internal static class TeachingModernTests
         };
         TeachingState modern = TeachingState.Inspect(Device());
         Check(modern.SamePoseReturn && !modern.RequiresZero && modern.CanReturn, "Modern backend capability did not expose measured-pose return");
-        Check(modern.ReturnFlags()["same_pose_confirmed"]?.GetValue<bool>() == true && modern.ReturnFlags()["zero_pose_confirmed"] is null,
+        Check(modern.ReturnFlags() is { ButtonOff: true, SamePoseConfirmed: true, ZeroPoseConfirmed: null },
             "Modern return mislabeled its request as physical-zero confirmation");
         Check(modern.NextStep.Contains("no need to move to zero") && modern.ReturnConfirmation.Contains("measured pose"), "Modern return still demanded zero");
         var missing = Device(); missing.Remove("teaching");
@@ -22,7 +22,7 @@ internal static class TeachingModernTests
         missing = Device(); missing["teaching"]!["seamless_supported"] = false;
         Check(TeachingState.Inspect(missing).RequiresZero, "Unqualified firmware enabled same-pose return");
         var legacy = TeachingState.Inspect(missing);
-        Check(legacy.ReturnFlags()["zero_pose_confirmed"]?.GetValue<bool>() == true && legacy.ReturnFlags()["same_pose_confirmed"] is null,
+        Check(legacy.ReturnFlags() is { ButtonOff: true, ZeroPoseConfirmed: true, SamePoseConfirmed: null },
             "Legacy return changed its zero-only API contract");
 
         TeachingState guiding = modern with { Phase = TeachingPhase.HandGuiding, Active = true, CanReturn = false };

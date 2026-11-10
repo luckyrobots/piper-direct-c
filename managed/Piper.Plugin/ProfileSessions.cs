@@ -107,9 +107,8 @@ public sealed partial class PipersPlugin
                     if (connection == PikaMonitorConnection.Skip) continue;
                     // Read-only discovery owns no motor targets. Exact selectors
                     // and the normal command gate prevent assignment races.
-                    await Call("/api/pika/connect", new() { ["owner"] = owner, ["take_over"] = connection == PikaMonitorConnection.AdoptReadOnly,
-                        ["read_only_adopt"] = connection == PikaMonitorConnection.AdoptReadOnly,
-                        ["pika_device"] = profile.PikaDevice, ["pika_distribution"] = profile.PikaDistribution }, cancellation);
+                    bool adopt = connection == PikaMonitorConnection.AdoptReadOnly;
+                    await Call(PiperApi.Requests.PikaConnect(owner, profile.PikaDevice, profile.PikaDistribution, takeOver: adopt, readOnlyAdopt: adopt), cancellation);
                 }
                 catch (Exception error) when (!cancellation.IsCancellationRequested)
                 { System.Diagnostics.Trace.TraceWarning("{0} gripper monitor: {1}", profile.Name, error.Message); }
@@ -130,7 +129,6 @@ public sealed partial class PipersPlugin
 
         async Task Release((string Device, string? Distribution) identity)
         {
-            JsonObject Body() => new() { ["owner"] = owner, ["pika_device"] = identity.Device, ["pika_distribution"] = identity.Distribution };
             (TelemetryReceipt Receipt, JsonObject Gripper)? ReadOwned()
             {
                 var latest = telemetry.Latest;
@@ -150,7 +148,7 @@ public sealed partial class PipersPlugin
                 var session = original.Gripper;
                 if (session["power_requested"]?.GetValue<bool>() == true || session["armed"]?.GetValue<bool>() == true)
                 {
-                    var reply = await Call("/api/pika/disable", Body(), cancellation, backend);
+                    var reply = await Call(PiperApi.Requests.PikaDisable(owner, identity.Device, identity.Distribution), cancellation, backend);
                     if (reply["motor_request_id"]?.GetValue<string>() is not { Length: > 0 } request)
                         throw new InvalidOperationException("Disable did not acknowledge a motor request.");
                     while (true)
@@ -169,7 +167,7 @@ public sealed partial class PipersPlugin
                     throw new InvalidOperationException("The gripper's read-only state could not be verified.");
 
                 cancellation.ThrowIfCancellationRequested();
-                await Call("/api/pika/disconnect", Body(), cancellation, backend);
+                await Call(PiperApi.Requests.PikaDisconnect(owner, identity.Device, identity.Distribution), cancellation, backend);
             }
             catch (Exception error) { System.Diagnostics.Trace.TraceWarning("Pika shutdown ({0}): {1}", identity.Device, error.Message); }
         }

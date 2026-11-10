@@ -74,7 +74,7 @@ public sealed partial class PipersPlugin
         // Existing disable retires both following and ordinary position targets.
         // No new protocol command, automatic release, enable or target is added.
         var role = telemetry.Pika.Observe();
-        var reply = await PikaTeachingMotorCall("/api/pika/disable", new JsonObject { ["owner"] = owner }, false, cancellation, expectedToken);
+        var reply = await PikaTeachingMotorCall(PiperApi.Requests.PikaDisable(owner, ActiveProfile.PikaDevice, ActiveProfile.PikaDistribution), false, cancellation, expectedToken);
         // A release that landed during the call stands; freed jaws never re-create a session.
         telemetry.Pika.TryAdvance(role, PikaSessionRole.Monitoring);
         string request = reply["motor_request_id"]?.GetValue<string>() ?? "";
@@ -135,8 +135,8 @@ public sealed partial class PipersPlugin
         long permissionEpoch = CommandAuthority.Epoch;
         double expectedFeedback = pika["feedback_time_s"]!.GetValue<double>();
         var role = telemetry.Pika.Observe();
-        var reply = await PikaTeachingMotorCall("/api/pika/resume-hold", new JsonObject { ["owner"] = owner, ["clear"] = true,
-            ["expected_angle_rad"] = angle, ["expected_feedback_time_s"] = expectedFeedback }, true, cancellation, expectedToken);
+        var reply = await PikaTeachingMotorCall(PiperApi.Requests.PikaResumeHold(owner, clear: true, expectedAngleRad: angle, expectedFeedbackTimeS: expectedFeedback,
+            ActiveProfile.PikaDevice, ActiveProfile.PikaDistribution), true, cancellation, expectedToken);
         string request = reply["motor_request_id"]?.GetValue<string>() ?? "";
         if (request.Length == 0) throw new InvalidOperationException("Measured hold was requested but its acknowledgement cannot be identified. Control remains unarmed.");
         long started = Stopwatch.GetTimestamp();
@@ -168,12 +168,12 @@ public sealed partial class PipersPlugin
         throw new InvalidOperationException("Measured-hold acknowledgement timed out. No replay or further automatic enable was sent; inspect Pika feedback.");
     }
 
-    private async Task<JsonObject> PikaTeachingMotorCall(string route, JsonObject body, bool enabled, CancellationToken cancellation, string expectedToken)
+    private async Task<JsonObject> PikaTeachingMotorCall(ApiRequest request, bool enabled, CancellationToken cancellation, string expectedToken)
     {
         recovery.PikaTeaching.BeginMotorTransition(enabled);
         try
         {
-            var reply = await Call(route, body, cancellation, expectedToken);
+            var reply = await Call(request, cancellation, expectedToken);
             recovery.PikaTeaching.MotorRequested(reply["motor_request_id"]?.GetValue<string>() ?? "", enabled);
             return reply;
         }

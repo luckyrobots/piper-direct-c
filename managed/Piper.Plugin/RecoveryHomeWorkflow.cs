@@ -93,8 +93,7 @@ public sealed partial class PipersPlugin
                         // generation, owner and active request. Priority STOP
                         // revocation already owns the transport if the epoch changed.
                         if (!RecoveryScopeMatches(operation)) return;
-                        await Call("/api/stop", new JsonObject { ["device_id"] = deviceId, ["generation"] = generation,
-                            ["request_id"] = request, ["owner"] = owner }, stopping, backend);
+                        await Call(PiperApi.Requests.Stop(owner, deviceId, generation, request), stopping, backend);
                     }, stage => SaveProgress(stage), operation.Token);
                 if (outcome == RecoveryHomeOutcome.Completed)
                 {

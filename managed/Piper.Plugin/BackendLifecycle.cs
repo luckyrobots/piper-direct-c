@@ -15,7 +15,7 @@ internal static class ControllerEndpoint
     public const int HttpPort = 8765, GrpcPort = 8766;
     public const string GrpcAddress = "http://" + Loopback + ":8766";
     private const string Http = "http://" + Loopback + ":8765";
-    public const string StateUrl = Http + "/api/state", StopUrl = Http + "/api/stop", ShutdownUrl = Http + "/api/shutdown";
+    public const string StateUrl = Http + PiperApi.Paths.State, StopUrl = Http + PiperApi.Paths.Stop, ShutdownUrl = Http + PiperApi.Paths.Shutdown;
 }
 
 public static class BackendGuards
@@ -216,13 +216,12 @@ public sealed partial class PipersPlugin
                 var motions = snapshot["motions"] is JsonArray lanes ? lanes : new JsonArray(snapshot["motion"]?.DeepClone());
                 if (motions.Any(lane => lane?["active"]?.GetValue<bool>() == true && lane["owner"]?.GetValue<string>() != owner))
                 { Trace.TraceWarning("Bundled server has another client's active lease; no stop or shutdown was sent."); return; }
-                var stop = new JsonObject { ["owner"] = owner };
-                using var stopRequest = new HttpRequestMessage(HttpMethod.Post, ControllerEndpoint.StopUrl) { Content = new StringContent(stop.ToJsonString(), Encoding.UTF8, "application/json") };
+                using var stopRequest = new HttpRequestMessage(HttpMethod.Post, ControllerEndpoint.StopUrl) { Content = new StringContent(PiperApi.Requests.Stop(owner).Json, Encoding.UTF8, "application/json") };
                 stopRequest.Headers.Add("X-Piper-Token", currentToken);
                 using var stopped = await http.SendAsync(stopRequest, deadline.Token);
                 stopped.EnsureSuccessStatusCode();
             }
-            using var request = new HttpRequestMessage(HttpMethod.Post, ControllerEndpoint.ShutdownUrl) { Content = new StringContent(new JsonObject { ["owner"] = owner }.ToJsonString(), Encoding.UTF8, "application/json") };
+            using var request = new HttpRequestMessage(HttpMethod.Post, ControllerEndpoint.ShutdownUrl) { Content = new StringContent(PiperApi.Requests.Shutdown(owner).Json, Encoding.UTF8, "application/json") };
             request.Headers.Add("X-Piper-Token", currentToken);
             using var response = await http.SendAsync(request, deadline.Token);
             response.EnsureSuccessStatusCode();

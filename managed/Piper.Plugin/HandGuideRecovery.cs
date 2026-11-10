@@ -205,7 +205,7 @@ public sealed partial class PipersPlugin
                 case RecoveryWorkspaceAction.RecoverAtPose:
                     bool teaching = view.NextAction == RecoveryWorkspaceAction.TeachReturn;
                     var flags = teaching ? TeachingState.Inspect(device).ReturnFlags()
-                        : new JsonObject { ["button_off"] = true, ["same_pose_confirmed"] = true };
+                        : new ArmCommandFields(ButtonOff: true, SamePoseConfirmed: true);
                     await Command(view.Action!, flags, cancellation, teaching ? CommandPurpose.TeachingReturn : CommandPurpose.Recovery);
                     progress = "Restoring holding control at the measured pose. No homing, replay or power change.";
                     recovery.MarkCommandSent(progress);
@@ -282,7 +282,7 @@ public sealed partial class PipersPlugin
                 return;
             // Claim the single return before sending, so a failure is never retried.
             if (!recovery.TryClaimReturn(armed)) return;
-            await Command("recover-at-pose", new() { ["button_off"] = true, ["same_pose_confirmed"] = true }, cancellation,
+            await Command("recover-at-pose", new(ButtonOff: true, SamePoseConfirmed: true), cancellation,
                 CommandPurpose.Recovery, expectedPermissionEpoch: expectedPermission);
             recovery.MarkClaimedReturnSent("Restoring holding control at the measured pose · no power change, homing or replay");
         }

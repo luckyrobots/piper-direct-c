@@ -250,7 +250,7 @@ public sealed partial class PipersPlugin
     {
         try
         {
-            var reply = await Call("/api/pika/devices", new() { ["pika_distribution"] = ActiveProfile.PikaDistribution }, cancellation);
+            var reply = await Call(PiperApi.Requests.PikaDevices(pikaDistribution: ActiveProfile.PikaDistribution), cancellation);
             pikaDevices = reply["devices"]?.AsArray().OfType<JsonObject>().Select(d => (JsonObject)d.DeepClone()).ToArray() ?? [];
             pikaInventoryMessage = pikaDevices.Length == 0 ? "No Pika detected. Connect its USB cable; discovery retries automatically." : $"{pikaDevices.Length} grippers detected · assignments are saved automatically";
         }
@@ -405,6 +405,6 @@ public sealed partial class PipersPlugin
         if (gripper["owner"]?.GetValue<string>() is { Length: > 0 } gripperOwner && gripperOwner != owner)
             throw new InvalidOperationException("Another controller owns this gripper. Finish its session before changing the assignment.");
         if (gripper["owner"]?.GetValue<string>() == owner)
-            await Call("/api/pika/disconnect", new() { ["owner"] = owner, ["pika_device"] = profile.PikaDevice, ["pika_distribution"] = profile.PikaDistribution }, cancellation);
+            await Call(PiperApi.Requests.PikaDisconnect(owner, profile.PikaDevice, profile.PikaDistribution), cancellation);
     }
 }

@@ -187,7 +187,7 @@ internal static class TelemetryPipelineTests
             plugin.approved = true; Feed();
             await Until(() => plugin.telemetry.Latest!.BackendToken == "session-b" && plugin.telemetry.Latest!.IsFresh(Stopwatch.GetTimestamp()), "Fixture did not restore fresh input for acknowledgement test");
             rpc.DelayedCommand = new(TaskCreationOptions.RunContinuationsAsynchronously);
-            var pending = plugin.Command("jog", new JsonObject { ["joint"] = 6, ["delta_deg"] = 1.0 }, lifetime.Token, CommandPurpose.Control, null, null, null);
+            var pending = plugin.Command("jog", new() { Joint = 6, Degrees = 1.0 }, lifetime.Token, CommandPurpose.Control, null, null, null);
             await Until(() => rpc.CommandReached.Task.IsCompleted, "Synthetic authorized action did not reach the fake transport");
             plugin.DisarmTelemetryTargets("Fixture telemetry loss", false, null, false);
             rpc.DelayedCommand.SetResult(new ControlReply { Status = 202, Json = "{\"request_id\":99,\"message\":\"accepted\"}" });
@@ -197,7 +197,7 @@ internal static class TelemetryPipelineTests
                 "A delayed old acknowledgement renewed its discarded operation after telemetry loss");
             int sentBefore = rpc.Routes.Count;
             long previousPermission = authority.Epoch - 1;
-            pending = plugin.Command("teach-return", new JsonObject { ["button_off"] = true, ["same_pose_confirmed"] = true }, lifetime.Token,
+            pending = plugin.Command("teach-return", new(ButtonOff: true, SamePoseConfirmed: true), lifetime.Token,
                     CommandPurpose.TeachingReturn, null, previousPermission, null);
             discarded = false;
             try { await pending; } catch (InvalidOperationException) { discarded = true; }

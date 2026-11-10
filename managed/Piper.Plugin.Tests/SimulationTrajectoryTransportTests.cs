@@ -7,8 +7,9 @@ internal static class SimulationTrajectoryTransportTests
     public static void Run()
     {
         const string pv = SimulationTrajectoryTransport.PositionVelocity, js = SimulationTrajectoryTransport.StreamedPosition;
-        Check(!SimulationTrajectoryTransport.StartFields().ContainsKey("trajectory_transport") &&
-            SimulationTrajectoryTransport.StartFields()["trajectory"]!.GetValue<bool>(),
+        var start = new FollowLaneController("backend", "owner", new RobotProfile("profile", "Profile", "can"), 1,
+            (_, _, _) => Task.FromResult(new JsonObject())).StartArm().Request.Body;
+        Check(!start.ContainsKey("trajectory_transport") && start["trajectory"]!.GetValue<bool>(),
             "Position-velocity admission acquired a new backend requirement or lost its trajectory flag");
         foreach (string? invalid in new[] { null, "", "mit", "streamed", "Streamed-position" })
         {
