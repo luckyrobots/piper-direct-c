@@ -386,10 +386,10 @@ internal sealed partial class FollowFixture : IAsyncDisposable
     public ConcurrentQueue<UiEvent> DiscardedUiEvents { get; } = new();
     public void UseUiDispatcher()
     {
-        plugin.uiEvents = new UiEventDispatch((input, cancellation) => plugin.HandleEventCoreAsync(input, cancellation),
+        plugin.shell.Open(new UiEventDispatch((input, cancellation) => plugin.HandleEventCoreAsync(input, cancellation),
             () => plugin.ControlInputEpoch,
             error => throw new InvalidOperationException("Unexpected fixture UI actor failure", error),
-            discarded: (input, _) => DiscardedUiEvents.Enqueue(input));
+            discarded: (input, _) => DiscardedUiEvents.Enqueue(input)));
     }
     public Task Navigate(string action) => plugin.WorkspaceEvent(action, CancellationToken.None);
     public Task Click(string id)
@@ -417,7 +417,7 @@ internal sealed partial class FollowFixture : IAsyncDisposable
         if (GroupActive)
             await plugin.StopGroupSimulationFollowing("Fixture disposed", CancellationToken.None);
         groupTelemetryStop.Cancel(); if (groupTelemetryWorker is not null) await groupTelemetryWorker;
-        if (plugin.uiEvents is { } dispatch) await dispatch.DisposeAsync();
+        if (plugin.shell.Events is { } dispatch) await dispatch.DisposeAsync();
         plugin.shutdown.Cancel();
         plugin.channel.Dispose(); Commands.Dispose();
         if (Directory.Exists(settingsDirectory)) Directory.Delete(settingsDirectory, recursive: true);

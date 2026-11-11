@@ -1,15 +1,9 @@
 using System.Diagnostics;
-using Grpc.Core;
 
 namespace LuckyRobots.Piper.Plugin;
 
 public sealed partial class PipersPlugin
 {
-    internal TimeSpan backgroundLoopRestartDelay = TimeSpan.FromSeconds(1);
-    private int backgroundLoopFaults;
-    /// <summary>How many times a supervised background loop ended outside shutdown.</summary>
-    internal int BackgroundLoopFaults => Volatile.Read(ref backgroundLoopFaults);
-
     internal Task Watch(CancellationToken cancellation) => Task.WhenAll(
         Supervise("Telemetry reader", ReadTelemetry, cancellation),
         Supervise("Telemetry processing", ProcessTelemetry, cancellation),
@@ -21,29 +15,11 @@ public sealed partial class PipersPlugin
     /// carry the feedback watchdog and the lease heartbeats, so none may end unseen:
     /// a fault (or an unexpected return) clears motion permission, is shown to the
     /// operator, and the loop is started again after a short pause.</summary>
-    internal async Task Supervise(string name, Func<CancellationToken, Task> loop, CancellationToken cancellation)
-    {
-        while (true)
-        {
-            string cause;
-            try
-            {
-                await loop(cancellation).ConfigureAwait(false);
-                if (cancellation.IsCancellationRequested) return;
-                cause = "ended unexpectedly";
-            }
-            catch (Exception error) when (cancellation.IsCancellationRequested &&
-                error is OperationCanceledException or RpcException { StatusCode: StatusCode.Cancelled }) { return; }
-            catch (Exception error) { cause = "failed: " + error.Message; }
-            ReportBackgroundLoopFault(name, cause);
-            try { await Task.Delay(backgroundLoopRestartDelay, cancellation).ConfigureAwait(false); }
-            catch (OperationCanceledException) { return; }
-        }
-    }
+    internal Task Supervise(string name, Func<CancellationToken, Task> loop, CancellationToken cancellation) =>
+        shell.Loops.Supervise(name, loop, ReportBackgroundLoopFault, cancellation);
 
     private void ReportBackgroundLoopFault(string name, string cause)
     {
-        Interlocked.Increment(ref backgroundLoopFaults);
         string report = name + " " + cause + " · motion permission cleared · restarting. Check the robot before continuing.";
         Trace.TraceError("Background loop: {0}", report);
         try { DisarmTelemetryTargets(name + " " + cause, clearLink: false); }

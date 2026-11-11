@@ -81,7 +81,7 @@ internal static class BackgroundLoopTests
         // A synthetic loop: throws once, returns once, then runs until cancelled.
         {
             var plugin = Plugin(out _);
-            plugin.backgroundLoopRestartDelay = TimeSpan.FromMilliseconds(10);
+            plugin.shell.Loops.RestartDelay = TimeSpan.FromMilliseconds(10);
             using var lifetime = new CancellationTokenSource();
             int runs = 0;
             plugin.approved = true;
@@ -94,7 +94,7 @@ internal static class BackgroundLoopTests
             }, lifetime.Token);
             Check(await Until(() => Volatile.Read(ref runs) >= 3), "A faulted background loop was not restarted");
             Check(!supervised.IsCompleted, "A background loop fault ended its supervisor");
-            Check(plugin.BackgroundLoopFaults == 2, "A loop fault and an unexpected loop return were not both counted");
+            Check(plugin.shell.Loops.Faults == 2, "A loop fault and an unexpected loop return were not both counted");
             Check(!plugin.approved, "A background loop fault left motion permission standing");
             Check(plugin.uiActionError.Contains("Fixture loop", StringComparison.Ordinal) && plugin.uiActionError.Contains("motion permission cleared", StringComparison.Ordinal),
                 "A background loop fault was not shown to the operator: " + plugin.uiActionError);
@@ -108,7 +108,7 @@ internal static class BackgroundLoopTests
         // watchdog must keep running afterwards, with permission withdrawn.
         {
             var plugin = Plugin(out var snapshot);
-            plugin.backgroundLoopRestartDelay = TimeSpan.FromMilliseconds(10);
+            plugin.shell.Loops.RestartDelay = TimeSpan.FromMilliseconds(10);
             using var lifetime = new CancellationTokenSource();
             var authority = plugin.CommandAuthority;
             snapshot["motion"]!["request_id"] = "not-a-number";
@@ -116,7 +116,7 @@ internal static class BackgroundLoopTests
             plugin.approved = true;
             authority.TryAcknowledge(authority.Epoch, new("piper-1", Backend, "can-one", 1), 5);
             var supervised = plugin.Supervise("Arm heartbeat", plugin.ArmHeartbeats, lifetime.Token);
-            Check(await Until(() => plugin.BackgroundLoopFaults >= 1), "Malformed motion feedback did not fault the arm heartbeat");
+            Check(await Until(() => plugin.shell.Loops.Faults >= 1), "Malformed motion feedback did not fault the arm heartbeat");
             Check(!plugin.approved && authority.Current.Lease is null, "A dead arm heartbeat left motion permission or its lease standing");
             Check(plugin.uiActionError.Contains("Arm heartbeat", StringComparison.Ordinal), "A dead arm heartbeat was not shown to the operator");
             // Still watching: once feedback goes stale, a later grant is withdrawn.

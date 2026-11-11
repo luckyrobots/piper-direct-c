@@ -43,8 +43,6 @@ public sealed partial class PipersPlugin : ILuckyPlugin
     internal volatile bool linkCommandsEnabled;
     private double? linkErrorDegrees;
     internal JsonObject? scene;
-    private Task? worker;
-    internal UiEventDispatch? uiEvents;
 
     public PipersPlugin(string address = ControllerEndpoint.GrpcAddress) : this(address, TimeProvider.System) { }
 
@@ -87,11 +85,11 @@ public sealed partial class PipersPlugin : ILuckyPlugin
         // The dispatcher exists before the first view is published, so a click
         // during startup is queued instead of running a full handler inline on
         // the SDK reader thread, where it would delay a following STOP.
-        uiEvents = new(HandleEventCoreAsync, () => ControlInputEpoch,
-            error => { uiActionError = message = error.Message; Trace.TraceWarning("UI action: {0}", error.Message); }, shutdown.Token);
+        shell.Open(new(HandleEventCoreAsync, () => ControlInputEpoch,
+            error => { uiActionError = message = error.Message; Trace.TraceWarning("UI action: {0}", error.Message); }, shutdown.Token));
         await Render(cancellation);
         passiveMeasuredTrackingStarted = true;
-        worker = Watch(shutdown.Token);
+        shell.Loops.Started(Watch(shutdown.Token));
         foreach (string camera in new[] { "bench", "gripper", "depth" }) await RestartCamera(camera);
     }
 
@@ -218,7 +216,7 @@ public sealed partial class PipersPlugin : ILuckyPlugin
             catch (Exception error) { Trace.TraceWarning("Recovery cancellation presentation: {0}", error.Message); }
             return;
         }
-        if (eventId == "disable" && uiEvents is { } urgentDispatch)
+        if (eventId == "disable" && shell.Events is { } urgentDispatch)
         {
             follow.CancelInput("Disable requested · stopping the follower group");
             DisarmTelemetryTargets("Disable requested; previous actions discarded", clearLink: false, forgetApproval: eventProfile.Id);
@@ -237,7 +235,7 @@ public sealed partial class PipersPlugin : ILuckyPlugin
             return;
         }
         if (GroupFollowActive && GroupBlocksControlEvent(eventId)) return;
-        if (uiEvents is { } dispatch)
+        if (shell.Events is { } dispatch)
         {
             if (!dispatch.Enqueue(input, inputEpoch, ControlEventNeedsPermission(eventId)))
                 message = "Controls are busy; that action was not queued.";
@@ -691,7 +689,7 @@ public sealed partial class PipersPlugin : ILuckyPlugin
         var cameraRetirement = calibration.Capture.Retire();
         passiveMeasuredTrackingStarted = false;
         await Quietly(ct => StopGroupSimulationFollowing("Plugin closed · following stopped", ct), TimeSpan.FromSeconds(8), "Group following");
-        if (uiEvents is { } dispatch) await Quietly(dispatch.DisposeAsync().AsTask(), "UI actions");
+        if (shell.Events is { } dispatch) await Quietly(dispatch.DisposeAsync().AsTask(), "UI actions");
         if (CurrentRecovery is { } recovery)
         {
             recovery.Cancel();
@@ -710,12 +708,12 @@ public sealed partial class PipersPlugin : ILuckyPlugin
         // verified. Closing an external backend must not strand its old owner.
         await Quietly(ReleaseOwnedPikas, TimeSpan.FromSeconds(3), "Pika release");
         await shutdown.CancelAsync();
-        await Quietly(StopFollowUp, "STOP follow-up");
+        await Quietly(shell.StopFollowUp.Idle, "STOP follow-up");
         await Quietly(wizardHighlightMaintenance, "Calibration marker maintenance");
         await Quietly(calibration.Height.MaintenanceIdle, "Height guide maintenance");
         await Quietly(calibration.Lens.Worker, "Lens calibration");
         await Quietly(cameraRetirement, "Camera");
-        await Quietly(worker, "Telemetry");
+        await Quietly(shell.Loops.Worker, "Telemetry");
         await StopOwnedBackend();
         // An externally managed server keeps running; its existing lease expiry handles a lost client.
         channel.Dispose(); commands.Dispose(); shutdown.Dispose();
