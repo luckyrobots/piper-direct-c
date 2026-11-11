@@ -163,6 +163,9 @@ internal static class CalibrationComponentTests
         Check(ReferenceEquals(height.Reading, HeightReading.None) && height.GuideProblem == "", "A reading or guide problem outlived its epoch");
         height.Observe(2, null, "late"); height.ReportGuide(2, "late");
         Check(ReferenceEquals(height.Reading, HeightReading.None) && height.GuideProblem == "", "A late write from an older epoch was shown");
+        height.Observe(3, null, "current"); height.ReportGuide(3, "current");
+        height.Observe(2, null, "late"); height.ReportGuide(2, "late");
+        Check(height.Reading.Issue == "current" && height.GuideProblem == "current", "A late write from an older epoch erased the current reading or guide problem");
 
         height.Start("again");
         Check(height.Session.Phase == HeightCheckPhase.Saved, "Check jaw height did not resume at the saved pose");

@@ -126,22 +126,21 @@ internal sealed class HeightCheckSession
     /// the check closes instead and tells the operator. False when it closed.</summary>
     public bool Enter(HeightCheckPhase next)
     {
-        bool entered = true;
-        Change(current =>
-        {
-            entered = current.Allows(next);
-            return entered ? current with { Phase = next } : current with { Phase = HeightCheckPhase.Inactive,
-                ActionError = "The jaw-height check lost track of its pinned pose and was closed. Nothing was saved; start Check jaw height again." };
-        });
+        bool entered = Change(current => Entering(current, next)).Phase == next || next == HeightCheckPhase.Inactive;
         if (!entered) Trace.TraceError("Jaw-height phase {0} disagrees with its pinned pose.", next);
         return entered;
     }
 
+    private static HeightSession Entering(HeightSession current, HeightCheckPhase next) =>
+        current.Allows(next) ? current with { Phase = next } : current with { Phase = HeightCheckPhase.Inactive,
+            ActionError = "The jaw-height check lost track of its pinned pose and was closed. Nothing was saved; start Check jaw height again." };
+
     /// <summary>Check jaw height: resumes at the pinned pose, if one was kept.</summary>
     public void Start(string status)
     {
-        Change(current => current with { Phase = current.ResumePhase, Status = current.StorageBlocked ? current.Status : status });
+        // The epoch advances first, so a reading taken once the check is open belongs to it.
         Interlocked.Increment(ref epoch);
+        Change(current => current with { Phase = current.ResumePhase, Status = current.StorageBlocked ? current.Status : status });
     }
 
     /// <summary>Stop height check. The pinned draft pose is kept.</summary>
@@ -154,17 +153,14 @@ internal sealed class HeightCheckSession
     /// <summary>Pins <paramref name="frozen"/> as the pose being measured.</summary>
     public void Pin(HeightObservation frozen, string status)
     {
-        Change(current => current with { Frozen = frozen });
-        Enter(HeightCheckPhase.Pinned);
-        Report(status);
+        // One publication: no reader sees a pinned pose in Live, or the reverse.
+        Change(current => Entering(current with { Frozen = frozen, Status = status }, HeightCheckPhase.Pinned));
     }
 
     /// <summary>Check another pose: drops the pinned pose and its tape entry.</summary>
     public void Unpin(string status)
     {
-        Change(current => current with { Frozen = null, MeasuredText = "" });
-        Enter(HeightCheckPhase.Live);
-        Report(status);
+        Change(current => Entering(current with { Frozen = null, MeasuredText = "", Status = status }, HeightCheckPhase.Live));
     }
 
     public void EnterTape(string text) => Change(current => current with { MeasuredText = text });
@@ -177,9 +173,16 @@ internal sealed class HeightCheckSession
 
     // ---- the telemetry loop's reading ----
 
-    /// <summary>Records a reading taken while <paramref name="readEpoch"/> was current.</summary>
-    public void Observe(long readEpoch, LiveHeightPreview? preview, string issue) =>
-        Volatile.Write(ref reading, new(readEpoch, preview, issue));
+    /// <summary>Records a reading taken while <paramref name="readEpoch"/> was current.
+    /// A reading from an older epoch than the one held is dropped: it must not
+    /// erase a current reading.</summary>
+    public void Observe(long readEpoch, LiveHeightPreview? preview, string issue)
+    {
+        var next = new HeightReading(readEpoch, preview, issue);
+        HeightReading current;
+        do { current = Volatile.Read(ref reading); if (current.Epoch > readEpoch) return; }
+        while (!ReferenceEquals(Interlocked.CompareExchange(ref reading, next, current), current));
+    }
 
     // ---- the engine's height line ----
 
@@ -187,7 +190,14 @@ internal sealed class HeightCheckSession
     public void MarkGuideShown() => Interlocked.Exchange(ref guideShown, 1);
     /// <summary>Marks the line as not shown; true when it had been.</summary>
     public bool TakeGuideShown() => Interlocked.Exchange(ref guideShown, 0) != 0;
-    public void ReportGuide(long attemptEpoch, string issue) => Volatile.Write(ref guideIssue, new(attemptEpoch, issue));
+    /// <summary>Records the height line's state for <paramref name="attemptEpoch"/>; an older epoch's report is dropped.</summary>
+    public void ReportGuide(long attemptEpoch, string issue)
+    {
+        var next = new GuideIssue(attemptEpoch, issue);
+        GuideIssue current;
+        do { current = Volatile.Read(ref guideIssue); if (current.Epoch > attemptEpoch) return; }
+        while (!ReferenceEquals(Interlocked.CompareExchange(ref guideIssue, next, current), current));
+    }
 
     /// <summary>Starts one maintenance pass unless one is still running.</summary>
     public void QueueMaintenance(Func<Task> pass)
