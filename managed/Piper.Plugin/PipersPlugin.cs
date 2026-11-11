@@ -613,9 +613,10 @@ public sealed partial class PipersPlugin : ILuckyPlugin
         patches["safety"] = new() { ["visible"] = scope.View?.Confirmation is { } presented &&
             ReferenceEquals(CommandAuthority.Current.Confirmation, presented) };
         AddResetCompletionPatches(patches);
-        patches["backend.restart.confirmation"] = new() { ["visible"] = backendRestart == BackendRestartPhase.Confirming };
-        patches["backend.status"] = new() { ["text"] = backendStatus };
-        patches["backend.prerequisites"] = new() { ["text"] = setupStatus };
+        var backend = shell.Backend.Standing;
+        patches["backend.restart.confirmation"] = new() { ["visible"] = backend.Restart == BackendRestartPhase.Confirming };
+        patches["backend.status"] = new() { ["text"] = backend.Status };
+        patches["backend.prerequisites"] = new() { ["text"] = backend.Setup };
         patches["workspace.action-error"] = new() { ["text"] = uiActionError, ["hint"] = uiActionError, ["visible"] = uiActionError.Length > 0 };
         AddProfilePatches(patches);
         JsonObject? device = null;
