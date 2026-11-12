@@ -572,12 +572,12 @@ public sealed partial class PipersPlugin : ILuckyPlugin
         {
             // Color and depth can share a serial/resolution but not intrinsics.
             // Keep cached images hidden until this new worker publishes its frame.
-            cameraCalibration.TryRemove(id, out _); cameraDimensions.TryRemove(id, out _);
+            calibration.Lens.RemoveProfile(id); cameraDimensions.TryRemove(id, out _);
             cameraStatus[id] = "Connecting D405 " + D405View.Mode(CameraSettings(id)) + " view…";
         }
         var camera = new CameraCapture(engine, id, CameraSettings(id), (key, value) => cameraStatus[key] = value, preferences.DepthSerial,
             (key, width, height) => cameraDimensions[key] = (width, height),
-            (key, profile) => { Materialize(profile); cameraCalibration[key] = profile; }, CameraImageId(id));
+            (key, profile) => { Materialize(profile); calibration.Lens.InstallProfile(key, profile); }, CameraImageId(id));
         camera.Start();
         return camera;
     });
@@ -717,8 +717,8 @@ public sealed partial class PipersPlugin : ILuckyPlugin
         await shutdown.CancelAsync();
         await Quietly(StopFollowUp, "STOP follow-up");
         await Quietly(wizardHighlightMaintenance, "Calibration marker maintenance");
-        await Quietly(HeightMaintenanceIdle, "Height guide maintenance");
-        await Quietly(lensWorker, "Lens calibration");
+        await Quietly(calibration.Height.MaintenanceIdle, "Height guide maintenance");
+        await Quietly(calibration.Lens.Worker, "Lens calibration");
         await Quietly(cameraRetirement, "Camera");
         await Quietly(worker, "Telemetry");
         await StopOwnedBackend();

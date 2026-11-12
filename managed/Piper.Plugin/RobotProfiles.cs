@@ -319,9 +319,9 @@ public sealed partial class PipersPlugin
             var profiles = append ? preferences.Robots!.Append(profile).ToArray() : preferences.Robots!.Select(p => p.Id == profile.Id ? profile : p).ToArray();
             preferences = RobotProfileRouting.Activate(preferences with { Robots = profiles }, profile.Id);
             recovery.PikaTeaching.Restore(ActiveProfile);
-            cameraCalibration.Clear(); cameraDimensions.TryRemove("gripper", out _); cameraDimensions.TryRemove("depth", out _);
+            calibration.Lens.ClearProfiles(); cameraDimensions.TryRemove("gripper", out _); cameraDimensions.TryRemove("depth", out _);
             cameraStatus["gripper"] = cameraStatus["depth"] = "Connecting…";
-            lens = LensSession.Initial;
+            calibration.Lens.Reset();
             await LoadCameraCalibration(cancellation);
             try
             {

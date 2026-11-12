@@ -158,12 +158,12 @@ internal static class CalibrationSheetIntegrationTests
             Check(Status(".sheet.row.status.3").Contains("overlaps P2"), "Duplicate reference measurement was not explained beside its row before hand guiding");
             await Event("field.p3back", "440"); await Event("field.p3left", "800");
             Check(!Status(".sheet.row.status.3").Contains("overlaps"), "P4 at BACK 440 / LEFT 800 was rejected merely because P2 is BACK 450 / LEFT 800");
-            var validDraft = plugin.calibrationWizard;
-            plugin.calibrationWizard = validDraft with { ModelRevision = "changed-revision" };
+            var validDraft = plugin.calibrationWizard!;
+            plugin.calibration.Wizard.Edit(_ => validDraft with { ModelRevision = "changed-revision" });
             Fresh(); await plugin.Update(CancellationToken.None);
             Check(!CaptureEnabled(0) && Status(".sheet.next").Contains("Reconfirm"), "Stale identity-bound desk confirmations still enabled capture");
             Check(patches?[WidgetId(".sheet.left.confirm")]?["enabled"]?.GetValue<bool>() == true, "Stale LEFT confirmation left the repair button disabled");
-            plugin.calibrationWizard = validDraft;
+            plugin.calibration.Wizard.Edit(_ => validDraft);
             device["status"]!["teach_state"] = 0; device["status"]!["control"] = 1;
             Fresh(); await plugin.Update(CancellationToken.None);
             Check(!CaptureEnabled(0) && Status(".sheet.row.status.0").Contains("solid green"), "Inactive hand guiding silently blocked Capture");
@@ -242,9 +242,9 @@ internal static class CalibrationSheetIntegrationTests
                 "Corrected measurement and fit invalidation did not survive report persistence");
             // Simulate a crash after corrected report commit but before the draft
             // commit: restored report observations must own captured coordinates.
-            var resumedDraft = plugin.calibrationWizard;
-            resumedDraft.Answers["p1left"] = "800"; resumedDraft.Answers["p1back"] = "499";
+            plugin.calibration.Wizard.Answer(("p1left", "800"), ("p1back", "499"));
             plugin.LoadSheetRows();
+            var resumedDraft = plugin.calibrationWizard!;
             var resumedPoint = plugin.SheetPoint(1);
             Check(resumedDraft.Answers["p1left"] == "780" && resumedDraft.Answers["p1back"] == "450" &&
                 resumedPoint.HasValue && Math.Abs(resumedPoint.Value.X - correctedP2.MeasuredWorld.X) < 1e-12 &&
@@ -264,13 +264,13 @@ internal static class CalibrationSheetIntegrationTests
                 plugin.calibrationSamples.Count == 5,
                 "Correcting an entered coordinate back to its measured value required recapture or failed to recover the fit");
             var savedIdentity = plugin.calibrationIdentity!;
-            plugin.calibrationIdentity = savedIdentity with { Generation = 999 };
+            plugin.calibration.Desk.Reinstate(plugin.calibration.Desk.Session with { Identity = savedIdentity with { Generation = 999 } });
             await Event("move.1");
             Check(plugin.sheetEditingRow == -1, "A changed robot connection permitted editing an old captured report");
-            plugin.calibrationIdentity = savedIdentity; plugin.calibrationPlacementUnverified = true;
+            plugin.calibration.Desk.Reinstate(plugin.calibration.Desk.Session with { Identity = savedIdentity }); plugin.calibration.Desk.MarkWritePending();
             await Event("move.1");
             Check(plugin.sheetEditingRow == -1, "An unverified scene placement permitted captured-measurement editing");
-            plugin.calibrationPlacementUnverified = false;
+            plugin.calibration.Desk.MarkWriteNotSent();
             Check(calls.All(c => c is "robot.read" or "robot.highlightReference" or "robot.highlightToolSite" or "robot.teleoperate"), "Calibration attempted a robot/scene mutation before Apply");
             Check(root.Same(CalibrationPlacement.At(new(.1, .75, -.2), 0)), "Fit changed the scene before explicit Apply");
             point = marks.Length - 1;
@@ -300,16 +300,16 @@ internal static class CalibrationSheetIntegrationTests
             // workspace navigation fix (B3).
             plugin.workspace.Commit(WorkspaceNavigation.Calibration);
             async Task Height(string action, string text = "") { Fresh(); await plugin.HeightCheckEvent(action, JsonSerializer.SerializeToElement(text), CancellationToken.None); }
-            string HeightPhase() => plugin.heightPhase.ToString()!;
+            string HeightPhase() => plugin.calibration.Height.Session.Phase.ToString();
             await Height("toggle");
-            Check(HeightPhase() == "Live" && plugin.heightActionError == "", "Check jaw height did not start live: " + plugin.heightActionError);
+            Check(HeightPhase() == "Live" && plugin.calibration.Height.Session.ActionError == "", "Check jaw height did not start live: " + plugin.calibration.Height.Session.ActionError);
             await Height("pin");
-            Check(HeightPhase() == "Pinned", "Measure this pose did not pin the pose: " + plugin.heightActionError);
+            Check(HeightPhase() == "Pinned", "Measure this pose did not pin the pose: " + plugin.calibration.Height.Session.ActionError);
             await Height("measured", "250");
             await Height("save");
-            Check(HeightPhase() == "Saved", "Save check did not record the pinned pose: " + plugin.heightActionError);
+            Check(HeightPhase() == "Saved", "Save check did not record the pinned pose: " + plugin.calibration.Height.Session.ActionError);
             await Height("another");
-            Check(HeightPhase() == "Live" && plugin.heightFrozen is null, "Check another pose kept the previous pinned pose");
+            Check(HeightPhase() == "Live" && plugin.calibration.Height.Session.Frozen is null, "Check another pose kept the previous pinned pose");
             await Height("toggle");
             Check(HeightPhase() == "Inactive", "Stop height check left the check active");
             plugin.workspace.Commit(WorkspaceNavigation.Calibration); await plugin.Render(CancellationToken.None);

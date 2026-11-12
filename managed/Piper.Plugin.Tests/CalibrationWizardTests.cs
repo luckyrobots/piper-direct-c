@@ -163,8 +163,9 @@ public static class CalibrationWizardTests
             "Hidden-overlay guidance was lost behind a generic marker failure");
         var copyPlugin = new PipersPlugin();
         var sheetDraft = draft with { Answers = new(draft.Answers) { ["left"] = "697", ["back"] = "200", ["height"] = "75" } };
-        copyPlugin.calibrationWizard = sheetDraft;
+        copyPlugin.calibration.Wizard.Open("robot-a", sheetDraft);
         copyPlugin.LoadSheetRows();
+        sheetDraft = copyPlugin.calibrationWizard!;
         Check(sheetDraft.Answers["p0left"] == "697" && sheetDraft.Answers["p0back"] == "200" && !sheetDraft.Answers.ContainsKey("p0height"), "Sheet migration lost current XY measurements or carried hover height into desk-contact rows");
         foreach (int row in Enumerable.Range(0, 5)) foreach (string axis in new[] { "left", "back" }) sheetDraft.Answers[$"p{row}{axis}"] = (100 + row * 100).ToString();
         CalibrationWizardFlow.ValidateDraft(sheetDraft, "robot-a");

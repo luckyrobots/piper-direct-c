@@ -5,10 +5,7 @@ namespace LuckyRobots.Piper.Plugin;
 
 public sealed partial class PipersPlugin
 {
-    private bool sheetMarkersDirty = true;
-    private long sheetMarkersAt;
-    private bool sheetMarkersPublished;
-    internal string sheetSaveStatus = "Measurements save automatically as you type.";
+    internal string sheetSaveStatus => calibration.Wizard.Session.SaveStatus;
 
     // Reading a visual reference must not fabricate any physical confirmation.
     private async Task<CalibrationPlacement> ReadSheetReference(CancellationToken cancellation)
@@ -27,10 +24,10 @@ public sealed partial class PipersPlugin
         if (changed && calibrationIdentity is not null) throw new InvalidOperationException("The recorded model changed. Re-evaluate saved poses with the corrected model before confirming its pointers; the original report is retained.");
         // A changed model voids the edge proofs and the jaw-tip comparison together.
         if (changed)
-            calibrationWizard = Wizard with { ModelAssetId = asset, ModelRevision = revision, Setup = Wizard.Setup.ClearEdges() with { JawTipsConfirmed = false } };
+            calibration.Wizard.Edit(draft => draft with { ModelAssetId = asset, ModelRevision = revision, Setup = draft.Setup.ClearEdges() with { JawTipsConfirmed = false } });
         if (!Wizard.Setup.SurfaceConfirmed)
-            Wizard.Answers["sceney"] = CalibrationNumber(root.Position.Y * 1000);
-        UpdateSetup(setup => setup with { ReferencePreviewed = true });
+            calibration.Wizard.Answer("sceney", CalibrationNumber(root.Position.Y * 1000));
+        calibration.Wizard.ChangeSetup(setup => setup with { ReferencePreviewed = true });
         return root;
     }
 
@@ -47,9 +44,9 @@ public sealed partial class PipersPlugin
 
     private async Task ShowSheetMarks(CancellationToken cancellation, int frameRow = -1)
     {
-        await wizardHighlightGate.WaitAsync(cancellation);
+        await calibration.Markers.Gate.WaitAsync(cancellation);
         try { await PublishSheetMarksWithinGate(cancellation, frameRow, frameAll: frameRow < 0); }
-        finally { wizardHighlightGate.Release(); }
+        finally { calibration.Markers.Gate.Release(); }
     }
 
     private async Task PublishSheetMarksWithinGate(CancellationToken cancellation, int frameRow = -1, bool frameAll = false)
@@ -61,8 +58,8 @@ public sealed partial class PipersPlugin
         if (frameRow >= 0 && points[frameRow] is null) throw new InvalidOperationException("Enter this row's BACK and LEFT distances first, in millimetres within the desk edges.");
         if (frameRow >= 0)
         {
-            Wizard.Answers["sheetselected"] = frameRow.ToString();
-            sheetMarkersDirty = true;
+            calibration.Wizard.Answer("sheetselected", frameRow.ToString());
+            calibration.Markers.InvalidateSheet();
         }
         int selected = SheetSelectedRow;
         var all = new JsonArray(points.Where(p => p.HasValue).Select(p => (JsonNode)p!.Value.Json()).ToArray());
@@ -88,7 +85,7 @@ public sealed partial class PipersPlugin
             var response = await engine.RequestAsync("robot.highlightReference", request, cancellation);
             if (!scope.Acknowledged(response, frame) || !response.TryGetProperty("markerId", out var returnedId) || returnedId.GetString() != "desk-point-" + row)
                 throw new InvalidOperationException("Update Lucky Engine: the editor did not acknowledge the numbered desk marker.");
-            sheetMarkersPublished = true;
+            calibration.Markers.MarkSheetPublished();
         }
     }
 
@@ -97,9 +94,9 @@ public sealed partial class PipersPlugin
     private async Task MaintainSheetMarks(CancellationToken cancellation)
     {
         if (!calibrationOpen || calibrationWizard is null || !Wizard.Answers.ContainsKey("sheetready") || link is null) return;
-        if (!sheetMarkersDirty && Stopwatch.GetElapsedTime(sheetMarkersAt).TotalSeconds < 10) return;
-        sheetMarkersDirty = false; sheetMarkersAt = Stopwatch.GetTimestamp();
-        try { await PublishSheetMarksWithinGate(cancellation, frameAll: !sheetMarkersPublished); }
+        if (!calibration.Markers.SheetDirty && Stopwatch.GetElapsedTime(calibration.Markers.SheetAttemptedAt).TotalSeconds < 10) return;
+        calibration.Markers.BeginSheetPublish(Stopwatch.GetTimestamp());
+        try { await PublishSheetMarksWithinGate(cancellation, frameAll: !calibration.Markers.SheetPublished); }
         catch (Exception error) when (error is not OperationCanceledException) { Trace.TraceWarning("Desk marks unavailable: {0}", error.Message); }
     }
 }

@@ -7,13 +7,8 @@ public sealed record SimulationCameraPreferences(string SceneId, string CameraId
 
 public sealed partial class PipersPlugin
 {
-    internal JsonObject? simulationCameras;
-
-    private long simulationCameraDiscoveryEpoch;
-    private sealed record SimulationCameraDiscovery(long Epoch, JsonObject Cameras);
-    private readonly ThrottledProbe<SimulationCameraDiscovery> simulationCameraProbe = new(TimeSpan.FromSeconds(2));
-    internal readonly CancellationTokenSource cameraDiscoveryShutdown = new();
-    private bool CameraDiscoveryRunning => passiveMeasuredTrackingStarted && !cameraDiscoveryShutdown.IsCancellationRequested;
+    internal JsonObject? simulationCameras => calibration.Cameras.SimulationCameras;
+    private bool CameraDiscoveryRunning => passiveMeasuredTrackingStarted && !calibration.Cameras.Retired;
 
     private async Task MaintainCameraDiscovery(CancellationToken cancellation)
     {
@@ -32,10 +27,10 @@ public sealed partial class PipersPlugin
                 // Probe completion only queues evidence; this tick applies it.
                 QueueSimulationCameraRefresh(cancellation);
                 QueueCameraDeviceRefresh(cancellation);
-                if (!simulationCameraProbe.HasPending && !cameraDeviceProbe.HasPending)
+                if (!calibration.Cameras.SimulationProbe.HasPending && !calibration.Cameras.DeviceProbe.HasPending)
                     return;
-                using var lifetime = CancellationTokenSource.CreateLinkedTokenSource(cancellation, cameraDiscoveryShutdown.Token);
-                if (simulationCameraProbe.Take() is { } discovered && discovered.Epoch == Interlocked.Read(ref simulationCameraDiscoveryEpoch))
+                using var lifetime = CancellationTokenSource.CreateLinkedTokenSource(cancellation, calibration.Cameras.Shutdown);
+                if (calibration.Cameras.SimulationProbe.Take() is { } discovered && discovered.Epoch == calibration.Cameras.Epoch)
                     await ApplySimulationCameraDiscovery(discovered.Cameras, lifetime.Token);
                 refreshSettings = await ApplyCameraDeviceInventory(lifetime.Token);
             }
@@ -43,7 +38,7 @@ public sealed partial class PipersPlugin
             if (refreshSettings && CameraDiscoveryRunning && Navigation.Page == WorkspacePage.Settings)
                 await Render(cancellation);
         }
-        catch (OperationCanceledException) when (cameraDiscoveryShutdown.IsCancellationRequested && !cancellation.IsCancellationRequested)
+        catch (OperationCanceledException) when (calibration.Cameras.Retired && !cancellation.IsCancellationRequested)
         {
         }
         catch (Exception error) when (!cancellation.IsCancellationRequested)
@@ -53,23 +48,18 @@ public sealed partial class PipersPlugin
     }
 
     // Stops both discovery probes for shutdown and drops any unapplied result.
-    private async Task RetireCameraDiscovery()
-    {
-        await cameraDiscoveryShutdown.CancelAsync();
-        await Task.WhenAll(simulationCameraProbe.Retire(), cameraDeviceProbe.Retire());
-        cameraDiscoveryShutdown.Dispose();
-    }
+    private Task RetireCameraDiscovery() => calibration.Cameras.Retire();
 
     private void QueueSimulationCameraRefresh(CancellationToken cancellation)
     {
         if (!CameraDiscoveryRunning || switchingProfile) return;
-        long epoch = Interlocked.Read(ref simulationCameraDiscoveryEpoch);
-        simulationCameraProbe.Queue(() => ReadSimulationCameraDiscovery(epoch, cancellation));
+        long epoch = calibration.Cameras.Epoch;
+        calibration.Cameras.SimulationProbe.Queue(() => ReadSimulationCameraDiscovery(epoch, cancellation));
     }
 
     private async Task<SimulationCameraDiscovery?> ReadSimulationCameraDiscovery(long epoch, CancellationToken cancellation)
     {
-        using var lifetime = CancellationTokenSource.CreateLinkedTokenSource(cancellation, cameraDiscoveryShutdown.Token);
+        using var lifetime = CancellationTokenSource.CreateLinkedTokenSource(cancellation, calibration.Cameras.Shutdown);
         cancellation = lifetime.Token;
         try
         {
@@ -99,8 +89,7 @@ public sealed partial class PipersPlugin
     private async Task DiscoverSimulationCameras(CancellationToken cancellation)
     {
         // An explicit refresh supersedes an older periodic read still in flight.
-        Interlocked.Increment(ref simulationCameraDiscoveryEpoch);
-        simulationCameraProbe.Take();
+        calibration.Cameras.Supersede();
         var discovered = JsonNode.Parse((await engine.RequestAsync("scene.cameras", cancellation: cancellation)).GetRawText())!.AsObject();
         Materialize(discovered);
         await ApplySimulationCameraDiscovery(discovered, cancellation);
@@ -108,13 +97,13 @@ public sealed partial class PipersPlugin
 
     private async Task ApplySimulationCameraDiscovery(JsonObject discovered, CancellationToken cancellation)
     {
-        simulationCameras = discovered;
+        calibration.Cameras.ApplySimulation(discovered);
         if (discovered["robotInventory"] is JsonObject robots)
             scene = robots.DeepClone().AsObject();
         // Entity UUIDs survive scene reload; session scene IDs do not. Refresh
         // every profile's valid camera bindings, including inactive robots.
         string before = JsonSerializer.Serialize(preferences, LuckyEngine.PluginSdk.PluginProtocol.Json);
-        preferences = SimulationCameraRouting.Refresh(preferences, simulationCameras);
+        preferences = SimulationCameraRouting.Refresh(preferences, discovered);
         if (before != JsonSerializer.Serialize(preferences, LuckyEngine.PluginSdk.PluginProtocol.Json))
             await Save(cancellation);
     }
@@ -156,14 +145,14 @@ public sealed partial class PipersPlugin
             var saved = preferences.SimulationCameras?.GetValueOrDefault(id);
             bool available = SimulationCameraRouting.IsAvailable(saved, simulationCameras);
             var size = cameraDimensions.GetValueOrDefault(id, (Width: 640, Height: 480));
-            cameraCalibration.TryGetValue(id, out var calibration);
+            var profile = calibration.Lens.Profile(id);
             bool metricDepth = D405View.MetricDepth(id, CameraSettings(id));
             string streamKind = metricDepth ? "depth" : "color";
             string identity = id == "depth" ? preferences.DepthSerial : CameraSettings(id).Device;
-            if (id == "depth" && string.IsNullOrEmpty(identity)) identity = calibration?["device"]?.GetValue<string>() ?? "";
-            bool matches = calibration is not null && (id == "depth"
-                ? CameraProfile.MatchesD405(calibration, identity, size.Width, size.Height, streamKind)
-                : CameraProfile.MatchesFisheye(calibration, identity, size.Width, size.Height));
+            if (id == "depth" && string.IsNullOrEmpty(identity)) identity = profile?["device"]?.GetValue<string>() ?? "";
+            bool matches = profile is not null && (id == "depth"
+                ? CameraProfile.MatchesD405(profile, identity, size.Width, size.Height, streamKind)
+                : CameraProfile.MatchesFisheye(profile, identity, size.Width, size.Height));
             patches[$"camera.{id}.sim"] = new()
             {
                 ["sceneId"] = saved?.SceneId ?? "", ["cameraId"] = saved?.CameraId ?? "",
@@ -171,15 +160,15 @@ public sealed partial class PipersPlugin
                 ["overlayImageId"] = saved?.Overlay == true && !metricDepth && CameraFrameReady(id) ? CameraImageId(id) : "",
                 ["captureWidth"] = size.Width, ["captureHeight"] = size.Height, ["blend"] = .5,
                 ["streamKind"] = streamKind, ["lensModel"] = id == "gripper" ? "fisheye" : "pinhole",
-                ["intrinsics"] = matches ? calibration!.DeepClone() : null
+                ["intrinsics"] = matches ? profile!.DeepClone() : null
             };
             patches[$"camera.{id}.sim.status"] = new() { ["text"] = !available
                 ? "Simulation camera unavailable · choose one in Camera settings"
                 : teleoperating ? "SIM leader pose · not time synchronized with measured camera"
                 : matches ? "Lens profile active · mount alignment / exposure sync unverified"
-                : id == "depth" && !metricDepth && calibration?["model"]?.GetValue<string>() == "realsense-distorted"
+                : id == "depth" && !metricDepth && profile?["model"]?.GetValue<string>() == "realsense-distorted"
                     ? "Real color uses factory distortion · sim lens/mount alignment unverified"
-                : calibration is not null ? "Profile mismatch · check camera device and resolution"
+                : profile is not null ? "Profile mismatch · check camera device and resolution"
                 : id == "gripper" ? "Estimated 150° fisheye · use ⚙ to calibrate lens and mount"
                 : "Estimated pose/lens · calibration not verified · preview clocks not synchronized" };
             patches[$"camera.{id}.simoverlay"] = new() { ["text"] = saved?.Overlay == true ? "Show simulation only" : "Real / simulation overlay", ["enabled"] = !metricDepth };

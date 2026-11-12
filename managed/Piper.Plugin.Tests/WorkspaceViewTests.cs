@@ -114,7 +114,7 @@ internal static class WorkspaceViewTests
         string folder = Path.Combine(Path.GetTempPath(), "piper-workspace-view-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(folder);
         var prefs = RobotProfileRouting.Normalize(new Preferences(Robots: [new("piper-1", "Fixture", "can-a")], ActiveRobotId: "piper-1"));
-        plugin.preferences = prefs; plugin.calibrationProfile = "piper-1";
+        plugin.preferences = prefs; plugin.calibration.Desk.Reinstate(DeskSession.Unloaded with { Profile = "piper-1" });
         JsonObject? rendered = null, patched = null;
         var engineRequests = new List<(string Method, JsonObject Arguments)>();
         var context = Fixtures.Context(new PluginStart("fixture", folder, folder),
@@ -233,19 +233,19 @@ internal static class WorkspaceViewTests
             }
 
             plugin.workspace.ToggleCameraStreamDetails();
-            plugin.simulationCameras = CameraInventory("source-a", "camera-a", "camera-b");
+            plugin.calibration.Cameras.ApplySimulation(CameraInventory("source-a", "camera-a", "camera-b"));
             await CheckView("settings", "cameras");
             string selector = WidgetId("camera.bench.simselect");
-            plugin.simulationCameras = CameraInventory("source-a", "camera-b", "camera-a");
+            plugin.calibration.Cameras.ApplySimulation(CameraInventory("source-a", "camera-b", "camera-a"));
             await Click(selector, 1);
             Check(plugin.preferences.SimulationCameras?.GetValueOrDefault("bench") is { CameraId: "camera-a", SceneId: "source-a" },
                 "A reordered camera inventory routed a rendered selection to the wrong camera");
-            plugin.simulationCameras = CameraInventory("source-a", "camera-b");
+            plugin.calibration.Cameras.ApplySimulation(CameraInventory("source-a", "camera-b"));
             await Click(selector, 1);
             Check(plugin.preferences.SimulationCameras?.GetValueOrDefault("bench")?.CameraId == "camera-a" &&
                 plugin.uiActionError.Contains("Simulation cameras changed", StringComparison.Ordinal),
                 "A removed camera selection silently rebound the bench preview");
-            plugin.simulationCameras = CameraInventory("source-b", "camera-a", "camera-b");
+            plugin.calibration.Cameras.ApplySimulation(CameraInventory("source-b", "camera-a", "camera-b"));
             await Click(selector, 0);
             Check(plugin.preferences.SimulationCameras?.GetValueOrDefault("bench")?.SceneId == "source-a",
                 "An Automatic selection from an old scene changed the new scene's binding");
@@ -278,16 +278,15 @@ internal static class WorkspaceViewTests
                 "Replay review hid the requirement for fresh reported acceleration caps");
             foreach (CalibrationWizardStep step in Enum.GetValues<CalibrationWizardStep>())
             {
-                plugin.wizardProfile = "piper-1";
-                plugin.calibrationWizard = CalibrationWizardFlow.New("piper-1") with { Step = step };
-                plugin.calibrationArchiveConfirmation = step == CalibrationWizardStep.InspectSaved;
+                plugin.calibration.Wizard.Open("piper-1", CalibrationWizardFlow.New("piper-1") with { Step = step });
+                if (step == CalibrationWizardStep.InspectSaved) plugin.calibration.Desk.AskArchive(); else plugin.calibration.Desk.CancelArchive();
                 await CheckView("settings", "bench");
             }
 
             // Exercise the actual edit/save/reload path without starting any
             // hardware, camera, backend or editor workers.
             var savedDraft = CalibrationWizardFlow.New("piper-1", 77);
-            plugin.calibrationWizard = savedDraft;
+            plugin.calibration.Wizard.Edit(_ => savedDraft);
             await plugin.WizardEvent("77.sheet.field.p0back", JsonSerializer.SerializeToElement("200"), CancellationToken.None);
             await plugin.WizardEvent("77.sheet.field.p0left", JsonSerializer.SerializeToElement("697"), CancellationToken.None);
             var freshPlugin = new PipersPlugin();

@@ -79,7 +79,6 @@ public sealed record WizardReferenceHighlightScope(CalibrationIdentity Identity,
 public sealed partial class PipersPlugin
 {
     // A failed or unsupported desk pointer waits for the visible Show edge retry.
-    private bool wizardReferenceRetryRequired;
     private bool WizardReferenceStep => calibrationWizard?.Step is CalibrationWizardStep.DeskFrame or CalibrationWizardStep.DeskBack;
     private CalibrationIdentity WizardReferenceIdentity() => CurrentCalibrationIdentity() with
     { ModelAssetId = Wizard.ModelAssetId, ModelRevision = Wizard.ModelRevision };
@@ -106,7 +105,7 @@ public sealed partial class PipersPlugin
 
     private async Task ShowWizardReferenceWithinGate(CancellationToken cancellation, bool frame)
     {
-        UnacknowledgeEdge();
+        calibration.Markers.UnacknowledgeEdge();
         var identity = WizardReferenceIdentity();
         long epoch = Wizard.Epoch, start = Stopwatch.GetTimestamp();
         _ = Device(identity.DeviceId, identity.Generation);
@@ -128,11 +127,11 @@ public sealed partial class PipersPlugin
         var scope = WizardReferenceHighlightScope.Create(identity, Wizard, pinnedRoot);
         if (!WizardReferenceCurrent(scope)) throw new InvalidOperationException("Wait for the linked robot to reconnect before showing the desk edge.");
         var pending = new MarkerState.Edge(scope, 0); // The native process owns one visual marker.
-        SetMarker(pending); wizardHighlightAttempt = Stopwatch.GetTimestamp();
+        calibration.Markers.Show(pending, Stopwatch.GetTimestamp());
         await RequestWizardReference(scope, true, cancellation, frame);
         if (!WizardReferenceCurrent(scope)) throw new InvalidOperationException("The robot or question changed while the pointer was being shown. Show it again.");
-        MoveMarker(pending, pending with { AcknowledgedAt = Stopwatch.GetTimestamp() });
-        wizardMessage = "The simulation pointer marks the " + (scope.Step == CalibrationWizardStep.DeskFrame ? "LEFT" : "BACK") + " desk edge. Compare it with the edge of your real desk before confirming.";
+        calibration.Markers.Move(pending, pending with { AcknowledgedAt = Stopwatch.GetTimestamp() });
+        calibration.Wizard.Report("The simulation pointer marks the " + (scope.Step == CalibrationWizardStep.DeskFrame ? "LEFT" : "BACK") + " desk edge. Compare it with the edge of your real desk before confirming.");
     }
 
     private async Task ShowWizardReference(CancellationToken cancellation, bool frame = true)
@@ -140,41 +139,41 @@ public sealed partial class PipersPlugin
         bool entered = false;
         try
         {
-            wizardReferenceRetryRequired = false;
-            entered = await wizardHighlightGate.WaitAsync(TimeSpan.FromMilliseconds(800), cancellation);
+            calibration.Markers.ClearRetry();
+            entered = await calibration.Markers.Gate.WaitAsync(TimeSpan.FromMilliseconds(800), cancellation);
             if (!entered) throw new InvalidOperationException("The pointer is busy. Try Show edge again.");
             await ShowWizardReferenceWithinGate(cancellation, frame);
         }
         catch (Exception error)
         {
-            UnacknowledgeEdge(); wizardReferenceRetryRequired = true;
-            wizardMessage = WizardReferenceHighlightScope.FailureMessage(error);
+            calibration.Markers.UnacknowledgeEdge(); calibration.Markers.RequireRetry();
+            calibration.Wizard.Report(WizardReferenceHighlightScope.FailureMessage(error));
         }
-        finally { if (entered) wizardHighlightGate.Release(); }
+        finally { if (entered) calibration.Markers.Gate.Release(); }
     }
 
-    // The caller owns wizardHighlightGate. This is invoked by the existing
+    // The caller owns calibration.Markers.Gate. This is invoked by the existing
     // nonblocking visual-maintenance task, never by robot command/heartbeat code.
     private async Task MaintainWizardReferenceWithinGate(CancellationToken cancellation)
     {
-        if (wizardReferenceRetryRequired) return; // Failed/unsupported markers require the visible Retry action.
+        if (calibration.Markers.RetryRequired) return; // Failed/unsupported markers require the visible Retry action.
         var edge = EdgeMarker;
         bool current = edge is not null && WizardReferenceCurrent(edge);
-        if (!current) UnacknowledgeEdge();
+        if (!current) calibration.Markers.UnacknowledgeEdge();
         bool firstQuestionMarker = edge is null || edge.Epoch != Wizard.Epoch || edge.Step != Wizard.Step;
-        if (!WizardReferenceHighlightScope.RefreshDue(edge, Wizard, Stopwatch.GetElapsedTime(wizardHighlightAttempt))) return;
-        wizardHighlightAttempt = Stopwatch.GetTimestamp();
+        if (!WizardReferenceHighlightScope.RefreshDue(edge, Wizard, Stopwatch.GetElapsedTime(calibration.Markers.AttemptedAt))) return;
+        calibration.Markers.MarkAttempt(Stopwatch.GetTimestamp());
         try { await ShowWizardReferenceWithinGate(cancellation, firstQuestionMarker); }
-        catch (Exception error) { UnacknowledgeEdge(); wizardReferenceRetryRequired = true; wizardMessage = WizardReferenceHighlightScope.FailureMessage(error); }
+        catch (Exception error) { calibration.Markers.UnacknowledgeEdge(); calibration.Markers.RequireRetry(); calibration.Wizard.Report(WizardReferenceHighlightScope.FailureMessage(error)); }
     }
 
     private void ConfirmWizardReference()
     {
         if (!WizardReferenceShown() || EdgeMarker is not { } scope)
-            throw new InvalidOperationException(wizardReferenceRetryRequired && wizardMessage.Length > 0 ? wizardMessage :
+            throw new InvalidOperationException(calibration.Markers.RetryRequired && wizardMessage.Length > 0 ? wizardMessage :
                 "First show the pointer in the simulation, then compare it with the matching real desk edge.");
         string proof = scope.DeskFingerprint();
-        UpdateSetup(setup => Wizard.Step == CalibrationWizardStep.DeskFrame
+        calibration.Wizard.ChangeSetup(setup => Wizard.Step == CalibrationWizardStep.DeskFrame
             ? setup.ConfirmLeft(scope.RootPlacement.Json().ToJsonString(), proof)
             : setup.ConfirmBack(proof));
     }
