@@ -152,7 +152,7 @@ public sealed partial class PipersPlugin
     private bool canInventoryRenderPending;
     private RobotProfile ActiveProfile => RobotProfileRouting.Active(preferences);
     private string CameraImageId(string id) => id == "bench" ? id : "piper-" + ActiveProfile.CameraSlot + "." + id;
-    private bool CameraFrameReady(string id) => cameras.Get(id)?.PublishedFrame is { } frame &&
+    private bool CameraFrameReady(string id) => calibration.Capture.PublishedFrame(id) is { } frame &&
         DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - frame.TimestampUnixMicroseconds / 1000 < 2000;
     private static Widget ScopeRobotWidget(Widget widget, long epoch, string profileId) => widget with {
         Id = WorkspaceEventScope.Wrap(epoch, profileId, widget.Id), Children = widget.Children?.Select(child => ScopeRobotWidget(child, epoch, profileId)).ToArray() };
@@ -315,12 +315,12 @@ public sealed partial class PipersPlugin
             await FinishPikaTeaching("Robot profile or hardware assignment changed", cancellation);
             recovery.PikaTeaching.Store(ActiveProfile);
             preferences = RobotProfileRouting.Capture(preferences);
-            foreach (string id in new[] { "gripper", "depth" }) await cameras.ReplaceAsync(id, startReplacement: null);
+            foreach (string id in new[] { "gripper", "depth" }) await calibration.Capture.Stop(id);
             var profiles = append ? preferences.Robots!.Append(profile).ToArray() : preferences.Robots!.Select(p => p.Id == profile.Id ? profile : p).ToArray();
             preferences = RobotProfileRouting.Activate(preferences with { Robots = profiles }, profile.Id);
             recovery.PikaTeaching.Restore(ActiveProfile);
-            calibration.Lens.ClearProfiles(); cameraDimensions.TryRemove("gripper", out _); cameraDimensions.TryRemove("depth", out _);
-            cameraStatus["gripper"] = cameraStatus["depth"] = "Connecting…";
+            calibration.Lens.ClearProfiles();
+            foreach (string id in new[] { "gripper", "depth" }) calibration.Capture.Connecting(id, "Connecting…");
             calibration.Lens.Reset();
             await LoadCameraCalibration(cancellation);
             try

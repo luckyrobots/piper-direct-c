@@ -26,25 +26,23 @@ public static class BackendRestartRequest
 
 public sealed partial class PipersPlugin
 {
-    private BackendRestartPhase backendRestart;
-
     private async Task RestartBackend(CancellationToken cancellation)
     {
-        var request = BackendRestartRequest.Create(state, owner, SimulationFollowingActive || GroupFollowActive, backendRestart == BackendRestartPhase.Confirming);
+        var request = BackendRestartRequest.Create(state, owner, SimulationFollowingActive || GroupFollowActive, shell.Backend.Standing.Restart == BackendRestartPhase.Confirming);
         bool relaunchOwned = state?["backend_restart"]?["mode"]?.GetValue<string>() == "plugin";
-        var owned = OwnedBackend;
+        var owned = shell.Backend.Standing.Owned;
         if (relaunchOwned && (owned is null || owned.Process.HasExited ||
             !BackendGuards.IsOwned(state!, owned.Process.Id, owned.Token)))
             throw new InvalidOperationException("This panel does not own the backend process. Restart from the plugin session that started it; no shutdown was requested.");
         string previousInstance = request.Body["backend_instance_id"]!.GetValue<string>();
-        backendRestart = BackendRestartPhase.Requested;
+        shell.Backend.RestartRequested();
         try { await RequestBackendRestart(request, relaunchOwned, owned?.Process, previousInstance, cancellation); }
-        finally { backendRestart = BackendRestartPhase.Idle; }
+        finally { shell.Backend.RestartEnded(); }
     }
 
     private async Task RequestBackendRestart(ApiRequest request, bool relaunchOwned, Process? process, string previousInstance, CancellationToken cancellation)
     {
-        backendStatus = "Requesting an idle backend restart…";
+        shell.Backend.Report("Requesting an idle backend restart…");
         await Update(cancellation);
         await Call(request, cancellation);
         // Once accepted, finish the exact monitoring-only restart even if a UI
@@ -53,7 +51,7 @@ public sealed partial class PipersPlugin
         deadline.CancelAfter(TimeSpan.FromSeconds(25));
         DisarmTelemetryTargets("Backend restart accepted; previous targets discarded", clearLink: true, forgetApproval: ActiveProfile.Id);
         telemetry.Pika.Release();
-        backendStatus = "Restart accepted · reconnecting automatically. Previous movement will not resume.";
+        shell.Backend.Report("Restart accepted · reconnecting automatically. Previous movement will not resume.");
         await Update(deadline.Token);
         using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(1) };
         try
@@ -61,11 +59,11 @@ public sealed partial class PipersPlugin
             while (true)
             {
                 deadline.Token.ThrowIfCancellationRequested();
-                if (relaunchOwned && backendRestart == BackendRestartPhase.Requested && process!.HasExited)
+                if (relaunchOwned && shell.Backend.Standing.Restart == BackendRestartPhase.Requested && process!.HasExited)
                 {
                     if (process.ExitCode != 75)
                         throw new InvalidOperationException($"Backend exited with {process.ExitCode}, not an acknowledged maintenance restart. It was not restarted automatically; inspect server logs.");
-                    backendRestart = BackendRestartPhase.Relaunching;
+                    shell.Backend.Relaunching();
                     await StartBundledBackend(deadline.Token);
                 }
                 try
@@ -77,8 +75,8 @@ public sealed partial class PipersPlugin
                         throw new InvalidOperationException(failure + " The original backend is still running; no restart occurred.");
                     if (next?["backend_instance_id"]?.GetValue<string>() is { Length: > 0 } current && current != previousInstance)
                     {
-                        backendStatus = "Backend restarted · connections are recovering automatically. Use Enable robot when ready. Existing robot STOPs are preserved; use Recover robot to clear them.";
-                        message = backendStatus;
+                        message = "Backend restarted · connections are recovering automatically. Use Enable robot when ready. Existing robot STOPs are preserved; use Recover robot to clear them.";
+                        shell.Backend.Report(message);
                         await Render(deadline.Token);
                         return;
                     }
@@ -90,8 +88,9 @@ public sealed partial class PipersPlugin
         }
         catch (OperationCanceledException) when (!shutdown.IsCancellationRequested)
         {
-            backendStatus = "Restart was accepted, but the new backend did not answer within 25 seconds. Automatic reconnection is still running. No movement will resume; check the server status before trying Start bundled server.";
-            throw new TimeoutException(backendStatus);
+            string unanswered = "Restart was accepted, but the new backend did not answer within 25 seconds. Automatic reconnection is still running. No movement will resume; check the server status before trying Start bundled server.";
+            shell.Backend.Report(unanswered);
+            throw new TimeoutException(unanswered);
         }
     }
 }

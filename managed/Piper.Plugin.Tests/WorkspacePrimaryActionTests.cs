@@ -8,13 +8,13 @@ using LuckyRobots.Piper.Grpc;
 using LuckyRobots.Piper.Pika;
 using LuckyRobots.Piper.Plugin;
 
-internal static partial class SimulationFollowingTests
+internal static class WorkspacePrimaryActionTests
 {
     internal static async Task RunPrimaryWorkspaceAction()
     {
         foreach (bool missingLink in new[] { false, true })
         {
-            await using var f = new Fixture();
+            await using var f = new FollowFixture();
             if (missingLink) f.RemoveMeasuredLink(editorDelayMilliseconds: 250);
             f.UseUiDispatcher();
             await f.Navigate("settings.robot");
@@ -26,7 +26,7 @@ internal static partial class SimulationFollowingTests
             Check(f.Session is null && !f.Ready && !f.PlayStarted && f.Mode == "edit" && !f.EngineRequests.Any(r => r.Method == "robot.runtime.control"),
                 "Primary Enable silently prepared a runtime or entered Play instead of waiting for the global group action");
         }
-        await using (var blocked = new Fixture())
+        await using (var blocked = new FollowFixture())
         {
             blocked.SetSpeed(0); blocked.UseUiDispatcher();
             await blocked.Click("enable");
@@ -37,7 +37,7 @@ internal static partial class SimulationFollowingTests
             Check(blocked.Session is null && !blocked.EngineRequests.Any(r => r.Action == "prepare-start") && blocked.Rpc.Requests.IsEmpty,
                 "A blocked primary action prepared a runtime or sent a physical request");
         }
-        await using (var gripperUnready = new Fixture())
+        await using (var gripperUnready = new FollowFixture())
         {
             gripperUnready.SetGripperUnready(); gripperUnready.UseUiDispatcher();
             await gripperUnready.Navigate("settings.robot"); await gripperUnready.Navigate("controls");
@@ -54,7 +54,7 @@ internal static partial class SimulationFollowingTests
         }
         foreach (bool failConfirmation in new[] { false, true })
         {
-            await using var confirmed = new Fixture();
+            await using var confirmed = new FollowFixture();
             confirmed.SetApproved(false); confirmed.UseUiDispatcher();
             await confirmed.Click("enable");
             var initial = await WaitPrimary(confirmed, "complete");
@@ -75,7 +75,7 @@ internal static partial class SimulationFollowingTests
                 "Safety confirmation of an already enabled arm silently started following or sent a physical request");
         }
 
-        static async Task<JsonObject> WaitPrimary(Fixture fixture, string stage, string? previousId = null)
+        static async Task<JsonObject> WaitPrimary(FollowFixture fixture, string stage, string? previousId = null)
         {
             long began = Stopwatch.GetTimestamp();
             while (true)

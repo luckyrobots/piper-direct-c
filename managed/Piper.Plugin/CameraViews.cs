@@ -32,7 +32,7 @@ public sealed partial class PipersPlugin
             Widget.Column("camera." + cameraDetail + ".real", Widget.Label("camera." + cameraDetail + ".real.title", "REAL · " + (D405View.MetricDepth(cameraDetail, CameraSettings(cameraDetail)) ? "distance, 7–50 cm" : "color image")) with { Appearance = "muted" },
                 new Widget("image", "camera." + cameraDetail + ".image") { ImageId = CameraImageId(cameraDetail), Height = 420, Visible = CameraFrameReady(cameraDetail) },
                 Widget.Label("camera." + cameraDetail + ".empty", "Waiting for a fresh camera frame") with { Height = 60, Visible = !CameraFrameReady(cameraDetail) },
-                Widget.Label("camera." + cameraDetail + ".info", cameraStatus.GetValueOrDefault(cameraDetail, "Connecting…")) with { Height = 40, Appearance = "muted" }),
+                Widget.Label("camera." + cameraDetail + ".info", calibration.Capture.Status(cameraDetail) ?? "Connecting…") with { Height = 40, Appearance = "muted" }),
             Widget.Column("camera." + cameraDetail + ".counterpart", Widget.Label("camera." + cameraDetail + ".sim.title", "SIM · " + (D405View.MetricDepth(cameraDetail, CameraSettings(cameraDetail)) ? "ideal distance" : cameraDetail == "gripper" ? "fisheye" : "color viewpoint")) with { Appearance = "muted" },
                 new Widget("scene-camera", "camera." + cameraDetail + ".sim") { Height = 420 },
                 Widget.Label("camera." + cameraDetail + ".sim.status", "Camera alignment unverified") with { Height = 50, Appearance = "muted" })) with { Spacing = 18 },
@@ -60,7 +60,7 @@ public sealed partial class PipersPlugin
             Widget.Label("workspace.settings.camera-remember", "Selection and preview state are remembered. Enabled cameras start when Pipers opens.") with { Height = 40, Appearance = "muted" },
             Widget.Button("workspace.camera-stream-details", workspace.CameraStreamDetailsOpen ? "Hide stream & device details" : "Stream & device details") with { Appearance = "quiet" },
             Widget.Column("workspace.settings.camera-stream",
-                Widget.Label("camera." + id + ".info", cameraStatus.GetValueOrDefault(id, "Waiting for frames…")) with { Height = 40 },
+                Widget.Label("camera." + id + ".info", calibration.Capture.Status(id) ?? "Waiting for frames…") with { Height = 40 },
                 Field("camera." + id + ".simselect", "Simulation counterpart", new Widget("dropdown", "camera." + id + ".simselect") {
                     Options = ["Automatic counterpart", .. cameraChoices.Cameras.Select(camera => camera.Name)],
                     Value = preferences.SimulationCameras?.GetValueOrDefault(id) is not { } counterpart || counterpart.SceneId != cameraChoices.SceneId

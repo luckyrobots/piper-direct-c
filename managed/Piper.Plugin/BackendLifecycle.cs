@@ -49,23 +49,12 @@ public static class BackendActivity
         state?["motions"] is JsonArray lanes && lanes.Any(lane => lane?["query_active"]?.GetValue<bool>() == true);
 }
 
-/// <summary>Plugin-4 restart of the controller backend: Idle → Confirming (the
-/// operator opened the gripper-release confirmation) → Requested (the request
-/// was sent) → Relaunching (this session's owned process exited for maintenance
-/// and is being started again) → Idle. Any failure returns to Idle.</summary>
-internal enum BackendRestartPhase { Idle, Confirming, Requested, Relaunching }
-
 public sealed record BackendSettings(string WslDistribution = PikaDistribution.WindowsDefault, string PikaDevice = "/dev/serial/by-id/usb-" + PikaProtocol.UsbVendorId + "_USB_Serial-if00-port0");
 
 public sealed partial class PipersPlugin
 {
-    /// <summary>Plugin-4 ownership: External (null) → Starting (Token null) → Ready (Token
-    /// set) → External once stopped or found exited. Read across threads; replaced whole.</summary>
-    private sealed record OwnedBackendProcess(Process Process, string? Token);
-    private OwnedBackendProcess? ownedBackend;
-    private OwnedBackendProcess? OwnedBackend => Volatile.Read(ref ownedBackend);
-    private string backendStatus = $"Use the existing controller, or start the bundled server when ports {ControllerEndpoint.HttpPort}/{ControllerEndpoint.GrpcPort} are free.";
-    private string setupStatus = "Windows Pika requires WSL 2 + a Linux distribution and usbipd-win. Share only the Pika USB device with WSL. Driver/USB setup is explicit; see plugin instructions.";
+    /// <summary>Plugin-level state and its transitions; see <see cref="ShellComponent"/>.</summary>
+    internal readonly ShellComponent shell = new();
     private BackendSettings BackendOptions => preferences.Backend ?? new();
 
     private Widget BackendSetup() => Widget.Column("backend.setup",
@@ -73,9 +62,9 @@ public sealed partial class PipersPlugin
             Widget.Button("backend.start", "Start bundled server"), Widget.Button("backend.check", "Check Pika setup")),
         Widget.Column("backend.restart.confirmation", Widget.Label("backend.restart.explanation", "Restarting releases all Pika grippers. Empty the jaws first. Arm power stays unchanged; robot STOPs still need recovery.") with { Height = 64 },
             Widget.Row("backend.restart.confirmation.actions", Widget.Button("backend.restart.confirm", "Grippers empty — restart") with { Appearance = "primary" },
-                Widget.Button("backend.restart.cancel", "Cancel"))) with { Visible = backendRestart == BackendRestartPhase.Confirming, Padding = 12, Appearance = "panel" },
-        Widget.Label("backend.status", backendStatus) with { Height = 42 },
-        Widget.Label("backend.prerequisites", setupStatus) with { Height = 66 },
+                Widget.Button("backend.restart.cancel", "Cancel"))) with { Visible = shell.Backend.Standing.Restart == BackendRestartPhase.Confirming, Padding = 12, Appearance = "panel" },
+        Widget.Label("backend.status", shell.Backend.Standing.Status) with { Height = 42 },
+        Widget.Label("backend.prerequisites", shell.Backend.Standing.Setup) with { Height = 66 },
         Widget.Column("backend.options", Widget.Label("backend.wsl.label", "WSL distro") with { Visible = OperatingSystem.IsWindows() },
             new Widget("input", "backend.wsl") { Text = BackendOptions.WslDistribution, Hint = "Existing WSL 2 distribution; used only by a bundled server started here", Visible = OperatingSystem.IsWindows() },
             Widget.Label("backend.device.label", "Pika Linux device"),
@@ -84,17 +73,8 @@ public sealed partial class PipersPlugin
 
     private async Task BackendEvent(string action, string value, CancellationToken cancellation)
     {
-        if (action == "restart")
-        {
-            if (backendRestart is not (BackendRestartPhase.Idle or BackendRestartPhase.Confirming))
-                throw new InvalidOperationException("A backend restart is already in progress.");
-            backendRestart = BackendRestartPhase.Confirming; await Render(cancellation);
-        }
-        else if (action == "restart.cancel")
-        {
-            if (backendRestart == BackendRestartPhase.Confirming) backendRestart = BackendRestartPhase.Idle;
-            await Render(cancellation);
-        }
+        if (action == "restart") { shell.Backend.ConfirmRestart(); await Render(cancellation); }
+        else if (action == "restart.cancel") { shell.Backend.CancelRestart(); await Render(cancellation); }
         else if (action == "restart.confirm") await RestartBackend(cancellation);
         else if (action == "start") await StartBundledBackend(cancellation);
         else if (action == "check") await CheckPikaSetup(cancellation);
@@ -103,7 +83,7 @@ public sealed partial class PipersPlugin
             if (value.Length > 1024 || value.Contains('\0') || value.Contains('\n') || value.Contains('\r')) throw new ArgumentException("Invalid backend setting.");
             preferences = preferences with { Backend = action == "wsl" ? BackendOptions with { WslDistribution = value.Trim() } : BackendOptions with { PikaDevice = value.Trim() } };
             await Save(cancellation);
-            backendStatus = "Saved for the next bundled server start. A running external controller is unchanged.";
+            shell.Backend.Report("Saved for the next bundled server start. A running external controller is unchanged.");
         }
         else if (action == "instructions")
             Process.Start(new ProcessStartInfo(Path.Combine(engine.Start.PackageDirectory, "docs", "lucky-engine-plugin.md")) { UseShellExecute = true });
@@ -111,17 +91,17 @@ public sealed partial class PipersPlugin
 
     private async Task StartBundledBackend(CancellationToken cancellation)
     {
-        if (OwnedBackend is { Process.HasExited: false }) { backendStatus = "The bundled server is already running; waiting for feedback."; return; }
+        if (shell.Backend.Standing.Owned is { Process.HasExited: false }) { shell.Backend.Report("The bundled server is already running; waiting for feedback."); return; }
         string global = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "LuckyRobots", "Piper");
         Directory.CreateDirectory(global);
         FileStream startupLock;
         try { startupLock = new FileStream(Path.Combine(global, "server-start.lock"), FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None); }
-        catch (IOException) { backendStatus = "Another Pipers instance is starting the controller. Waiting for its endpoint."; return; }
+        catch (IOException) { shell.Backend.Report("Another Pipers instance is starting the controller. Waiting for its endpoint."); return; }
         using (startupLock)
         {
             if (await BackendGuards.PortOccupied(ControllerEndpoint.HttpPort, cancellation) || await BackendGuards.PortOccupied(ControllerEndpoint.GrpcPort, cancellation))
             {
-                backendStatus = $"A local service is already listening on {ControllerEndpoint.HttpPort}/{ControllerEndpoint.GrpcPort}. Waiting for a compatible controller endpoint; no second server was started.";
+                shell.Backend.Report($"A local service is already listening on {ControllerEndpoint.HttpPort}/{ControllerEndpoint.GrpcPort}. Waiting for a compatible controller endpoint; no second server was started.");
                 return;
             }
             string directory = Path.Combine(engine.Start.PackageDirectory, "server");
@@ -132,9 +112,9 @@ public sealed partial class PipersPlugin
                 "--grpc-port", ControllerEndpoint.GrpcPort.ToString(System.Globalization.CultureInfo.InvariantCulture), "--web-root", Path.Combine(engine.Start.PackageDirectory, "web"),
                 "--state-dir", Path.Combine(global, "controller"), "--session-owner", owner, "--pika-device", BackendOptions.PikaDevice], directory);
             if (OperatingSystem.IsWindows()) { start.ArgumentList.Add("--pika-wsl"); start.ArgumentList.Add(BackendOptions.WslDistribution); }
-            Interlocked.Exchange(ref ownedBackend, null)?.Process.Dispose();
+            shell.Backend.Disown();
             var process = BoundedProcess.Start(start, "Could not start the bundled controller.");
-            Volatile.Write(ref ownedBackend, new(process, null));
+            shell.Backend.Starting(process);
             process.StandardInput.Close();
             _ = DrainBackendOutput(process.StandardOutput, Path.Combine(global, "server-output.log"));
             _ = DrainBackendOutput(process.StandardError, Path.Combine(global, "server-errors.log"));
@@ -142,21 +122,21 @@ public sealed partial class PipersPlugin
             for (int attempt = 0; attempt < 40; attempt++)
             {
                 cancellation.ThrowIfCancellationRequested();
-                if (process.HasExited) { backendStatus = $"Bundled server exited ({process.ExitCode}). See {global}. Check USB/controller prerequisites."; return; }
+                if (process.HasExited) { shell.Backend.Report($"Bundled server exited ({process.ExitCode}). See {global}. Check USB/controller prerequisites."); return; }
                 try
                 {
                     var snapshot = JsonNode.Parse(await http.GetStringAsync(ControllerEndpoint.StateUrl, cancellation));
                     if (snapshot is not null && BackendGuards.IsOwned(snapshot, process.Id, null))
                     {
-                        Volatile.Write(ref ownedBackend, new(process, snapshot["token"]!.GetValue<string>()));
-                        backendStatus = "Bundled server started in monitoring mode. It belongs to this plugin session; closing Pipers stops this server. Startup sends no motor-power or movement commands.";
+                        shell.Backend.Ready(process, snapshot["token"]!.GetValue<string>());
+                        shell.Backend.Report("Bundled server started in monitoring mode. It belongs to this plugin session; closing Pipers stops this server. Startup sends no motor-power or movement commands.");
                         return;
                     }
                 }
                 catch (Exception error) when (error is HttpRequestException or TaskCanceledException or System.Text.Json.JsonException) { }
                 await Task.Delay(200, cancellation);
             }
-            backendStatus = "Bundled server is starting slowly; state streaming will reconnect automatically. Check Pika setup and server logs if it remains unavailable.";
+            shell.Backend.Report("Bundled server is starting slowly; state streaming will reconnect automatically. Check Pika setup and server logs if it remains unavailable.");
         }
     }
 
@@ -176,30 +156,30 @@ public sealed partial class PipersPlugin
 
     private async Task CheckPikaSetup(CancellationToken cancellation)
     {
-        if (string.IsNullOrEmpty(BackendOptions.PikaDevice)) { setupStatus = "Pika is disabled for bundled-server starts. Arm and cameras remain available."; return; }
+        if (string.IsNullOrEmpty(BackendOptions.PikaDevice)) { shell.Backend.ReportSetup("Pika is disabled for bundled-server starts. Arm and cameras remain available."); return; }
         if (OperatingSystem.IsLinux())
         {
-            setupStatus = File.Exists(BackendOptions.PikaDevice) ? "Pika serial device exists. Ensure this user has read/write permissions; the bundled agent opens it only when requested."
-                : "Pika serial device is absent. Connect the device and select its stable /dev/serial/by-id path; configure udev/group permissions as described in setup instructions.";
+            shell.Backend.ReportSetup(File.Exists(BackendOptions.PikaDevice) ? "Pika serial device exists. Ensure this user has read/write permissions; the bundled agent opens it only when requested."
+                : "Pika serial device is absent. Connect the device and select its stable /dev/serial/by-id path; configure udev/group permissions as described in setup instructions.");
             return;
         }
-        if (!OperatingSystem.IsWindows()) { setupStatus = "The Pika transport is supported on Windows + WSL and Linux."; return; }
+        if (!OperatingSystem.IsWindows()) { shell.Backend.ReportSetup("The Pika transport is supported on Windows + WSL and Linux."); return; }
         string usbipd = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "usbipd-win", "usbipd.exe");
-        if (!File.Exists(usbipd)) { setupStatus = "Install usbipd-win and WSL 2 with a Linux distribution, then follow the Pika-only USB sharing steps in setup instructions. No driver settings were changed."; return; }
+        if (!File.Exists(usbipd)) { shell.Backend.ReportSetup("Install usbipd-win and WSL 2 with a Linux distribution, then follow the Pika-only USB sharing steps in setup instructions. No driver settings were changed."); return; }
         try
         {
             var check = await BoundedProcess.RunAsync("wsl.exe", ["--distribution", BackendOptions.WslDistribution, "--exec", "test", "-w", BackendOptions.PikaDevice],
                 "Could not start WSL. Install WSL 2 and the selected Linux distribution.", "WSL setup check timed out.", cancellation, TimeSpan.FromSeconds(10));
-            setupStatus = check.ExitCode == 0 ? "WSL can access the Pika serial device. The Linux agent is bundled; no /opt installation is required. No motor commands were sent."
-                : "WSL cannot write the selected Pika serial device. Check distro name, Pika-only usbipd attachment and Linux serial permissions. See setup instructions; no driver settings were changed.";
+            shell.Backend.ReportSetup(check.ExitCode == 0 ? "WSL can access the Pika serial device. The Linux agent is bundled; no /opt installation is required. No motor commands were sent."
+                : "WSL cannot write the selected Pika serial device. Check distro name, Pika-only usbipd attachment and Linux serial permissions. See setup instructions; no driver settings were changed.");
         }
         catch (TimeoutException)
-        { setupStatus = "WSL setup check timed out. Start the selected Linux distribution and check its Pika USB attachment before retrying."; }
+        { shell.Backend.ReportSetup("WSL setup check timed out. Start the selected Linux distribution and check its Pika USB attachment before retrying."); }
     }
 
     private async Task StopOwnedBackend()
     {
-        if (OwnedBackend is not { } owned) return;
+        if (shell.Backend.Standing.Owned is not { } owned) return;
         var process = owned.Process;
         try
         {
@@ -229,6 +209,6 @@ public sealed partial class PipersPlugin
         }
         catch (Exception error) when (error is HttpRequestException or OperationCanceledException or InvalidOperationException or System.Text.Json.JsonException)
         { Trace.TraceWarning("Bundled server shutdown: " + error.Message); }
-        finally { process.Dispose(); Interlocked.CompareExchange(ref ownedBackend, null, owned); }
+        finally { shell.Backend.Release(owned); }
     }
 }

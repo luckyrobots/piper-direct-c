@@ -366,11 +366,11 @@ internal static class EmergencyStopTests
                 Check(first && sent > 0, "A STOP click waited for the held panel publication gate");
                 Check(second && fixture.Rpc.Routes.Count > sent && fixture.Rpc.Routes.All(route => route.StartsWith("/api/stop", StringComparison.Ordinal)),
                     "A second STOP was not sent to the hardware while the first STOP's follow-up was still pending");
-                Check(!fixture.Plugin.StopFollowUp.IsCompleted, "The STOP follow-up refreshed the panel without the publication gate");
+                Check(!fixture.Plugin.shell.StopFollowUp.Idle.IsCompleted, "The STOP follow-up refreshed the panel without the publication gate");
             }
             finally { gate.Release(); }
             bool finished = true;
-            try { await fixture.Plugin.StopFollowUp.WaitAsync(TimeSpan.FromSeconds(5)); } catch (TimeoutException) { finished = false; }
+            try { await fixture.Plugin.shell.StopFollowUp.Idle.WaitAsync(TimeSpan.FromSeconds(5)); } catch (TimeoutException) { finished = false; }
             Check(finished && fixture.Plugin.uiActionError.Length == 0, "A STOP follow-up did not finish cleanly once the publication gate was free: " + fixture.Plugin.uiActionError);
         }
         bool editorGone = false;
@@ -380,7 +380,7 @@ internal static class EmergencyStopTests
             fixture.Plugin.approved = true;
             editorGone = true;
             await fixture.Event(stop, default).WaitAsync(TimeSpan.FromSeconds(1));
-            await fixture.Plugin.StopFollowUp.WaitAsync(TimeSpan.FromSeconds(5));
+            await fixture.Plugin.shell.StopFollowUp.Idle.WaitAsync(TimeSpan.FromSeconds(5));
             Check(fixture.Rpc.Routes.Count > 0 && !fixture.Plugin.approved, "STOP was not sent, or kept motion permission, when its panel refresh failed");
             Check(fixture.Plugin.uiActionError.Contains("STOP was sent", StringComparison.Ordinal) && fixture.Plugin.uiActionError.Contains("Panel refresh", StringComparison.Ordinal),
                 "A failed STOP follow-up was lost instead of reported: " + fixture.Plugin.uiActionError);
@@ -405,7 +405,7 @@ internal static class EmergencyStopTests
             await fixture.Event("robot.piper-1.stop", default);
             Check(fixture.Rpc.StopCallsCancelled > 0 && plugin.message.StartsWith("STOP acknowledgement unavailable", StringComparison.Ordinal),
                 "The fixture's STOP was answered, so its acknowledgement budget was not used up: " + plugin.message);
-            await Eventually(() => plugin.StopFollowUp.IsCompleted, "The follow-up of an unanswered STOP never ended");
+            await Eventually(() => plugin.shell.StopFollowUp.Idle.IsCompleted, "The follow-up of an unanswered STOP never ended");
             var after = teaching.Current;
             Check(plugin.uiActionError.Length == 0, "Cleanup after a STOP that used its whole budget did not get a budget of its own: " + plugin.uiActionError);
             Check(after is { Recorder: null, Saving: false, Unsaved: null } && File.Exists(after.Path),

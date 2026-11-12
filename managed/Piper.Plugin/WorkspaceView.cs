@@ -50,8 +50,8 @@ public sealed partial class PipersPlugin
         foreach (string id in new[] { "bench", "depth", "gripper" })
         {
             bool ready = CameraFrameReady(id);
-            patches["camera." + id + ".empty"] = new() { ["visible"] = !ready, ["text"] = cameraStatus.GetValueOrDefault(id, "Connecting camera…") };
-            patches["camera." + id + ".title"] = new() { ["hint"] = cameraStatus.GetValueOrDefault(id, "Waiting for a fresh frame") };
+            patches["camera." + id + ".empty"] = new() { ["visible"] = !ready, ["text"] = calibration.Capture.Status(id) ?? "Connecting camera…" };
+            patches["camera." + id + ".title"] = new() { ["hint"] = calibration.Capture.Status(id) ?? "Waiting for a fresh frame" };
         }
         if (calibrationOpen && calibrationWizard is { } wizard && wizardProfile == ActiveProfile.Id)
         {

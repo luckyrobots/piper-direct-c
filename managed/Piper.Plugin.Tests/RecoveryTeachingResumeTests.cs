@@ -8,11 +8,11 @@ using LuckyRobots.Piper.Grpc;
 using LuckyRobots.Piper.Pika;
 using LuckyRobots.Piper.Plugin;
 
-internal static partial class SimulationFollowingTests
+internal static class RecoveryTeachingResumeTests
 {
     internal static async Task RunTeachingResume()
     {
-        await using (var f = new Fixture())
+        await using (var f = new FollowFixture())
         {
             f.ConfigureTeachingResume();
             Task resume = f.PrimaryResume();
@@ -36,7 +36,7 @@ internal static partial class SimulationFollowingTests
                 f.Plugin.workspace.PrimaryAction.Current.Status.StartsWith("Controls restored", StringComparison.Ordinal) && f.Mode == "edit",
                 "Successful resume failed its final approval/presentation or entered Play");
         }
-        await using (var f = new Fixture())
+        await using (var f = new FollowFixture())
         {
             f.ConfigureTeachingResume(completeImmediately: false); f.SetResumeEligible();
             f.Rpc.DelayedOperation = "heartbeat";
@@ -57,7 +57,7 @@ internal static partial class SimulationFollowingTests
         }
         foreach (string interruption in new[] { "permission", "generation", "playback", "fault" })
         {
-            await using var f = new Fixture(); f.ConfigureTeachingResume();
+            await using var f = new FollowFixture(); f.ConfigureTeachingResume();
             Task resume = f.PrimaryResume();
             for (int i = 0; i < 100 && f.Plugin.workspace.PrimaryAction.Current.Phase != PrimaryActionPhase.ResumingControls; i++) { f.Refresh(); await Task.Delay(5); }
             f.InterruptResume(interruption);
@@ -67,7 +67,7 @@ internal static partial class SimulationFollowingTests
                 f.Plugin.workspace.PrimaryAction.Current.Phase == PrimaryActionPhase.Idle && f.Plugin.workspace.PrimaryAction.Current.Status.StartsWith("Could not start:", StringComparison.Ordinal),
                 "A pending resume survived revocation, identity change, playback or a fault, or hid its failure");
         }
-        await using (var f = new Fixture())
+        await using (var f = new FollowFixture())
         {
             f.ConfigureTeachingResume(completeImmediately: false); f.SetResumeEligible(); f.CompleteResumeOnHeartbeat();
             await f.PrimaryResume().WaitAsync(TimeSpan.FromSeconds(2));

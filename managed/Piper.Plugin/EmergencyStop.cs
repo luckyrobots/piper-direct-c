@@ -13,9 +13,6 @@ public sealed partial class PipersPlugin
     // The panel refresh waits on the publication gate, which navigation can hold
     // for a long time. It is bounded so follow-up passes always end.
     internal static readonly TimeSpan StopViewBudget = TimeSpan.FromSeconds(4);
-    private readonly object stopFollowUpGate = new();
-    private Task stopFollowUp = Task.CompletedTask;
-    private bool stopFollowUpGroup, stopFollowUpQueued;
 
     // This path deliberately does not wait for the ordinary UI command gate or
     // for editor requests. The backend attempts the two channels independently.
@@ -31,7 +28,7 @@ public sealed partial class PipersPlugin
         }
         DisarmTelemetryTargets("Operator STOP; previous actions discarded", clearLink: false, forgetApproval: profile.Id, forgetAllApprovals: groupActive);
         CancelHandGuideRecovery();
-        uiEvents?.InvalidateControlEvents();
+        shell.Events?.InvalidateControlEvents();
         message = "STOP requested · previous targets discarded · verifying hardware";
         using (var timeout = new CancellationTokenSource(StopAcknowledgementBudget))
         try
@@ -83,33 +80,11 @@ public sealed partial class PipersPlugin
         // The handler returns as soon as the hardware answered (or its budget ran
         // out): saving observations and updating the editor run detached, so a
         // held publication gate or slow disk can never delay the next STOP.
-        QueueStopFollowUp(groupActive);
+        shell.StopFollowUp.Queue(groupActive, RunStopFollowUp);
     }
 
-    /// <summary>The detached post-STOP work: completes when every queued pass has ended.
-    /// It never faults; failures are reported to the operator by <see cref="RunStopFollowUp"/>.</summary>
-    internal Task StopFollowUp { get { lock (stopFollowUpGate) return stopFollowUp; } }
-
-    // At most one pass runs and one waits. A STOP that arrives while a pass is
-    // waiting is covered by that pass, so repeated STOP clicks cannot pile up work.
-    private void QueueStopFollowUp(bool groupActive)
-    {
-        lock (stopFollowUpGate)
-        {
-            stopFollowUpGroup |= groupActive;
-            if (stopFollowUpQueued) return;
-            stopFollowUpQueued = true;
-            Task previous = stopFollowUp;
-            stopFollowUp = Task.Run(async () =>
-            {
-                await previous.ConfigureAwait(false);
-                bool group;
-                lock (stopFollowUpGate) { group = stopFollowUpGroup; stopFollowUpGroup = stopFollowUpQueued = false; }
-                await RunStopFollowUp(group).ConfigureAwait(false);
-            });
-        }
-    }
-
+    /// <summary>One pass of the detached post-STOP work. It never faults; failures
+    /// are reported to the operator.</summary>
     private async Task RunStopFollowUp(bool groupActive)
     {
         var failures = new List<string>();

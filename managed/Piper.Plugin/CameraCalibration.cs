@@ -88,7 +88,7 @@ public sealed partial class PipersPlugin
             calibration.Lens.New();
             return;
         }
-        var frame = cameras.Get(id)?.LatestFrame ?? throw new InvalidOperationException("Wait for a camera frame first.");
+        var frame = calibration.Capture.LatestFrame(id) ?? throw new InvalidOperationException("Wait for a camera frame first.");
         if (DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - frame.TimestampUnixMicroseconds / 1000 > 1000)
             throw new InvalidOperationException("The camera frame is stale. Reconnect the camera first.");
         if (action == "calibrationcapture")

@@ -55,7 +55,7 @@ internal static class RecoveryHomeUiTests
         await using var dispatch = new UiEventDispatch((input, cancellation) =>
                 plugin.HandleEventCoreAsync(input, cancellation),
             () => plugin.CommandAuthority.Epoch, errors.Enqueue);
-        plugin.uiEvents = dispatch;
+        plugin.shell.Open(dispatch);
         try
         {
             await plugin.Render(CancellationToken.None);
