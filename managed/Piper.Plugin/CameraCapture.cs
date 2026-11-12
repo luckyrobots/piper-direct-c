@@ -245,6 +245,8 @@ public sealed class CameraCapture(PluginContext engine, string imageId,
         await stopping.CancelAsync();
         try { if (worker is not null) await worker; }
         catch (OperationCanceledException) { }
+        // A worker that faulted while ending is still ended; its replacement must start.
+        catch (Exception error) { System.Diagnostics.Trace.TraceError("Camera worker {0} faulted while stopping: {1}", imageId, error.Message); }
         finally
         {
             lock (phaseGate) phase = CaptureWorkerPhase.Disposed;
