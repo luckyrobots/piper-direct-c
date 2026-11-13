@@ -34,7 +34,7 @@ if($Runtime -eq 'win-x64') {
         Copy-Item -LiteralPath (Join-Path $taskRepo ('build/windows-x64/'+$taskLibrary)) -Destination (Join-Path $taskPackage 'server') -Force
     }
 } else {
-    Copy-Item -LiteralPath (Join-Path $taskRepo 'build/libpiper-core.so') -Destination (Join-Path $taskPackage 'server') -Force
+    Copy-Item -LiteralPath (Join-Path $taskRepo 'build/linux-x64/libpiper-core.so') -Destination (Join-Path $taskPackage 'server') -Force
 }
 Copy-Item -LiteralPath (Join-Path $taskRepo 'lucky-plugin.yaml') -Destination $taskPackage -Force
 Copy-Item -LiteralPath (Join-Path $taskRepo 'web') -Destination $taskPackage -Recurse -Force
