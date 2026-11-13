@@ -124,6 +124,12 @@ function chooseJoint(index) { selectedJoint = index; cards.forEach((c, i) => c.e
 
    reset, verify-current and motion, and `reset_completed` on verify-reset.
 
+   teach-return also reads `button_off`, plus `same_pose_confirmed` (measured-pose
+
+   firmware) or `zero_pose_confirmed` (older firmware), so it has one statement
+
+   per strategy; `action` names the command a statement sends when it differs.
+
    A flag is sent only when the operator has confirmed the statement it stands
 
    for: each power or recovery action below asks its own question every time,
@@ -157,6 +163,14 @@ const attestations = Object.freeze({
   'verify-reset': { flags: { standalone: true, supported: true, reset_completed: true }, title: 'Verify the completed reset', confirm: 'Reset completed',
 
     text: 'Confirm now: the controller reset or power cycle has completed, the arm is supported and stationary, and this dashboard is the only controller commanding it. This clears the recovery latch.' },
+
+  'teach-return': { flags: { standalone: true, clear: true, supported: true, button_off: true, same_pose_confirmed: true }, title: 'Return to CAN control', confirm: 'Return to CAN',
+
+    text: 'Confirm now: the teach button light is off, the arm is supported and stationary at the pose it holds now, people and objects are clear of it, and this dashboard is the only controller commanding it. The arm holds this measured pose; no earlier target resumes, and no homing or motor-power change runs.' },
+
+  'teach-return-zero': { action: 'teach-return', flags: { standalone: true, clear: true, supported: true, button_off: true, zero_pose_confirmed: true }, title: 'Return to CAN control', confirm: 'Return to CAN',
+
+    text: 'Confirm now: the arm is at its physical zero pose, the teach button light is off, the arm is supported during the standby/CAN change, people and objects are clear of it, and this dashboard is the only controller commanding it. No homing, reset or position target is sent.' },
 
 });
 
@@ -318,7 +332,7 @@ async function command(action, fields = {}) {
 
   if (!await (statement ? ask(statement) : approveMotion())) return;
 
-  return perform(api.command, { ...arm(), speed_percent: Number($('speed').value), tolerance_deg: Number($('tolerance').value), ...(statement ? statement.flags : motionFlags), action, ...fields });
+  return perform(api.command, { ...arm(), speed_percent: Number($('speed').value), tolerance_deg: Number($('tolerance').value), ...(statement ? statement.flags : motionFlags), action: statement?.action ?? action, ...fields });
 
 }
 
@@ -443,6 +457,16 @@ function render() {
   $('align').disabled = !canAct() || device?.range_entry_deg > 3;
 
   const corrections = device?.joints.filter(j => Number.isFinite(j.range_entry_target_deg) && Math.abs(j.range_entry_target_deg - j.actual_deg) > .0005) || [];
+
+  // The arm's own teach mode ended; only an explicit, confirmed handoff returns it to CAN control.
+
+  const handoff = device?.fresh ? device.teaching : null;
+
+  $('teach-return').hidden = !handoff?.return_required;
+
+  $('teach-return').disabled = !idle() || !handoff?.can_return || !!handoff?.handoff_in_progress;
+
+  $('teach-return').title = handoff?.can_return ? '' : (handoff?.return_reason || '');
 
   $('range-preview').hidden = !outside;
 
@@ -641,6 +665,8 @@ $('incident-verify').onclick = () => {
 };
 
 $('align').onclick = () => command('align');
+
+$('teach-return').onclick = () => command(device?.teaching?.return_requires_zero ? 'teach-return-zero' : 'teach-return');
 
 $('cycle').onclick = () => command('cycle');
 
