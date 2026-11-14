@@ -339,7 +339,8 @@ public sealed partial class PipersPlugin
         }
         string[] path = action.Split('.');
         if (path.Length != 3 || path[0] != "robot") throw new InvalidOperationException("Unknown settings action.");
-        var before = preferences.Robots!.Single(p => p.Id == path[1]);
+        // Captured: the active profile's stored record can lag its live (projected) values.
+        var before = RobotProfileRouting.Capture(preferences).Robots!.Single(p => p.Id == path[1]);
         var updated = before;
         switch (path[2])
         {
