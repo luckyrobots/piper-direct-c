@@ -246,11 +246,15 @@ public sealed partial class PipersPlugin
         preferences.Robots!.Select(p => Widget.Button("global.context." + target + "." + p.Id, p.Name) with {
             Appearance = p.Id == ActiveProfile.Id ? "selected" : "quiet", Hint = "Configure " + p.Name + " here in shared Settings" }).ToArray()) with { Spacing = 8 };
 
+    /// <summary>Gripper discovery is a session-owned route: a server this plugin started
+    /// refuses it without the plugin's owner, exactly like the other Pika requests.</summary>
+    internal ApiRequest PikaInventoryRequest() => PiperApi.Requests.PikaDevices(owner, pikaDistribution: ActiveProfile.PikaDistribution);
+
     private async Task RefreshPikaInventory(CancellationToken cancellation)
     {
         try
         {
-            var reply = await Call(PiperApi.Requests.PikaDevices(pikaDistribution: ActiveProfile.PikaDistribution), cancellation);
+            var reply = await Call(PikaInventoryRequest(), cancellation);
             pikaDevices = reply["devices"]?.AsArray().OfType<JsonObject>().Select(d => (JsonObject)d.DeepClone()).ToArray() ?? [];
             pikaInventoryMessage = pikaDevices.Length == 0 ? "No Pika detected. Connect its USB cable; discovery retries automatically." : $"{pikaDevices.Length} grippers detected · assignments are saved automatically";
         }

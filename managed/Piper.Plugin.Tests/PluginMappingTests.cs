@@ -23,7 +23,13 @@ internal static class PluginMappingTests
                 Check(!LuckyRobots.Piper.SessionOwnerGuard.Allows("plugin-session", route, absent.RootElement), "Missing owner accepted for " + route);
             }
         }
-        Check(ControllerEndpoint.GrpcAddress == $"http://{ControllerEndpoint.Loopback}:{ControllerEndpoint.GrpcPort}" &&
+        var discoveryPlugin = new PipersPlugin();
+        discoveryPlugin.preferences = RobotProfileRouting.Normalize(new Preferences(Robots: [new("piper-1", "Fixture", "can-one")], ActiveRobotId: "piper-1"));
+        var discovery = discoveryPlugin.PikaInventoryRequest();
+        using (var discoveryBody = System.Text.Json.JsonDocument.Parse(discovery.Json))
+            Check(discovery.Route.SessionOwned && LuckyRobots.Piper.SessionOwnerGuard.Allows(discoveryPlugin.owner, discovery.Route.Path, discoveryBody.RootElement),
+                "The plugin's gripper discovery was refused by the server it started (missing session owner)");
+        Check(ControllerEndpoint.GrpcAddress ==$"http://{ControllerEndpoint.Loopback}:{ControllerEndpoint.GrpcPort}" &&
             ControllerEndpoint.StateUrl == $"http://{ControllerEndpoint.Loopback}:{ControllerEndpoint.HttpPort}/api/state",
             "Controller endpoint constants disagree with their ports");
         var followerPreferences = RobotProfileRouting.Normalize(new Preferences(Robots: [
