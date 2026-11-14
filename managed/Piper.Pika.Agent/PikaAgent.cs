@@ -41,7 +41,9 @@ internal sealed class PikaAgent
     private double feedbackAt = -100, heartbeatAt, holdingEndedAt = -100, reportedAt = -100, position, speed;
     private string lastMotorRequest = ""; private double motorRequestAt = -100;
     // The ordinary target; meaningful only while mode == Targeting.
-    private double targetWidth, targetAngle, stepAt, lastTargetAt; private double? arrivedAt;
+    private double targetWidth, targetAngle, stepAt, lastTargetAt;
+    // Measured arrival: openings inside the target tolerance that stay steady (see PikaStillness).
+    private readonly PikaStillness arrival = new();
     private JsonElement? telemetry;
     private PikaDriverStatus? driverStatus;
     private string message = "Reading telemetry; no enable or target command sent.";
@@ -88,7 +90,7 @@ internal sealed class PikaAgent
     // The single Pika-E transition function.
     private void SetMode(MotorMode next)
     {
-        if (next == MotorMode.Targeting) arrivedAt = null;
+        if (next == MotorMode.Targeting) arrival.Reset();
         mode = next;
         Debug.Assert(mode != MotorMode.Targeting || following.Phase is not (PikaFollowPhase.Following or PikaFollowPhase.Holding),
             "A Pika position target coexists with a follow session.");
@@ -298,14 +300,13 @@ internal sealed class PikaAgent
             powerFeedback = null;
         }
         if (mode != MotorMode.Targeting) return;
-        if (Math.Abs(PikaProtocol.Width(position) - targetWidth) > PikaProtocol.ArrivalToleranceMm || Math.Abs(speed) > PikaProtocol.StationarySpeedRadiansPerSecond)
-        { arrivedAt = null; return; }
-        arrivedAt ??= Now();
-        if (Now() - arrivedAt >= .15)
-        {
-            message = $"Reached {PikaProtocol.Width(position):F2} mm, within {PikaProtocol.ArrivalToleranceMm:F1} mm of target.";
-            SetMode(MotorMode.Armed);
-        }
+        // Arrival is judged from the measured opening, not the per-sample speed estimate,
+        // which is too noisy at rest to confirm stillness before the movement deadline.
+        double opening = PikaProtocol.Width(position);
+        if (Math.Abs(opening - targetWidth) > PikaProtocol.ArrivalToleranceMm) { arrival.Reset(); return; }
+        if (!arrival.Observe(feedbackAt, opening)) return;
+        message = $"Reached {opening:F2} mm, within {PikaProtocol.ArrivalToleranceMm:F1} mm of target.";
+        SetMode(MotorMode.Armed);
     }
 
     /// <summary>The watchdog and control step. Called on its own timer; it
