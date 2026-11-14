@@ -42,6 +42,29 @@ A controller for AgileX PiPER arms with Pika grippers, driven from Lucky Engine.
 | Dashboard | `web/` | Browser dashboard served by the Host. |
 | CI | `.github/workflows/validate.yml` | Linux and Windows jobs; the full list of what must pass. |
 
+## 2a. The engine side: Lucky Engine plugin support
+
+A plugin is only half of the work. Lucky Engine itself had to learn to load
+plugins, and that work is **not merged**. As of 2026-11-13:
+
+| What | Where | State |
+|---|---|---|
+| Public native editor plugin API, plugin SDK and package manager | `luckyrobots/LuckyEngine` pull request 1099, branch `feature/plugin-sdk-pipers`, into `dev` | Open. Conflicts with `dev`. One check failing. |
+| Native Pipers runtime integration (runtime robot, measured ghost, episode followers, viewport overlays) | Branch `checkpoint/office-pipers-20261106`, one commit on top of the *first* commit of the pull request branch | Pushed, but **not part of pull request 1099**. The pull request branch has since moved 102 commits ahead of where this branch started. |
+| Plugin SDK the plugin builds against | `PluginSDK/` in the engine repository (`LuckyEngine.PluginSdk`, examples, tests) | CI here restores a pinned public preview of it; see `validate.yml`. |
+
+What this means for a G1 plugin:
+
+- Build against the plugin SDK from pull request 1099, and check that pull
+  request's state before starting. If it has merged, use `dev`.
+- Anything robot-specific that the engine must draw or evaluate natively was
+  done for the PiPER in the checkpoint branch, and it is PiPER-shaped. Prefer
+  keeping G1-specific behaviour in the plugin. If the engine needs a change,
+  make it general (any robot), and propose it against the engine repository as
+  its own pull request.
+- Read `PluginSDK/README.md` on the pull request branch and
+  `docs/lucky-engine-plugin.md` here for how the two sides meet.
+
 ## 3. The design that worked
 
 These are the parts worth carrying to the G1 plugin. Each has a real example
