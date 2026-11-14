@@ -23,6 +23,25 @@ internal static class PluginMappingTests
                 Check(!LuckyRobots.Piper.SessionOwnerGuard.Allows("plugin-session", route, absent.RootElement), "Missing owner accepted for " + route);
             }
         }
+        var discoveryPlugin = new PipersPlugin();
+        discoveryPlugin.preferences = RobotProfileRouting.Normalize(new Preferences(Robots: [new("piper-1", "Fixture", "can-one")], ActiveRobotId: "piper-1"));
+        var discovery = discoveryPlugin.PikaInventoryRequest();
+        using (var discoveryBody = System.Text.Json.JsonDocument.Parse(discovery.Json))
+            Check(discovery.Route.SessionOwned && LuckyRobots.Piper.SessionOwnerGuard.Allows(discoveryPlugin.owner, discovery.Route.Path, discoveryBody.RootElement),
+                "The plugin's gripper discovery was refused by the server it started (missing session owner)");
+        // Editing the active profile's simulation arm must stick. Capturing after the substitution
+        // copied the stale projected RobotId back, so the Settings dropdown always reverted.
+        static bool Throws(Action action) { try { action(); return false; } catch (InvalidOperationException) { return true; } }
+        var linked = RobotProfileRouting.Normalize(new Preferences(Robots: [new("a", "A", RobotId: "old-arm"), new("b", "B")], ActiveRobotId: "a"));
+        linked = RobotProfileRouting.Activate(linked, "a") with { Speed = 42 };   // a live, not yet captured value
+        var relinkedProfile = RobotProfileRouting.Capture(linked).Robots!.Single(p => p.Id == "a") with { RobotId = "new-arm", RobotJointPrefix = "right_" };
+        var relinked = RobotProfileRouting.Apply(linked, relinkedProfile, append: false);
+        Check(relinked.RobotId == "new-arm" && relinked.Robots!.Single(p => p.Id == "a") is { RobotId: "new-arm", RobotJointPrefix: "right_", Speed: 42 },
+            "Changing the active robot's simulation arm reverted, or lost its live settings");
+        var grown = RobotProfileRouting.Apply(relinked with { Speed = 17 }, new RobotProfile("c", "C"), append: true);
+        Check(grown.ActiveRobotId == "c" && grown.Robots!.Length == 3 && grown.Robots.Single(p => p.Id == "a").Speed == 17,
+            "Adding a robot did not capture the outgoing robot's live settings");
+        Check(Throws(() => RobotProfileRouting.Apply(linked, new RobotProfile("missing", "M"), append: false)), "Applying an unknown profile was accepted");
         Check(ControllerEndpoint.GrpcAddress == $"http://{ControllerEndpoint.Loopback}:{ControllerEndpoint.GrpcPort}" &&
             ControllerEndpoint.StateUrl == $"http://{ControllerEndpoint.Loopback}:{ControllerEndpoint.HttpPort}/api/state",
             "Controller endpoint constants disagree with their ports");

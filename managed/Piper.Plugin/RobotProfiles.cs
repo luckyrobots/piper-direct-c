@@ -105,6 +105,17 @@ public static class RobotProfileRouting
         return Project(value with { ActiveRobotId = id }, profile);
     }
 
+    /// <summary>Stores a new or edited profile and activates it. The active profile's live values
+    /// are captured first; capturing after the substitution (as <see cref="Activate"/> would) copies
+    /// the stale projection over an edit to the active profile, e.g. a new simulation arm.</summary>
+    public static Preferences Apply(Preferences value, RobotProfile profile, bool append)
+    {
+        value = Capture(value);
+        if (!append && value.Robots!.All(p => p.Id != profile.Id)) throw new InvalidOperationException("Unknown robot profile.");
+        RobotProfile[] robots = append ? [.. value.Robots!, profile] : value.Robots!.Select(p => p.Id == profile.Id ? profile : p).ToArray();
+        return Project(value with { Robots = robots, ActiveRobotId = profile.Id }, profile);
+    }
+
     private static Preferences Project(Preferences value, RobotProfile profile)
     {
         var cameras = RobotCameras(profile.SimulationCameras);
@@ -314,10 +325,8 @@ public sealed partial class PipersPlugin
             else { CommandAuthority.Revoke(); link = null; approved = linkCommandsEnabled = false; telemetry.Pika.Release(); }
             await FinishPikaTeaching("Robot profile or hardware assignment changed", cancellation);
             recovery.PikaTeaching.Store(ActiveProfile);
-            preferences = RobotProfileRouting.Capture(preferences);
             foreach (string id in new[] { "gripper", "depth" }) await calibration.Capture.Stop(id);
-            var profiles = append ? preferences.Robots!.Append(profile).ToArray() : preferences.Robots!.Select(p => p.Id == profile.Id ? profile : p).ToArray();
-            preferences = RobotProfileRouting.Activate(preferences with { Robots = profiles }, profile.Id);
+            preferences = RobotProfileRouting.Apply(preferences, profile, append);
             recovery.PikaTeaching.Restore(ActiveProfile);
             calibration.Lens.ClearProfiles();
             foreach (string id in new[] { "gripper", "depth" }) calibration.Capture.Connecting(id, "Connecting…");
