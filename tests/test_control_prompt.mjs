@@ -45,7 +45,7 @@ function fake(initial = {}) {
 const joint = enabled => index => ({ index, fresh: true, enabled, actual_deg: 0, min_deg: -150, max_deg: 150, limits_fresh: true, max_speed_rad_s: 1, velocity_rad_s: 0 });
 const robot = (overrides = {}, enabled = false) => ({ id: 'simulation:one', name: 'Sim', interface: 'sim', present: true, fresh: true, generation: 3, blocker: '', range_entry_deg: 0, firmware_supported: true, recovery_required: false, reset_pending: false, status: { control: 0, teach_state: 0, arm_status: 0, error: 0 }, gripper: {}, joints: [1, 2, 3, 4, 5, 6].map(joint(enabled)), ...overrides });
 const serverState = (overrides = {}) => ({ token: 't', simulated: true, selected: 'simulation:one', phase: 'monitor', message: '', query_active: false, motion: { active: false, request_id: 0 }, devices: [robot()], ...overrides });
-const flags = ['standalone', 'clear', 'supported', 'reset_completed'];
+const flags = ['standalone', 'clear', 'supported', 'reset_completed', 'button_off', 'same_pose_confirmed', 'zero_pose_confirmed'];
 
 // One page load. `page.served` is what GET /api/state answers (null = unreachable);
 // `page.answer(route, body, token)` answers each POST.
@@ -128,6 +128,34 @@ for (const [id, action, title, expected] of perAction) {
 }
 assert.equal(page.posts.some(post => post.body.action === 'verify-current'), false, 'Enable never clears the recovery latch');
 assert.ok(page.dispatched.some(event => event.type === 'piper-robot-disable'), 'Disabling the robot tells the Pika panel');
+
+// Ended onboard teaching: the handoff button appears only when the backend asks for it,
+// confirms its own statement every time, and carries the flags of the firmware's strategy.
+{
+  const ended = (teaching, enabled = true) => serverState({ devices: [robot({ status: { control: 2, teach_state: 2, arm_status: 0, error: 0 }, blocker: 'Teaching ended.', teaching }, enabled)] });
+  const measured = { phase: 'ended', return_required: true, can_return: true, return_requires_zero: false, return_reason: '', handoff_in_progress: false };
+  const teach = boot(serverState()); await teach.settle();
+  assert.equal(teach.byId('teach-return').hidden, true, 'No handoff button outside ended teaching');
+  teach.served = ended(measured); await teach.poll();
+  assert.equal(teach.byId('teach-return').hidden, false, 'Ended teaching shows the handoff button');
+  assert.equal(teach.byId('teach-return').disabled, false);
+  const before = teach.posts.length;
+  assert.match((await teach.press('teach-return', false))[0], /Return to CAN control/);
+  assert.equal(teach.posts.length, before, 'Declining the handoff sends nothing');
+  await teach.press('teach-return', true);
+  assert.equal(teach.posts.at(-1).route, '/api/command');
+  assert.equal(teach.posts.at(-1).body.action, 'teach-return');
+  assert.deepEqual(teach.sent(), { standalone: true, clear: true, supported: true, button_off: true, same_pose_confirmed: true });
+  assert.match(String(teach.byId('safety-text').textContent), /teach button light is off/);
+  teach.served = ended({ ...measured, return_requires_zero: true }); await teach.poll();
+  await teach.press('teach-return', true);
+  assert.equal(teach.posts.at(-1).body.action, 'teach-return', 'The zero-pose statement still sends teach-return');
+  assert.deepEqual(teach.sent(), { standalone: true, clear: true, supported: true, button_off: true, zero_pose_confirmed: true });
+  assert.match(String(teach.byId('safety-text').textContent), /physical zero pose/);
+  teach.served = ended({ ...measured, can_return: false, return_reason: 'Turn off the physical teach button.' }); await teach.poll();
+  assert.equal(teach.byId('teach-return').disabled, true, 'A refused handoff disables the button');
+  assert.equal(teach.byId('teach-return').title, 'Turn off the physical teach button.');
+}
 
 // Web-B: motion commands share one session approval whose prompt states exactly the flags they carry.
 let before = page.posts.length;
