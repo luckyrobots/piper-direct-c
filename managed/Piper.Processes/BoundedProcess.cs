@@ -65,6 +65,26 @@ public static class BoundedProcess
         { throw new IOException($"{startFailure} ({start.FileName}: {e.Message})", e); }
     }
 
+    /// <summary>Opens a file in the desktop's default application without lending it this
+    /// process's standard streams. A shell-executed child inherits them, and the plugin's
+    /// stdin and stdout are its message pipes to the engine: a handler that reads its stdin
+    /// (a terminal editor started without a terminal does) consumes the engine's messages,
+    /// so clicks stop arriving and a half-eaten message ends the plugin.</summary>
+    public static void OpenWithDefaultApplication(string path)
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            try { Process.Start(new ProcessStartInfo(path) { UseShellExecute = true })?.Dispose(); }
+            catch (Exception e) when (e is System.ComponentModel.Win32Exception or InvalidOperationException)
+            { throw new IOException($"Could not open {path} ({e.Message})", e); }
+            return;
+        }
+        var process = Start(Redirected(OperatingSystem.IsMacOS() ? "open" : "xdg-open", [path]), "Could not open " + path);
+        process.StandardInput.Close();
+        _ = Task.WhenAll(process.StandardOutput.BaseStream.CopyToAsync(Stream.Null), process.StandardError.BaseStream.CopyToAsync(Stream.Null))
+            .ContinueWith(_ => process.Dispose(), TaskScheduler.Default);
+    }
+
     /// <summary>Kills a process tree. It runs on timer and cancellation
     /// callbacks, where an escaping exception would end the caller's process,
     /// so every failure the runtime documents is reported as <c>false</c> instead.</summary>

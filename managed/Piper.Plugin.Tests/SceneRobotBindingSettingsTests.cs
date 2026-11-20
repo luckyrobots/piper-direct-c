@@ -35,7 +35,13 @@ internal static class SceneRobotBindingSettingsTests
             foreach (var child in widget.Children ?? []) foreach (var descendant in Walk(child)) yield return descendant;
         }
         plugin.preferences = prefs; plugin.scene = scene;
-        var widgets = Walk(Render()).ToArray();
+        // Each robot is set up on its own Setup tab, so render the page once per selected robot.
+        var widgets = new[] { first, second }.SelectMany(p =>
+        {
+            plugin.preferences = prefs with { ActiveRobotId = p.Id };
+            return Walk(Render());
+        }).ToArray();
+        plugin.preferences = prefs;
         Check(widgets.Where(w => w.Type is "input" or "dropdown").All(w => w.Width is null or <= 250) &&
             !widgets.Any(w => w.Id == "global.robot.headings" || w.Id.EndsWith(".connections", StringComparison.Ordinal)) &&
             new[] { first, second }.All(p => new[] { "name", "can", "pika", "scene" }.All(field =>

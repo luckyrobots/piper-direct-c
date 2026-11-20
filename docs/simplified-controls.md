@@ -1,13 +1,17 @@
 # Using the Pipers workspace
 
-Choose a robot in the left bar. Its joint controls, Pika gripper and two wrist
-cameras appear together. The bench camera stays in the left bar because every
-robot shares it. Connection details and configuration live under the single
-**Settings** gear above the robot list. Hover over an **(i)** icon for explanations.
+Choose a robot in the left bar. Its state and the one thing to do next are at the
+top; its gripper and joint controls follow, with the two wrist cameras below them.
+The left bar also holds the **Follow simulation** block and the bench camera,
+because every robot shares them. Connection details and configuration live under
+the **Settings** tab beside **Controls** and **Recording**; while it is open, the
+left bar lists its pages (Robots, Cameras, Calibration, Diagnostics). A gear icon
+anywhere leads to Settings, and the expand icon on a camera opens its enlarged
+real-and-simulation comparison. Hover over an info icon for explanations.
 
 ## Connect and use one robot
 
-1. Open **Settings → Robots & devices**. Give the robot a name and choose its
+1. Open **Settings → Robots**. Give the robot a name and choose its
    exact CAN adapter, Pika USB gripper and individual **Simulation arm**. Each
    real robot has one assignment, such as **Piper 2 → Sim arm 2**. Two arms may
    share one physics model internally; their joints, cameras and assignments
@@ -37,7 +41,7 @@ not redirect, restart or end either participant's ordered movement.
 Enable each participating robot and its assigned gripper first. The main robot
 button then says **Enabled**; it does not start or prepare a simulation.
 
-1. For each robot, check **Follow simulation** in its controls if it should join
+1. For each robot, tick **Include** in the left bar's Follow simulation block if it should join
    playback. Checking a box only saves the selection. It does not move a robot,
    pause the editor or enter Play.
 2. Click the single **Follow simulation** button in the left sidebar. It arms the
@@ -126,9 +130,9 @@ playback alone does not prove that USB gripper motion was recorded.
 
 ## Settings, calibration and recording
 
-**Settings → Robots & devices** holds robot names, arm/gripper connections, scene
+**Settings → Robots** holds robot names, arm/gripper connections, scene
 bindings and removal. **Cameras** holds physical devices, simulation counterparts,
-preview controls and lens calibration. **Bench & calibration** holds the common
+preview controls and lens calibration. **Calibration** holds the common
 desk reference and the selected arm's calibration. **Diagnostics** holds detailed
 controller state, recovery tools and the gripper's closed display reference.
 

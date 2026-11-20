@@ -104,7 +104,7 @@ internal static class PikaTeachingTests
         var controls = plugin.ControlsPage();
         var children = controls.Children!.ToArray();
         int teachingIndex = Array.FindIndex(children, w => w.Id == "teaching");
-        Check(teachingIndex >= 0 && teachingIndex < Array.FindIndex(children, w => w.Id == "cameras") && teachingIndex < Array.FindIndex(children, w => w.Id == "joint.1"),
+        Check(teachingIndex >= 0 && Array.FindIndex(children, w => w.Id == "cameras") < 0 && teachingIndex < Array.FindIndex(children, w => w.Id == "joint.1"),
             "Hand-guiding actions were placed below cameras or disabled joints, making release confirmation unreachable without scrolling");
         Check(All(controls).Count(w => w.Id == "teaching.pika.free") == 1 &&
             All(controls).Single(w => w.Id == "teaching.pika.status").Height == 36 &&

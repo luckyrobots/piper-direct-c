@@ -90,7 +90,11 @@ public sealed partial class PipersPlugin : ILuckyPlugin
         await Render(cancellation);
         passiveMeasuredTrackingStarted = true;
         shell.Loops.Started(Watch(shutdown.Token));
+        // Clicks are only taken once this method returns. These lines say, from the system
+        // journal alone, whether a dead panel is a startup that never finished.
+        Trace.TraceInformation("Startup: view published; starting cameras.");
         foreach (string camera in new[] { "bench", "gripper", "depth" }) await RestartCamera(camera);
+        Trace.TraceInformation("Startup complete; accepting clicks.");
     }
 
     private JsonObject Device(string? expectedDeviceId = null, long? expectedGeneration = null, string? expectedToken = null,
@@ -124,8 +128,14 @@ public sealed partial class PipersPlugin : ILuckyPlugin
     {
         string authorization = expectedToken ?? token;
         if (expectedToken is not null && token != expectedToken) throw new InvalidOperationException("The controller session changed; no command was sent under the old confirmation.");
-        var reply = await client.ExecuteAsync(new ControlRequest { Route = request.Route.Path, Json = request.Json },
-            new Metadata { { "x-piper-token", authorization } }, deadline: DateTime.UtcNow.AddSeconds(request.Route == PiperApi.PikaConnect ? 20 : 3), cancellationToken: cancellation);
+        double seconds = request.Route == PiperApi.PikaConnect ? 20 : 3;
+        using var call = client.ExecuteAsync(new ControlRequest { Route = request.Route.Path, Json = request.Json },
+            new Metadata { { "x-piper-token", authorization ?? "" } }, deadline: DateTime.UtcNow.AddSeconds(seconds), cancellationToken: cancellation);
+        ControlReply reply;
+        // The call's own deadline is not trusted to end it: with no arm server listening it has been seen
+        // to stay pending, and one request that never returns leaves every later click unanswered.
+        try { reply = await call.ResponseAsync.WaitAsync(TimeSpan.FromSeconds(seconds + 1), cancellation); }
+        catch (TimeoutException) { throw new RpcException(new Status(StatusCode.Unavailable, "The arm server did not answer.")); }
         var result = JsonNode.Parse(reply.Json)!.AsObject();
         if (reply.Status >= 400)
         {
@@ -198,6 +208,9 @@ public sealed partial class PipersPlugin : ILuckyPlugin
 
     public async Task HandleEventAsync(UiEvent input, CancellationToken cancellation)
     {
+        // Streams (a slider drag, simulation targets) carry a value on every frame; only presses are traced.
+        if (!input.WidgetId.StartsWith("engine.", StringComparison.Ordinal) && input.Value.ValueKind is not System.Text.Json.JsonValueKind.Number)
+            Trace.TraceInformation("Click received: {0}", input.WidgetId);
         long inputEpoch = ControlInputEpoch;
         var eventProfile = ActiveProfile;
         string eventBackend = token;
@@ -216,8 +229,25 @@ public sealed partial class PipersPlugin : ILuckyPlugin
             catch (Exception error) { Trace.TraceWarning("Recovery cancellation presentation: {0}", error.Message); }
             return;
         }
+        // Disable switches the motors off and these arms have no brakes, so an idle powered arm asks first.
+        // STOP never asks, and neither does Disable while something is running: that is not the moment for a question.
+        if (eventId == "disable" && shell.Events is not null && DisableDropsIdleArm(eventProfile, state, GroupFollowActive))
+        {
+            pendingDisable = new(input, eventProfile.Id);
+            await PresentDisableConfirmation();
+            return;
+        }
+        if (eventId is "disable.confirm.accept" or "disable.confirm.cancel")
+        {
+            var pending = pendingDisable; pendingDisable = null;
+            // The answer counts only for the robot that was asked about. A question left open for
+            // another robot would otherwise announce a Disable here that reaches no arm.
+            if (eventId == "disable.confirm.cancel" || pending is null || pending.ProfileId != eventProfile.Id) { await PresentDisableConfirmation(); return; }
+            input = pending.Click; eventId = "disable";
+        }
         if (eventId == "disable" && shell.Events is { } urgentDispatch)
         {
+            pendingDisable = null;
             follow.CancelInput("Disable requested · stopping the follower group");
             DisarmTelemetryTargets("Disable requested; previous actions discarded", clearLink: false, forgetApproval: eventProfile.Id);
             CancelHandGuideRecovery();
@@ -243,6 +273,41 @@ public sealed partial class PipersPlugin : ILuckyPlugin
         }
         // Unstarted isolated fixtures use the same handler without a worker.
         await HandleEventCoreAsync(input, cancellation);
+    }
+
+    /// <summary>A Disable click waiting for "Arm supported — disable", and the robot it was made for.
+    /// An immutable reference: the telemetry loop reads it while the event reader replaces it.</summary>
+    private sealed record PendingDisable(UiEvent Click, string ProfileId);
+    private volatile PendingDisable? pendingDisable;
+
+    /// <summary>Whether the Disable question is open for the robot on screen. A question asked about
+    /// one robot is never shown, or answered, on another robot's page.</summary>
+    /// <summary>Names the robot: the question can be read from a page that is not that robot's own.</summary>
+    internal string DisableQuestionText => ActiveProfile.Name + ": motors switch off now. The arm has no brakes and will drop unless it is supported.";
+
+    internal bool DisableQuestionOpen => pendingDisable is { } pending && pending.ProfileId == ActiveProfile.Id;
+
+    /// <summary>Whether Disable would let a resting, powered arm fall: this robot's motors are on and
+    /// nothing is moving it. With no state, or state that cannot be read, the answer is no, so
+    /// Disable is never held back blind.</summary>
+    internal static bool DisableDropsIdleArm(RobotProfile profile, JsonObject? state, bool following)
+    {
+        if (following || profile.CanDeviceId.Length == 0) return false;
+        try
+        {
+            if (state?["any_motion_active"]?.GetValue<bool>() == true) return false;
+            var device = state?["devices"]?.AsArray().FirstOrDefault(d => d?["id"]?.GetValue<string>() == profile.CanDeviceId);
+            return device?["joints"] is JsonArray joints && joints.Any(joint => joint?["enabled"]?.GetValue<bool>() == true);
+        }
+        // Unexpected feedback must not stand between the operator and Disable.
+        catch (Exception error) when (error is InvalidOperationException or FormatException) { return false; }
+    }
+
+    private async Task PresentDisableConfirmation()
+    {
+        using var presentation = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+        try { await Update(presentation.Token); }
+        catch (Exception error) { Trace.TraceWarning("Disable confirmation presentation: {0}", error.Message); }
     }
 
     internal static bool ControlEventNeedsPermission(string id)
@@ -280,7 +345,7 @@ public sealed partial class PipersPlugin : ILuckyPlugin
                 "toggle" or "match" => "toggle", "stop" => "cancel",
                 _ => throw new InvalidOperationException("Unknown simulation follow action.") }, cancellation);
             else if (TryStrip(id, "global.", out rest)) await GlobalSettingsEvent(rest, input.Value, cancellation);
-            else if (TryStrip(id, "workspace.", out rest)) await WorkspaceEvent(rest, cancellation);
+            else if (TryStrip(id, "workspace.", out rest)) await WorkspaceEvent(WorkspaceTabs.Action(rest, input.Value), cancellation);
             else if (TryStrip(id, "height.", out rest)) { if (rest != "info") await HeightCheckEvent(rest, input.Value, cancellation); }
             else if (TryStrip(id, "replay.", out rest)) await ReplayEvent(rest, input.Value, cancellation);
             else if (TryStrip(id, "wizard.", out rest))
@@ -292,7 +357,15 @@ public sealed partial class PipersPlugin : ILuckyPlugin
             {
                 if (calibrationOpen && (id.StartsWith("profiles.select.", StringComparison.Ordinal) || id is "profiles.add" or "profiles.remove"))
                 { await StopHeightCheck(cancellation); await ClearWizardHighlight(cancellation); }
-                await ProfileEvent(rest, cancellation);
+                // Clicking the robot that is already open is how you come back from a bench page. That is
+                // navigation only: a profile switch would hold a moving arm, revoke control, release the
+                // gripper and cancel a recovery in progress.
+                // That holds only while the arm server is already listening to this robot's adapter. When it
+                // is not (after a server start it may be on another robot's), this click is the one way to
+                // connect, so it must go through.
+                bool elsewhere = ActiveProfile.CanDeviceId.Length > 0 && state?["selected"]?.GetValue<string>() is { } listening &&
+                    listening != ActiveProfile.CanDeviceId;
+                if (id != "profiles.select." + ActiveProfile.Id || elsewhere) await ProfileEvent(rest, cancellation);
                 // Selecting a robot returns to its controls through the same
                 // publication gate as every other navigation.
                 await PublishWorkspaceView(cancellation, Navigation.Navigate("controls"));
@@ -303,7 +376,10 @@ public sealed partial class PipersPlugin : ILuckyPlugin
         }
         catch (Exception error) when (error is not OperationCanceledException)
         {
-            uiActionError = "Action failed: " + error.Message;
+            // A stopped arm server is the common cause; say what to do instead of printing the transport error.
+            uiActionError = error is RpcException { StatusCode: StatusCode.Unavailable }
+                ? "That needs the arm server, which is not running. Start it under Settings → Arm server."
+                : "Action failed: " + error.Message;
             message = uiActionError;
             await Update(cancellation);
         }
@@ -379,7 +455,7 @@ public sealed partial class PipersPlugin : ILuckyPlugin
             {
                 if (parts[2] == "device") settings = settings with { Device = CameraDeviceChoices.Resolve(cameraDeviceChoices, input.Value, CameraSettings(camera).Device), Enabled = true };
                 if (parts[2] == "toggle") settings = settings with { Enabled = !settings.Enabled };
-                if (camera == "depth" && parts[2] is "view" or "selectcolor" or "selectdepth") settings = D405View.Select(settings, parts[2] == "view" ? input.Value.GetInt32() : parts[2] == "selectdepth" ? 1 : 0);
+                if (camera == "depth" && parts[2] is "view" or "mode" or "selectcolor" or "selectdepth") settings = D405View.Select(settings, parts[2] is "view" or "mode" ? input.Value.GetInt32() : parts[2] == "selectdepth" ? 1 : 0);
                 if (parts[2] == "serial") preferences = preferences with { DepthSerial = CameraDeviceChoices.Resolve(depthDeviceChoices, input.Value, "") };
                 preferences = camera switch { "bench" => preferences with { Bench = settings }, "gripper" => preferences with { Gripper = settings }, _ => preferences with { Depth = settings } };
                 await Save(cancellation); await RestartCamera(camera);
@@ -608,12 +684,20 @@ public sealed partial class PipersPlugin : ILuckyPlugin
         {
             ["link"] = new() { ["text"] = link is null ? "Link robot" : "Unlink robot" }
         };
+        patches["disable.confirm"] = new() { ["visible"] = DisableQuestionOpen };
+        patches["disable.confirm.text"] = new() { ["text"] = DisableQuestionText };
         patches["safety"] = new() { ["visible"] = scope.View?.Confirmation is { } presented &&
             ReferenceEquals(CommandAuthority.Current.Confirmation, presented) };
         AddResetCompletionPatches(patches);
         var backend = shell.Backend.Standing;
         patches["backend.restart.confirmation"] = new() { ["visible"] = backend.Restart == BackendRestartPhase.Confirming };
         patches["backend.status"] = new() { ["text"] = backend.Status };
+        bool serverLive = ServerLive;
+        patches["workspace.settings.diagnostics@nav"] = new() { ["text"] = ServerLabel, ["appearance"] = serverLive ? "success" : "muted" };
+        patches["backend.state.dot"] = new() { ["appearance"] = serverLive ? "success" : "muted" };
+        patches["backend.state"] = new() { ["text"] = serverLive ? "Running" : "Not running" };
+        patches["backend.start"] = new() { ["enabled"] = !serverLive, ["appearance"] = serverLive ? "default" : "primary", ["hint"] = serverLive ? "The arm server is already running." : StartHint };
+        patches["backend.restart"] = new() { ["enabled"] = serverLive, ["hint"] = serverLive ? RestartHint : "Nothing to restart: the arm server is not running." };
         patches["backend.prerequisites"] = new() { ["text"] = backend.Setup };
         patches["workspace.action-error"] = new() { ["text"] = uiActionError, ["hint"] = uiActionError, ["visible"] = uiActionError.Length > 0 };
         AddProfilePatches(patches);
@@ -669,7 +753,9 @@ public sealed partial class PipersPlugin : ILuckyPlugin
         foreach (string id in new[] { "bench", "gripper", "depth" })
         {
             patches["camera." + id + ".image"] = new() { ["visible"] = CameraFrameReady(id) };
+            // Without a picture the status is already shown in its place; do not print it twice.
             patches["camera." + id + ".info"] = new() { ["text"] = calibration.Capture.Status(id) ?? "Waiting for a fresh frame…" };
+            patches["camera." + id + ".frame-info"] = new() { ["text"] = calibration.Capture.Status(id) ?? "Waiting for a fresh frame…", ["visible"] = CameraFrameReady(id) };
         }
         patches["camera.gripper.calibration.status"] = new() { ["text"] = lens.Status };
         AddTeachingPatches(patches, device);
@@ -680,7 +766,7 @@ public sealed partial class PipersPlugin : ILuckyPlugin
         AddPikaReferencePatches(patches, pika as JsonObject);
         AddUnifiedWorkspacePatches(patches, device);
         AddRecoveryHomePatches(patches);
-        AddGroupFollowPatches(patches);
+        AddGroupFollowPatches(patches, device);
         return PublishWorkspacePatch(scope, patches, cancellation, evidence);
     }
 

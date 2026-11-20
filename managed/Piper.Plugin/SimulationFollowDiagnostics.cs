@@ -49,13 +49,15 @@ public sealed record SimulationFollowFailureOrdered(string EpisodeId, long Episo
 
     public string Describe()
     {
-        int joint = Array.IndexOf(EndpointJointErrorsDegrees, EndpointJointErrorsDegrees.Max());
+        // The joint furthest outside its own allowance, not simply the largest error: a roll joint is allowed more.
+        int joint = Enumerable.Range(0, EndpointJointErrorsDegrees.Length)
+            .MaxBy(index => EndpointJointErrorsDegrees[index] - SimulationFollowPolicy.ArrivalJointToleranceDegrees(index));
         string F(double value, string format = "F1") => value.ToString(format, CultureInfo.InvariantCulture);
         return $"Queued {Kind.ToLowerInvariant()} phase {Phase}, cursors {FirstCursor}–{EndCursor}: " +
             $"Pika {F(ActualOpeningMm)} mm; expected {F(ExpectedOpeningMm)} ±{F(OpeningToleranceMm)} mm " +
             $"(command {F(EndpointCommandOpeningMm)} mm)" +
             (RequiresPhysicalContactCandidate ? $"; physical contact candidate {(ActualPhysicalContactCandidate ? "present" : "missing")}" : "") +
-            $"; largest arm endpoint error J{joint + 1} {F(EndpointJointErrorsDegrees[joint], "F2")}° (allowed 0.25°)" +
+            $"; arm endpoint error furthest past its allowance J{joint + 1} {F(EndpointJointErrorsDegrees[joint], "F2")}° (allowed {F(SimulationFollowPolicy.ArrivalJointToleranceDegrees(joint), "F2")}°)" +
             $"; arm stationary {(ArmStationary ? "yes" : "no")}; elapsed {F(ElapsedSeconds, "F2")}/{F(DurationSeconds, "F2")} s.";
     }
 }

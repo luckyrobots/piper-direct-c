@@ -17,13 +17,14 @@ internal sealed partial class FollowFixture
     public async Task GroupEvent(string action)
     { await plugin.GroupFollowEvent(action, CancellationToken.None); }
     public FollowPreparationReport Preparation() => plugin.GroupPreparation(null, null, null);
-    public string SidebarStatus() => Sidebar().Children!.Single(w => w.Id == "group.follow.status").Text!;
-    public bool SidebarFollowEnabled() => Sidebar().Children!.Single(w => w.Id == "group.follow.toggle").Enabled != false;
-    private Widget Sidebar() => plugin.GroupFollowControls();
+    // The status and the Follow button live on the Follow simulation page; Stop following stays in
+    // the sidebar, where it is reachable from every page.
+    public string SidebarStatus() => Widgets(plugin.FollowPage()).Single(w => w.Id == "group.follow.status").Text!;
+    public bool SidebarFollowEnabled() => Widgets(plugin.FollowPage()).Single(w => w.Id == "group.follow.toggle").Enabled != false;
+    private static IEnumerable<Widget> Widgets(Widget root) => new[] { root }.Concat((root.Children ?? []).SelectMany(Widgets));
     public Task ClickSidebarGroupStop()
     {
-        var sidebar = plugin.GroupFollowControls();
-        var stop = sidebar.Children!.Single(w => w.Text == "Stop following" && w.Visible != false);
+        var stop = Widgets(plugin.RobotSidebar()).Single(w => w.Text == "Stop following" && w.Visible != false);
         string wire = WorkspaceEventScope.Wrap(plugin.workspace.Epoch, "piper-1", stop.Id);
         return plugin.HandleEventAsync(new("fixture", wire, "click", JsonSerializer.SerializeToElement(true)), CancellationToken.None);
     }

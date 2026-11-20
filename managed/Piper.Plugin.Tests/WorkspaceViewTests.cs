@@ -165,7 +165,8 @@ internal static class WorkspaceViewTests
                 Check(nodes.Any(n => n["text"]?.GetValue<string>()?.Contains("height = 0 mm", StringComparison.Ordinal) == true) && !ids.Any(id => id.EndsWith(".sheet.field.height", StringComparison.Ordinal)), "Desk contact calibration must describe tabletop contact and expose no hover-height input");
                 Check(nodes.Where(n => n["type"]?.GetValue<string>() == "input").All(n => n["commitOnly"]?.GetValue<bool>() == false), "Calibration measurements wait for blur/Enter instead of publishing edits live");
             }
-            Check(ids.Count(id => id == "robot.piper-1.stop") == 1, "Persistent profile-bound STOP is missing/duplicated: " + label);
+            // Every page keeps the open robot's STOP: it sits beside the robot's name in the sidebar.
+            Check(ids.Count(id => id == "stop.piper-1") == 1, "Persistent profile-bound STOP is missing/duplicated: " + label);
             long current = plugin.workspace.Epoch;
             Check(ids.All(id => WorkspaceEventScope.Unwrap(current, "piper-1", id).Length > 0), "Rendered widget escaped its current view/profile scope: " + label);
             await plugin.Update(CancellationToken.None);
@@ -257,12 +258,13 @@ internal static class WorkspaceViewTests
             {
                 await CheckView("settings", "cameras");
                 long before = plugin.workspace.Epoch;
-                string back = WidgetId("workspace.controls@settings");
-                await Click(WidgetId("workspace.settings.bench"));
+                string back = WidgetId("workspace.pages");
+                // Calibration opens from a robot's Setup tab; the request is the same navigation event.
+                await Click(back[..^"workspace.pages".Length] + "workspace.settings.bench");
                 Check(plugin.workspace.Navigation.Category == SettingsCategory.Cameras && plugin.workspace.Epoch == before &&
                     plugin.uiActionError.Contains("Stop following", StringComparison.Ordinal),
                     "Rejected Bench navigation mutated the published camera page");
-                await Click(back);
+                await Click(back, 0);
                 Check(plugin.workspace.Navigation.Page == WorkspacePage.Controls && plugin.workspace.Epoch > before,
                     "The old page became unclickable after rejected Bench navigation");
             }

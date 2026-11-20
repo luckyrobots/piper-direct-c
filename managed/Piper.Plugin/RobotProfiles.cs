@@ -62,7 +62,12 @@ public static class RobotProfileRouting
         return result;
     }
 
+    /// <summary>The sidebar's STOP for one named robot: "stop.&lt;profile id&gt;". It names its robot
+    /// itself, so it is the same button whichever robot or page is open.</summary>
+    public const string RobotStopPrefix = "stop.";
+
     public static bool SharedWidget(string id) => id.StartsWith("profiles.select.", StringComparison.Ordinal) ||
+        id.StartsWith(RobotStopPrefix, StringComparison.Ordinal) ||
         id.StartsWith("group.follow.", StringComparison.Ordinal) && id != "group.follow.selected" ||
         id.StartsWith("global.", StringComparison.Ordinal) ||
         id is "profiles.add" or "profiles.heading" or "profiles.list" or "profiles.edit" or "profiles.mode" ||
@@ -103,6 +108,17 @@ public static class RobotProfileRouting
         value = Capture(value);
         var profile = value.Robots!.SingleOrDefault(p => p.Id == id) ?? throw new InvalidOperationException("Unknown robot profile.");
         return Project(value with { ActiveRobotId = id }, profile);
+    }
+
+    /// <summary>Stores a new or edited profile and activates it. The active profile's live values
+    /// are captured first; capturing after the substitution (as <see cref="Activate"/> would) copies
+    /// the stale projection over an edit to the active profile, e.g. a new simulation arm.</summary>
+    public static Preferences Apply(Preferences value, RobotProfile profile, bool append)
+    {
+        value = Capture(value);
+        if (!append && value.Robots!.All(p => p.Id != profile.Id)) throw new InvalidOperationException("Unknown robot profile.");
+        RobotProfile[] robots = append ? [.. value.Robots!, profile] : value.Robots!.Select(p => p.Id == profile.Id ? profile : p).ToArray();
+        return Project(value with { Robots = robots, ActiveRobotId = profile.Id }, profile);
     }
 
     private static Preferences Project(Preferences value, RobotProfile profile)
@@ -161,25 +177,97 @@ public sealed partial class PipersPlugin
             ? PublishWorkspacePatch(scope, patches, cancellation)
             : Task.CompletedTask;
 
-    private Widget RobotSidebar()
+    /// <summary>The only navigation of the workspace, drawn with the editor's own Settings-sidebar
+    /// list: group headings, one indented row per page, a hairline between groups.</summary>
+    internal Widget RobotSidebar()
     {
-        var rows = preferences.Robots!.Select(p => Widget.Button("profiles.select." + p.Id, ProfileLabel(p)) with
-        { Height = 56, Padding = 12, Appearance = p.Id == ActiveProfile.Id ? "selected" : "quiet", Hint = p.CanDeviceId.Length == 0 ? "Assign an adapter in Settings → Robot" : "Switch to " + p.Name }).ToArray();
-        return Widget.Column("sidebar", Widget.Button("workspace.settings.robot@sidebar", "⚙  Settings") with { Appearance = "quiet", Height = 38, Hint = "All robots, cameras, controllers and bench calibration" },
-            Widget.Label("profiles.heading", "ROBOTS") with { Appearance = "muted" },
-            Widget.Column("profiles.list", rows) with { Spacing = 8 },
-            GroupFollowControls(),
-            (Navigation.Page == WorkspacePage.Camera && cameraDetail == "bench" ? Widget.Label("workspace.bench.enlarged", "Bench camera is enlarged") with { Height = 60, Appearance = "muted" } : Camera("bench", "Bench camera")),
-            Widget.Button("workspace.camera.bench@compare", "Enlarge & compare") with { Appearance = "quiet", Hint = "The bench camera is shared by every robot." }) with { Width = 170, Padding = 12, Spacing = 14, Appearance = "sidebar" };
+        bool bench = WorkspaceTabs.BenchPage(Navigation);
+        bool serverPage = Navigation.Page == WorkspacePage.Settings && Navigation.Category == SettingsCategory.Diagnostics;
+        bool benchCamera = bench && (Navigation.Page == WorkspacePage.Camera || Navigation.Page == WorkspacePage.Settings && Navigation.Category == SettingsCategory.Cameras);
+        // Every robot keeps its own Stop beside its name, on every page.
+        var robots = preferences.Robots!.Select(p => (Widget)(Widget.Row("profiles.row." + p.Id,
+            // No tooltip on a plain row: it would cover the robot below it.
+            Widget.NavItem("profiles.select." + p.Id, ProfileLabel(p), "robot-arm", !bench && p.Id == ActiveProfile.Id) with
+                { Appearance = ProfileDisplay(p).Tone, Hint = p.CanDeviceId.Length == 0 ? "Assign an adapter in this robot's Setup tab" : null },
+            Widget.Button(RobotProfileRouting.RobotStopPrefix + p.Id, "Stop") with { Height = 28, Width = 52, Appearance = "danger-quiet",
+                Enabled = StopAvailable(p), Hint = StopHint(p) },
+            Widget.Label("profiles.row.pad." + p.Id, "") with { Width = 6 }) with { Spacing = 4 })).ToList();
+        // Adding a robot opens it, which releases the open robot's control: not offered while that
+        // robot is under control or a group is following, so a slip below the list cannot do it.
+        robots.Add(Widget.NavItem("profiles.add", "Add robot", "plus", false) with {
+            Enabled = preferences.Robots!.Length < RobotProfileRouting.MaximumProfiles && !approved && !GroupFollowActive,
+            Hint = approved || GroupFollowActive ? "Disable the open robot and stop following before adding another." : null });
+        var rows = new List<Widget> { Widget.NavGroup("profiles.heading", "Robots", "robot-arm", !bench) };
+        rows.AddRange(robots);
+        rows.AddRange([
+            Widget.Separator("sidebar.bench.separator"),
+            Widget.NavGroup("sidebar.bench.heading", "Bench", "scene", bench && !serverPage),
+            Widget.NavItem("workspace.overview", "Overview", "eye", Navigation.Page == WorkspacePage.Overview),
+            Widget.NavItem("workspace.follow", "Follow simulation", "play", Navigation.Page == WorkspacePage.Follow),
+            // Always one click away, on every page, while a group is armed or running.
+            Widget.Row("group.follow.cancel.row", Widget.Label("group.follow.cancel.pad", "") with { Width = 28 },
+                Widget.Button("group.follow.cancel", "Stop following") with { Height = 30, Width = 150, Visible = GroupFollowActive,
+                    Hint = "Stop sending targets, request a hold for the arms and grippers used, and pause the simulation." }),
+            Widget.NavItem("workspace.camera.bench@nav", "Bench camera", "camera", benchCamera),
+            Widget.Separator("sidebar.settings.separator"),
+            Widget.NavGroup("sidebar.settings.heading", "Settings", "gear", serverPage),
+            Widget.NavItem("workspace.settings.diagnostics@nav", ServerLabel, "server", serverPage) with { Appearance = ServerLive ? "success" : "muted" }]);
+        // The Settings sidebar's own width and row gap; rows reach both edges so the lit row spans it.
+        // The lighter panel grey of the editor's Settings sidebar, not a black strip.
+        return Widget.Column("sidebar", rows.ToArray()) with { Width = 244, Padding = 4, Spacing = 2, Appearance = "panel" };
     }
 
-    private string ProfileLabel(RobotProfile profile)
+    /// <summary>A robot with no adapter, or one the arm server reports as absent, has nothing to stop.
+    /// A robot that was last seen present keeps its Stop even if feedback has since gone quiet.</summary>
+    /// While a follower group runs, every Stop halts the whole group, so none is ever switched off then.
+    private bool StopAvailable(RobotProfile profile) => GroupFollowActive || ProfileStatus(profile) is not ("unassigned" or "offline");
+    private string StopHint(RobotProfile profile) => StopAvailable(profile)
+        ? "Stop " + profile.Name + " now. Holding torque can be lost: support the arm."
+        : profile.Name + " is not connected, so there is nothing to stop.";
+
+    private string ProfileLabel(RobotProfile profile) => profile.Name + "\n● " + ProfileDisplay(profile).Word;
+
+    /// <summary>One word and one colour for a robot wherever it is listed: what the arm itself is doing,
+    /// not merely that its adapter answers. Green holds or follows, yellow needs the operator before it
+    /// can move, red is stopped, grey is not there. Read from the arm server alone, so it is the same
+    /// for the open robot and the others.</summary>
+    internal (string Word, string Tone) ProfileDisplay(RobotProfile profile)
+    {
+        string status = ProfileStatus(profile);
+        bool open = openRobotStatus is { } header && header.Profile == profile.Id && profile.Id == ActiveProfile.Id;
+        // With the arm server silent, what was last heard about a robot is history, not its state. The open
+        // robot is the exception: its header already says it is waiting, and its row repeats the header.
+        if (NoFeedback(profile) && !(open && status == "connected")) return ("No feedback", "muted");
+        if (status != "connected") return (status switch { "Needs recovery" => "Stopped", "In follower group" => "Following", _ => StatusText(status) }, StatusTone(status));
+        // The open robot's row repeats its page header, word and colour, so the two can never disagree.
+        if (open) return (openRobotStatus!.Value.Word, openRobotStatus.Value.Tone);
+        var device = state?["devices"]?.AsArray().FirstOrDefault(d => d?["id"]?.GetValue<string>() == profile.CanDeviceId);
+        // Control mode 2 is the arm's own teach button: the hand moves it, software does not.
+        if (device?["status"]?["control"]?.GetValue<int>() == 2) return ("Hand guiding", "warning");
+        bool powered = device?["joints"] is JsonArray joints && joints.Count > 0 && joints.All(joint => joint?["enabled"]?.GetValue<bool>() == true);
+        // Motors on is not yet ready: this session has not connected to the robot, which is what its
+        // page will ask for when opened. Green is kept for a robot with nothing left to do.
+        return (powered ? "Motors on" : "Disabled", "warning");
+    }
+
+    /// <summary>An assigned robot while the arm server is not answering. Only for what is displayed:
+    /// <see cref="StopAvailable"/> deliberately keeps Stop for a robot that was last seen present.</summary>
+    private bool NoFeedback(RobotProfile profile) => profile.CanDeviceId.Length > 0 && !ServerLive;
+    private string OverviewStatus(RobotProfile profile) => NoFeedback(profile) ? "no feedback" : ProfileStatus(profile);
+
+    /// <summary>What the open robot's page header last showed; null until a header has been drawn.</summary>
+    private (string Profile, string Word, string Tone)? openRobotStatus;
+
+    /// <summary>What the operator reads for a robot's state, and the colour it is read in.</summary>
+    internal static string StatusText(string status) => status switch { "connected" => "Connected", "offline" => "Offline", "unassigned" => "Not set up", _ => status };
+    internal static string StatusTone(string status) => status switch { "connected" or "In follower group" => "success", "Needs recovery" => "danger", _ => "muted" };
+
+    private string ProfileStatus(RobotProfile profile)
     {
         var device = state?["devices"]?.AsArray().FirstOrDefault(d => d?["id"]?.GetValue<string>() == profile.CanDeviceId);
-        string status = string.IsNullOrEmpty(profile.CanDeviceId) ? "unassigned" : device?["present"]?.GetValue<bool>() != true ? "offline" :
+        return string.IsNullOrEmpty(profile.CanDeviceId) ? "unassigned" : device?["present"]?.GetValue<bool>() != true ? "offline" :
             device["recovery_required"]?.GetValue<bool>() == true || device["status"]?["arm_status"]?.GetValue<int>() == 1 ? "Needs recovery" :
             GroupFollowIncludes(profile.Id) ? "In follower group" : "connected";
-        return profile.Name + "\n" + status;
     }
 
     private async Task ObserveProfileRouting(JsonObject snapshot, CancellationToken cancellation)
@@ -238,10 +326,16 @@ public sealed partial class PipersPlugin
     {
         foreach (var profile in preferences.Robots!)
         {
-            patches["profiles.select." + profile.Id] = new() { ["text"] = ProfileLabel(profile) };
+            var display = ProfileDisplay(profile);
+            patches["profiles.select." + profile.Id] = new() { ["text"] = ProfileLabel(profile), ["enabled"] = true, ["appearance"] = display.Tone };
+            patches[RobotProfileRouting.RobotStopPrefix + profile.Id] = new() { ["enabled"] = StopAvailable(profile), ["hint"] = StopHint(profile) };
+            patches["overview.dot." + profile.Id] = new() { ["appearance"] = display.Tone };
+            patches["overview.state." + profile.Id] = new() { ["text"] = display.Word };
+            patches["overview.next." + profile.Id] = new() { ["text"] = OverviewNext(OverviewStatus(profile)) };
             var assignment = SceneArmAssignment(profile, settingsRobotOptions);
             patches[assignment.Id] = new() { ["text"] = assignment.Text };
         }
+        patches["profiles.add"] = new() { ["enabled"] = preferences.Robots!.Length < RobotProfileRouting.MaximumProfiles && !approved && !GroupFollowActive };
         string can = ActiveProfile.CanDeviceId;
         patches["profiles.can.status"] = new() { ["text"] = string.IsNullOrEmpty(can) ? "No CAN adapter assigned · scene and robot cameras can still be configured."
             : snapshotSelected() == can ? "Active CAN · " + can : "Assigned CAN inactive or disconnected · " + can };
@@ -308,21 +402,29 @@ public sealed partial class PipersPlugin
             throw new InvalidOperationException("Stop grouped following before changing a robot assignment.");
         if (LensWorkerBusy) throw new InvalidOperationException("Finish camera setup/calibration before switching robots.");
         switchingProfile = true;
+        // A Disable question belongs to the robot it was asked about; it does not follow the operator
+        // to another robot, nor wait to reappear when this one is opened again.
+        pendingDisable = null;
         try
         {
+            // Each step is traced: a switch that never returns leaves every later click unanswered, and the
+            // last line in the journal then names the step that did not finish.
+            System.Diagnostics.Trace.TraceInformation("Robot switch: {0}", "releasing control");
             if (!groupViewOnly) await ReleaseProfileControl(cancellation);
             else { CommandAuthority.Revoke(); link = null; approved = linkCommandsEnabled = false; telemetry.Pika.Release(); }
+            System.Diagnostics.Trace.TraceInformation("Robot switch: {0}", "finishing gripper teaching");
             await FinishPikaTeaching("Robot profile or hardware assignment changed", cancellation);
             recovery.PikaTeaching.Store(ActiveProfile);
-            preferences = RobotProfileRouting.Capture(preferences);
+            System.Diagnostics.Trace.TraceInformation("Robot switch: {0}", "stopping cameras");
             foreach (string id in new[] { "gripper", "depth" }) await calibration.Capture.Stop(id);
-            var profiles = append ? preferences.Robots!.Append(profile).ToArray() : preferences.Robots!.Select(p => p.Id == profile.Id ? profile : p).ToArray();
-            preferences = RobotProfileRouting.Activate(preferences with { Robots = profiles }, profile.Id);
+            System.Diagnostics.Trace.TraceInformation("Robot switch: {0}", "cameras stopped");
+            preferences = RobotProfileRouting.Apply(preferences, profile, append);
             recovery.PikaTeaching.Restore(ActiveProfile);
             calibration.Lens.ClearProfiles();
             foreach (string id in new[] { "gripper", "depth" }) calibration.Capture.Connecting(id, "Connecting…");
             calibration.Lens.Reset();
             await LoadCameraCalibration(cancellation);
+            System.Diagnostics.Trace.TraceInformation("Robot switch: {0}", "reading the scene");
             try
             {
                 scene = JsonNode.Parse((await engine.RequestAsync("scene.robots", cancellation: cancellation)).GetRawText())!.AsObject();
@@ -330,14 +432,24 @@ public sealed partial class PipersPlugin
                 await DiscoverSimulationCameras(cancellation);
             }
             catch (PluginRequestException error) { System.Diagnostics.Trace.TraceWarning("Profile scene discovery: {0}", error.Message); }
+            System.Diagnostics.Trace.TraceInformation("Robot switch: {0}", "saving");
             await Save(cancellation);
+            System.Diagnostics.Trace.TraceInformation("Robot switch: {0}", "selecting the adapter");
             string? selectionError = null;
-            if (profile.CanDeviceId.Length > 0 && state?["selected"]?.GetValue<string>() != profile.CanDeviceId)
+            // With no arm server answering there is nobody to ask. Nothing selects the adapter later by
+            // itself: once feedback returns, clicking this robot again does (see the "elsewhere" rule).
+            if (profile.CanDeviceId.Length > 0 && !ServerLive) selectionError = "the arm server is not running";
+            else if (profile.CanDeviceId.Length > 0 && state?["selected"]?.GetValue<string>() != profile.CanDeviceId)
             {
+                // The robot opens whether or not its adapter could be selected: a switch abandoned here
+                // would leave the old robot's page on screen over the new robot's settings.
                 try { await Call(PiperApi.Requests.Select(profile.CanDeviceId, owner), cancellation); }
                 catch (InvalidOperationException error) { selectionError = error.Message; }
+                catch (global::Grpc.Core.RpcException) { selectionError = "the arm server is not running"; }
             }
+            System.Diagnostics.Trace.TraceInformation("Robot switch: {0}", "starting cameras");
             foreach (string id in new[] { "gripper", "depth" }) await RestartCamera(id);
+            System.Diagnostics.Trace.TraceInformation("Robot switch: {0}", "done");
             message = selectionError is null ? profile.Name + " selected. Controls require fresh feedback and Enable robot. Shared bench camera stays running."
                 : profile.Name + " selected · CAN unavailable: " + selectionError;
         }

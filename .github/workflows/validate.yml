@@ -34,8 +34,10 @@ jobs:
       - name: Restore against the pinned public plugin SDK preview
         shell: pwsh
         run: |
-          $package = 'vendor/plugin-sdk/LuckyEngine.PluginSdk.0.1.1-preview.1.nupkg'
-          if ((Get-FileHash -LiteralPath $package -Algorithm SHA256).Hash -ne '037E3A92F303BBE517091EFCAE5AA8137B2DC44106D997D8E56F1F1290027361') { throw 'Unexpected public SDK preview digest' }
+          # 0.1.2-preview.1 (plugin API 2) is packed from luckyrobots/LuckyEngine#1128, not yet a published release.
+          # Replace the file and this digest with the released package once that PR ships one.
+          $package = 'vendor/plugin-sdk/LuckyEngine.PluginSdk.0.1.2-preview.1.nupkg'
+          if ((Get-FileHash -LiteralPath $package -Algorithm SHA256).Hash -ne '4DAA368D3609837DA3890EA97ACA3275A237A8482162DF5AE630062944F67731') { throw 'Unexpected plugin SDK preview digest' }
           foreach ($project in @('Piper.Plugin.Tests','Piper.Pika.Tests')) {
             dotnet restore "managed/$project" --configfile NuGet.Config
             if ($LASTEXITCODE) { throw "Restore failed: $project" }

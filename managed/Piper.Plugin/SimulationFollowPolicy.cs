@@ -178,6 +178,12 @@ public static class SimulationFollowPolicy
     public const double TrackingJointToleranceDegrees = 5;
     public const double TrackingGripperToleranceMm = 10;
 
+    /// <summary>How close each joint must be to a phase's endpoint for the phase to count as arrived.
+    /// The two roll joints (J4, J6) get more: a real PiPER leaves a roll target of a few tenths of a
+    /// degree unexecuted (measured: commanded -0.31°, held at 0.00° for 18 s), and a roll error
+    /// of that size moves the jaws by well under a millimetre. The position joints keep 0.25°.</summary>
+    public static double ArrivalJointToleranceDegrees(int joint) => joint is 3 or 5 ? .5 : .25;
+
     /// <summary>Checks a possible Match target without authorizing or performing that physical move.</summary>
     public static void ValidateCandidate(SimulationFollowSample sample, SimulationFollowIdentity expectedIdentity, SimulationFollowHardware hardware,
         long receivedAtUnixMilliseconds, double requestDurationMilliseconds)

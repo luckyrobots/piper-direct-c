@@ -1861,11 +1861,13 @@ static void lane_tick(struct controller *c,struct controller_lane *l,double now)
     if (now-l->heartbeat>=lease_timeout_s) { stop_lane(c,l,"Control heartbeat expired."); return; }
     if (l->follow!=FOLLOW_LIVE&&now-l->started>(l->op==OP_CYCLE?180:l->op==OP_MOVE||l->op==OP_ALIGN||l->op==OP_GRIPPER?120:l->op==OP_ENABLE||l->op==OP_DISABLE?8:3)) {
         if (l->op==OP_ENABLE) {
-            char reason[200]="Enable timed out; motors still disabled:";
+            char reason[200]="Enable timed out; motors still disabled:";bool disabled=false;
             for (unsigned i=0;i<6;++i) if (!d->feedback.motor[i].enabled) {
-                size_t used=strlen(reason); snprintf(reason+used,sizeof reason-used," J%u",i+1);
+                size_t used=strlen(reason); snprintf(reason+used,sizeof reason-used," J%u",i+1);disabled=true;
             }
-            stop_lane(c,l,reason);
+            /* Every driver switched on: what never arrived is the stillness that
+               completes the sequence, which a hand-held arm cannot give. */
+            stop_lane(c,l,disabled?reason:"Enable timed out: all six motors switched on, but the arm did not hold still. Rest or prop it so it is motionless, then recover.");
         } else if(l->op==OP_DISABLE) {
             char reason[240]="Disable timed out; motors not verified off:";bool missing=false;
             for(unsigned i=0;i<6;++i)if(!l->power_acknowledged[i]||d->feedback.motor[i].enabled) {

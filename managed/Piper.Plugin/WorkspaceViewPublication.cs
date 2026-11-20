@@ -9,8 +9,11 @@ public sealed partial class PipersPlugin
     private sealed record WorkspacePatchEvidence(TelemetryReceipt? Receipt, JsonObject? State, string Backend, long PermissionEpoch);
     private WorkspaceViewContext CurrentWorkspaceViewContext => new(ActiveProfile.Id, Navigation);
 
-    private RobotProfile? CaptureStopProfile(string wireId, RobotProfile selected)
+    internal RobotProfile? CaptureStopProfile(string wireId, RobotProfile selected)
     {
+        // A sidebar STOP names its robot. It is honoured only for a robot that still exists.
+        if (wireId.StartsWith(RobotProfileRouting.RobotStopPrefix, StringComparison.Ordinal))
+            return preferences.Robots?.SingleOrDefault(p => p.Id == wireId[RobotProfileRouting.RobotStopPrefix.Length..]);
         var visible = workspace.Published?.StopProfile;
         if (visible is not null && wireId == WorkspaceEventScope.Wrap(0, visible.Id, "stop")) return visible;
         return wireId == WorkspaceEventScope.Wrap(0, selected.Id, "stop") ? selected : null;

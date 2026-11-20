@@ -57,14 +57,26 @@ public sealed partial class PipersPlugin
     internal readonly ShellComponent shell = new();
     private BackendSettings BackendOptions => preferences.Backend ?? new();
 
+    /// <summary>The arm server answers: fresh telemetry is arriving from it.</summary>
+    private bool ServerLive => telemetry.Latest is { } receipt && receipt.IsFresh(Stopwatch.GetTimestamp());
+    /// <summary>The sidebar row: the server's state under its name, like a robot's.</summary>
+    private string ServerLabel => "Arm server\n" + (ServerLive ? "Running" : "Not running");
+    private const string StartHint = "Starts the bundled arm server in monitoring mode. Sends no motor-power or movement commands.";
+    private const string RestartHint = "Reopens connections. Releases Pika holding torque; does not clear a robot STOP or replay movement.";
+
     private Widget BackendSetup() => Widget.Column("backend.setup",
-        Widget.Row("backend.actions", Widget.Button("backend.restart", "Restart backend") with { Hint = "Reopens connections. Releases Pika holding torque; does not clear a robot STOP or replay movement." },
-            Widget.Button("backend.start", "Start bundled server"), Widget.Button("backend.check", "Check Pika setup")),
+        StatusBadge("backend.state.dot", ServerLive ? "success" : "muted", Widget.Label("backend.state", ServerLive ? "Running" : "Not running") with { Height = 28 }),
+        Widget.Row("backend.actions",
+            Widget.Button("backend.start", "Start server") with { Icon = "play", Enabled = !ServerLive, Appearance = ServerLive ? "default" : "primary", Hint = ServerLive ? "The arm server is already running." : StartHint },
+            Widget.Button("backend.restart", "Restart server") with { Icon = "refresh", Enabled = ServerLive, Hint = ServerLive ? RestartHint : "Nothing to restart: the arm server is not running." },
+            Widget.Button("backend.check", "Check gripper setup")),
         Widget.Column("backend.restart.confirmation", Widget.Label("backend.restart.explanation", "Restarting releases all Pika grippers. Empty the jaws first. Arm power stays unchanged; robot STOPs still need recovery.") with { Height = 64 },
             Widget.Row("backend.restart.confirmation.actions", Widget.Button("backend.restart.confirm", "Grippers empty — restart") with { Appearance = "primary" },
                 Widget.Button("backend.restart.cancel", "Cancel"))) with { Visible = shell.Backend.Standing.Restart == BackendRestartPhase.Confirming, Padding = 12, Appearance = "panel" },
-        Widget.Label("backend.status", shell.Backend.Standing.Status) with { Height = 42 },
-        Widget.Label("backend.prerequisites", shell.Backend.Standing.Setup) with { Height = 66 },
+        Widget.Column("backend.log",
+            Widget.Label("backend.log.title", "LAST MESSAGE") with { Appearance = "muted" },
+            Widget.Label("backend.status", shell.Backend.Standing.Status) with { Height = 42 },
+            Widget.Label("backend.prerequisites", shell.Backend.Standing.Setup) with { Height = 42, Appearance = "muted" }) with { Padding = 12, Spacing = 6, Appearance = "panel" },
         Widget.Column("backend.options", Widget.Label("backend.wsl.label", "WSL distro") with { Visible = OperatingSystem.IsWindows() },
             new Widget("input", "backend.wsl") { Text = BackendOptions.WslDistribution, Hint = "Existing WSL 2 distribution; used only by a bundled server started here", Visible = OperatingSystem.IsWindows() },
             Widget.Label("backend.device.label", "Pika Linux device"),
@@ -86,7 +98,11 @@ public sealed partial class PipersPlugin
             shell.Backend.Report("Saved for the next bundled server start. A running external controller is unchanged.");
         }
         else if (action == "instructions")
-            Process.Start(new ProcessStartInfo(Path.Combine(engine.Start.PackageDirectory, "docs", "lucky-engine-plugin.md")) { UseShellExecute = true });
+        {
+            string instructions = Path.Combine(engine.Start.PackageDirectory, "docs", "lucky-engine-plugin.md");
+            BoundedProcess.OpenWithDefaultApplication(instructions);
+            shell.Backend.Report("Setup instructions opened: " + instructions);
+        }
     }
 
     private async Task StartBundledBackend(CancellationToken cancellation)

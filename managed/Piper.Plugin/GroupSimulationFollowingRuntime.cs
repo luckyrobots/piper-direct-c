@@ -380,6 +380,23 @@ public sealed partial class PipersPlugin
         }
     }
 
+    /// <summary>The Host's answer to a renewal for a request it is no longer running.</summary>
+    private const string LeaseEnded = "No matching active control lease.";
+
+    /// <summary>Whether feedback newer than <paramref name="seen"/> shows the lane no longer running
+    /// <paramref name="request"/>. Waits a few feedback periods for that newer sample; with none, the
+    /// refusal stands as a failure.</summary>
+    private async Task<bool> RequestEnded(GroupSession group, GroupLane lane, long request, TelemetryReceipt seen, CancellationToken ct)
+    {
+        for (int attempt = 0; attempt < 10; attempt++)
+        {
+            if (telemetry.Latest is { } newer && newer.Sequence > seen.Sequence)
+                return !(lane.Feedback.Read(group.Backend, newer).Motion is { Active: true } motion && motion.RequestId == request);
+            await Task.Delay(TimeSpan.FromMilliseconds(50), group.Clock, ct);
+        }
+        return false;
+    }
+
     private async Task GroupHeartbeats(GroupSession group, CancellationToken ct)
     {
         try
@@ -393,7 +410,14 @@ public sealed partial class PipersPlugin
                     foreach (var lane in group.Lanes)
                         if (lane.Arm.CurrentRequest is > 0 and var request &&
                             lane.Feedback.Read(group.Backend, source).Motion is { Active: true } motion && motion.RequestId == request)
-                            await lane.Controller.Heartbeat(request, ct);
+                        {
+                            try { await lane.Controller.Heartbeat(request, ct); }
+                            // The Host can finish a request between the telemetry sample that showed it
+                            // active and this renewal (reaching the first pose does exactly that). Only a
+                            // lease refused while its request is still running is a failure.
+                            catch (InvalidOperationException refused) when (refused.Message == LeaseEnded)
+                            { if (!await RequestEnded(group, lane, request, source, ct)) throw; }
+                        }
                 }
                 await Task.Delay(TimeSpan.FromMilliseconds(100), group.Clock, ct);
             }

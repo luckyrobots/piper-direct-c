@@ -2,6 +2,41 @@ using LuckyRobots.Piper.Plugin;
 
 internal static class OrderedSimulationExecutionTests
 {
+    // A phase endpoint allows the two roll joints (J4, J6) 0.5 degrees and the others 0.25.
+    public static void RunArrivalTolerance()
+    {
+        var first = SimulationFollowSample.Read(Fixtures.SimulationPose());
+        var hardware = new SimulationFollowHardware("can-a", 7, true, true, true, first.CommandDegrees,
+            Enumerable.Range(1, 6).Select(j => new EpisodeReplayJointLimit(j, -180, 180, 30, 20, true)).ToArray(), 20,
+            new("can-a", 7, 77, 0, first.CommandDegrees));
+        OrderedSimulationFrame Frame(ulong cursor, double time, double q, string phase, bool complete = false) =>
+            new(cursor, (long)(time * 1e9), time, first.CommandDegrees.Select((v, i) => i == 0 ? q : v).ToArray(), first.MeasuredDegrees,
+                20, 20, "episode-a", 0, phase, complete, complete);
+        // Whether the first arm phase retires with one joint resting that far from its endpoint.
+        bool Arrives(int joint, double error)
+        {
+            var execute = new OrderedSimulationExecution(first, hardware, 1);
+            execute.Path.Append([Frame(1, 1, 0, "arm:1"), Frame(2, 1.02, .1, "arm:1"), Frame(3, 1.04, .2, "finish:2", complete: true)]);
+            var arm = execute.Path.Current!;
+            for (double time = 0; time < arm.DurationSeconds + .5 && execute.CompletedCursor == 0; time += .01)
+            {
+                double[] measured = arm.At(time).JointDegrees.ToArray();
+                measured[joint] += error;
+                execute.Step(time, hardware with { JointDegrees = measured }, time >= arm.DurationSeconds, 0, 100 + time);
+            }
+            return execute.CompletedCursor == 2;
+        }
+        for (int joint = 0; joint < 6; joint++)
+        {
+            bool roll = joint is 3 or 5;
+            Check(SimulationFollowPolicy.ArrivalJointToleranceDegrees(joint) == (roll ? .5 : .25), "J" + (joint + 1) + " has the wrong endpoint allowance");
+            Check(Arrives(joint, .2) && Arrives(joint, -.2), "J" + (joint + 1) + " did not arrive 0.2° from its endpoint");
+            Check(Arrives(joint, .4) == roll && Arrives(joint, -.4) == roll,
+                "J" + (joint + 1) + (roll ? ", a roll joint, did not arrive 0.4° from its endpoint" : ", a position joint, arrived 0.4° from its endpoint"));
+            Check(!Arrives(joint, .6) && !Arrives(joint, -.6), "J" + (joint + 1) + " arrived 0.6° from its endpoint");
+        }
+    }
+
     public static void Run()
     {
         var first = SimulationFollowSample.Read(Fixtures.SimulationPose());

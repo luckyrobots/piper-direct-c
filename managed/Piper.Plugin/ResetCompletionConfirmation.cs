@@ -20,12 +20,12 @@ public sealed partial class PipersPlugin
     private bool ResetCompletionCurrent(ResetCompletionPrompt prompt) =>
         prompt.Epoch == CommandAuthority.Epoch && prompt.Scope.Backend == token && prompt.Scope.ProfileId == ActiveProfile.Id;
 
-    private Widget ResetCompletionConfirmation() => Widget.Row("recovery.reset",
+    private Widget ResetCompletionConfirmation() => Confirmation("recovery.reset",
         Widget.Label("recovery.reset.text", ResetCompletionQuestion),
         Widget.Button("recovery.reset.confirm", "Confirm") with { Appearance = "primary",
             Hint = "Confirm only after the controller reset or power cycle has finished, with the arm supported and stationary." },
         Widget.Button("recovery.reset.cancel", "Cancel")) with
-        { Visible = PendingResetCompletion is { } prompt && ResetCompletionCurrent(prompt), Padding = 12, Appearance = "panel" };
+        { Visible = PendingResetCompletion is { } prompt && ResetCompletionCurrent(prompt) };
 
     private void AddResetCompletionPatches(Dictionary<string, JsonObject> patches) =>
         patches["recovery.reset"] = new() { ["visible"] = PendingResetCompletion is { } prompt && ResetCompletionCurrent(prompt) };

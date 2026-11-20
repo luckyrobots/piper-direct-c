@@ -17,8 +17,9 @@ internal static class PikaAgentFaultTests
 {
     private static readonly byte[] DisablePacket = PikaProtocol.Packet(PikaCommand.Disable), EnablePacket = PikaProtocol.Packet(PikaCommand.Enable);
 
-    private static byte[] Telemetry(bool enabled) => Encoding.UTF8.GetBytes(
-        "{\"motor\":{\"Position\":0.5,\"Speed\":0,\"Current\":0},\"motorstatus\":{\"Status\":\"" + (enabled ? "0x40" : "0x00") +
+    private static byte[] Telemetry(bool enabled, double position = .5, double speed = 0) => Encoding.UTF8.GetBytes(
+        "{\"motor\":{\"Position\":" + position.ToString("R", CultureInfo.InvariantCulture) + ",\"Speed\":" + speed.ToString("R", CultureInfo.InvariantCulture) +
+        ",\"Current\":0},\"motorstatus\":{\"Status\":\"" + (enabled ? "0x40" : "0x00") +
         "\",\"Voltage\":24,\"DriverTemp\":40,\"MotorTemp\":33,\"BusCurrent\":0}}\r\n");
 
     /// <summary>A gripper that reports the power state of the last enable/disable packet it received.</summary>
@@ -82,6 +83,8 @@ internal static class PikaAgentFaultTests
         public readonly AgentOutput Output;
         public readonly PikaAgent Agent;
         public double Now => ticks / 100.0;
+        /// <summary>Measured position and speed reported at a fake-clock time; null reports a still jaw at 0.5 rad.</summary>
+        public Func<double, (double Position, double Speed)>? Motion;
 
         public Rig()
         {
@@ -102,7 +105,11 @@ internal static class PikaAgentFaultTests
             for (long end = ticks + (long)Math.Round(seconds * 100); ticks < end;)
             {
                 ++ticks;
-                if (telemetry) Agent.SerialBytes(Telemetry(Gripper.Enabled), 0);
+                if (telemetry)
+                {
+                    var (position, speed) = Motion?.Invoke(Now) ?? (.5, 0);
+                    Agent.SerialBytes(Telemetry(Gripper.Enabled, position, speed), 0);
+                }
                 if (heartbeat && ticks % 50 == 0) Agent.Command(Line("hb" + ticks, "heartbeat"));
                 Agent.Tick();
                 if (ticks % 10 == 0 && Captured.Open.IsSet) Output.Drain(TimeSpan.FromSeconds(2));
@@ -126,6 +133,7 @@ internal static class PikaAgentFaultTests
         VerifyOutputQueue();
         VerifyHostSilence();
         VerifyStalledTelemetryAndTargetDeadline();
+        VerifyArrivalUnderSpeedNoise();
         VerifyHoldingGrace();
         VerifyMalformedLines();
         VerifySerialWriteFailure();
@@ -216,6 +224,39 @@ internal static class PikaAgentFaultTests
         Check(target.Gripper.Disables == 0 && target.Agent.Mode == MotorMode.Targeting, "The movement deadline fired early");
         target.Advance(.04);
         Check(target.Gripper.Disables == 1 && target.Agent.Mode == MotorMode.ReadOnly, "A target that never arrived was not disabled at the movement deadline");
+    }
+
+    // Measured arrival under real feedback noise. On hardware at rest, the per-sample
+    // speed estimate reached 0.12 rad/s (six times StationarySpeedRadiansPerSecond)
+    // while the opening varied by only ~0.2 mm, and a reached target was disabled at
+    // its movement deadline because the speed test never held for 150 ms.
+    private static void VerifyArrivalUnderSpeedNoise()
+    {
+        double target = PikaProtocol.Angle(40);
+        var noise = new Random(7);
+        var noisy = new Rig().Arm();
+        // ±0.002 rad of position jitter (~±0.1 mm here) and ±0.12 rad/s of speed jitter around the target.
+        noisy.Motion = _ => (target + (noise.NextDouble() - .5) * .004, (noise.NextDouble() - .5) * .24);
+        Check(noisy.Captured.Ack(noisy.Send("position", ("value", target))) == true && noisy.Agent.Mode == MotorMode.Targeting,
+            "The fixture agent refused a valid target");
+        noisy.Advance(.3);
+        Check(noisy.Agent.Mode == MotorMode.Armed && noisy.Gripper.Disables == 0,
+            "A reached target was not confirmed promptly under realistic speed-estimate noise");
+        noisy.Advance(PikaProtocol.TargetDeadlineSeconds + 1);
+        Check(noisy.Gripper.Disables == 0 && noisy.Agent.Mode == MotorMode.Armed, "A reached target was disabled at the movement deadline");
+
+        // A jaw still sweeping through the tolerance band (30 → 50 mm at 0.2 rad/s) has not arrived at 40 mm.
+        var moving = new Rig().Arm();
+        double from = PikaProtocol.Angle(30), to = PikaProtocol.Angle(50), startedAt = moving.Now;
+        moving.Motion = now => (Math.Min(to, from + .2 * (now - startedAt)), now - startedAt < (to - from) / .2 ? .2 : 0);
+        Check(moving.Captured.Ack(moving.Send("position", ("value", target))) == true, "The fixture agent refused a valid target");
+        moving.Advance((to - from) / .2 + .5);
+        Check(moving.Agent.Mode == MotorMode.Targeting, "Arrival was confirmed while the jaw was still travelling through the tolerance band");
+
+        var window = new PikaStillness();
+        Check(!window.Observe(0, 40) && !window.Observe(.1, 40) && window.Observe(.15, 40.4), "Stillness did not need its full window or rejected rest jitter");
+        Check(!window.Observe(.2, 41), "A 0.6 mm spread within the window counted as still");
+        Check(!window.Observe(.1, 41), "Time running backwards did not restart the window");
     }
 
     // P9: holding keeps torque for a bounded grace only.

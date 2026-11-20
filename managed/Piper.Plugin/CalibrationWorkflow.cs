@@ -135,7 +135,7 @@ public sealed partial class PipersPlugin
         if (action == "open")
         {
             if (!File.Exists(calibrationPath)) throw new InvalidOperationException("Start and save a calibration report first.");
-            Process.Start(new ProcessStartInfo(calibrationPath) { UseShellExecute = true }); return;
+            LuckyRobots.Piper.Processes.BoundedProcess.OpenWithDefaultApplication(calibrationPath); return;
         }
         if (action == "archive.cancel") { calibration.Desk.CancelArchive(); await Render(cancellation); return; }
         if (action is "new" or "archive")

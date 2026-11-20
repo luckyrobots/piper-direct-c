@@ -1,10 +1,10 @@
 # Pipers for Lucky Engine
 
-Pipers adds a native `Plugin:Pipers` workspace: scene hierarchy, robot controls,
+Pipers adds a native `Pipers` workspace: scene hierarchy, robot controls,
 and the normal engine viewport. It uses the public LuckyEngine.PluginSdk package;
 building it does not require Lucky Engine source, native headers or Hazel assemblies.
 
-This is an API 1 development preview. The arm's existing controller remains the
+This is an API 2 development preview: it needs an editor that offers the native `tabs` widget. The arm's existing controller remains the
 single owner of USB-CAN and the Pika connection. The plugin communicates with it
 over loopback gRPC (8766), alongside the existing web dashboard (8765).
 
@@ -175,7 +175,7 @@ and homing never start automatically from refresh, reconnection or calibration.
 
 ## Public SDK dependency
 
-The source uses the public MIT `LuckyEngine.PluginSdk` 0.1.1 preview package,
+The source uses the public MIT `LuckyEngine.PluginSdk` 0.1.2 preview package,
 pinned under `vendor/plugin-sdk` with its SHA-256 and provenance. Relative
 `NuGet.Config` and bundled source include that feed, so independent authors need
 no engine checkout or private assemblies. Installed packages include the SDK,

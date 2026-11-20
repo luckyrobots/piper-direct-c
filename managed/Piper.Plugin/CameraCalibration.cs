@@ -73,7 +73,7 @@ public sealed partial class PipersPlugin
         {
             string destination = Path.Combine(LensCalibrationDirectory, "checkerboard-20mm.svg");
             File.Copy(Path.Combine(engine.Start.PackageDirectory, "camera", "checkerboard.svg"), destination, true);
-            Process.Start(new ProcessStartInfo(destination) { UseShellExecute = true });
+            BoundedProcess.OpenWithDefaultApplication(destination);
             return;
         }
         if (LensWorkerBusy) throw new InvalidOperationException("Camera setup or calibration is still running.");

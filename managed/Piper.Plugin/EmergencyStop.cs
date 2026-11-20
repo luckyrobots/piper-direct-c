@@ -28,6 +28,8 @@ public sealed partial class PipersPlugin
         }
         DisarmTelemetryTargets("Operator STOP; previous actions discarded", clearLink: false, forgetApproval: profile.Id, forgetAllApprovals: groupActive);
         CancelHandGuideRecovery();
+        // A stopped arm is no longer the idle powered arm the Disable question was asked about.
+        if (pendingDisable is { } question && (groupActive || question.ProfileId == profile.Id)) pendingDisable = null;
         shell.Events?.InvalidateControlEvents();
         message = "STOP requested · previous targets discarded · verifying hardware";
         using (var timeout = new CancellationTokenSource(StopAcknowledgementBudget))
@@ -38,13 +40,21 @@ public sealed partial class PipersPlugin
             var armStop = groupActive ? PiperApi.Requests.Stop(owner) : PiperApi.Requests.Stop(owner, deviceId);
             var first = !ownPika ? armStop : groupActive ? PiperApi.Requests.CoordinatedStop(owner)
                 : PiperApi.Requests.CoordinatedStop(owner, deviceId, pikaDevice: profile.PikaDevice, pikaDistribution: profile.PikaDistribution);
+            // Like Call, this does not rely on the call's own deadline or cancellation to end it: STOP is
+            // awaited by the event reader, so one that never returned would hold back every later click,
+            // the next STOP included. The extra second lets the call's own, more specific failure come first.
+            async Task<ControlReply> Send(ApiRequest request, double seconds)
+            {
+                using var call = client.ExecuteAsync(new ControlRequest { Route = request.Route.Path, Json = request.Json },
+                    new Metadata { { "x-piper-token", expectedToken } },
+                    deadline: DateTime.UtcNow.AddSeconds(seconds), cancellationToken: timeout.Token);
+                return await call.ResponseAsync.WaitAsync(StopAcknowledgementBudget + TimeSpan.FromSeconds(1));
+            }
             ControlReply reply;
             bool legacyCoordinator = false;
             try
             {
-                reply = await client.ExecuteAsync(new ControlRequest { Route = first.Route.Path, Json = first.Json },
-                    new Metadata { { "x-piper-token", expectedToken } },
-                    deadline: DateTime.UtcNow.AddSeconds(4), cancellationToken: timeout.Token);
+                reply = await Send(first, 4);
                 legacyCoordinator = ownPika && reply.Status == 404;
             }
             catch (RpcException error) when (ownPika && error.StatusCode is StatusCode.InvalidArgument or StatusCode.Unimplemented)
@@ -55,9 +65,7 @@ public sealed partial class PipersPlugin
             if (legacyCoordinator)
             {
                 // Older external backends must still receive the arm STOP.
-                reply = await client.ExecuteAsync(new ControlRequest { Route = armStop.Route.Path, Json = armStop.Json },
-                    new Metadata { { "x-piper-token", expectedToken } },
-                    deadline: DateTime.UtcNow.AddSeconds(2), cancellationToken: timeout.Token);
+                reply = await Send(armStop, 2);
                 message = reply.Status is >= 200 and < 300
                     ? "Arm STOP acknowledged · external backend cannot coordinate Pika hold; gripper state unverified"
                     : "STOP could not be acknowledged · inspect the controller's hardware state";

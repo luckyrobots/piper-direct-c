@@ -8,7 +8,34 @@ public sealed record VideoDevice(int Index, string Name, string Path, string Usb
 
 public static class VideoDevices
 {
-    public static IReadOnlyList<VideoDevice> List() => OperatingSystem.IsWindows() ? WindowsList() : [];
+    public static IReadOnlyList<VideoDevice> List() => OperatingSystem.IsWindows() ? WindowsList() : OperatingSystem.IsLinux() ? LinuxList() : [];
+
+    /// <summary>Linux colour cameras by their stable by-path name, which <see cref="ColorPreview"/>
+    /// opens directly with V4L2. A camera is the first video node of a USB interface; the kernel's
+    /// second node carries metadata only. D405 nodes are left out: depth cameras are chosen by serial.
+    /// Reads names from sysfs and never opens a device.</summary>
+    private static IReadOnlyList<VideoDevice> LinuxList()
+    {
+        const string folder = "/dev/v4l/by-path";
+        if (!Directory.Exists(folder)) return [];
+        var devices = new List<VideoDevice>();
+        foreach (string link in Directory.EnumerateFiles(folder, "*-usb-*-video-index0").Order(StringComparer.Ordinal))
+        {
+            string? node;
+            try { node = File.ResolveLinkTarget(link, true)?.Name; }
+            catch (IOException) { continue; }
+            if (node is null) continue;
+            string name;
+            try { name = File.ReadAllText("/sys/class/video4linux/" + node + "/name").Trim(); }
+            catch (Exception e) when (e is IOException or UnauthorizedAccessException) { continue; }
+            if (name.Contains("RealSense", StringComparison.OrdinalIgnoreCase)) continue;
+            // "…-usb-0:3.4.1:1.0-video-index0": the port chain names the socket, which survives replugging.
+            var port = System.Text.RegularExpressions.Regex.Match(link, @"-usb-\d+:([\d.]+):");
+            int colon = name.IndexOf(':');
+            devices.Add(new(devices.Count, colon > 0 ? name[..colon].Trim() : name, link, port.Success ? port.Groups[1].Value : ""));
+        }
+        return devices;
+    }
 
     [SupportedOSPlatform("windows")]
     private static IReadOnlyList<VideoDevice> WindowsList()

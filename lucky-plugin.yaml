@@ -1,5 +1,5 @@
 schema: 1
-api: 1
+api: 2
 id: luckyrobots.pipers
 name: Pipers
 version: 0.1.0-preview.1
@@ -15,11 +15,11 @@ entrypoints:
   linux-x64: LuckyRobots.Pipers
 panels:
   - id: luckyrobots.pipers.controls
-    title: Plugin:Pipers
+    title: Pipers
 workspaces:
   - id: luckyrobots.pipers.workspace
     name: Pipers
-    icon: robot
+    icon: RobotArm
     panel: luckyrobots.pipers.controls
     panelRatio: 0.52
 # Release tooling writes verified download URLs and SHA-256 digests here.

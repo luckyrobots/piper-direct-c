@@ -49,6 +49,12 @@ internal static class OrderedMissedGraspTests
             Check(!execution.ReturnedHome(Real(50, .251), true, 0) && !execution.ReturnedHome(Real(47.9), true, 0) &&
                 !execution.ReturnedHome(Real(50), false, 0) && !execution.ReturnedHome(Real(50) with { GripperFresh = false }, true, 0),
                 "Returned-home reporting bypassed actual zero/open/stationary/fresh proof");
+            // Measured home has the phase-endpoint allowance per joint: half a degree on the roll joints J4 and J6 only.
+            SimulationFollowHardware Rested(int joint, double q) { var joints = Joints(0); joints[joint] = q; return Real(50) with { JointDegrees = joints }; }
+            Check(execution.ReturnedHome(Rested(3, .4), true, 0) && execution.ReturnedHome(Rested(5, -.5), true, 0) &&
+                !execution.ReturnedHome(Rested(3, .51), true, 0) && !execution.ReturnedHome(Rested(5, -.51), true, 0) &&
+                new[] { 0, 1, 2, 4 }.All(joint => execution.ReturnedHome(Rested(joint, .25), true, 0) && !execution.ReturnedHome(Rested(joint, .3), true, 0)),
+                "Measured home did not use each joint's own endpoint allowance");
         }
         var path = new OrderedSimulationPath(limits);
         Reject(() => path.Append([Frame(1, 1, 0, "finish:1", final: true, success: false)]),

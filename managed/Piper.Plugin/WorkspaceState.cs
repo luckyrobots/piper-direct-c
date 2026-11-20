@@ -22,7 +22,7 @@ public sealed record RobotPowerState(int? EnabledCount)
 /// <summary>UI events belong to a particular rendered page and robot; stop remains available across page changes.</summary>
 public static class WorkspaceEventScope
 {
-    private static bool Persistent(string id) => id is "stop" or "disable" or "recovery.guide.cancel" or "motion.hold" or "simulation.stop" or "group.follow.cancel" || id.StartsWith("engine.", StringComparison.Ordinal);
+    private static bool Persistent(string id) => id.StartsWith(RobotProfileRouting.RobotStopPrefix, StringComparison.Ordinal) || id is "stop" or "disable" or "recovery.guide.cancel" or "motion.hold" or "simulation.stop" or "group.follow.cancel" || id.StartsWith("engine.", StringComparison.Ordinal);
     public static string Wrap(long epoch, string profileId, string id) => Persistent(id)
         ? RobotProfileRouting.ScopeEvent(profileId, id)
         : "view." + epoch.ToString(CultureInfo.InvariantCulture) + "." + RobotProfileRouting.ScopeEvent(profileId, id);
@@ -87,6 +87,9 @@ internal sealed record WorkspaceNavigation(WorkspacePage Page, SettingsCategory 
                 "diagnostics" => SettingsCategory.Diagnostics, _ => SettingsCategory.Robot
             };
             string camera = parts.Length > 1 && category == SettingsCategory.Cameras && IsCamera(parts[1]) ? parts[1] : SettingsCamera;
+            // The bench camera has one page, with its settings under its picture.
+            if (category == SettingsCategory.Cameras && parts.Length > 1 && camera == "bench")
+                return this with { Page = WorkspacePage.Camera, CameraDetail = "bench", CameraReturn = Page == WorkspacePage.Camera ? CameraReturn : Page };
             return this with { Page = WorkspacePage.Settings, Category = category, SettingsCamera = camera };
         }
         if (action.StartsWith("camera.", StringComparison.Ordinal))
@@ -103,12 +106,59 @@ internal sealed record WorkspaceNavigation(WorkspacePage Page, SettingsCategory 
             "replay" => this with { Page = WorkspacePage.Replay },
             "calibration" => this with { Page = WorkspacePage.Settings, Category = SettingsCategory.Bench },
             "settings" => this with { Page = WorkspacePage.Settings },
+            "overview" => this with { Page = WorkspacePage.Overview },
+            "follow" => this with { Page = WorkspacePage.Follow },
+            // A robot's own cameras: never the shared bench camera, which has its own page.
+            "robot-cameras" => this with { Page = WorkspacePage.Settings, Category = SettingsCategory.Cameras, SettingsCamera = SettingsCamera == "bench" ? "gripper" : SettingsCamera },
             _ => throw new InvalidOperationException("Unknown workspace page.")
         };
     }
 }
 
-internal enum WorkspacePage { Controls, Recording, Replay, Camera, Settings }
+internal enum WorkspacePage { Controls, Recording, Replay, Camera, Settings, Overview, Follow }
+
+/// <summary>How the workspace is laid out. The left sidebar is the only navigation: a robot, a bench
+/// page or a settings page. A robot's page has tabs for what belongs to that one arm; a bench page
+/// belongs to no single robot and has none.</summary>
+internal static class WorkspaceTabs
+{
+    // Setup comes last: the tabs you work in first, configuration at the end.
+    public static readonly string[] RobotTabs = ["Controls", "Cameras", "Recording", "Setup"];
+    private static readonly string[] RobotTabActions = ["controls", "robot-cameras", "recording", "settings.robot"];
+    /// <summary>The camera switch on a robot's Cameras tab, in the order of its actions below.</summary>
+    public static readonly string[] RobotCameras = ["Gripper fisheye", "D405 wrist camera"];
+    private static readonly string[] RobotCameraActions = ["settings.cameras.gripper", "settings.cameras.depth"];
+
+    /// <summary>A page about the whole bench: the overview, following, the shared camera and the arm server.</summary>
+    public static bool BenchPage(WorkspaceNavigation navigation) => navigation.Page switch
+    {
+        WorkspacePage.Overview or WorkspacePage.Follow => true,
+        WorkspacePage.Camera => navigation.CameraDetail == "bench",
+        WorkspacePage.Settings => navigation.Category == SettingsCategory.Diagnostics ||
+            navigation.Category == SettingsCategory.Cameras && navigation.SettingsCamera == "bench",
+        _ => false
+    };
+
+    /// <summary>The robot tab a page sits under: a replay belongs to Recording, calibration to Setup,
+    /// an enlarged wrist camera to Cameras.</summary>
+    public static int PageIndex(WorkspaceNavigation navigation) => navigation.Page switch
+    {
+        WorkspacePage.Recording or WorkspacePage.Replay => 2,
+        WorkspacePage.Camera => 1,
+        WorkspacePage.Settings => navigation.Category == SettingsCategory.Cameras ? 1 : 3,
+        _ => 0
+    };
+
+    /// <summary>Turns a tab's change event into its navigation action; any other workspace action passes through.</summary>
+    public static string Action(string action, System.Text.Json.JsonElement value)
+    {
+        string[]? actions = action switch { "pages" => RobotTabActions, "robot-camera" => RobotCameraActions, _ => null };
+        if (actions is null) return action;
+        if (value.ValueKind != System.Text.Json.JsonValueKind.Number || !value.TryGetInt32(out int index) || index < 0 || index >= actions.Length)
+            throw new InvalidOperationException("Unknown workspace tab.");
+        return actions[index];
+    }
+}
 internal enum SettingsCategory { Robot, Cameras, Bench, Diagnostics }
 
 public sealed partial class PipersPlugin

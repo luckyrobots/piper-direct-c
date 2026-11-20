@@ -110,7 +110,8 @@ public sealed class OrderedSimulationExecution
         // Opening resolves to its command; neither aperture check proves a grasp.
         bool unconfirmedClose = ClosingContact(phase) && UnconfirmedOpening(hardware.GripperOpeningMm, phase.End.CommandOpeningMm);
         bool arrived = !QualifyingLostContact && ElapsedSeconds >= phase.DurationSeconds && armStationary &&
-            Target.JointDegrees.Zip(hardware.JointDegrees, (target, actual) => Math.Abs(target - actual)).All(error => error <= .25) &&
+            Target.JointDegrees.Zip(hardware.JointDegrees, (target, actual) => Math.Abs(target - actual))
+                .Select((error, joint) => error <= SimulationFollowPolicy.ArrivalJointToleranceDegrees(joint)).All(within => within) &&
             Math.Abs(gripperSpeed) <= PikaProtocol.StationarySpeedRadiansPerSecond && (unconfirmedClose ||
                 Math.Abs(hardware.GripperOpeningMm - expected) <= OpeningArrivalToleranceMm &&
                 (!RequiresPhysicalContactCandidate || hardware.GripperOpeningMm - phase.End.CommandOpeningMm > 2));
@@ -188,7 +189,9 @@ public sealed class OrderedSimulationExecution
         Path.Drained && CompletedCursor == Path.LastCursor && OrderedSimulationPath.PhaseKind(Path.LastSource?.Phase ?? "") == "finish" &&
         completedHomeCursor > 0 && completedHomeEpisode == Path.LastSource?.EpisodeId &&
         hardware.FeedbackFresh && hardware.GripperFresh && armStationary && double.IsFinite(gripperSpeed) && Math.Abs(gripperSpeed) <= PikaProtocol.StationarySpeedRadiansPerSecond &&
-        Target.JointDegrees.All(q => Math.Abs(q) <= .25) && hardware.JointDegrees.All(q => Math.Abs(q) <= .25) &&
+        Target.JointDegrees.All(q => Math.Abs(q) <= .25) &&
+        // Measured home gets the same per-joint allowance as any phase endpoint: a roll joint leaves a small target unexecuted.
+        hardware.JointDegrees.Select((q, joint) => Math.Abs(q) <= SimulationFollowPolicy.ArrivalJointToleranceDegrees(joint)).All(within => within) &&
         completedOpeningCommand is { } opened && lastClosingCommand is { } closed && opened > closed && Target.OpeningMm == opened &&
         jaw.Resolved && jaw.Opening == opened && Math.Abs(hardware.GripperOpeningMm - opened) <= 2;
 

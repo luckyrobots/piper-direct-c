@@ -36,6 +36,11 @@ internal static class SimulationFollowDiagnosticsTests
         Check(description.Contains("Pika 38.1 mm; expected 41.4 ±5.0 mm (command 36.0 mm)", StringComparison.Ordinal) &&
             description.Contains("J2 0.01°", StringComparison.Ordinal) && description.Contains("arm stationary no", StringComparison.Ordinal),
             "Ordered timeout details did not explain the actual jaw/arm discrepancy in readable units");
+        // A roll joint (J4, J6) is allowed more at an endpoint, so the joint named is the one furthest
+        // outside its own allowance, with that allowance beside it.
+        Check((ordered with { EndpointJointErrorsDegrees = [0, .3, 0, .45, 0, 0] }).Describe().Contains("J2 0.30° (allowed 0.25°)", StringComparison.Ordinal) &&
+            (ordered with { EndpointJointErrorsDegrees = [0, .1, 0, 0, 0, .7] }).Describe().Contains("J6 0.70° (allowed 0.50°)", StringComparison.Ordinal),
+            "The endpoint diagnostic named a joint inside its allowance, or quoted another joint's allowance");
 
         string directory = Path.Combine(Path.GetTempPath(), "piper-ordered-diagnostics-" + Guid.NewGuid().ToString("N"));
         string reported = "";
